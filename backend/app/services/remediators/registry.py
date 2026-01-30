@@ -1,10 +1,12 @@
-"""Executor registry for remediation actions."""
+"""Executor registry and orchestration for remediation actions."""
 
 from __future__ import annotations
 
 from typing import Iterable, List, Optional
 
-from app.models.accessibility import ActionCode, RemediationPlan
+from app.models.accessibility import AccessibilityTree, ActionCode
+from app.services.remediation_planner import RemediationPlan
+from app.services.remediators.dispatcher import RemediationDispatcher
 from app.services.remediators.add_table_headers_executor import AddTableHeadersExecutor
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 from app.services.remediators.flag_for_manual_review_executor import FlagForManualReviewExecutor
@@ -54,6 +56,58 @@ def execute_plan(
                     target_node_id=plan.target_node_id,
                     status=ExecutionStatus.NOT_IMPLEMENTED,
                     notes="No executor registered for this action.",
+                )
+            )
+    return results
+
+
+def execute_plans(
+    tree: AccessibilityTree,
+    plans: List[RemediationPlan],
+    dispatcher: Optional[RemediationDispatcher] = None,
+) -> List[ExecutionResult]:
+    """Example usage:
+    tree = run_analyzers(tree)
+    plans = plan_remediations(tree, policy)
+    results = execute_plans(tree, plans)
+    """
+    selected_dispatcher = dispatcher or RemediationDispatcher(get_default_executors())
+    seen_keys: set[tuple[str, ActionCode]] = set()
+    results: List[ExecutionResult] = []
+    for plan in plans:
+        selection = selected_dispatcher.select(plan)
+        key = (plan.target_node_id, selection.action_code)
+        if key in seen_keys:
+            results.append(
+                ExecutionResult(
+                    action_code=selection.action_code,
+                    target_node_id=plan.target_node_id,
+                    status=ExecutionStatus.SKIPPED,
+                    notes=f"Duplicate suppressed for key={key}.",
+                )
+            )
+            continue
+        seen_keys.add(key)
+        if selection.executor is None:
+            results.append(
+                ExecutionResult(
+                    action_code=selection.action_code,
+                    target_node_id=plan.target_node_id,
+                    status=selection.status,
+                    notes=selection.notes,
+                )
+            )
+            continue
+        executor = selection.executor
+        try:
+            results.append(executor.execute(plan, tree=tree))
+        except Exception as exc:  # pragma: no cover - deterministic fallback
+            results.append(
+                ExecutionResult(
+                    action_code=selection.action_code,
+                    target_node_id=plan.target_node_id,
+                    status=ExecutionStatus.NOT_IMPLEMENTED,
+                    notes=f"Executor failed with {exc.__class__.__name__}.",
                 )
             )
     return results

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from app.models.accessibility import ActionCode, RemediationPlan
+from typing import Optional
+
+from app.models.accessibility import AccessibilityTree, ActionCode
+from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 
 class AddTableHeadersExecutor(RemediationExecutor):
     supported_actions = [ActionCode.ADD_TABLE_HEADERS]
 
-    def execute(self, plan: RemediationPlan) -> ExecutionResult:
+    def execute(self, plan: RemediationPlan, tree: Optional[AccessibilityTree] = None) -> ExecutionResult:
         action_code = self._first_action(plan)
         self._ensure_supported(action_code)
         return ExecutionResult(

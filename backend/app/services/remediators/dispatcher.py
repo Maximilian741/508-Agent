@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from app.models.accessibility import ActionCode, RemediationPlan
+from app.models.accessibility import ActionCode
+from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
-from app.services.remediators.registry import get_default_executors
 
 
 @dataclass(frozen=True)
@@ -20,13 +20,50 @@ class _Candidate:
 
 class RemediationDispatcher:
     def __init__(self, executors: Optional[Iterable[RemediationExecutor]] = None) -> None:
-        self._executors = list(executors) if executors is not None else get_default_executors()
+        self._executors = list(executors) if executors is not None else []
 
     def dispatch(self, plans: List[RemediationPlan]) -> List[ExecutionResult]:
         results: List[ExecutionResult] = []
         for plan in plans:
             results.append(self._dispatch_plan(plan))
         return results
+
+    def select(self, plan: RemediationPlan) -> "SelectionResult":
+        if not plan.actions:
+            return self._fallback_selection(
+                plan,
+                "No recommended actions; falling back to manual review.",
+            )
+        if not plan.execution_allowed:
+            return self._fallback_selection(
+                plan,
+                "Execution blocked by policy; falling back to manual review.",
+            )
+
+        candidates = [
+            _Candidate(
+                action_code=action.action_code,
+                is_auto_applicable=action.is_auto_applicable,
+                requires_ai=action.requires_ai,
+                requires_human_review=action.requires_human_review,
+            )
+            for action in plan.actions
+        ]
+        selected = self._select_action(candidates)
+        executor = self._resolve_executor(selected.action_code)
+        if executor is None:
+            return SelectionResult(
+                action_code=selected.action_code,
+                executor=None,
+                status=ExecutionStatus.NOT_IMPLEMENTED,
+                notes="No executor registered for selected action.",
+            )
+        return SelectionResult(
+            action_code=selected.action_code,
+            executor=executor,
+            status=ExecutionStatus.READY,
+            notes=f"Selected {selected.action_code} using {executor.__class__.__name__}.",
+        )
 
     def _dispatch_plan(self, plan: RemediationPlan) -> ExecutionResult:
         if not plan.actions:
@@ -80,6 +117,16 @@ class RemediationDispatcher:
                 return executor
         return None
 
+    def _fallback_selection(self, plan: RemediationPlan, reason: str) -> "SelectionResult":
+        executor = self._resolve_executor(ActionCode.FLAG_FOR_MANUAL_REVIEW)
+        executor_name = executor.__class__.__name__ if executor else "None"
+        return SelectionResult(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            executor=executor,
+            status=ExecutionStatus.SKIPPED,
+            notes=f"{reason} Executor={executor_name}.",
+        )
+
     def _fallback_result(self, plan: RemediationPlan, reason: str) -> ExecutionResult:
         executor = self._resolve_executor(ActionCode.FLAG_FOR_MANUAL_REVIEW)
         executor_name = executor.__class__.__name__ if executor else "None"
@@ -89,3 +136,11 @@ class RemediationDispatcher:
             status=ExecutionStatus.SKIPPED,
             notes=f"{reason} Executor={executor_name}.",
         )
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    action_code: ActionCode
+    executor: Optional[RemediationExecutor]
+    status: ExecutionStatus
+    notes: str

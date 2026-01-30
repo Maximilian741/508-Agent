@@ -4,17 +4,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.accessibility import ActionCode, RemediationPlan
+from app.models.accessibility import AccessibilityTree, ActionCode
+from app.services.remediation_planner import RemediationPlan
 
 
 class ExecutionStatus(str, Enum):
     SKIPPED = "skipped"
     READY = "ready"
     NOT_IMPLEMENTED = "not_implemented"
+    SUCCESS = "success"
 
 
 class ExecutionResult(BaseModel):
@@ -33,7 +35,7 @@ class RemediationExecutor(ABC):
         return action_code in self.supported_actions
 
     @abstractmethod
-    def execute(self, plan: RemediationPlan) -> ExecutionResult:
+    def execute(self, plan: RemediationPlan, tree: Optional[AccessibilityTree] = None) -> ExecutionResult:
         raise NotImplementedError
 
     def _ensure_supported(self, action_code: ActionCode) -> None:
