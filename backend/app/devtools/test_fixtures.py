@@ -73,6 +73,18 @@ def heading_level_jump_tree() -> Tuple[AccessibilityTree, HeadingNode, HeadingNo
     return tree, heading_one, heading_jump
 
 
+def document_title_missing_tree() -> Tuple[AccessibilityTree, DocumentNode]:
+    document = DocumentNode(
+        id="doc-1",
+        content=NodeContent(kind=ContentKind.NONE),
+        metadata=NodeMetadata(language="en", source_format="pdf"),
+        children=[],
+        accessibility_flags=[AccessibilityFlag.from_code(AccessibilityFlagCode.DOCUMENT_TITLE_MISSING)],
+    )
+    tree = AccessibilityTree(root=document)
+    return tree, document
+
+
 def invalid_list_structure_tree() -> Tuple[AccessibilityTree, ListNode]:
     paragraph = ParagraphNode(
         id="p-1",

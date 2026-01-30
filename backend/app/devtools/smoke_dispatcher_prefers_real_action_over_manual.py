@@ -1,7 +1,7 @@
-"""Smoke test for setting document title.
+"""Smoke test for dispatcher preferring real action over manual review.
 
 Run with:
-python -m app.devtools.smoke_set_document_title_changes
+python -m app.devtools.smoke_dispatcher_prefers_real_action_over_manual
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import sys
 
 from app.analyzers import get_default_analyzers, run_analyzers
 from app.devtools.test_fixtures import document_title_missing_tree
-from app.models.accessibility import ActionCode
 from app.services.remediation_planner import RemediationPolicy, plan_remediations
 from app.services.remediators import execute_plans
 
@@ -36,10 +35,19 @@ def main() -> int:
 
     if after_title != "Untitled Document":
         return 1
-    for result in results:
-        if result.action_code.value == "SET_DOCUMENT_TITLE" and result.status.value == "success":
-            return 0
-    return 1
+    has_title_success = any(
+        result.action_code.value == "SET_DOCUMENT_TITLE" and result.status.value == "success"
+        for result in results
+    )
+    has_manual_success = any(
+        result.action_code.value == "FLAG_FOR_MANUAL_REVIEW" and result.status.value == "success"
+        for result in results
+    )
+    if not has_title_success:
+        return 1
+    if has_manual_success:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
