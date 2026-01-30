@@ -241,6 +241,9 @@ class AccessibilityFlag(BaseModel):
             standards=definition.standards,
         )
 
+    def recommended_actions(self) -> List["RemediationAction"]:
+        return list(REMEDIATION_ACTIONS_BY_FLAG.get(self.code, []))
+
 
 class BaseNode(BaseModel, ABC):
     model_config = ConfigDict(extra="forbid")
@@ -423,12 +426,208 @@ class Violation(BaseModel):
 
 
 class RemediationAction(BaseModel):
-    action_id: str
-    action_type: str
-    target_node_id: str
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-    rationale: str
-    deterministic: bool = True
+    model_config = ConfigDict(extra="forbid")
+
+    action_code: "ActionCode"
+    description: str
+    requires_ai: bool
+    requires_human_review: bool
+    is_auto_applicable: bool
+    supported_node_types: List[NodeType]
+    related_flag_code: AccessibilityFlagCode
+
+
+class ActionCode(str, Enum):
+    GENERATE_ALT_TEXT = "GENERATE_ALT_TEXT"
+    REMOVE_DECORATIVE_ALT_TEXT = "REMOVE_DECORATIVE_ALT_TEXT"
+    NORMALIZE_HEADING_LEVEL = "NORMALIZE_HEADING_LEVEL"
+    ADD_TABLE_HEADERS = "ADD_TABLE_HEADERS"
+    SET_TABLE_HEADER_SCOPE = "SET_TABLE_HEADER_SCOPE"
+    FIX_LIST_STRUCTURE = "FIX_LIST_STRUCTURE"
+    IMPROVE_LINK_TEXT = "IMPROVE_LINK_TEXT"
+    SET_DOCUMENT_LANGUAGE = "SET_DOCUMENT_LANGUAGE"
+    SET_DOCUMENT_TITLE = "SET_DOCUMENT_TITLE"
+    RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
+    FLAG_FOR_MANUAL_REVIEW = "FLAG_FOR_MANUAL_REVIEW"
+
+
+REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]] = {
+    AccessibilityFlagCode.MISSING_ALT_TEXT: [
+        RemediationAction(
+        action_code=ActionCode.GENERATE_ALT_TEXT,
+        description="Generate alternative text for meaningful images.",
+        requires_ai=True,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.IMAGE],
+        related_flag_code=AccessibilityFlagCode.MISSING_ALT_TEXT,
+        )
+    ],
+    AccessibilityFlagCode.DECORATIVE_IMAGE_WITH_ALT: [
+        RemediationAction(
+        action_code=ActionCode.REMOVE_DECORATIVE_ALT_TEXT,
+        description="Remove alternative text from decorative images.",
+        requires_ai=False,
+        requires_human_review=False,
+        is_auto_applicable=True,
+        supported_node_types=[NodeType.IMAGE],
+        related_flag_code=AccessibilityFlagCode.DECORATIVE_IMAGE_WITH_ALT,
+        )
+    ],
+    AccessibilityFlagCode.HEADING_LEVEL_JUMP: [
+        RemediationAction(
+        action_code=ActionCode.NORMALIZE_HEADING_LEVEL,
+        description="Normalize heading levels to preserve hierarchy.",
+        requires_ai=False,
+        requires_human_review=False,
+        is_auto_applicable=True,
+        supported_node_types=[NodeType.HEADING],
+        related_flag_code=AccessibilityFlagCode.HEADING_LEVEL_JUMP,
+        )
+    ],
+    AccessibilityFlagCode.SKIPPED_HEADING_LEVEL: [
+        RemediationAction(
+            action_code=ActionCode.NORMALIZE_HEADING_LEVEL,
+            description="Normalize heading levels to preserve hierarchy.",
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.HEADING],
+            related_flag_code=AccessibilityFlagCode.SKIPPED_HEADING_LEVEL,
+        )
+    ],
+    AccessibilityFlagCode.TABLE_MISSING_HEADERS: [
+        RemediationAction(
+        action_code=ActionCode.ADD_TABLE_HEADERS,
+        description="Add table header cells for data tables.",
+        requires_ai=False,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.TABLE],
+        related_flag_code=AccessibilityFlagCode.TABLE_MISSING_HEADERS,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.TABLE],
+            related_flag_code=AccessibilityFlagCode.TABLE_MISSING_HEADERS,
+        ),
+    ],
+    AccessibilityFlagCode.TABLE_HEADER_SCOPE_INVALID: [
+        RemediationAction(
+        action_code=ActionCode.SET_TABLE_HEADER_SCOPE,
+        description="Set table header scope for header cells.",
+        requires_ai=False,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.TABLE_CELL],
+        related_flag_code=AccessibilityFlagCode.TABLE_HEADER_SCOPE_INVALID,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.TABLE_CELL],
+            related_flag_code=AccessibilityFlagCode.TABLE_HEADER_SCOPE_INVALID,
+        ),
+    ],
+    AccessibilityFlagCode.LIST_STRUCTURE_INVALID: [
+        RemediationAction(
+        action_code=ActionCode.FIX_LIST_STRUCTURE,
+        description="Normalize list structure to valid list/list_item hierarchy.",
+        requires_ai=False,
+        requires_human_review=False,
+        is_auto_applicable=True,
+        supported_node_types=[NodeType.LIST],
+        related_flag_code=AccessibilityFlagCode.LIST_STRUCTURE_INVALID,
+        )
+    ],
+    AccessibilityFlagCode.LINK_TEXT_NON_DESCRIPTIVE: [
+        RemediationAction(
+        action_code=ActionCode.IMPROVE_LINK_TEXT,
+        description="Provide descriptive link text.",
+        requires_ai=False,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.LINK],
+        related_flag_code=AccessibilityFlagCode.LINK_TEXT_NON_DESCRIPTIVE,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.LINK],
+            related_flag_code=AccessibilityFlagCode.LINK_TEXT_NON_DESCRIPTIVE,
+        ),
+    ],
+    AccessibilityFlagCode.DOCUMENT_LANGUAGE_MISSING: [
+        RemediationAction(
+        action_code=ActionCode.SET_DOCUMENT_LANGUAGE,
+        description="Set the document language metadata.",
+        requires_ai=False,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.DOCUMENT],
+        related_flag_code=AccessibilityFlagCode.DOCUMENT_LANGUAGE_MISSING,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.DOCUMENT_LANGUAGE_MISSING,
+        ),
+    ],
+    AccessibilityFlagCode.DOCUMENT_TITLE_MISSING: [
+        RemediationAction(
+        action_code=ActionCode.SET_DOCUMENT_TITLE,
+        description="Set the document title metadata.",
+        requires_ai=False,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.DOCUMENT],
+        related_flag_code=AccessibilityFlagCode.DOCUMENT_TITLE_MISSING,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.DOCUMENT_TITLE_MISSING,
+        ),
+    ],
+    AccessibilityFlagCode.READING_ORDER_AMBIGUOUS: [
+        RemediationAction(
+        action_code=ActionCode.RESOLVE_READING_ORDER,
+        description="Resolve ambiguous reading order.",
+        requires_ai=False,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.DOCUMENT],
+        related_flag_code=AccessibilityFlagCode.READING_ORDER_AMBIGUOUS,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.READING_ORDER_AMBIGUOUS,
+        ),
+    ],
+}
 
 
 class RemediationLogEntry(BaseModel):
