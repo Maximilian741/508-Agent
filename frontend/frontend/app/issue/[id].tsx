@@ -13,6 +13,8 @@ export default function IssueDetailScreen() {
     const scanResults = useAppStore((state) => state.scanResults);
     const runRemediate = useAppStore((state) => state.runRemediate);
     const addManualReviewItem = useAppStore((state) => state.addManualReviewItem);
+    const fetchManualReview = useAppStore((state) => state.fetchManualReview);
+    const mockMode = useAppStore((state) => state.mockMode);
 
     const issue = useMemo(() => {
         return scanResults?.issues.find((item) => item.id === issueId) ?? null;
@@ -44,13 +46,17 @@ export default function IssueDetailScreen() {
         const result = response.results[0];
         setLastResult(`${result.actionCode} -> ${result.status}`);
         if (result.status !== "success") {
-            addManualReviewItem({
-                id: `${issue.id}-${selectedAction.actionCode}-${Date.now()}`,
-                issueId: issue.id,
-                targetNodeId: issue.nodeId,
-                reason: "Execution blocked by policy.",
-                notes: result.notes,
-            });
+            if (mockMode) {
+                addManualReviewItem({
+                    id: `${issue.id}-${selectedAction.actionCode}-${Date.now()}`,
+                    issueId: issue.id,
+                    targetNodeId: issue.nodeId,
+                    reason: "Execution blocked by policy.",
+                    notes: result.notes,
+                });
+            } else {
+                await fetchManualReview();
+            }
             Alert.alert("Manual review required", "The action was blocked; queued for review.");
             router.push("/manual-review");
             return;

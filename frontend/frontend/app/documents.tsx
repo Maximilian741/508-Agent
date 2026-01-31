@@ -9,7 +9,7 @@ export default function DocumentsScreen() {
     const { selectedDocument, setSelectedDocument, runScan, isScanning } = useAppStore();
     const [documentId, setDocumentId] = useState(selectedDocument?.documentId ?? "doc-1");
     const [sourceFormat, setSourceFormat] = useState(selectedDocument?.sourceFormat ?? "pdf");
-    const [content, setContent] = useState(selectedDocument?.content ?? "{\n  \"title\": \"Sample Document\"\n}");
+    const [content, setContent] = useState(selectedDocument?.content ?? samplePayload());
 
     const canScan = useMemo(() => documentId.trim().length > 0, [documentId]);
 
@@ -21,7 +21,22 @@ export default function DocumentsScreen() {
     const handleSample = () => {
         setDocumentId("doc-sample");
         setSourceFormat("pdf");
-        setContent("{\n  \"title\": \"Accessibility Sample\",\n  \"sections\": [\n    {\"heading\": \"Intro\", \"body\": \"Hello\"}\n  ]\n}");
+        setContent(samplePayload());
+    };
+
+    const handleDemo = async () => {
+        const demoId = "doc-demo";
+        const demoContent = samplePayload();
+        setDocumentId(demoId);
+        setSourceFormat("pdf");
+        setContent(demoContent);
+        setSelectedDocument({ documentId: demoId, sourceFormat: "pdf", content: demoContent });
+        const result = await runScan({ documentId: demoId, sourceFormat: "pdf", content: demoContent });
+        if (!result.ok) {
+            Alert.alert("Scan failed", result.error ?? "Unknown error");
+            return;
+        }
+        router.push("/scan");
     };
 
     const handleScan = async () => {
@@ -52,7 +67,20 @@ export default function DocumentsScreen() {
                 <Button title="Save" onPress={handleSave} />
             </View>
             <Button title={isScanning ? "Scanning..." : "Run Scan"} onPress={handleScan} disabled={!canScan || isScanning} />
+            <Button title="Run End-to-End Demo" onPress={handleDemo} disabled={isScanning} />
         </ScrollView>
+    );
+}
+
+function samplePayload(): string {
+    return JSON.stringify(
+        {
+            title: "",
+            images: [{ id: "img-1", alt_text: "decorative flourish", decorative: true }],
+            headings: [{ id: "h1", level: 1, text: "Intro" }],
+        },
+        null,
+        2,
     );
 }
 

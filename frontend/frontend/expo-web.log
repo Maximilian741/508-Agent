@@ -1,0 +1,12 @@
+
+> frontend@1.0.0 web
+> expo start --web --port 19006
+
+Starting project at C:\Users\maxca\Documents\workspace\508-agent\frontend\frontend
+Metro is running in CI mode, reloads are disabled. Remove CI=true to enable watch mode.
+Starting Metro Bundler
+Waiting on http://localhost:19006
+Logs for your project will appear below.
+Web Bundled 272ms node_modules\expo-router\entry.js (629 modules)
+ LOG  [web] Logs will appear in the browser console
+^C^CTerminate batch job (Y/N)? 

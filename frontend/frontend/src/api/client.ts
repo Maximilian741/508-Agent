@@ -63,6 +63,7 @@ export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     manualReview: () => Promise<ManualReviewItem[]>;
+    clearManualReview: () => Promise<{ cleared: number }>;
 }
 
 interface ApiClientConfig {
@@ -118,6 +119,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 issues: mockIssues,
             };
         }
+        console.log("[api] POST /scan", payload);
         return request<ScanResponse>("/scan", payload);
     };
 
@@ -136,6 +138,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 ],
             };
         }
+        console.log("[api] POST /remediate", payload);
         return request<RemediateResponse>("/remediate", payload);
     };
 
@@ -143,6 +146,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         if (mockMode) {
             return [];
         }
+        console.log("[api] GET /manual-review");
         const response = await fetch(`${baseUrl}/manual-review`);
         if (!response.ok) {
             return [];
@@ -150,5 +154,17 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return (await response.json()) as ManualReviewItem[];
     };
 
-    return { scan, remediate, manualReview };
+    const clearManualReview = async (): Promise<{ cleared: number }> => {
+        if (mockMode) {
+            return { cleared: 0 };
+        }
+        console.log("[api] DELETE /manual-review");
+        const response = await fetch(`${baseUrl}/manual-review`, { method: "DELETE" });
+        if (!response.ok) {
+            return { cleared: 0 };
+        }
+        return (await response.json()) as { cleared: number };
+    };
+
+    return { scan, remediate, manualReview, clearManualReview };
 }

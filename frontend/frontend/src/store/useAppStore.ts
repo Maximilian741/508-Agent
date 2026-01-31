@@ -37,6 +37,8 @@ interface AppState {
     setScanResults: (results: ScanResponse) => void;
     addManualReviewItem: (item: ManualReviewItem) => void;
     clearManualReviewQueue: () => void;
+    fetchManualReview: () => Promise<RunResult<ManualReviewItem[]>>;
+    clearManualReview: () => Promise<RunResult<{ cleared: number }>>;
     runScan: (request: ScanRequest) => Promise<RunResult<ScanResponse>>;
     runRemediate: (request: RemediateRequest) => Promise<RunResult<ExecutionResult[]>>;
 }
@@ -61,6 +63,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     addManualReviewItem: (item) =>
         set((state) => ({ manualReviewQueue: [item, ...state.manualReviewQueue] })),
     clearManualReviewQueue: () => set({ manualReviewQueue: [] }),
+    fetchManualReview: async () => {
+        const client = getClient(get());
+        try {
+            const items = await client.manualReview();
+            set({ manualReviewQueue: items });
+            return { ok: true, data: items };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    clearManualReview: async () => {
+        const client = getClient(get());
+        try {
+            const result = await client.clearManualReview();
+            set({ manualReviewQueue: [] });
+            return { ok: true, data: result };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
     runScan: async (request) => {
         const client = getClient(get());
         set({ isScanning: true });
