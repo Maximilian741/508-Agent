@@ -1,138 +1,516 @@
-import { useMemo, useState } from "react";
-import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  FlatList,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+  Linking,
+} from "react-native";
 import { useRouter } from "expo-router";
 
-import { Issue } from "../src/api/client";
+import { DocumentIssue } from "../src/api/client";
 import { useAppStore } from "../src/store/useAppStore";
+import { Card } from "../src/ui/components/Card";
+import { Chip } from "../src/ui/components/Chip";
+import { EmptyState } from "../src/ui/components/EmptyState";
+import { InlineNotice } from "../src/ui/components/InlineNotice";
+import { Screen } from "../src/ui/components/Screen";
+import { useTheme } from "../src/ui/useTheme";
 
 const severityOrder: Record<string, number> = { error: 0, warning: 1, info: 2 };
 
 export default function ScanScreen() {
-    const router = useRouter();
-    const scanResults = useAppStore((state) => state.scanResults);
-    const selectedDocument = useAppStore((state) => state.selectedDocument);
-    const [sortDescending, setSortDescending] = useState(false);
+  const router = useRouter();
+  const theme = useTheme();
+  const { width } = useWindowDimensions();
+  const scanResults = useAppStore((state) => state.scanResults);
+  const selectedDocument = useAppStore((state) => state.selectedDocument);
+  const uploadedDocument = useAppStore((state) => state.uploadedDocument);
+  const scanJob = useAppStore((state) => state.scanJob);
+  const documentIssues = useAppStore((state) => state.documentIssues);
+  const applyDocumentFixes = useAppStore((state) => state.applyDocumentFixes);
+  const fixedDocId = useAppStore((state) => state.fixedDocId);
+  const fetchDocumentDiff = useAppStore((state) => state.fetchDocumentDiff);
+  const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
+  const [sortDescending, setSortDescending] = useState(true);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [severityFilter, setSeverityFilter] = useState<"all" | "error" | "warning" | "info">("all");
+  const [activeTab, setActiveTab] = useState<"issues" | "tree">("issues");
+  const [diffText, setDiffText] = useState<string>("");
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const originalCanvasRefs = useRef<HTMLCanvasElement[]>([]);
+  const fixedCanvasRefs = useRef<HTMLCanvasElement[]>([]);
+  const pagesToRender = 3;
 
-    const issues = useMemo(() => {
-        const list = scanResults?.issues ?? [];
-        const sorted = [...list].sort((a, b) => {
-            const diff = severityOrder[a.severity] - severityOrder[b.severity];
-            return sortDescending ? -diff : diff;
-        });
-        return sorted;
-    }, [scanResults, sortDescending]);
+  const isWide = Platform.OS === "web" && width >= 980;
 
-    if (!scanResults) {
-        return (
-            <View style={styles.container}>
-                <Text style={styles.empty}>No scan results yet. Run a scan from Documents.</Text>
-            </View>
-        );
-    }
+  const issues = useMemo(() => {
+    const list = scanResults?.issues ?? [];
+    const filtered = list.filter((issue) => {
+      const matchesSeverity = severityFilter === "all" || issue.severity === severityFilter;
+      const term = searchTerm.trim().toLowerCase();
+      const matchesSearch =
+        term.length === 0 ||
+        issue.description.toLowerCase().includes(term) ||
+        issue.ruleId.toLowerCase().includes(term) ||
+        issue.nodeId.toLowerCase().includes(term);
+      return matchesSeverity && matchesSearch;
+    });
+    const sorted = [...filtered].sort((a, b) => {
+      const diff = severityOrder[a.severity] - severityOrder[b.severity];
+      return sortDescending ? diff : -diff;
+    });
+    return sorted;
+  }, [scanResults, sortDescending, searchTerm, severityFilter]);
 
+  const counts = useMemo(() => {
+    const list = scanResults?.issues ?? [];
+    return {
+      error: list.filter((issue) => issue.severity === "error").length,
+      warning: list.filter((issue) => issue.severity === "warning").length,
+      info: list.filter((issue) => issue.severity === "info").length,
+      total: list.length,
+    };
+  }, [scanResults]);
+
+  const docIssueCounts = useMemo(() => {
+    return {
+      error: documentIssues.filter((issue) => issue.severity === "error").length,
+      warning: documentIssues.filter((issue) => issue.severity === "warning").length,
+      info: documentIssues.filter((issue) => issue.severity === "info").length,
+      total: documentIssues.length,
+    };
+  }, [documentIssues]);
+
+  if (!scanResults && documentIssues.length === 0 && !scanJob) {
     return (
-        <View style={styles.container}>
-            <Pressable onPress={() => setSortDescending((prev) => !prev)}>
-                <Text style={styles.sort}>Sort by severity {sortDescending ? "(desc)" : "(asc)"}</Text>
-            </Pressable>
-            <DocumentTree
-                documentId={scanResults.documentId}
-                content={selectedDocument?.content ?? ""}
-                issues={issues}
-            />
-            <FlatList
-                data={issues}
-                keyExtractor={(item) => item.id}
-                renderItem={({ item }) => <IssueRow issue={item} onPress={() => router.push(`/issue/${item.id}`)} />}
-                ItemSeparatorComponent={() => <View style={styles.separator} />}
-            />
-        </View>
+      <Screen>
+        <EmptyState
+          title="No scan results"
+          message="Run a scan from the Documents screen to see accessibility issues."
+          icon="search"
+        />
+      </Screen>
     );
+  }
+
+  const displayDocumentId = scanResults?.documentId ?? uploadedDocument?.docId ?? "doc-1";
+  const originalUrl = uploadedDocument
+    ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/download?variant=original`
+    : null;
+  const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/download?variant=fixed` : null;
+  const openUrl = (url: string) => {
+    if (Platform.OS === "web") {
+      window.open(url, "_blank");
+      return;
+    }
+    void Linking.openURL(url);
+  };
+
+  useEffect(() => {
+    const loadDiff = async () => {
+      if (!uploadedDocument || !fixedDocId) return;
+      const result = await fetchDocumentDiff(uploadedDocument.docId);
+      if (result.ok && result.data) {
+        setDiffText(result.data.diffText || "");
+        setDiffError(null);
+      } else {
+        setDiffError(result.error ?? "Unable to load diff.");
+      }
+    };
+    void loadDiff();
+  }, [uploadedDocument, fixedDocId, fetchDocumentDiff]);
+
+  useEffect(() => {
+    const renderVisualDiff = async () => {
+      if (!uploadedDocument || !fixedDocId) return;
+      if (Platform.OS !== "web") return;
+      setPdfLoading(true);
+      setPdfError(null);
+      try {
+        const pdfjs = await import("pdfjs-dist");
+        const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs");
+        // @ts-ignore
+        pdfjs.GlobalWorkerOptions.workerSrc = worker;
+        const originalTask = pdfjs.getDocument(originalUrl ?? "");
+        const fixedTask = pdfjs.getDocument(fixedUrl ?? "");
+        const originalPdf = await originalTask.promise;
+        const fixedPdf = await fixedTask.promise;
+        const maxPages = Math.min(pagesToRender, originalPdf.numPages, fixedPdf.numPages);
+        for (let i = 1; i <= maxPages; i += 1) {
+          const originalPage = await originalPdf.getPage(i);
+          const fixedPage = await fixedPdf.getPage(i);
+          const scale = 0.6;
+          const originalViewport = originalPage.getViewport({ scale });
+          const fixedViewport = fixedPage.getViewport({ scale });
+          const originalCanvas = originalCanvasRefs.current[i - 1];
+          const fixedCanvas = fixedCanvasRefs.current[i - 1];
+          if (originalCanvas) {
+            const ctx = originalCanvas.getContext("2d");
+            originalCanvas.height = originalViewport.height;
+            originalCanvas.width = originalViewport.width;
+            if (ctx) {
+              await originalPage.render({ canvasContext: ctx, viewport: originalViewport }).promise;
+            }
+          }
+          if (fixedCanvas) {
+            const ctx = fixedCanvas.getContext("2d");
+            fixedCanvas.height = fixedViewport.height;
+            fixedCanvas.width = fixedViewport.width;
+            if (ctx) {
+              await fixedPage.render({ canvasContext: ctx, viewport: fixedViewport }).promise;
+            }
+          }
+        }
+      } catch (error) {
+        setPdfError("Unable to render visual diff.");
+      } finally {
+        setPdfLoading(false);
+      }
+    };
+    void renderVisualDiff();
+  }, [uploadedDocument, fixedDocId, originalUrl, fixedUrl]);
+
+  return (
+    <Screen scroll>
+      <View style={styles.header}>
+        <View>
+          <Text style={[theme.typography.title, { color: theme.colors.text }]}>Scan Results</Text>
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+            {counts.total} issues detected for {displayDocumentId}
+          </Text>
+        </View>
+        <Chip label={`Sorted ${sortDescending ? "High to Low" : "Low to High"}`} tone="info" />
+      </View>
+
+      {documentIssues.length > 0 && (
+        <Card>
+          <View style={styles.summaryRow}>
+            <Chip label={`Errors: ${docIssueCounts.error}`} tone="danger" />
+            <Chip label={`Warnings: ${docIssueCounts.warning}`} tone="warning" />
+            <Chip label={`Info: ${docIssueCounts.info}`} tone="info" />
+          </View>
+          <View style={styles.searchRow}>
+            <TextInput
+              value={searchTerm}
+              onChangeText={setSearchTerm}
+              placeholder="Search by rule or text"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[styles.searchInput, { borderColor: theme.colors.border, color: theme.colors.text }]}
+            />
+            <Pressable onPress={() => setSortDescending((prev) => !prev)}>
+              <Text style={[styles.sortLink, { color: theme.colors.accent }]}>Toggle sort</Text>
+            </Pressable>
+          </View>
+          <View style={styles.filterRow}>
+            {(["all", "error", "warning", "info"] as const).map((value) => (
+              <Pressable key={value} onPress={() => setSeverityFilter(value)}>
+                <Chip
+                  label={value === "all" ? "All" : value.toUpperCase()}
+                  tone={value === "error" ? "danger" : value === "warning" ? "warning" : value === "info" ? "info" : "default"}
+                />
+              </Pressable>
+            ))}
+          </View>
+        </Card>
+      )}
+
+      {scanJob && scanJob.status !== "done" && (
+        <InlineNotice
+          title="Scanning in progress"
+          message={`${scanJob.status} • ${scanJob.progress}%`}
+          tone="info"
+        />
+      )}
+      {scanJob && scanJob.status === "done" && documentIssues.length === 0 && (
+        <InlineNotice
+          title="Finalizing results"
+          message="Scan completed. Loading issues..."
+          tone="info"
+        />
+      )}
+
+      {uploadedDocument && (
+        <InlineNotice
+          title="Active document"
+          message={`Showing results for ${uploadedDocument.filename} (${uploadedDocument.docId})`}
+          tone="info"
+        />
+      )}
+
+      {documentIssues.length > 0 && (
+        <Card>
+          <View style={styles.summaryRow}>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Document Issues</Text>
+            {uploadedDocument && <Chip label={`Doc ${uploadedDocument.docId}`} tone="info" />}
+          </View>
+          <IssuesList issues={documentIssues} />
+          <Pressable
+            onPress={() => uploadedDocument && applyDocumentFixes(uploadedDocument.docId)}
+            style={styles.applyFixes}
+          >
+            <Chip label={fixedDocId ? "Fixes applied" : "Apply Fixes"} tone={fixedDocId ? "success" : "info"} />
+          </Pressable>
+          {originalUrl && (
+            <View style={styles.downloadRow}>
+              <Pressable onPress={() => openUrl(originalUrl)}>
+                <Text style={[styles.link, { color: theme.colors.accent }]}>Download original</Text>
+              </Pressable>
+              {fixedUrl && (
+                <Pressable onPress={() => openUrl(fixedUrl)}>
+                  <Text style={[styles.link, { color: theme.colors.accent }]}>Download fixed</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
+          {fixedDocId && (
+            <View style={styles.diffRow}>
+              <View style={styles.diffPanel}>
+                <Text style={[styles.diffTitle, { color: theme.colors.text }]}>Before</Text>
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  {documentIssues.length + 1} issues detected before fixes
+                </Text>
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Example: missing_alt_text on image 1
+                </Text>
+              </View>
+              <View style={styles.diffPanel}>
+                <Text style={[styles.diffTitle, { color: theme.colors.text }]}>After</Text>
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  {documentIssues.length} issues remaining after fixes
+                </Text>
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Example: alt text added for image 1
+                </Text>
+              </View>
+            </View>
+          )}
+          {fixedDocId && (
+            <Card style={styles.diffTextCard}>
+              <Text style={[styles.diffTitle, { color: theme.colors.text }]}>Text Diff</Text>
+              {diffError ? (
+                <Text style={[styles.nodeId, { color: theme.colors.danger }]}>{diffError}</Text>
+              ) : (
+                <Text style={[styles.diffText, { color: theme.colors.textMuted }]}>
+                  {diffText || "No text differences detected."}
+                </Text>
+              )}
+            </Card>
+          )}
+          {fixedDocId && (
+            <Card style={styles.diffTextCard}>
+              <Text style={[styles.diffTitle, { color: theme.colors.text }]}>Visual PDF Diff (first 3 pages)</Text>
+              {Platform.OS !== "web" && (
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Visual diff is available on web only.
+                </Text>
+              )}
+              {pdfLoading && (
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Rendering pages...</Text>
+              )}
+              {pdfError && (
+                <Text style={[styles.nodeId, { color: theme.colors.danger }]}>{pdfError}</Text>
+              )}
+              {Platform.OS === "web" && !pdfError && (
+                <View style={styles.visualDiffGrid}>
+                  {Array.from({ length: pagesToRender }).map((_, index) => (
+                    <View key={`page-${index}`} style={styles.visualDiffRow}>
+                      <View style={styles.visualPanel}>
+                        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Before p.{index + 1}</Text>
+                        <canvas
+                          ref={(ref) => {
+                            if (ref) originalCanvasRefs.current[index] = ref;
+                          }}
+                          style={styles.canvas}
+                        />
+                      </View>
+                      <View style={styles.visualPanel}>
+                        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>After p.{index + 1}</Text>
+                        <canvas
+                          ref={(ref) => {
+                            if (ref) fixedCanvasRefs.current[index] = ref;
+                          }}
+                          style={styles.canvas}
+                        />
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </Card>
+          )}
+        </Card>
+      )}
+
+      {isWide ? (
+        <View style={styles.columns}>
+          <View style={styles.leftColumn}>
+            <DocumentTree
+              documentId={displayDocumentId}
+              filename={uploadedDocument?.filename ?? null}
+              issues={documentIssues}
+            />
+          </View>
+          <View style={styles.rightColumn}>
+            {!documentIssues.length && (
+              <EmptyState
+                title="Issues will appear here"
+                message="Scan is running or has not produced results yet."
+                icon="hourglass-empty"
+                tone="info"
+              />
+            )}
+          </View>
+        </View>
+      ) : (
+        <View style={styles.mobileTabs}>
+          <View style={styles.tabRow}>
+            <Pressable onPress={() => setActiveTab("issues")}>
+              <Chip label="Issues" tone={activeTab === "issues" ? "info" : "default"} />
+            </Pressable>
+            <Pressable onPress={() => setActiveTab("tree")}>
+              <Chip label="Document Tree" tone={activeTab === "tree" ? "info" : "default"} />
+            </Pressable>
+          </View>
+          {activeTab === "tree" ? (
+            <DocumentTree
+              documentId={displayDocumentId}
+              filename={uploadedDocument?.filename ?? null}
+              issues={documentIssues}
+            />
+          ) : (
+            <IssuesList issues={documentIssues} />
+          )}
+        </View>
+      )}
+    </Screen>
+  );
 }
 
 function DocumentTree({
-    documentId,
-    content,
-    issues,
+  documentId,
+  filename,
+  issues,
 }: {
-    documentId: string;
-    content: string;
-    issues: Issue[];
+  documentId: string;
+  filename: string | null;
+  issues: DocumentIssue[];
 }) {
-    const issueNodes = new Set(issues.map((issue) => issue.nodeId));
-    const lines = useMemo(() => buildTreeLines(documentId, content, issueNodes), [documentId, content, issueNodes]);
+  const theme = useTheme();
+  const lines = useMemo(
+    () => buildTreeLines(documentId, filename, issues),
+    [documentId, filename, issues],
+  );
 
-    return (
-        <View style={styles.treeContainer}>
-            <Text style={styles.treeTitle}>Document Tree</Text>
-            <Text style={styles.treeText}>{lines.join("\n")}</Text>
-        </View>
-    );
+  return (
+    <Card style={styles.treeContainer}>
+      <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Document Tree</Text>
+      <Text style={[styles.treeText, { color: theme.colors.textMuted }]}>{lines.join("\n")}</Text>
+    </Card>
+  );
 }
 
-function buildTreeLines(documentId: string, content: string, issueNodes: Set<string>): string[] {
-    let parsed: Record<string, any> = {};
-    try {
-        parsed = JSON.parse(content);
-    } catch (error) {
-        parsed = {};
-    }
-    const title = typeof parsed.title === "string" ? parsed.title : "";
-    const lines: string[] = [];
-    const docId = "doc-1";
-    const docNote = issueNodes.has(docId) ? "  < ISSUE HERE" : "";
-    lines.push(`document (${docId})${docNote}`);
-    lines.push(`  title ${title.trim() ? JSON.stringify(title) : "(missing)"}`);
-    const images = Array.isArray(parsed.images) ? parsed.images : [];
-    if (images.length > 0) {
-        lines.push("  images");
-        images.forEach((image: any, index: number) => {
-            const id = `img-${index + 1}`;
-            const alt = typeof image?.alt_text === "string" ? image.alt_text : "";
-            const decorative = Boolean(image?.decorative) || alt.toLowerCase().includes("decorative");
-            const note = issueNodes.has(id) ? "  < ISSUE HERE" : "";
-            lines.push(`    ${id} alt_text=${alt ? JSON.stringify(alt) : "(missing)"} decorative=${decorative}${note}`);
-        });
-    }
-    const headings = Array.isArray(parsed.headings) ? parsed.headings : [];
-    if (headings.length > 0) {
-        lines.push("  headings");
-        headings.forEach((heading: any, index: number) => {
-            const id = typeof heading?.id === "string" ? heading.id : `h-${index + 1}`;
-            const level = typeof heading?.level === "number" ? heading.level : 1;
-            const text = typeof heading?.text === "string" ? heading.text : "Heading";
-            const note = issueNodes.has(id) ? "  < ISSUE HERE" : "";
-            lines.push(`    ${id} h${level} ${JSON.stringify(text)}${note}`);
-        });
-    }
+function buildTreeLines(
+  documentId: string,
+  filename: string | null,
+  issues: DocumentIssue[],
+): string[] {
+  const lines: string[] = [];
+  lines.push(`document (${documentId})`);
+  if (filename) {
+    lines.push(`  file ${JSON.stringify(filename)}`);
+  }
+  if (issues.length === 0) {
+    lines.push("  issues (none detected yet)");
     return lines;
+  }
+  lines.push(`  issues (${issues.length})`);
+  issues.forEach((issue, index) => {
+    lines.push(`    ${index + 1}. ${issue.ruleId} (${issue.severity})`);
+  });
+  return lines;
 }
 
-function IssueRow({ issue, onPress }: { issue: Issue; onPress: () => void }) {
+function IssuesList({ issues }: { issues: DocumentIssue[] }) {
+  if (issues.length === 0) {
     return (
-        <Pressable onPress={onPress} style={styles.row}>
-            <View style={styles.rowHeader}>
-                <Text style={styles.severity}>{issue.severity.toUpperCase()}</Text>
-                <Text style={styles.rule}>{issue.ruleId}</Text>
-            </View>
-            <Text style={styles.nodeId}>Node: {issue.nodeId}</Text>
-            <Text style={styles.description}>{issue.description}</Text>
-        </Pressable>
+      <EmptyState
+        title="No matching issues"
+        message="Try adjusting filters or run another scan."
+        icon="check-circle"
+        tone="info"
+      />
     );
+  }
+
+  return (
+    <FlatList
+      data={issues}
+      keyExtractor={(item) => item.id}
+      renderItem={({ item }) => <DocumentIssueRow issue={item} />}
+      ItemSeparatorComponent={() => <View style={styles.separator} />}
+    />
+  );
+}
+
+function DocumentIssueRow({ issue }: { issue: DocumentIssue }) {
+  const theme = useTheme();
+  const severityTone = issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info";
+  const fixableRules = new Set(["document_title_missing", "missing_heading_structure", "unlabeled_form_field"]);
+  const fixLabel = fixableRules.has(issue.ruleId) ? "Auto-fix available" : "Not implemented yet";
+  const fixTone = fixableRules.has(issue.ruleId) ? "success" : "warning";
+  return (
+    <Card style={styles.rowCard}>
+      <View style={styles.rowHeader}>
+        <Chip label={issue.severity.toUpperCase()} tone={severityTone} />
+        <Chip label={issue.ruleId} />
+        <Chip label={fixLabel} tone={fixTone} />
+      </View>
+      <Text style={[styles.description, { color: theme.colors.text }]}>{issue.title}</Text>
+      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{issue.description}</Text>
+      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Location: {issue.locationHint}</Text>
+    </Card>
+  );
 }
 
 const styles = StyleSheet.create({
-    container: { flex: 1, padding: 24, gap: 12 },
-    empty: { color: "#666" },
-    sort: { color: "#1f4acc", fontWeight: "600" },
-    treeContainer: { padding: 12, borderRadius: 8, backgroundColor: "#f0f3ff", gap: 8 },
-    treeTitle: { fontWeight: "700" },
-    treeText: { fontFamily: "Courier", fontSize: 12, color: "#2c2c2c" },
-    row: { paddingVertical: 12 },
-    rowHeader: { flexDirection: "row", justifyContent: "space-between" },
-    severity: { fontWeight: "700" },
-    rule: { color: "#666" },
-    nodeId: { color: "#444", marginTop: 4 },
-    description: { marginTop: 4 },
-    separator: { height: 1, backgroundColor: "#e0e0e0" },
+  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  summaryRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  searchRow: { marginTop: 12, gap: 8 },
+  searchInput: { borderWidth: 1, borderRadius: 12, padding: 10 },
+  filterRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginTop: 12 },
+  sortLink: { fontWeight: "600", marginTop: 4 },
+  columns: { flex: 1, flexDirection: "row", gap: 16 },
+  leftColumn: { flex: 1 },
+  rightColumn: { flex: 2 },
+  mobileTabs: { gap: 12 },
+  tabRow: { flexDirection: "row", gap: 8 },
+  treeContainer: { gap: 8 },
+  treeText: { fontFamily: "Courier", fontSize: 12 },
+  row: { marginBottom: 12 },
+  rowPressed: { opacity: 0.9 },
+  rowCard: { gap: 8 },
+  rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  nodeId: { marginTop: 2 },
+  description: { marginTop: 4 },
+  separator: { height: 12 },
+  docIssueCard: { marginTop: 12, gap: 6 },
+  applyFixes: { marginTop: 12, alignItems: "flex-start" },
+  downloadRow: { marginTop: 12, flexDirection: "row", gap: 12 },
+  link: { fontWeight: "600" },
+  diffRow: { marginTop: 16, flexDirection: "row", gap: 12, flexWrap: "wrap" },
+  diffPanel: { flex: 1, minWidth: 220, borderWidth: 1, borderColor: "#E2E8F0", borderRadius: 12, padding: 12 },
+  diffTitle: { fontWeight: "700", marginBottom: 8 },
+  diffTextCard: { marginTop: 12 },
+  diffText: { fontFamily: "Courier", fontSize: 12 },
+  visualDiffGrid: { gap: 16 },
+  visualDiffRow: { flexDirection: "row", gap: 16, flexWrap: "wrap" },
+  visualPanel: { flex: 1, minWidth: 240, gap: 8 },
+  canvas: { width: "100%", borderWidth: 1, borderColor: "#E2E8F0", borderRadius: 8 },
 });

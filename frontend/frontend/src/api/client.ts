@@ -59,11 +59,64 @@ export interface ManualReviewItem {
     createdAt?: string;
 }
 
+export interface UploadResponse {
+    docId: string;
+    filename: string;
+    sizeBytes: number;
+}
+
+export interface ScanJobResponse {
+    jobId: string;
+    status: "queued" | "running" | "done" | "error";
+    progress: number;
+    message?: string;
+}
+
+export interface DocumentIssue {
+    id: string;
+    ruleId: string;
+    title: string;
+    severity: Severity;
+    description: string;
+    locationHint: string;
+    recommendation: string;
+}
+
+export interface ApplyFixesResponse {
+    docId: string;
+    fixed: boolean;
+}
+
+export interface DocumentDiffResponse {
+    beforeText: string;
+    afterText: string;
+    diffText: string;
+}
+
+export interface DocumentSummary {
+    docId: string;
+    title: string;
+    pages: number;
+    images: number;
+    tagged: boolean;
+    outlineCount: number;
+    formFields: number;
+    unlabeledFields: number;
+}
+
 export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     manualReview: () => Promise<ManualReviewItem[]>;
     clearManualReview: () => Promise<{ cleared: number }>;
+    uploadDocument: (file: File) => Promise<UploadResponse>;
+    startDocumentScan: (docId: string) => Promise<{ jobId: string }>;
+    getJob: (jobId: string) => Promise<ScanJobResponse>;
+    getIssues: (docId: string) => Promise<DocumentIssue[]>;
+    applyFixes: (docId: string) => Promise<ApplyFixesResponse>;
+    getDownloadUrl: (docId: string, variant: "original" | "fixed") => string;
+    getDocumentDiff: (docId: string) => Promise<DocumentDiffResponse>;
+    getDocumentSummary: (docId: string) => Promise<DocumentSummary>;
 }
 
 interface ApiClientConfig {
@@ -166,5 +219,110 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return (await response.json()) as { cleared: number };
     };
 
-    return { scan, remediate, manualReview, clearManualReview };
+    const uploadDocument = async (file: File): Promise<UploadResponse> => {
+        if (mockMode) {
+            return { docId: `doc-${Date.now()}`, filename: file.name, sizeBytes: file.size };
+        }
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch(`${baseUrl}/documents/upload`, {
+            method: "POST",
+            body: form,
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Upload failed");
+        }
+        return (await response.json()) as UploadResponse;
+    };
+
+    const startDocumentScan = async (docId: string): Promise<{ jobId: string }> => {
+        if (mockMode) {
+            return { jobId: `job-${Date.now()}` };
+        }
+        return request<{ jobId: string }>(`/documents/${docId}/scan`, {});
+    };
+
+    const getJob = async (jobId: string): Promise<ScanJobResponse> => {
+        if (mockMode) {
+            return { jobId, status: "done", progress: 100 };
+        }
+        const response = await fetch(`${baseUrl}/jobs/${jobId}`);
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Job lookup failed");
+        }
+        return (await response.json()) as ScanJobResponse;
+    };
+
+    const getIssues = async (docId: string): Promise<DocumentIssue[]> => {
+        if (mockMode) {
+            return [];
+        }
+        const response = await fetch(`${baseUrl}/documents/${docId}/issues`);
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Issue fetch failed");
+        }
+        return (await response.json()) as DocumentIssue[];
+    };
+
+    const applyFixes = async (docId: string): Promise<ApplyFixesResponse> => {
+        if (mockMode) {
+            return { docId, fixed: true };
+        }
+        return request<ApplyFixesResponse>(`/documents/${docId}/apply-fixes`, {});
+    };
+
+    const getDownloadUrl = (docId: string, variant: "original" | "fixed") => {
+        return `${baseUrl}/documents/${docId}/download?variant=${variant}`;
+    };
+
+    const getDocumentDiff = async (docId: string): Promise<DocumentDiffResponse> => {
+        if (mockMode) {
+            return { beforeText: "", afterText: "", diffText: "" };
+        }
+        const response = await fetch(`${baseUrl}/documents/${docId}/diff`);
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Diff fetch failed");
+        }
+        return (await response.json()) as DocumentDiffResponse;
+    };
+
+    const getDocumentSummary = async (docId: string): Promise<DocumentSummary> => {
+        if (mockMode) {
+            return {
+                docId,
+                title: "",
+                pages: 0,
+                images: 0,
+                tagged: false,
+                outlineCount: 0,
+                formFields: 0,
+                unlabeledFields: 0,
+            };
+        }
+        const response = await fetch(`${baseUrl}/documents/${docId}/summary`);
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Summary fetch failed");
+        }
+        return (await response.json()) as DocumentSummary;
+    };
+
+    return {
+        scan,
+        remediate,
+        manualReview,
+        clearManualReview,
+        uploadDocument,
+        startDocumentScan,
+        getJob,
+        getIssues,
+        applyFixes,
+        getDownloadUrl,
+        getDocumentDiff,
+        getDocumentSummary,
+    };
 }
