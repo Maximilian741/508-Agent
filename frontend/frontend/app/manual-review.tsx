@@ -21,10 +21,8 @@ export default function ManualReviewScreen() {
     const mockMode = useAppStore((state) => state.mockMode);
     const theme = useTheme();
 
-    const originalUrl = uploadedDocument
-        ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/download?variant=original`
-        : null;
-    const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/download?variant=fixed` : null;
+    const originalUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf` : null;
+    const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/pdf-fixed` : null;
 
   useEffect(() => {
     if (!mockMode) {

@@ -4,6 +4,7 @@ import {
     ApiClient,
     ApplyFixesResponse,
     DocumentDiffResponse,
+    DocumentSummary,
     DocumentIssue,
     ExecutionResult,
     Issue,
@@ -11,6 +12,7 @@ import {
     RemediateRequest,
     ScanRequest,
     ScanResponse,
+    TagTreeResponse,
     UploadResponse,
     createApiClient,
 } from "../api/client";
@@ -45,6 +47,8 @@ interface AppState {
     scanJob: { jobId: string; status: string; progress: number; message?: string } | null;
     documentIssues: DocumentIssue[];
     fixedDocId: string | null;
+    documentSummary: DocumentSummary | null;
+    tagTree: TagTreeResponse | null;
     isScanning: boolean;
     isUploading: boolean;
     setApiBaseUrl: (value: string) => void;
@@ -64,11 +68,27 @@ interface AppState {
     runDocumentScan: (docId: string) => Promise<RunResult<{ jobId: string }>>;
     applyDocumentFixes: (docId: string) => Promise<RunResult<ApplyFixesResponse>>;
     fetchDocumentDiff: (docId: string) => Promise<RunResult<DocumentDiffResponse>>;
+    fetchDocumentSummary: (docId: string) => Promise<RunResult<DocumentSummary>>;
+    fetchTagTree: (docId: string) => Promise<RunResult<TagTreeResponse>>;
 }
 
 const resolved = getBackendUrlInfo();
 const defaultBaseUrl = resolved.url;
 const baseUrlKey = "apiBaseUrl";
+
+const emptyTagTree: TagTreeResponse = {
+    tagged: false,
+    warnings: ["Tag tree unavailable."],
+    summary: {
+        nodeCount: 0,
+        tagCounts: {},
+        figures: 0,
+        figuresMissingAlt: 0,
+        headings: {},
+        tables: {},
+    },
+    tree: { rootId: "0", nodes: {} },
+};
 
 function readStoredBaseUrl(): string | null {
     if (Platform.OS !== "web") return null;
@@ -134,6 +154,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     scanJob: null,
     documentIssues: [],
     fixedDocId: null,
+    documentSummary: null,
+    tagTree: null,
     isScanning: false,
     isUploading: false,
     setApiBaseUrl: (value) => {
@@ -259,6 +281,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 scanJob: null,
                 documentIssues: [],
                 fixedDocId: null,
+                documentSummary: null,
+                tagTree: null,
                 isUploading: false,
             });
             return { ok: true, data: response };
@@ -271,7 +295,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         const client = getClient(get());
         try {
             const start = await client.startDocumentScan(docId);
-            set({ scanJob: { jobId: start.jobId, status: "queued", progress: 0 } });
+            set({
+                scanJob: { jobId: start.jobId, status: "queued", progress: 0 },
+                documentIssues: [],
+                fixedDocId: null,
+                documentSummary: null,
+                tagTree: null,
+            });
             const poll = async (): Promise<void> => {
                 const current = await client.getJob(start.jobId);
                 set({
@@ -284,6 +314,20 @@ export const useAppStore = create<AppState>((set, get) => ({
                 });
                 const issues = await client.getIssues(docId);
                 set({ documentIssues: issues });
+                if (current.status === "done") {
+                    try {
+                        const summary = await client.getDocumentSummary(docId);
+                        set({ documentSummary: summary });
+                    } catch (error) {
+                        return;
+                    }
+                    try {
+                        const tagTree = await client.getTagTree(docId);
+                        set({ tagTree });
+                    } catch (error) {
+                        set({ tagTree: emptyTagTree });
+                    }
+                }
                 if (current.status === "done") {
                     return;
                 }
@@ -314,6 +358,27 @@ export const useAppStore = create<AppState>((set, get) => ({
             const response = await client.getDocumentDiff(docId);
             return { ok: true, data: response };
         } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    fetchDocumentSummary: async (docId) => {
+        const client = getClient(get());
+        try {
+            const response = await client.getDocumentSummary(docId);
+            set({ documentSummary: response });
+            return { ok: true, data: response };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    fetchTagTree: async (docId) => {
+        const client = getClient(get());
+        try {
+            const response = await client.getTagTree(docId);
+            set({ tagTree: response });
+            return { ok: true, data: response };
+        } catch (error) {
+            set({ tagTree: emptyTagTree });
             return { ok: false, error: (error as Error).message };
         }
     },

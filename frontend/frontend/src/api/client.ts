@@ -1,4 +1,4 @@
-export type Severity = "error" | "warning" | "info";
+﻿export type Severity = "error" | "warning" | "info";
 
 export interface ScanRequest {
     documentId: string;
@@ -80,6 +80,7 @@ export interface DocumentIssue {
     description: string;
     locationHint: string;
     recommendation: string;
+    evidence?: Record<string, unknown>;
 }
 
 export interface ApplyFixesResponse {
@@ -93,12 +94,49 @@ export interface DocumentDiffResponse {
     diffText: string;
 }
 
+
+export interface TagTreeNode {
+    id: string;
+    role: string;
+    tag: string | null;
+    title: string | null;
+    alt: string | null;
+    actualText: string | null;
+    lang: string | null;
+    kids: string[];
+    mcid?: number;
+    pg?: string | null;
+}
+
+export interface TagTreeSummary {
+    nodeCount: number;
+    tagCounts: Record<string, number>;
+    figures: number;
+    figuresMissingAlt: number;
+    headings: Record<string, number>;
+    tables: Record<string, number>;
+}
+
+export interface TagTreeResponse {
+    tagged: boolean;
+    warnings: string[];
+    summary: TagTreeSummary;
+    tree: {
+        rootId: string;
+        nodes: Record<string, TagTreeNode>;
+    };
+}
+
 export interface DocumentSummary {
     docId: string;
     title: string;
     pages: number;
     images: number;
     tagged: boolean;
+    tagCounts: Record<string, number>;
+    figures: number;
+    figuresMissingAlt: number;
+    nodeCount: number;
     outlineCount: number;
     formFields: number;
     unlabeledFields: number;
@@ -117,6 +155,7 @@ export interface ApiClient {
     getDownloadUrl: (docId: string, variant: "original" | "fixed") => string;
     getDocumentDiff: (docId: string) => Promise<DocumentDiffResponse>;
     getDocumentSummary: (docId: string) => Promise<DocumentSummary>;
+    getTagTree: (docId: string) => Promise<TagTreeResponse>;
 }
 
 interface ApiClientConfig {
@@ -275,7 +314,10 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
     };
 
     const getDownloadUrl = (docId: string, variant: "original" | "fixed") => {
-        return `${baseUrl}/documents/${docId}/download?variant=${variant}`;
+        if (variant === "fixed") {
+            return `${baseUrl}/documents/${docId}/pdf-fixed`;
+        }
+        return `${baseUrl}/documents/${docId}/pdf`;
     };
 
     const getDocumentDiff = async (docId: string): Promise<DocumentDiffResponse> => {
@@ -298,6 +340,10 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 pages: 0,
                 images: 0,
                 tagged: false,
+                tagCounts: {},
+                figures: 0,
+                figuresMissingAlt: 0,
+                nodeCount: 0,
                 outlineCount: 0,
                 formFields: 0,
                 unlabeledFields: 0,
@@ -309,6 +355,30 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             throw new Error(message || "Summary fetch failed");
         }
         return (await response.json()) as DocumentSummary;
+    };
+
+    const getTagTree = async (docId: string): Promise<TagTreeResponse> => {
+        if (mockMode) {
+            return {
+                tagged: false,
+                warnings: ["Tag tree unavailable in mock mode."],
+                summary: {
+                    nodeCount: 0,
+                    tagCounts: {},
+                    figures: 0,
+                    figuresMissingAlt: 0,
+                    headings: {},
+                    tables: {},
+                },
+                tree: { rootId: "0", nodes: {} },
+            };
+        }
+        const response = await fetch(`${baseUrl}/documents/${docId}/tag-tree`);
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Tag tree fetch failed");
+        }
+        return (await response.json()) as TagTreeResponse;
     };
 
     return {
@@ -324,5 +394,11 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         getDownloadUrl,
         getDocumentDiff,
         getDocumentSummary,
+        getTagTree,
     };
 }
+
+
+
+
+

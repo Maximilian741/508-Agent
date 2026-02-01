@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import {
   FlatList,
   Platform,
@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 
-import { DocumentIssue } from "../src/api/client";
+import { DocumentIssue, TagTreeResponse, TagTreeNode } from "../src/api/client";
 import { useAppStore } from "../src/store/useAppStore";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
@@ -36,10 +36,14 @@ export default function ScanScreen() {
   const fixedDocId = useAppStore((state) => state.fixedDocId);
   const fetchDocumentDiff = useAppStore((state) => state.fetchDocumentDiff);
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
+  const documentSummary = useAppStore((state) => state.documentSummary);
+  const tagTree = useAppStore((state) => state.tagTree);
   const [sortDescending, setSortDescending] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [severityFilter, setSeverityFilter] = useState<"all" | "error" | "warning" | "info">("all");
   const [activeTab, setActiveTab] = useState<"issues" | "tree">("issues");
+  const [highlightNodeId, setHighlightNodeId] = useState<string | null>(null);
+  const [treeLimit, setTreeLimit] = useState(500);
   const [diffText, setDiffText] = useState<string>("");
   const [diffError, setDiffError] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<string | null>(null);
@@ -51,7 +55,7 @@ export default function ScanScreen() {
   const isWide = Platform.OS === "web" && width >= 980;
 
   const issues = useMemo(() => {
-    const list = scanResults?.issues ?? [];
+    const list = documentIssues;
     const filtered = list.filter((issue) => {
       const matchesSeverity = severityFilter === "all" || issue.severity === severityFilter;
       const term = searchTerm.trim().toLowerCase();
@@ -67,17 +71,17 @@ export default function ScanScreen() {
       return sortDescending ? diff : -diff;
     });
     return sorted;
-  }, [scanResults, sortDescending, searchTerm, severityFilter]);
+  }, [documentIssues, sortDescending, searchTerm, severityFilter]);
 
   const counts = useMemo(() => {
-    const list = scanResults?.issues ?? [];
+    const list = documentIssues;
     return {
       error: list.filter((issue) => issue.severity === "error").length,
       warning: list.filter((issue) => issue.severity === "warning").length,
       info: list.filter((issue) => issue.severity === "info").length,
       total: list.length,
     };
-  }, [scanResults]);
+  }, [documentIssues]);
 
   const docIssueCounts = useMemo(() => {
     return {
@@ -100,11 +104,9 @@ export default function ScanScreen() {
     );
   }
 
-  const displayDocumentId = scanResults?.documentId ?? uploadedDocument?.docId ?? "doc-1";
-  const originalUrl = uploadedDocument
-    ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/download?variant=original`
-    : null;
-  const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/download?variant=fixed` : null;
+  const displayDocumentId = uploadedDocument?.docId ?? scanResults?.documentId ?? "doc-1";
+  const originalUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf` : null;
+  const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/pdf-fixed` : null;
   const openUrl = (url: string) => {
     if (Platform.OS === "web") {
       window.open(url, "_blank");
@@ -134,12 +136,60 @@ export default function ScanScreen() {
       setPdfLoading(true);
       setPdfError(null);
       try {
-        const pdfjs = await import("pdfjs-dist");
-        const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs");
-        // @ts-ignore
-        pdfjs.GlobalWorkerOptions.workerSrc = worker;
-        const originalTask = pdfjs.getDocument(originalUrl ?? "");
-        const fixedTask = pdfjs.getDocument(fixedUrl ?? "");
+        const loadPdfJs = (): Promise<any> =>
+          new Promise((resolve, reject) => {
+            if (typeof window === "undefined") {
+              reject(new Error("PDF.js is only available on web."));
+              return;
+            }
+            // @ts-ignore
+            if (window.pdfjsLib) {
+              // @ts-ignore
+              resolve(window.pdfjsLib);
+              return;
+            }
+            const existing = document.getElementById("pdfjs-script");
+            if (existing) {
+              existing.addEventListener("load", () => {
+                // @ts-ignore
+                resolve(window.pdfjsLib);
+              });
+              existing.addEventListener("error", () => reject(new Error("Failed to load PDF.js")));
+              return;
+            }
+            const script = document.createElement("script");
+            script.id = "pdfjs-script";
+            script.src = "https://unpkg.com/pdfjs-dist@4.2.67/legacy/build/pdf.min.js";
+            script.async = true;
+            script.onload = () => {
+              // @ts-ignore
+              resolve(window.pdfjsLib);
+            };
+            script.onerror = () => reject(new Error("Failed to load PDF.js"));
+            document.body.appendChild(script);
+          });
+
+        const pdfjs = await loadPdfJs();
+        if (!originalUrl || !fixedUrl) {
+          setPdfError("Missing document URLs for diff rendering.");
+          return;
+        }
+        const [originalResponse, fixedResponse] = await Promise.all([
+          fetch(originalUrl, { cache: "no-store", mode: "cors" }),
+          fetch(fixedUrl, { cache: "no-store", mode: "cors" }),
+        ]);
+        if (!originalResponse.ok) {
+          throw new Error(`Original PDF fetch failed: ${originalResponse.status}`);
+        }
+        if (!fixedResponse.ok) {
+          throw new Error(`Fixed PDF fetch failed: ${fixedResponse.status}`);
+        }
+        const [originalBuffer, fixedBuffer] = await Promise.all([
+          originalResponse.arrayBuffer(),
+          fixedResponse.arrayBuffer(),
+        ]);
+        const originalTask = pdfjs.getDocument({ data: originalBuffer, disableWorker: true });
+        const fixedTask = pdfjs.getDocument({ data: fixedBuffer, disableWorker: true });
         const originalPdf = await originalTask.promise;
         const fixedPdf = await fixedTask.promise;
         const maxPages = Math.min(pagesToRender, originalPdf.numPages, fixedPdf.numPages);
@@ -169,7 +219,11 @@ export default function ScanScreen() {
           }
         }
       } catch (error) {
-        setPdfError("Unable to render visual diff.");
+        const message =
+          error instanceof Error
+            ? `Unable to render visual diff: ${error.message}`
+            : "Unable to render visual diff. Check that the PDFs are reachable.";
+        setPdfError(message);
       } finally {
         setPdfLoading(false);
       }
@@ -224,7 +278,7 @@ export default function ScanScreen() {
       {scanJob && scanJob.status !== "done" && (
         <InlineNotice
           title="Scanning in progress"
-          message={`${scanJob.status} • ${scanJob.progress}%`}
+          message={`${scanJob.status} - ${scanJob.progress}%`}
           tone="info"
         />
       )}
@@ -250,7 +304,16 @@ export default function ScanScreen() {
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Document Issues</Text>
             {uploadedDocument && <Chip label={`Doc ${uploadedDocument.docId}`} tone="info" />}
           </View>
-          <IssuesList issues={documentIssues} />
+          <IssuesList
+            issues={issues}
+            onSelectIssue={(issue) => {
+              const nodeIds = (issue.evidence?.nodeIds as string[]) ?? [];
+              if (nodeIds.length > 0) {
+                setHighlightNodeId(nodeIds[0]);
+                setActiveTab("tree");
+              }
+            }}
+          />
           <Pressable
             onPress={() => uploadedDocument && applyDocumentFixes(uploadedDocument.docId)}
             style={styles.applyFixes}
@@ -355,6 +418,11 @@ export default function ScanScreen() {
               documentId={displayDocumentId}
               filename={uploadedDocument?.filename ?? null}
               issues={documentIssues}
+              summary={documentSummary}
+              tagTree={tagTree}
+              highlightNodeId={highlightNodeId}
+              treeLimit={treeLimit}
+              onShowMore={() => setTreeLimit((prev) => prev + 500)}
             />
           </View>
           <View style={styles.rightColumn}>
@@ -383,9 +451,23 @@ export default function ScanScreen() {
               documentId={displayDocumentId}
               filename={uploadedDocument?.filename ?? null}
               issues={documentIssues}
+              summary={documentSummary}
+              tagTree={tagTree}
+              highlightNodeId={highlightNodeId}
+              treeLimit={treeLimit}
+              onShowMore={() => setTreeLimit((prev) => prev + 500)}
             />
           ) : (
-            <IssuesList issues={documentIssues} />
+            <IssuesList
+              issues={documentIssues}
+              onSelectIssue={(issue) => {
+                const nodeIds = (issue.evidence?.nodeIds as string[]) ?? [];
+                if (nodeIds.length > 0) {
+                  setHighlightNodeId(nodeIds[0]);
+                  setActiveTab("tree");
+                }
+              }}
+            />
           )}
         </View>
       )}
@@ -397,21 +479,66 @@ function DocumentTree({
   documentId,
   filename,
   issues,
+  summary,
+  tagTree,
+  highlightNodeId,
+  treeLimit,
+  onShowMore,
 }: {
   documentId: string;
   filename: string | null;
   issues: DocumentIssue[];
+  summary: {
+    title: string;
+    pages: number;
+    images: number;
+    tagged: boolean;
+    tagCounts: Record<string, number>;
+    figures: number;
+    figuresMissingAlt: number;
+    nodeCount: number;
+    outlineCount: number;
+    formFields: number;
+    unlabeledFields: number;
+  } | null;
+  tagTree: TagTreeResponse | null;
+  highlightNodeId: string | null;
+  treeLimit: number;
+  onShowMore: () => void;
 }) {
   const theme = useTheme();
   const lines = useMemo(
-    () => buildTreeLines(documentId, filename, issues),
-    [documentId, filename, issues],
+    () => buildTreeLines(documentId, filename, issues, summary),
+    [documentId, filename, issues, summary],
   );
 
   return (
     <Card style={styles.treeContainer}>
       <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Document Tree</Text>
       <Text style={[styles.treeText, { color: theme.colors.textMuted }]}>{lines.join("\n")}</Text>
+      {summary?.nodeCount !== undefined && (
+        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+          Tag tree nodes: {summary.nodeCount}
+        </Text>
+      )}
+      {tagTree ? (
+        tagTree.tree.nodes && Object.keys(tagTree.tree.nodes).length > 0 ? (
+          <TagTreeViewer
+            tagTree={tagTree}
+            highlightNodeId={highlightNodeId}
+            limit={treeLimit}
+            onShowMore={onShowMore}
+          />
+        ) : (
+          <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+            No tag tree available (PDF may be untagged or parsing failed).
+          </Text>
+        )
+      ) : (
+        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+          Tag tree data not available yet.
+        </Text>
+      )}
     </Card>
   );
 }
@@ -420,11 +547,68 @@ function buildTreeLines(
   documentId: string,
   filename: string | null,
   issues: DocumentIssue[],
+  summary: {
+    title: string;
+    pages: number;
+    images: number;
+    tagged: boolean;
+    tagCounts: Record<string, number>;
+    figures: number;
+    figuresMissingAlt: number;
+    nodeCount: number;
+    outlineCount: number;
+    formFields: number;
+    unlabeledFields: number;
+  } | null,
 ): string[] {
   const lines: string[] = [];
   lines.push(`document (${documentId})`);
   if (filename) {
     lines.push(`  file ${JSON.stringify(filename)}`);
+  }
+  if (summary) {
+    lines.push(`  pages ${summary.pages}`);
+    lines.push(`  title ${summary.title ? JSON.stringify(summary.title) : "(missing)"}`);
+    lines.push(`  images ${summary.images}`);
+    lines.push(`  tagged ${summary.tagged ? "yes" : "no"}`);
+    if (!summary.tagged) {
+      lines.push("  structure tags (not tagged)");
+    } else {
+      const tagOrder = [
+        "H1",
+        "H2",
+        "H3",
+        "H4",
+        "H5",
+        "H6",
+        "P",
+        "L",
+        "LI",
+        "Table",
+        "TR",
+        "TH",
+        "TD",
+        "Figure",
+      ];
+      const tagLines = tagOrder
+        .map((tag) => {
+          const count = summary.tagCounts[tag];
+          return count ? `    ${tag}: ${count}` : null;
+        })
+        .filter((value): value is string => Boolean(value));
+      if (tagLines.length) {
+        lines.push("  structure tags");
+        lines.push(...tagLines);
+      } else {
+        lines.push("  structure tags (none detected)");
+      }
+      if (summary.figures) {
+        lines.push(`  figures ${summary.figures} (missing alt: ${summary.figuresMissingAlt})`);
+      }
+    }
+    lines.push(`  outline ${summary.outlineCount}`);
+    lines.push(`  form fields ${summary.formFields}`);
+    lines.push(`  unlabeled fields ${summary.unlabeledFields}`);
   }
   if (issues.length === 0) {
     lines.push("  issues (none detected yet)");
@@ -437,7 +621,13 @@ function buildTreeLines(
   return lines;
 }
 
-function IssuesList({ issues }: { issues: DocumentIssue[] }) {
+function IssuesList({
+  issues,
+  onSelectIssue,
+}: {
+  issues: DocumentIssue[];
+  onSelectIssue?: (issue: DocumentIssue) => void;
+}) {
   if (issues.length === 0) {
     return (
       <EmptyState
@@ -453,29 +643,125 @@ function IssuesList({ issues }: { issues: DocumentIssue[] }) {
     <FlatList
       data={issues}
       keyExtractor={(item) => item.id}
-      renderItem={({ item }) => <DocumentIssueRow issue={item} />}
+      renderItem={({ item }) => <DocumentIssueRow issue={item} onSelectIssue={onSelectIssue} />}
       ItemSeparatorComponent={() => <View style={styles.separator} />}
     />
   );
 }
 
-function DocumentIssueRow({ issue }: { issue: DocumentIssue }) {
+function DocumentIssueRow({
+  issue,
+  onSelectIssue,
+}: {
+  issue: DocumentIssue;
+  onSelectIssue?: (issue: DocumentIssue) => void;
+}) {
   const theme = useTheme();
   const severityTone = issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info";
   const fixableRules = new Set(["document_title_missing", "missing_heading_structure", "unlabeled_form_field"]);
   const fixLabel = fixableRules.has(issue.ruleId) ? "Auto-fix available" : "Not implemented yet";
   const fixTone = fixableRules.has(issue.ruleId) ? "success" : "warning";
   return (
-    <Card style={styles.rowCard}>
-      <View style={styles.rowHeader}>
-        <Chip label={issue.severity.toUpperCase()} tone={severityTone} />
-        <Chip label={issue.ruleId} />
-        <Chip label={fixLabel} tone={fixTone} />
-      </View>
-      <Text style={[styles.description, { color: theme.colors.text }]}>{issue.title}</Text>
-      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{issue.description}</Text>
-      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Location: {issue.locationHint}</Text>
-    </Card>
+    <Pressable onPress={() => onSelectIssue?.(issue)}>
+      <Card style={styles.rowCard}>
+        <View style={styles.rowHeader}>
+          <Chip label={issue.severity.toUpperCase()} tone={severityTone} />
+          <Chip label={issue.ruleId} />
+          <Chip label={fixLabel} tone={fixTone} />
+        </View>
+        <Text style={[styles.description, { color: theme.colors.text }]}>{issue.title}</Text>
+        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{issue.description}</Text>
+        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+          Location: {issue.locationHint}
+        </Text>
+        {issue.evidence?.nodeIds && (
+          <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+            Tag nodes: {(issue.evidence.nodeIds as string[]).slice(0, 3).join(", ")}
+          </Text>
+        )}
+      </Card>
+    </Pressable>
+  );
+}
+
+function TagTreeViewer({
+  tagTree,
+  highlightNodeId,
+  limit,
+  onShowMore,
+}: {
+  tagTree: TagTreeResponse;
+  highlightNodeId: string | null;
+  limit: number;
+  onShowMore: () => void;
+}) {
+  const theme = useTheme();
+  const listRef = useRef<FlatList<{ id: string; depth: number; node: TagTreeNode }>>(null);
+
+  const flattened = useMemo(() => {
+    const nodes = tagTree.tree.nodes;
+    const result: { id: string; depth: number; node: TagTreeNode }[] = [];
+    const walk = (id: string, depth: number) => {
+      const node = nodes[id];
+      if (!node) return;
+      result.push({ id, depth, node });
+      node.kids.forEach((kid) => walk(kid, depth + 1));
+    };
+    walk(tagTree.tree.rootId, 0);
+    return result;
+  }, [tagTree]);
+
+  useEffect(() => {
+    if (!highlightNodeId) return;
+    const idx = flattened.findIndex((entry) => entry.id === highlightNodeId);
+    if (idx >= 0 && idx < limit) {
+      listRef.current?.scrollToIndex({ index: idx, animated: true });
+    }
+  }, [highlightNodeId, flattened, limit]);
+
+  const data = flattened.slice(0, limit);
+  const canShowMore = flattened.length > limit;
+
+  return (
+    <View style={styles.tagTreeContainer}>
+      <Text style={[styles.tagTreeTitle, { color: theme.colors.text }]}>Tag Tree</Text>
+      {tagTree.warnings.length > 0 && (
+        <Text style={[styles.nodeId, { color: theme.colors.warning }]}>
+          {tagTree.warnings.join(" | ")}
+        </Text>
+      )}
+      <FlatList
+        ref={listRef}
+        data={data}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => {
+          const tagLabel = item.node.tag ?? item.node.role;
+          const title = item.node.title ? ` \"${item.node.title}\"` : "";
+          const missingAlt = item.node.tag === "Figure" && !item.node.alt;
+          const isHighlighted = highlightNodeId === item.id;
+          return (
+            <View
+              style={[
+                styles.tagRow,
+                { paddingLeft: 12 + item.depth * 12 },
+                isHighlighted && { borderColor: theme.colors.accent, borderWidth: 1 },
+              ]}
+            >
+              <Text style={[styles.tagRowText, { color: theme.colors.text }]}>
+                {tagLabel}
+                {title}
+              </Text>
+              {missingAlt && <Chip label="missing alt" tone="warning" />}
+            </View>
+          );
+        }}
+      />
+      {canShowMore && (
+        <Pressable onPress={onShowMore} style={styles.showMore}>
+          <Text style={[styles.link, { color: theme.colors.accent }]}>Show more</Text>
+        </Pressable>
+      )}
+    </View>
   );
 }
 
@@ -493,6 +779,17 @@ const styles = StyleSheet.create({
   tabRow: { flexDirection: "row", gap: 8 },
   treeContainer: { gap: 8 },
   treeText: { fontFamily: "Courier", fontSize: 12 },
+  tagTreeContainer: { marginTop: 12, gap: 6 },
+  tagTreeTitle: { fontWeight: "700" },
+  tagRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  tagRowText: { fontFamily: "Courier", fontSize: 12 },
+  showMore: { marginTop: 8, alignItems: "flex-start" },
   row: { marginBottom: 12 },
   rowPressed: { opacity: 0.9 },
   rowCard: { gap: 8 },
@@ -514,3 +811,8 @@ const styles = StyleSheet.create({
   visualPanel: { flex: 1, minWidth: 240, gap: 8 },
   canvas: { width: "100%", borderWidth: 1, borderColor: "#E2E8F0", borderRadius: 8 },
 });
+
+
+
+
+
