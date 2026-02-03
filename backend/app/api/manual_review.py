@@ -21,6 +21,12 @@ class ManualReviewItem(BaseModel):
     reason: str
     notes: str | None = None
     createdAt: str | None = None
+    pages: list[int] = []
+    anchors: list[str] = []
+    instructions: str | None = None
+    suggestedFix: str | None = None
+    confidence: float | None = None
+    requiresHuman: bool = True
 
 
 @router.get("/manual-review", response_model=List[ManualReviewItem])

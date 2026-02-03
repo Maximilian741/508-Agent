@@ -8,15 +8,16 @@ interface ChipProps {
   tone?: "default" | "success" | "warning" | "danger" | "info";
   style?: ViewStyle;
   icon?: ReactNode;
+  textStyle?: ViewStyle;
 }
 
-export function Chip({ label, tone = "default", style, icon }: ChipProps) {
+export function Chip({ label, tone = "default", style, icon, textStyle }: ChipProps) {
   const theme = useTheme();
   const styles = createStyles(theme);
   return (
     <View style={[styles.base, styles[`tone_${tone}`], style]}>
       {icon}
-      <Text style={[styles.text, styles[`text_${tone}`]]}>{label}</Text>
+      <Text style={[styles.text, styles[`text_${tone}`], textStyle]}>{label}</Text>
     </View>
   );
 }

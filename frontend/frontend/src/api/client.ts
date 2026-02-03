@@ -57,6 +57,12 @@ export interface ManualReviewItem {
     reason: string;
     notes?: string;
     createdAt?: string;
+    pages?: number[];
+    anchors?: string[];
+    instructions?: string;
+    suggestedFix?: string;
+    confidence?: number;
+    requiresHuman?: boolean;
 }
 
 export interface UploadResponse {
@@ -86,6 +92,30 @@ export interface DocumentIssue {
 export interface ApplyFixesResponse {
     docId: string;
     fixed: boolean;
+    report?: FixReport;
+}
+
+export interface FixReportItem {
+    fixId: string;
+    ruleId: string;
+    severity: Severity;
+    action: string;
+    pages: number[];
+    anchors: string[];
+    deterministic: boolean;
+}
+
+export interface FixReport {
+    applied_fixes: FixReportItem[];
+    remaining_issues: DocumentIssue[];
+    manual_review_added: ManualReviewItem[];
+    before_after: {
+        metadata_before: Record<string, string | null>;
+        metadata_after: Record<string, string | null>;
+    };
+    deterministic: boolean;
+    mode: string;
+    rebuilt: boolean;
 }
 
 export interface DocumentDiffResponse {

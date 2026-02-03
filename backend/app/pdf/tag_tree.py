@@ -39,6 +39,20 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
         return _safe_payload(warnings, tagged=False)
 
     try:
+        page_ref_map: Dict[tuple, int] = {}
+        for idx, page in enumerate(reader.pages, start=1):
+            try:
+                ref = page.indirect_reference
+                if ref is not None:
+                    page_ref_map[(ref.idnum, ref.generation)] = idx
+                try:
+                    page_obj = page.get_object()
+                    page_ref_map[("obj", id(page_obj))] = idx
+                except Exception:
+                    page_ref_map[("obj", id(page))] = idx
+            except Exception:
+                continue
+
         nodes: Dict[str, Dict[str, object]] = {}
         tag_counts: Dict[str, int] = {}
         heading_counts: Dict[str, int] = {}
@@ -120,6 +134,14 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
                 elif isinstance(obj, dict) and obj.get("/Type") == "/MCR":
                     mcid = obj.get("/MCID")
                     pg = obj.get("/Pg")
+                    page_num = None
+                    try:
+                        if pg is not None and hasattr(pg, "idnum"):
+                            page_num = page_ref_map.get((pg.idnum, pg.generation))
+                        elif pg is not None:
+                            page_num = page_ref_map.get(("obj", id(pg))) or page_ref_map.get(("obj", id(pg.get_object())))
+                    except Exception:
+                        page_num = None
                     add_node(
                         node_id,
                         "MCR",
@@ -129,7 +151,7 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
                         None,
                         None,
                         [],
-                        {"mcid": mcid, "pg": str(pg) if pg else None},
+                        {"mcid": mcid, "pg": str(pg) if pg else None, "page": page_num},
                     )
                     node_count += 1
                 else:
@@ -138,6 +160,16 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
                     alt = _clean_text(obj.get("/Alt") if isinstance(obj, dict) else None)
                     actual_text = _clean_text(obj.get("/ActualText") if isinstance(obj, dict) else None)
                     lang = _clean_text(obj.get("/Lang") if isinstance(obj, dict) else None)
+                    page_num = None
+                    if isinstance(obj, dict):
+                        pg = obj.get("/Pg")
+                        try:
+                            if pg is not None and hasattr(pg, "idnum"):
+                                page_num = page_ref_map.get((pg.idnum, pg.generation))
+                            elif pg is not None:
+                                page_num = page_ref_map.get(("obj", id(pg))) or page_ref_map.get(("obj", id(pg.get_object())))
+                        except Exception:
+                            page_num = None
                     kids_value = obj.get("/K") if isinstance(obj, dict) else None
                     child_ids: List[str] = []
                     if kids_value is not None:
@@ -145,7 +177,7 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
                             child_ids.append(child_id)
                             stack.append((child_id, child_obj, child_depth, node_id))
                     role = tag if tag else "StructElem"
-                    add_node(node_id, role, tag, title, alt, actual_text, lang, child_ids)
+                    add_node(node_id, role, tag, title, alt, actual_text, lang, child_ids, {"page": page_num})
                     node_count += 1
                     if tag:
                         add_tag_count(tag)
@@ -161,6 +193,29 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
             except Exception as exc:
                 warnings.append(f"tag tree: failed to parse node {node_id}: {exc.__class__.__name__}")
                 continue
+
+        def resolve_page(node_id: str, memo: Dict[str, Optional[int]]) -> Optional[int]:
+            if node_id in memo:
+                return memo[node_id]
+            node = nodes.get(node_id)
+            if not node:
+                memo[node_id] = None
+                return None
+            page_value = node.get("page")
+            if isinstance(page_value, int):
+                memo[node_id] = page_value
+                return page_value
+            for kid in node.get("kids", []):
+                found = resolve_page(kid, memo)
+                if found:
+                    memo[node_id] = found
+                    node["page"] = found
+                    return found
+            memo[node_id] = None
+            return None
+
+        memo: Dict[str, Optional[int]] = {}
+        resolve_page("0", memo)
 
         summary = {
             "nodeCount": node_count,

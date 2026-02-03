@@ -7,6 +7,7 @@ import {
     DocumentSummary,
     DocumentIssue,
     ExecutionResult,
+    FixReport,
     Issue,
     ManualReviewItem,
     RemediateRequest,
@@ -49,6 +50,7 @@ interface AppState {
     fixedDocId: string | null;
     documentSummary: DocumentSummary | null;
     tagTree: TagTreeResponse | null;
+    fixReport: FixReport | null;
     isScanning: boolean;
     isUploading: boolean;
     setApiBaseUrl: (value: string) => void;
@@ -156,6 +158,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     fixedDocId: null,
     documentSummary: null,
     tagTree: null,
+    fixReport: null,
     isScanning: false,
     isUploading: false,
     setApiBaseUrl: (value) => {
@@ -346,7 +349,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         const client = getClient(get());
         try {
             const response = await client.applyFixes(docId);
-            set({ fixedDocId: response.docId });
+            set({ fixedDocId: response.docId, fixReport: response.report ?? null });
+            if (response.report?.remaining_issues) {
+                set({ documentIssues: response.report.remaining_issues });
+            }
             return { ok: true, data: response };
         } catch (error) {
             return { ok: false, error: (error as Error).message };

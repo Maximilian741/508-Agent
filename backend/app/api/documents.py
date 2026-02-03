@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import BooleanObject, DictionaryObject, NameObject, TextStringObject
 import difflib
 import json
 
@@ -166,23 +167,103 @@ def _apply_pdf_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     reader = PdfReader(str(src), strict=False)
     writer = PdfWriter()
 
-    for page in reader.pages:
-        writer.add_page(page)
+    if hasattr(writer, "clone_document_from_reader"):
+        try:
+            writer.clone_document_from_reader(reader)
+        except Exception:
+            for page in reader.pages:
+                writer.add_page(page)
+    else:
+        for page in reader.pages:
+            writer.add_page(page)
 
-    applied: List[str] = []
+    applied: List[Dict[str, object]] = []
+    manual_review_added: List[Dict[str, object]] = []
+    metadata_before: Dict[str, Optional[str]] = {}
+    metadata_after: Dict[str, Optional[str]] = {}
 
     metadata = reader.metadata or {}
     title = metadata.title if metadata else None
+    metadata_before["Title"] = str(title) if title else None
     if not title or not str(title).strip():
-        writer.add_metadata({"/Title": "Untitled Document"})
-        applied.append("set_document_title")
+        fallback_title = src.stem
+        writer.add_metadata({"/Title": fallback_title})
+        applied.append(
+            {
+                "fixId": f"{doc_id}-fix-title",
+                "ruleId": "document_title_missing",
+                "severity": "error",
+                "action": "Set /Title metadata from filename.",
+                "pages": [],
+                "anchors": [],
+                "deterministic": True,
+            }
+        )
+        metadata_after["Title"] = fallback_title
+
+    try:
+        root = writer._root_object
+        if "/Lang" not in root:
+            root.update({NameObject("/Lang"): TextStringObject("en-US")})
+            applied.append(
+                {
+                    "fixId": f"{doc_id}-fix-lang",
+                    "ruleId": "document_language_missing",
+                    "severity": "warning",
+                    "action": "Set /Lang to en-US.",
+                    "pages": [],
+                    "anchors": [],
+                    "deterministic": True,
+                }
+            )
+    except Exception:
+        pass
 
     if not _has_outline(reader):
         try:
-            writer.add_outline_item("Document", 0)
-            applied.append("add_document_outline")
+            headings = _extract_heading_titles(reader)
+            if headings:
+                for heading in headings[:20]:
+                    writer.add_outline_item(heading, 0)
+                applied.append(
+                    {
+                        "fixId": f"{doc_id}-fix-outline",
+                        "ruleId": "missing_outline",
+                        "severity": "warning",
+                        "action": "Added outline from existing headings.",
+                        "pages": [],
+                        "anchors": [],
+                        "deterministic": True,
+                    }
+                )
+            else:
+                manual_review_added.append(
+                    _queue_manual_review(
+                        doc_id,
+                        "missing_outline",
+                        "doc-1",
+                        "Missing outline",
+                        "No headings available to build bookmarks.",
+                        pages=[],
+                        anchors=[],
+                        suggested_fix="Add bookmarks matching document headings.",
+                        confidence=0.7,
+                    )
+                )
         except Exception:
-            pass
+            manual_review_added.append(
+                _queue_manual_review(
+                    doc_id,
+                    "missing_outline",
+                    "doc-1",
+                    "Missing outline",
+                    "Failed to add bookmarks from headings.",
+                    pages=[],
+                    anchors=[],
+                    suggested_fix="Add bookmarks matching document headings.",
+                    confidence=0.5,
+                )
+            )
 
     try:
         root = reader.trailer.get("/Root", {})
@@ -195,18 +276,182 @@ def _apply_pdf_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
                 except Exception:
                     field_obj = field
                 name = field_obj.get("/T")
+                tu = field_obj.get("/TU")
                 if not name or not str(name).strip():
-                    field_obj.update({"/T": f"Field {idx}"})
-                    applied.append("label_form_field")
+                    field_obj.update({"/T": f"Field {idx}", "/TU": f"Field {idx}"})
+                    applied.append(
+                        {
+                            "fixId": f"{doc_id}-fix-form-{idx}",
+                            "ruleId": "unlabeled_form_field",
+                            "severity": "info",
+                            "action": f"Set placeholder label Field {idx}.",
+                            "pages": [],
+                            "anchors": [str(name) if name else f"field-{idx}"],
+                            "deterministic": True,
+                        }
+                    )
+                    manual_review_added.append(
+                        _queue_manual_review(
+                            doc_id,
+                            "unlabeled_form_field",
+                            "doc-1",
+                            "Unlabeled form field",
+                            "Placeholder labels were applied; review field labels for accuracy.",
+                            pages=[],
+                            anchors=[str(name) if name else f"field-{idx}"],
+                            suggested_fix="Replace placeholder labels with meaningful field names.",
+                            confidence=0.6,
+                        )
+                    )
             writer._root_object.update({"/AcroForm": acro})
     except Exception:
         pass
+
+    try:
+        tag_tree = extract_tag_tree(reader)
+        if tag_tree.get("tagged"):
+            added = _add_placeholder_alt(writer)
+            if added > 0:
+                applied.append(
+                    {
+                        "fixId": f"{doc_id}-fix-alt",
+                        "ruleId": "missing_alt_text",
+                        "severity": "error",
+                        "action": "Added placeholder /Alt text for Figure tags.",
+                        "pages": [],
+                        "anchors": [],
+                        "deterministic": True,
+                    }
+                )
+                manual_review_added.append(
+                    _queue_manual_review(
+                        doc_id,
+                        "missing_alt_text",
+                        "doc-1",
+                        "Missing alt text",
+                        "Placeholder alt text was added; update with meaningful descriptions.",
+                        pages=[],
+                        anchors=[],
+                        suggested_fix="Replace placeholder alt text with meaningful descriptions.",
+                        confidence=0.6,
+                    )
+                )
+        else:
+            manual_review_added.append(
+                _queue_manual_review(
+                    doc_id,
+                    "missing_tag_structure",
+                    "doc-1",
+                    "Missing tag structure",
+                    "PDF is untagged. Manual tagging required before remediation.",
+                    pages=[],
+                    anchors=[],
+                    suggested_fix="Tag the PDF structure per PDF/UA.",
+                    confidence=0.8,
+                )
+            )
+    except Exception:
+        manual_review_added.append(
+            _queue_manual_review(
+                doc_id,
+                "missing_tag_structure",
+                "doc-1",
+                "Missing tag structure",
+                "Failed to analyze tag tree; manual tagging required.",
+                pages=[],
+                anchors=[],
+                suggested_fix="Tag the PDF structure per PDF/UA.",
+                confidence=0.5,
+            )
+        )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     with dest.open("wb") as output:
         writer.write(output)
 
-    return {"applied": applied}
+    return {
+        "applied": applied,
+        "manual_review_added": manual_review_added,
+        "metadata_before": metadata_before,
+        "metadata_after": metadata_after,
+    }
+
+
+def _add_placeholder_alt(writer: PdfWriter) -> int:
+    try:
+        root = writer._root_object
+        struct_root = root.get("/StructTreeRoot")
+        if not struct_root:
+            return 0
+        count = 0
+        stack = [struct_root]
+        while stack:
+            node = stack.pop()
+            try:
+                obj = node.get_object()
+            except Exception:
+                obj = node
+            if isinstance(obj, dict):
+                tag = obj.get("/S")
+                if tag == "/Figure":
+                    alt = obj.get("/Alt")
+                    if not alt or not str(alt).strip():
+                        obj.update({NameObject("/Alt"): TextStringObject("[TODO] Add alt text")})
+                        count += 1
+                kids = obj.get("/K")
+                if kids:
+                    if isinstance(kids, list):
+                        stack.extend(kids)
+                    else:
+                        stack.append(kids)
+        return count
+    except Exception:
+        return 0
+
+
+def _extract_heading_titles(reader: PdfReader) -> List[str]:
+    tag_tree = extract_tag_tree(reader)
+    if not tag_tree.get("tagged"):
+        return []
+    nodes = tag_tree.get("tree", {}).get("nodes", {})
+    titles: List[str] = []
+    for node in nodes.values():
+        tag = node.get("tag")
+        if tag in {"H1", "H2", "H3", "H4", "H5", "H6"}:
+            title = node.get("title") or node.get("actualText")
+            if title:
+                titles.append(str(title))
+    return titles
+
+
+def _queue_manual_review(
+    doc_id: str,
+    issue_id: str,
+    target_node_id: str,
+    reason: str,
+    notes: str,
+    pages: List[int],
+    anchors: List[str],
+    suggested_fix: str,
+    confidence: float,
+) -> Dict[str, object]:
+    from app.api import state
+
+    item = {
+        "id": f"mr-{int(time.time() * 1000)}-{len(state.manual_review_queue)}",
+        "issueId": issue_id,
+        "targetNodeId": target_node_id,
+        "reason": reason,
+        "notes": notes,
+        "pages": pages,
+        "anchors": anchors,
+        "instructions": notes,
+        "suggestedFix": suggested_fix,
+        "confidence": confidence,
+        "requiresHuman": True,
+    }
+    state.manual_review_queue.append(item)
+    return item
 
 
 def _extract_text(path: Path) -> str:
@@ -255,6 +500,7 @@ def _analyze_pdf(
                 "description": "PDF metadata title is missing or empty.",
                 "locationHint": "Document metadata",
                 "recommendation": "Set a descriptive document title in PDF metadata.",
+                "evidence": {"pages": []},
             }
         )
 
@@ -272,7 +518,7 @@ def _analyze_pdf(
                 "description": "PDF is not tagged. Accessibility structure cannot be determined.",
                 "locationHint": "Structure tree",
                 "recommendation": "Add PDF/UA tags before remediating content.",
-                "evidence": {"tagged": False},
+                "evidence": {"tagged": False, "pages": []},
             }
         )
     if image_count > 0 and not tagged:
@@ -285,6 +531,7 @@ def _analyze_pdf(
                 "description": "Images were detected but the PDF is not tagged.",
                 "locationHint": f"{image_count} image(s) detected",
                 "recommendation": "Add PDF/UA tags and alt text for images.",
+                "evidence": {"pages": []},
             }
         )
     figures = struct_info.get("figures", 0)
@@ -296,6 +543,15 @@ def _analyze_pdf(
                 missing_alt_nodes.append(node_id)
                 if len(missing_alt_nodes) >= 50:
                     break
+    missing_alt_pages: List[int] = []
+    if missing_alt_nodes:
+        for node_id in missing_alt_nodes:
+            node_page = tree_nodes.get(node_id, {}).get("page")
+            if isinstance(node_page, int) and node_page not in missing_alt_pages:
+                missing_alt_pages.append(node_page)
+            if len(missing_alt_pages) >= 10:
+                break
+    missing_alt_page = missing_alt_pages[0] if missing_alt_pages else None
     if tagged and figures and figures_missing_alt:
         issues.append(
             {
@@ -306,7 +562,11 @@ def _analyze_pdf(
                 "description": "Tagged figures are missing alternative text.",
                 "locationHint": f"Figure tags missing alt: {figures_missing_alt} of {figures} (see tag tree nodes)",
                 "recommendation": "Provide meaningful alt text for each figure element.",
-                "evidence": {"nodeIds": missing_alt_nodes},
+                "evidence": {
+                    "nodeIds": missing_alt_nodes,
+                    "pages": missing_alt_pages,
+                    "page": missing_alt_page if missing_alt_page else None,
+                },
             }
         )
 
@@ -322,7 +582,7 @@ def _analyze_pdf(
                 "description": "Tagged PDF has no heading elements in the structure tree.",
                 "locationHint": "Structure tree",
                 "recommendation": "Add heading tags (H1-H6) for navigable structure.",
-                "evidence": {"headingCount": 0},
+                "evidence": {"headingCount": 0, "pages": []},
             }
         )
     if not tagged and not _has_outline(reader):
@@ -335,6 +595,7 @@ def _analyze_pdf(
                 "description": "PDF has no outline/bookmarks.",
                 "locationHint": "Document outline",
                 "recommendation": "Add bookmarks to improve navigation.",
+                "evidence": {"pages": []},
             }
         )
 
@@ -348,6 +609,7 @@ def _analyze_pdf(
                 "description": "One or more form fields are missing a label.",
                 "locationHint": "AcroForm fields",
                 "recommendation": "Add labels (/T) for form fields in the PDF.",
+                "evidence": {"pages": []},
             }
         )
 
@@ -383,6 +645,8 @@ def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional
         if tag and tag.startswith("H") and len(tag) == 2 and tag[1].isdigit():
             level = int(tag[1])
             if prev_level is not None and level > prev_level + 1:
+                page_value = nodes.get(node_id, {}).get("page")
+                pages = [page_value] if isinstance(page_value, int) else []
                 return {
                     "id": f"issue-skipped-heading-{node_id}",
                     "ruleId": "skipped_heading_level",
@@ -391,7 +655,13 @@ def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional
                     "description": "Heading levels skip at least one level in the tag tree.",
                     "locationHint": f"{prev_tag} then {tag}",
                     "recommendation": "Ensure heading levels progress in order without skipping levels.",
-                    "evidence": {"from": prev_tag, "to": tag, "nodeId": node_id},
+                    "evidence": {
+                        "from": prev_tag,
+                        "to": tag,
+                        "nodeId": node_id,
+                        "pages": pages,
+                        "page": page_value if isinstance(page_value, int) else None,
+                    },
                 }
             prev_level = level
             prev_tag = tag
@@ -484,7 +754,7 @@ async def get_issues(doc_id: str) -> List[Dict[str, object]]:
 
 
 @router.post("/documents/{doc_id}/apply-fixes")
-async def apply_fixes(doc_id: str) -> dict:
+async def apply_fixes(doc_id: str, mode: Optional[str] = "in_place") -> dict:
     _ensure_dirs()
     with LOCK:
         doc = DOCS.get(doc_id)
@@ -493,23 +763,42 @@ async def apply_fixes(doc_id: str) -> dict:
     src = Path(str(doc["path"]))
     fixed_dir = FIXED_DIR / doc_id
     fixed_dir.mkdir(parents=True, exist_ok=True)
-    dest = fixed_dir / src.name
-    _apply_pdf_fixes(doc_id, src, dest)
+    fixed_dest = fixed_dir / "fixed.pdf"
+    rebuild_dest = fixed_dir / "rebuilt.pdf"
+    fix_result = _apply_pdf_fixes(doc_id, src, fixed_dest)
+    rebuilt = False
+    if mode == "rebuild":
+        rebuilt = False
     try:
         try:
-            tag_tree = extract_tag_tree(PdfReader(str(dest), strict=False))
+            tag_tree = extract_tag_tree(PdfReader(str(fixed_dest), strict=False))
         except Exception as exc:
             tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
         tag_path = _write_tag_tree(doc_id, tag_tree)
         with LOCK:
             DOCS[doc_id]["tagTreePath"] = str(tag_path)
             DOCS[doc_id]["tagSummary"] = tag_tree.get("summary", {})
-        fixed_issues = _analyze_pdf(doc_id, dest, tag_tree=tag_tree)
+        fixed_issues = _analyze_pdf(doc_id, fixed_dest, tag_tree=tag_tree)
         with LOCK:
             ISSUES[doc_id] = fixed_issues
     except Exception:
         pass
-    return {"docId": doc_id, "fixed": True}
+    report = {
+        "applied_fixes": fix_result.get("applied", []),
+        "remaining_issues": ISSUES.get(doc_id, []),
+        "manual_review_added": fix_result.get("manual_review_added", []),
+        "before_after": {
+            "metadata_before": fix_result.get("metadata_before", {}),
+            "metadata_after": fix_result.get("metadata_after", {}),
+        },
+        "deterministic": True,
+        "mode": mode,
+        "rebuilt": rebuilt,
+    }
+    report_path = RESULTS_DIR / doc_id / "fix_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return {"docId": doc_id, "fixed": True, "report": report}
 
 
 @router.get("/documents/{doc_id}/download")
@@ -520,7 +809,7 @@ async def download_document(doc_id: str, variant: Optional[str] = "original") ->
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
     if variant == "fixed":
-        fixed_path = FIXED_DIR / doc_id / src.name
+        fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
         if not fixed_path.exists():
             raise HTTPException(status_code=404, detail="Fixed document not found")
         return FileResponse(str(fixed_path), filename=fixed_path.name)
@@ -551,7 +840,7 @@ async def download_pdf_fixed(doc_id: str) -> FileResponse:
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
-    fixed_path = FIXED_DIR / doc_id / src.name
+    fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
     if not fixed_path.exists():
         raise HTTPException(status_code=404, detail="Fixed document not found")
     return FileResponse(str(fixed_path), filename=fixed_path.name, media_type="application/pdf")
@@ -603,7 +892,7 @@ async def document_diff(doc_id: str) -> Dict[str, object]:
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
-    fixed_path = FIXED_DIR / doc_id / src.name
+    fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
     if not fixed_path.exists():
         raise HTTPException(status_code=404, detail="Fixed document not found")
 
