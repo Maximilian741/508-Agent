@@ -39,6 +39,7 @@ export default function ScanScreen() {
   const documentSummary = useAppStore((state) => state.documentSummary);
   const tagTree = useAppStore((state) => state.tagTree);
   const fixReport = useAppStore((state) => state.fixReport);
+  const [afterVariant, setAfterVariant] = useState<"fixed" | "rebuilt">("fixed");
   const [sortDescending, setSortDescending] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [severityFilter, setSeverityFilter] = useState<"all" | "error" | "warning" | "info">("all");
@@ -130,21 +131,34 @@ export default function ScanScreen() {
   }, [issueCategories]);
 
   const filteredFixReport = useMemo(() => {
-    if (!fixReport) return { fixed: [], remaining: [], manual: [] };
-    const fixed = fixReport.applied_fixes ?? [];
-    const remaining = fixReport.remaining_issues ?? [];
-    const manual = fixReport.manual_review_added ?? [];
+    if (!fixReport) return { fixed: [], remaining: [], introduced: [], manual: [] };
+    const fixed = fixReport.delta?.fixed ?? [];
+    const remaining = fixReport.delta?.remaining ?? [];
+    const introduced = fixReport.delta?.introduced ?? [];
+    const manual = fixReport.manualReview ?? [];
     if (fixReportFilter === "fixed") {
-      return { fixed, remaining: [], manual: [] };
+      return { fixed, remaining: [], introduced: [], manual: [] };
     }
     if (fixReportFilter === "remaining") {
-      return { fixed: [], remaining, manual: [] };
+      return { fixed: [], remaining, introduced: [], manual: [] };
     }
     if (fixReportFilter === "manual") {
-      return { fixed: [], remaining: [], manual };
+      return { fixed: [], remaining: [], introduced: [], manual };
     }
-    return { fixed, remaining, manual };
+    return { fixed, remaining, introduced, manual };
   }, [fixReport, fixReportFilter]);
+
+  const focusedIssueStatus = useMemo(() => {
+    if (!fixReport || !focusedIssue) return "unknown";
+    const key = makeIssueKey(focusedIssue);
+    const inFixed = (fixReport.delta?.fixed ?? []).some((issue) => makeIssueKey(issue) === key);
+    if (inFixed) return "fixed";
+    const inRemaining = (fixReport.delta?.remaining ?? []).some((issue) => makeIssueKey(issue) === key);
+    if (inRemaining) return "remaining";
+    const inIntroduced = (fixReport.delta?.introduced ?? []).some((issue) => makeIssueKey(issue) === key);
+    if (inIntroduced) return "introduced";
+    return "unknown";
+  }, [fixReport, focusedIssue]);
 
   if (!scanResults && documentIssues.length === 0 && !scanJob) {
     return (
@@ -160,7 +174,16 @@ export default function ScanScreen() {
 
   const displayDocumentId = uploadedDocument?.docId ?? scanResults?.documentId ?? "doc-1";
   const originalUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf` : null;
-  const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/pdf-fixed` : null;
+  const fixedUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf-fixed` : null;
+  const rebuiltUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf-rebuilt` : null;
+  const fixedAvailable = fixReport?.fixedExists === true;
+  const rebuiltAvailable = fixReport?.rebuiltExists === true;
+  const afterUrl =
+    afterVariant === "rebuilt" && rebuiltAvailable
+      ? rebuiltUrl
+      : fixedAvailable
+      ? fixedUrl
+      : null;
   const openUrl = (url: string) => {
     if (Platform.OS === "web") {
       window.open(url, "_blank");
@@ -175,7 +198,7 @@ export default function ScanScreen() {
 
   useEffect(() => {
     const loadDiff = async () => {
-      if (!uploadedDocument || !fixedDocId) return;
+      if (!uploadedDocument || !afterUrl) return;
       const result = await fetchDocumentDiff(uploadedDocument.docId);
       if (result.ok && result.data) {
         setDiffText(result.data.diffText || "");
@@ -185,11 +208,26 @@ export default function ScanScreen() {
       }
     };
     void loadDiff();
-  }, [uploadedDocument, fixedDocId, fetchDocumentDiff]);
+  }, [uploadedDocument, afterUrl, fetchDocumentDiff]);
+
+  useEffect(() => {
+    if (afterVariant === "rebuilt" && !rebuiltAvailable) {
+      setAfterVariant("fixed");
+    }
+  }, [afterVariant, rebuiltAvailable]);
+
+  useEffect(() => {
+    if (!afterUrl && fixReport) {
+      const message = fixReport.fixedExists
+        ? "After artifact not available yet."
+        : "Fixed artifact not available. Apply Fixes again to generate fixed PDF.";
+      setPdfError(message);
+    }
+  }, [afterUrl, fixReport]);
 
   useEffect(() => {
     const renderVisualDiff = async () => {
-      if (!uploadedDocument || !fixedDocId) return;
+      if (!uploadedDocument || !afterUrl) return;
       if (Platform.OS !== "web") return;
       setPdfLoading(true);
       setPdfError(null);
@@ -225,19 +263,22 @@ export default function ScanScreen() {
         const pdfjs = await loadPdfJs();
         // @ts-ignore
         pdfjs.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdfjs/pdf.worker.mjs`;
-        if (!originalUrl || !fixedUrl) {
+        if (!originalUrl || !afterUrl) {
           setPdfError("Missing document URLs for diff rendering.");
           return;
         }
         const [originalResponse, fixedResponse] = await Promise.all([
           fetch(originalUrl, { cache: "no-store", mode: "cors" }),
-          fetch(fixedUrl, { cache: "no-store", mode: "cors" }),
+          fetch(afterUrl, { cache: "no-store", mode: "cors" }),
         ]);
         if (!originalResponse.ok) {
           throw new Error(`Original PDF fetch failed: ${originalResponse.status}`);
         }
         if (!fixedResponse.ok) {
-          throw new Error(`Fixed PDF fetch failed: ${fixedResponse.status}`);
+          const targetLabel = afterVariant === "rebuilt" ? "rebuilt" : "fixed";
+          throw new Error(
+            `After PDF fetch failed (${targetLabel}): ${fixedResponse.status} for ${afterUrl ?? "unknown URL"}`,
+          );
         }
         const [originalBuffer, fixedBuffer] = await Promise.all([
           originalResponse.arrayBuffer(),
@@ -318,13 +359,16 @@ export default function ScanScreen() {
         }
         let issueBoxes: HighlightBox[] = [];
         if (focusedIssue && showIssueHighlight) {
-          issueBoxes = await computeIssueBoxes(pdfjs, originalPage, originalViewport, focusedIssue);
+          issueBoxes = await computeIssueBoxes(
+            pdfjs,
+            originalPage,
+            originalViewport,
+            focusedIssue,
+            currentPage,
+          );
         }
         setNoVisualDiff(issueBoxes.length === 0);
-        const isFixed =
-          focusedIssue && fixReport
-            ? fixReport.applied_fixes.some((fix) => fix.ruleId === focusedIssue.ruleId)
-            : false;
+        const isFixed = focusedIssueStatus === "fixed";
         drawHighlightBoxes(overlayOriginal, issueBoxes, "danger");
         drawHighlightBoxes(overlayFixed, issueBoxes, isFixed ? "success" : "danger");
       } catch (error) {
@@ -338,7 +382,7 @@ export default function ScanScreen() {
       }
     };
     void renderVisualDiff();
-  }, [uploadedDocument, fixedDocId, originalUrl, fixedUrl, currentPage, focusedIssue]);
+  }, [uploadedDocument, afterUrl, originalUrl, currentPage, focusedIssue, afterVariant]);
 
   return (
     <Screen scroll>
@@ -371,7 +415,7 @@ export default function ScanScreen() {
               <Pressable key={value} onPress={() => setSeverityFilter(value)}>
                 {({ hovered, pressed }) => (
                   <Chip
-                    label={value === "all" ? "All" : value.toUpperCase()}
+                    label={value === "all" ? "All" : value === "error" ? "Issue" : value === "warning" ? "Warning" : "Info"}
                     tone={value === "error" ? "danger" : value === "warning" ? "warning" : value === "info" ? "info" : "default"}
                     style={[
                       severityFilter === value
@@ -517,15 +561,19 @@ export default function ScanScreen() {
         </Card>
       )}
 
-      {fixedDocId && (
-        <Card>
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Fix Report</Text>
-          {fixReport ? (
-            <View style={styles.fixReport}>
+          {fixedDocId && (
+            <Card>
+              <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Fix Report</Text>
+              {fixReport ? (
+                <View style={styles.fixReport}>
+              <View style={styles.summaryRow}>
+                <Chip label={`Before: ${fixReport.before.issueCount}`} tone="default" />
+                <Chip label={`After: ${fixReport.after.issueCount}`} tone="default" />
+              </View>
               <View style={styles.summaryRow}>
                 <Pressable onPress={() => setFixReportFilter("all")}>
                   <Chip
-                    label={`All (${fixReport.applied_fixes.length + fixReport.remaining_issues.length + fixReport.manual_review_added.length})`}
+                    label={`All (${(fixReport.delta?.fixed?.length ?? 0) + (fixReport.delta?.remaining?.length ?? 0) + (fixReport.delta?.introduced?.length ?? 0) + (fixReport.manualReview?.length ?? 0)})`}
                     tone="default"
                     style={fixReportFilter === "all" ? styles.filterActiveDefault : undefined}
                     textStyle={fixReportFilter === "all" ? styles.filterActiveText : undefined}
@@ -533,7 +581,7 @@ export default function ScanScreen() {
                 </Pressable>
                 <Pressable onPress={() => setFixReportFilter("fixed")}>
                   <Chip
-                    label={`Fixed (${fixReport.applied_fixes.length})`}
+                    label={`Fixed (${fixReport.delta?.fixed?.length ?? 0})`}
                     tone="success"
                     style={fixReportFilter === "fixed" ? styles.filterActiveSuccess : undefined}
                     textStyle={fixReportFilter === "fixed" ? styles.filterActiveText : undefined}
@@ -541,7 +589,7 @@ export default function ScanScreen() {
                 </Pressable>
                 <Pressable onPress={() => setFixReportFilter("remaining")}>
                   <Chip
-                    label={`Remaining (${fixReport.remaining_issues.length})`}
+                    label={`Remaining (${fixReport.delta?.remaining?.length ?? 0})`}
                     tone="warning"
                     style={fixReportFilter === "remaining" ? styles.filterActiveWarning : undefined}
                     textStyle={fixReportFilter === "remaining" ? styles.filterActiveText : undefined}
@@ -549,7 +597,7 @@ export default function ScanScreen() {
                 </Pressable>
                 <Pressable onPress={() => setFixReportFilter("manual")}>
                   <Chip
-                    label={`Manual review (${fixReport.manual_review_added.length})`}
+                    label={`Manual review (${fixReport.manualReview?.length ?? 0})`}
                     tone="info"
                     style={fixReportFilter === "manual" ? styles.filterActiveInfo : undefined}
                     textStyle={fixReportFilter === "manual" ? styles.filterActiveText : undefined}
@@ -560,12 +608,13 @@ export default function ScanScreen() {
                 Deterministic: {fixReport.deterministic ? "yes" : "no"} • Mode: {fixReport.mode}
               </Text>
               <View style={styles.fixList}>
-                {filteredFixReport.fixed.map((fix) => (
+                {filteredFixReport.fixed.map((issue) => (
                   <Pressable
-                    key={fix.fixId}
+                    key={issue.id}
                     onPress={() => {
-                      const page = fix.pages?.[0];
-                      if (typeof page === "number") {
+                      setFocusedIssue(issue);
+                      const page = getIssuePage(issue);
+                      if (page !== null) {
                         const clamped = pageCount ? Math.min(Math.max(1, page), pageCount) : Math.max(1, page);
                         setCurrentPage(clamped);
                       }
@@ -573,13 +622,13 @@ export default function ScanScreen() {
                   >
                     <View style={styles.fixRow}>
                       <Chip
-                        label={fix.severity.toUpperCase()}
-                        tone={fix.severity === "error" ? "danger" : fix.severity === "warning" ? "warning" : "info"}
+                        label={issue.severity.toUpperCase()}
+                        tone={issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info"}
                         icon={<Text style={{ color: theme.colors.success, fontWeight: "700" }}>✓</Text>}
                       />
-                      <Chip label={fix.ruleId} />
+                      <Chip label={issue.ruleId} />
                     </View>
-                    <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{fix.action}</Text>
+                    <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{issue.title}</Text>
                   </Pressable>
                 ))}
               </View>
@@ -606,6 +655,30 @@ export default function ScanScreen() {
                   ))}
                 </View>
               )}
+              {filteredFixReport.introduced.length > 0 && (
+                <View style={styles.fixList}>
+                  <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Introduced issues</Text>
+                  {filteredFixReport.introduced.map((item) => (
+                    <Pressable
+                      key={item.id}
+                      onPress={() => {
+                        const page = getIssuePage(item);
+                        if (page !== null) {
+                          const clamped = pageCount ? Math.min(Math.max(1, page), pageCount) : Math.max(1, page);
+                          setCurrentPage(clamped);
+                        }
+                        setFocusedIssue(item);
+                      }}
+                    >
+                      <View style={styles.fixRow}>
+                        <Chip label={item.severity.toUpperCase()} tone={item.severity === "error" ? "danger" : item.severity === "warning" ? "warning" : "info"} />
+                        <Chip label={item.ruleId} />
+                      </View>
+                      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{item.title}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
               {filteredFixReport.manual.length > 0 && (
                 <View style={styles.fixList}>
                   <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Manual review items</Text>
@@ -619,7 +692,7 @@ export default function ScanScreen() {
                           setCurrentPage(clamped);
                         }
                       }}
-                    >
+                      >
                       <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                         {item.reason} • {item.suggestedFix ?? "Manual review required"}
                       </Text>
@@ -632,6 +705,26 @@ export default function ScanScreen() {
             <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
               Fix report will appear after Apply Fixes.
             </Text>
+          )}
+          {rebuiltAvailable && (
+            <View style={styles.summaryRow}>
+              <Pressable onPress={() => setAfterVariant("fixed")}>
+                <Chip
+                  label="After: Fixed"
+                  tone="default"
+                  style={afterVariant === "fixed" ? styles.filterActiveDefault : undefined}
+                  textStyle={afterVariant === "fixed" ? styles.filterActiveText : undefined}
+                />
+              </Pressable>
+              <Pressable onPress={() => setAfterVariant("rebuilt")}>
+                <Chip
+                  label="After: Rebuilt"
+                  tone="default"
+                  style={afterVariant === "rebuilt" ? styles.filterActiveDefault : undefined}
+                  textStyle={afterVariant === "rebuilt" ? styles.filterActiveText : undefined}
+                />
+              </Pressable>
+            </View>
           )}
           <Card style={styles.diffTextCard}>
             <View style={styles.diffHeader}>
@@ -683,9 +776,9 @@ export default function ScanScreen() {
                 </Pressable>
                 {openSeverity && (
                   <View style={styles.dropdown}>
-                    <Text style={[styles.dropdownTitle, { color: theme.colors.text }]}>
-                      {openSeverity.toUpperCase()} issues
-                    </Text>
+                      <Text style={[styles.dropdownTitle, { color: theme.colors.text }]}>
+                        {openSeverity === "error" ? "Issue" : openSeverity === "warning" ? "Warning" : "Info"} issues
+                      </Text>
                     <View style={styles.dropdownList}>
                       <FlatList
                         data={severityGroups[openSeverity]}
@@ -1003,6 +1096,28 @@ function buildTreeLines(
   return lines;
 }
 
+function makeIssueKey(issue: DocumentIssue): string {
+  const ruleId = (issue.ruleId ?? "").trim().toLowerCase();
+  const severity = (issue.severity ?? "").trim().toLowerCase();
+  const title = (issue.title ?? "").trim().toLowerCase();
+  const location = (issue.locationHint ?? "").trim().toLowerCase();
+  const evidence = issue.evidence ?? {};
+  const nodeIds = Array.isArray(evidence.nodeIds)
+    ? (evidence.nodeIds as string[]).map((value) => String(value)).slice(0, 10).sort()
+    : [];
+  const pages = Array.isArray(evidence.pages)
+    ? (evidence.pages as number[]).filter((value) => typeof value === "number").map((value) => String(value)).sort()
+    : [];
+  return [
+    `rule:${ruleId}`,
+    `sev:${severity}`,
+    `nodes:${nodeIds.join(",")}`,
+    `pages:${pages.join(",")}`,
+    `loc:${location}`,
+    `title:${title}`,
+  ].join("|");
+}
+
 function getIssuePage(issue: DocumentIssue): number | null {
   const evidencePages = issue.evidence?.pages;
   if (Array.isArray(evidencePages) && evidencePages.length > 0) {
@@ -1254,8 +1369,17 @@ async function computeIssueBoxes(
   page: any,
   viewport: any,
   issue: DocumentIssue,
+  currentPage: number,
 ): Promise<HighlightBox[]> {
   if (!issue) return [];
+  const anchors = Array.isArray(issue.evidence?.anchors) ? (issue.evidence?.anchors as any[]) : [];
+  const anchorsForPage = anchors.filter(
+    (anchor) => typeof anchor?.page === "number" && anchor.page === currentPage && typeof anchor?.mcid === "number",
+  );
+  if (anchorsForPage.length > 0) {
+    const boxes = await computeBoxesForAnchors(pdfjs, page, viewport, anchorsForPage);
+    if (boxes.length > 0) return boxes;
+  }
   if (issue.ruleId === "missing_alt_text") {
     return computeImageBoxes(pdfjs, page, viewport);
   }
@@ -1319,6 +1443,184 @@ async function computeImageBoxes(pdfjs: any, page: any, viewport: any): Promise<
       const p1 = applyTransform([1, 0], ctm);
       const p2 = applyTransform([1, 1], ctm);
       const p3 = applyTransform([0, 1], ctm);
+      const vp0 = toViewport(p0);
+      const vp1 = toViewport(p1);
+      const vp2 = toViewport(p2);
+      const vp3 = toViewport(p3);
+      const xs = [vp0[0], vp1[0], vp2[0], vp3[0]];
+      const ys = [vp0[1], vp1[1], vp2[1], vp3[1]];
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+        boxes.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY });
+      }
+    }
+  });
+  return boxes.slice(0, 6);
+}
+
+async function computeBoxesForAnchors(
+  pdfjs: any,
+  page: any,
+  viewport: any,
+  anchors: { page: number; mcid: number; kind?: string }[],
+): Promise<HighlightBox[]> {
+  const operatorList = await page.getOperatorList();
+  const boxes: HighlightBox[] = [];
+  const targetMcids = new Set(anchors.map((anchor) => anchor.mcid));
+  const { OPS, Util } = pdfjs;
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack: number[][] = [];
+  const mcidStack: Array<number | null> = [];
+  let textMatrix = [1, 0, 0, 1, 0, 0];
+  let textLineMatrix = [1, 0, 0, 1, 0, 0];
+  let fontSize = 12;
+  let textHScale = 1;
+
+  const applyTransform = (point: number[], matrix: number[]) => Util.applyTransform(point, matrix);
+  const toViewport = (point: number[]) => viewport.convertToViewportPoint(point[0], point[1]);
+  const readMcid = (props: any): number | null => {
+    const candidates = [
+      props?.MCID,
+      props?.mcid,
+      props?.get?.("MCID"),
+      props?.get?.("/MCID"),
+      props?.["MCID"],
+      props?.["/MCID"],
+    ];
+    for (const value of candidates) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+      }
+    }
+    return null;
+  };
+  const currentMcid = () => (mcidStack.length ? mcidStack[mcidStack.length - 1] : null);
+
+  operatorList.fnArray.forEach((fn: number, index: number) => {
+    const args = operatorList.argsArray[index];
+    if (fn === OPS.save) {
+      stack.push(ctm.slice());
+      return;
+    }
+    if (fn === OPS.restore) {
+      const restored = stack.pop();
+      if (restored) ctm = restored;
+      return;
+    }
+    if (fn === OPS.transform) {
+      ctm = Util.transform(ctm, args);
+      return;
+    }
+    if (fn === OPS.beginText) {
+      textMatrix = [1, 0, 0, 1, 0, 0];
+      textLineMatrix = [1, 0, 0, 1, 0, 0];
+      return;
+    }
+    if (fn === OPS.endText) {
+      return;
+    }
+    if (fn === OPS.setTextMatrix && args && args.length >= 6) {
+      textMatrix = [args[0], args[1], args[2], args[3], args[4], args[5]];
+      textLineMatrix = textMatrix.slice() as number[];
+      return;
+    }
+    if (fn === OPS.moveText && args && args.length >= 2) {
+      textLineMatrix = Util.transform(textLineMatrix, [1, 0, 0, 1, args[0], args[1]]);
+      textMatrix = textLineMatrix.slice() as number[];
+      return;
+    }
+    if (fn === OPS.nextLine) {
+      textLineMatrix = Util.transform(textLineMatrix, [1, 0, 0, 1, 0, -1]);
+      textMatrix = textLineMatrix.slice() as number[];
+      return;
+    }
+    if (fn === OPS.setFont && args && args.length >= 2) {
+      if (typeof args[1] === "number") {
+        fontSize = args[1];
+      }
+      return;
+    }
+    if (fn === OPS.setHScale && args && args.length >= 1) {
+      if (typeof args[0] === "number") {
+        textHScale = args[0] / 100;
+      }
+      return;
+    }
+    if (fn === OPS.beginMarkedContentProps && args && args.length >= 2) {
+      const props = args[1];
+      const mcid = readMcid(props);
+      mcidStack.push(mcid ?? currentMcid());
+      return;
+    }
+    if (fn === OPS.beginMarkedContent && args && args.length >= 1) {
+      mcidStack.push(currentMcid());
+      return;
+    }
+    if (fn === OPS.endMarkedContent) {
+      mcidStack.pop();
+      return;
+    }
+    const activeMcid = currentMcid();
+    if (
+      activeMcid !== null &&
+      targetMcids.has(activeMcid) &&
+      (fn === OPS.paintImageXObject ||
+        fn === OPS.paintInlineImageXObject ||
+        fn === OPS.paintImageXObjectRepeat ||
+        fn === OPS.paintJpegXObject)
+    ) {
+      const p0 = applyTransform([0, 0], ctm);
+      const p1 = applyTransform([1, 0], ctm);
+      const p2 = applyTransform([1, 1], ctm);
+      const p3 = applyTransform([0, 1], ctm);
+      const vp0 = toViewport(p0);
+      const vp1 = toViewport(p1);
+      const vp2 = toViewport(p2);
+      const vp3 = toViewport(p3);
+      const xs = [vp0[0], vp1[0], vp2[0], vp3[0]];
+      const ys = [vp0[1], vp1[1], vp2[1], vp3[1]];
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+        boxes.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY });
+      }
+      return;
+    }
+    if (
+      activeMcid !== null &&
+      targetMcids.has(activeMcid) &&
+      (fn === OPS.showText ||
+        fn === OPS.showSpacedText ||
+        fn === OPS.nextLineShowText ||
+        fn === OPS.nextLineSetSpacingShowText)
+    ) {
+      let textLength = 0;
+      if (fn === OPS.showText && args && args.length >= 1) {
+        const text = args[0];
+        if (typeof text === "string") {
+          textLength = text.length;
+        } else if (Array.isArray(text)) {
+          textLength = text.length;
+        }
+      }
+      if (fn === OPS.showSpacedText && args && args.length >= 1 && Array.isArray(args[0])) {
+        textLength = args[0].reduce((sum: number, part: any) => {
+          if (typeof part === "string") return sum + part.length;
+          return sum;
+        }, 0);
+      }
+      const width = Math.max(1, textLength * fontSize * 0.5 * textHScale);
+      const height = Math.max(1, fontSize);
+      const textTransform = Util.transform(ctm, textMatrix);
+      const p0 = applyTransform([0, 0], textTransform);
+      const p1 = applyTransform([width, 0], textTransform);
+      const p2 = applyTransform([width, height], textTransform);
+      const p3 = applyTransform([0, height], textTransform);
       const vp0 = toViewport(p0);
       const vp1 = toViewport(p1);
       const vp2 = toViewport(p2);

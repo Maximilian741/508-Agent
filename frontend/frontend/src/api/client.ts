@@ -91,6 +91,10 @@ export interface DocumentIssue {
 
 export interface ApplyFixesResponse {
     docId: string;
+    fixedDocId?: string;
+    fixedPath?: string;
+    rebuiltDocId?: string;
+    rebuiltPath?: string;
     fixed: boolean;
     report?: FixReport;
 }
@@ -106,10 +110,34 @@ export interface FixReportItem {
 }
 
 export interface FixReport {
-    applied_fixes: FixReportItem[];
-    remaining_issues: DocumentIssue[];
-    manual_review_added: ManualReviewItem[];
-    before_after: {
+    docId: string;
+    fixedDocId: string;
+    fixedPath?: string;
+    rebuiltDocId?: string | null;
+    rebuiltPath?: string | null;
+    fixedExists?: boolean;
+    rebuiltExists?: boolean;
+    fixedSize?: number;
+    rebuiltSize?: number;
+    scanTargetPath?: string;
+    appliedFixes: FixReportItem[];
+    before: {
+        issueCount: number;
+        bySeverity: Record<string, number>;
+        byRuleId: Record<string, number>;
+    };
+    after: {
+        issueCount: number;
+        bySeverity: Record<string, number>;
+        byRuleId: Record<string, number>;
+    };
+    delta: {
+        fixed: DocumentIssue[];
+        remaining: DocumentIssue[];
+        introduced: DocumentIssue[];
+    };
+    manualReview: ManualReviewItem[];
+    beforeAfter: {
         metadata_before: Record<string, string | null>;
         metadata_after: Record<string, string | null>;
     };
@@ -186,6 +214,8 @@ export interface ApiClient {
     getDocumentDiff: (docId: string) => Promise<DocumentDiffResponse>;
     getDocumentSummary: (docId: string) => Promise<DocumentSummary>;
     getTagTree: (docId: string) => Promise<TagTreeResponse>;
+    getFixReport: (docId: string) => Promise<FixReport>;
+    getRebuiltUrl: (docId: string) => string;
 }
 
 interface ApiClientConfig {
@@ -350,6 +380,8 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return `${baseUrl}/documents/${docId}/pdf`;
     };
 
+    const getRebuiltUrl = (docId: string) => `${baseUrl}/documents/${docId}/pdf-rebuilt`;
+
     const getDocumentDiff = async (docId: string): Promise<DocumentDiffResponse> => {
         if (mockMode) {
             return { beforeText: "", afterText: "", diffText: "" };
@@ -411,6 +443,30 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return (await response.json()) as TagTreeResponse;
     };
 
+    const getFixReport = async (docId: string): Promise<FixReport> => {
+        if (mockMode) {
+            return {
+                docId,
+                fixedDocId: docId,
+                appliedFixes: [],
+                before: { issueCount: 0, bySeverity: {}, byRuleId: {} },
+                after: { issueCount: 0, bySeverity: {}, byRuleId: {} },
+                delta: { fixed: [], remaining: [], introduced: [] },
+                manualReview: [],
+                beforeAfter: { metadata_before: {}, metadata_after: {} },
+                deterministic: true,
+                mode: "in_place",
+                rebuilt: false,
+            };
+        }
+        const response = await fetch(`${baseUrl}/documents/${docId}/fix-report`);
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Fix report fetch failed");
+        }
+        return (await response.json()) as FixReport;
+    };
+
     return {
         scan,
         remediate,
@@ -425,6 +481,8 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         getDocumentDiff,
         getDocumentSummary,
         getTagTree,
+        getFixReport,
+        getRebuiltUrl,
     };
 }
 

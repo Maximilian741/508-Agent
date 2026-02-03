@@ -72,6 +72,7 @@ interface AppState {
     fetchDocumentDiff: (docId: string) => Promise<RunResult<DocumentDiffResponse>>;
     fetchDocumentSummary: (docId: string) => Promise<RunResult<DocumentSummary>>;
     fetchTagTree: (docId: string) => Promise<RunResult<TagTreeResponse>>;
+    fetchFixReport: (docId: string) => Promise<RunResult<FixReport>>;
 }
 
 const resolved = getBackendUrlInfo();
@@ -304,6 +305,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 fixedDocId: null,
                 documentSummary: null,
                 tagTree: null,
+                fixReport: null,
             });
             const poll = async (): Promise<void> => {
                 const current = await client.getJob(start.jobId);
@@ -330,6 +332,12 @@ export const useAppStore = create<AppState>((set, get) => ({
                     } catch (error) {
                         set({ tagTree: emptyTagTree });
                     }
+                    try {
+                        const report = await client.getFixReport(docId);
+                        set({ fixReport: report });
+                    } catch (error) {
+                        return;
+                    }
                 }
                 if (current.status === "done") {
                     return;
@@ -349,9 +357,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         const client = getClient(get());
         try {
             const response = await client.applyFixes(docId);
-            set({ fixedDocId: response.docId, fixReport: response.report ?? null });
-            if (response.report?.remaining_issues) {
-                set({ documentIssues: response.report.remaining_issues });
+            const resolvedFixedDocId = response.fixedDocId ?? response.report?.fixedDocId ?? response.docId;
+            set({ fixedDocId: resolvedFixedDocId, fixReport: response.report ?? null });
+            if (response.report?.after?.issueCount !== undefined) {
+                set({ documentIssues: response.report.delta?.remaining ?? [] });
             }
             return { ok: true, data: response };
         } catch (error) {
@@ -385,6 +394,16 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: true, data: response };
         } catch (error) {
             set({ tagTree: emptyTagTree });
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    fetchFixReport: async (docId) => {
+        const client = getClient(get());
+        try {
+            const response = await client.getFixReport(docId);
+            set({ fixReport: response });
+            return { ok: true, data: response };
+        } catch (error) {
             return { ok: false, error: (error as Error).message };
         }
     },

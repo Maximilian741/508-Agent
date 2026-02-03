@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, DictionaryObject, NameObject, TextStringObject
+from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, NameObject, NumberObject, TextStringObject
 import difflib
 import json
 
@@ -112,6 +112,91 @@ def _write_tag_tree(doc_id: str, tag_tree: Dict[str, object]) -> Path:
     dest = doc_dir / "tag_tree.json"
     dest.write_text(json.dumps(tag_tree, indent=2), encoding="utf-8")
     return dest
+
+
+def _normalize_text(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return " ".join(str(value).split()).strip().lower()
+
+
+def _issue_key(issue: Dict[str, object]) -> str:
+    rule_id = _normalize_text(issue.get("ruleId"))
+    severity = _normalize_text(issue.get("severity"))
+    title = _normalize_text(issue.get("title"))
+    location = _normalize_text(issue.get("locationHint"))
+    evidence = issue.get("evidence", {}) if isinstance(issue.get("evidence"), dict) else {}
+    node_ids = evidence.get("nodeIds") or []
+    if isinstance(node_ids, list):
+        node_ids = [str(item) for item in node_ids][:10]
+    else:
+        node_ids = []
+    pages = evidence.get("pages") or []
+    if isinstance(pages, list):
+        pages = [str(int(item)) for item in pages if isinstance(item, int)]
+    else:
+        pages = []
+    if not pages:
+        page = evidence.get("page")
+        if isinstance(page, int):
+            pages = [str(page)]
+    key = "|".join(
+        [
+            f"rule:{rule_id}",
+            f"sev:{severity}",
+            f"nodes:{','.join(sorted(node_ids))}",
+            f"pages:{','.join(sorted(set(pages), key=lambda x: int(x)))}",
+            f"loc:{location}",
+            f"title:{title}",
+        ]
+    )
+    return key
+
+
+def _summarize_issues(issues: List[Dict[str, object]]) -> Dict[str, object]:
+    by_severity: Dict[str, int] = {}
+    by_rule: Dict[str, int] = {}
+    for issue in issues:
+        sev = str(issue.get("severity", "")).lower()
+        rule = str(issue.get("ruleId", "")).lower()
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        by_rule[rule] = by_rule.get(rule, 0) + 1
+    return {"issueCount": len(issues), "bySeverity": by_severity, "byRuleId": by_rule}
+
+
+def _anchor_counts_by_rule(issues: List[Dict[str, object]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for issue in issues:
+        rule = str(issue.get("ruleId", "")).lower()
+        evidence = issue.get("evidence", {}) if isinstance(issue.get("evidence"), dict) else {}
+        anchors = evidence.get("anchors") or []
+        if isinstance(anchors, list):
+            counts[rule] = counts.get(rule, 0) + len(anchors)
+    return counts
+
+
+def _sample_anchors_by_rule(issues: List[Dict[str, object]]) -> Dict[str, List[Dict[str, object]]]:
+    samples: Dict[str, List[Dict[str, object]]] = {}
+    for issue in issues:
+        rule = str(issue.get("ruleId", "")).lower()
+        evidence = issue.get("evidence", {}) if isinstance(issue.get("evidence"), dict) else {}
+        anchors = evidence.get("anchors") or []
+        if isinstance(anchors, list) and anchors:
+            if rule not in samples:
+                samples[rule] = anchors[:3]
+    return samples
+
+
+def _compute_delta(
+    before: List[Dict[str, object]],
+    after: List[Dict[str, object]],
+) -> Dict[str, List[Dict[str, object]]]:
+    before_map = {_issue_key(issue): issue for issue in before}
+    after_map = {_issue_key(issue): issue for issue in after}
+    fixed = [before_map[key] for key in before_map.keys() if key not in after_map]
+    remaining = [after_map[key] for key in after_map.keys() if key in before_map]
+    introduced = [after_map[key] for key in after_map.keys() if key not in before_map]
+    return {"fixed": fixed, "remaining": remaining, "introduced": introduced}
 
 
 def _safe_tag_tree(warnings: Optional[List[str]] = None) -> Dict[str, object]:
@@ -377,6 +462,182 @@ def _apply_pdf_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     }
 
 
+def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
+    reader = PdfReader(str(src), strict=False)
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    manual_review_added: List[Dict[str, object]] = []
+
+    try:
+        root = writer._root_object
+        root.update({NameObject("/MarkInfo"): DictionaryObject({NameObject("/Marked"): BooleanObject(True)})})
+        if "/Lang" not in root:
+            root.update({NameObject("/Lang"): TextStringObject("en-US")})
+
+        struct_root = DictionaryObject({NameObject("/Type"): NameObject("/StructTreeRoot")})
+        doc_elem = DictionaryObject(
+            {NameObject("/Type"): NameObject("/StructElem"), NameObject("/S"): NameObject("/Document")}
+        )
+        doc_kids = ArrayObject()
+        parent_nums = ArrayObject()
+
+        for idx, page in enumerate(writer.pages):
+            page_ref = page.indirect_reference
+            try:
+                page_obj = page.get_object()
+            except Exception:
+                page_obj = page
+            page_obj.update({NameObject("/StructParents"): NumberObject(idx)})
+            sect_elem = DictionaryObject(
+                {
+                    NameObject("/Type"): NameObject("/StructElem"),
+                    NameObject("/S"): NameObject("/Sect"),
+                    NameObject("/Pg"): page_ref,
+                    NameObject("/K"): ArrayObject(),
+                }
+            )
+            sect_elem_ref = writer._add_object(sect_elem)
+            doc_kids.append(sect_elem_ref)
+            parent_nums.append(NumberObject(idx))
+            page_fig_refs = ArrayObject()
+            try:
+                resources = page_obj.get("/Resources")
+                xobjects = resources.get("/XObject") if resources else None
+                image_xobjects: Dict[NameObject, object] = {}
+                if xobjects:
+                    for name, obj in xobjects.items():
+                        try:
+                            xobj = obj.get_object()
+                        except Exception:
+                            xobj = obj
+                        if xobj.get("/Subtype") == "/Image":
+                            image_xobjects[name] = xobj
+                contents = page_obj.get("/Contents")
+                if contents and image_xobjects:
+                    content_stream = ContentStream(contents, writer)
+                    new_ops = []
+                    mcid = 0
+                    text_mcids = 0
+                    text_ops = {b"Tj", b"TJ", b"'", b"\""}
+                    for operands, operator in content_stream.operations:
+                        if operator == b"Do" and operands:
+                            name_obj = operands[0]
+                            if name_obj in image_xobjects:
+                                new_ops.append(
+                                    (
+                                        [
+                                            NameObject("/Figure"),
+                                            DictionaryObject({NameObject("/MCID"): NumberObject(mcid)}),
+                                        ],
+                                        b"BDC",
+                                    )
+                                )
+                                new_ops.append((operands, operator))
+                                new_ops.append(([], b"EMC"))
+                                fig_elem = DictionaryObject(
+                                    {
+                                        NameObject("/Type"): NameObject("/StructElem"),
+                                        NameObject("/S"): NameObject("/Figure"),
+                                        NameObject("/Alt"): TextStringObject("[TODO] Add alt text"),
+                                        NameObject("/Pg"): page_ref,
+                                        NameObject("/K"): NumberObject(mcid),
+                                    }
+                                )
+                                fig_elem_ref = writer._add_object(fig_elem)
+                                sect_elem_ref.get_object()[NameObject("/K")].append(fig_elem_ref)
+                                page_fig_refs.append(fig_elem_ref)
+                                mcid += 1
+                                continue
+                        if operator in text_ops:
+                            new_ops.append(
+                                (
+                                    [
+                                        NameObject("/Span"),
+                                        DictionaryObject({NameObject("/MCID"): NumberObject(mcid)}),
+                                    ],
+                                    b"BDC",
+                                )
+                            )
+                            new_ops.append((operands, operator))
+                            new_ops.append(([], b"EMC"))
+                            text_elem = DictionaryObject(
+                                {
+                                    NameObject("/Type"): NameObject("/StructElem"),
+                                    NameObject("/S"): NameObject("/Span"),
+                                    NameObject("/Pg"): page_ref,
+                                    NameObject("/K"): NumberObject(mcid),
+                                }
+                            )
+                            text_elem_ref = writer._add_object(text_elem)
+                            sect_elem_ref.get_object()[NameObject("/K")].append(text_elem_ref)
+                            page_fig_refs.append(text_elem_ref)
+                            text_mcids += 1
+                            mcid += 1
+                            continue
+                        new_ops.append((operands, operator))
+                    content_stream.operations = new_ops
+                    page_obj.update({NameObject("/Contents"): content_stream})
+            except Exception:
+                continue
+
+            parent_nums.append(page_fig_refs)
+
+        doc_elem.update({NameObject("/K"): doc_kids})
+        doc_elem_ref = writer._add_object(doc_elem)
+        struct_root.update({NameObject("/K"): ArrayObject([doc_elem_ref])})
+        struct_root.update({NameObject("/ParentTree"): DictionaryObject({NameObject("/Nums"): parent_nums})})
+        struct_root_ref = writer._add_object(struct_root)
+        root.update({NameObject("/StructTreeRoot"): struct_root_ref})
+    except Exception as exc:
+        manual_review_added.append(
+            _queue_manual_review(
+                doc_id,
+                "rebuild_failed",
+                "doc-1",
+                "Rebuild tagging failed",
+                f"Rebuild failed to create structure tree: {exc.__class__.__name__}",
+                pages=[],
+                anchors=[],
+                suggested_fix="Rebuild tagging manually or retry with different settings.",
+                confidence=0.4,
+            )
+        )
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("wb") as output:
+        writer.write(output)
+
+    manual_review_added.append(
+        _queue_manual_review(
+            doc_id,
+            "rebuild_needs_review",
+            "doc-1",
+            "Rebuilt PDF requires review",
+            "Rebuild created minimal tag structure; manual review required for semantic accuracy.",
+            pages=[],
+            anchors=[],
+            suggested_fix="Review rebuilt structure, headings, and alt text placeholders.",
+            confidence=0.6,
+        )
+    )
+    manual_review_added.append(
+        _queue_manual_review(
+            doc_id,
+            "rebuild_text_not_tagged",
+            "doc-1",
+            "Rebuild text tagging incomplete",
+            "Rebuild currently tags images with MCIDs; text tagging/headings require semantic inference.",
+            pages=[],
+            anchors=[],
+            suggested_fix="Add text structure tags and headings manually.",
+            confidence=0.6,
+        )
+    )
+
+    return {"manual_review_added": manual_review_added}
+
+
 def _add_placeholder_alt(writer: PdfWriter) -> int:
     try:
         root = writer._root_object
@@ -537,10 +798,20 @@ def _analyze_pdf(
     figures = struct_info.get("figures", 0)
     figures_missing_alt = struct_info.get("figuresMissingAlt", 0)
     missing_alt_nodes: List[str] = []
+    missing_alt_anchors: List[Dict[str, object]] = []
     if tagged and tree_nodes:
         for node_id, node in tree_nodes.items():
             if node.get("tag") == "Figure" and not node.get("alt"):
                 missing_alt_nodes.append(node_id)
+                node_page = node.get("page")
+                mcid = None
+                for kid in node.get("kids", []):
+                    kid_node = tree_nodes.get(kid, {})
+                    if kid_node.get("role") == "MCID" and kid_node.get("mcid") is not None:
+                        mcid = kid_node.get("mcid")
+                        break
+                if isinstance(node_page, int) and mcid is not None:
+                    missing_alt_anchors.append({"page": node_page, "mcid": mcid, "kind": "figure"})
                 if len(missing_alt_nodes) >= 50:
                     break
     missing_alt_pages: List[int] = []
@@ -566,6 +837,7 @@ def _analyze_pdf(
                     "nodeIds": missing_alt_nodes,
                     "pages": missing_alt_pages,
                     "page": missing_alt_page if missing_alt_page else None,
+                    "anchors": missing_alt_anchors[:50],
                 },
             }
         )
@@ -617,7 +889,91 @@ def _analyze_pdf(
     if skipped_issue:
         issues.append(skipped_issue)
 
+    reading_order_issue = _find_reading_order_issue(tree_nodes)
+    if reading_order_issue:
+        issues.append(reading_order_issue)
+
     return issues
+
+
+def _anchors_from_nodes(nodes: Dict[str, Dict[str, object]], node_ids: List[Optional[str]]) -> List[Dict[str, object]]:
+    anchors: List[Dict[str, object]] = []
+    for node_id in node_ids:
+        if not node_id:
+            continue
+        node = nodes.get(node_id)
+        if not node:
+            continue
+        page_value = node.get("page")
+        if not isinstance(page_value, int):
+            for kid_id in node.get("kids", []):
+                kid = nodes.get(kid_id, {})
+                kid_page = kid.get("page")
+                if isinstance(kid_page, int):
+                    page_value = kid_page
+                    break
+        mcid_value = None
+        if node.get("role") == "MCID" and node.get("mcid") is not None:
+            mcid_value = node.get("mcid")
+        if mcid_value is None:
+            for kid_id in node.get("kids", []):
+                kid = nodes.get(kid_id, {})
+                if kid.get("role") == "MCID" and kid.get("mcid") is not None:
+                    mcid_value = kid.get("mcid")
+                    break
+        if isinstance(page_value, int) and isinstance(mcid_value, int):
+            tag = node.get("tag")
+            kind = "figure" if tag == "Figure" else "text"
+            anchors.append({"page": page_value, "mcid": mcid_value, "kind": kind, "nodeId": node_id})
+        if len(anchors) >= 50:
+            break
+    return anchors
+
+
+def _find_reading_order_issue(nodes: Dict[str, Dict[str, object]]) -> Optional[Dict[str, object]]:
+    if not nodes:
+        return None
+    order: List[str] = []
+
+    def walk(node_id: str) -> None:
+        node = nodes.get(node_id)
+        if not node:
+            return
+        order.append(node_id)
+        for kid in node.get("kids", []):
+            walk(kid)
+
+    walk("0")
+    last_page: Optional[int] = None
+    sequence: List[str] = []
+    for node_id in order:
+        node = nodes.get(node_id, {})
+        page_value = node.get("page")
+        if not isinstance(page_value, int):
+            continue
+        if last_page is not None and page_value < last_page:
+            sequence.append(node_id)
+            break
+        last_page = page_value
+    if not sequence:
+        return None
+    node_ids = sequence[:5]
+    pages: List[int] = []
+    for node_id in node_ids:
+        page_value = nodes.get(node_id, {}).get("page")
+        if isinstance(page_value, int) and page_value not in pages:
+            pages.append(page_value)
+    anchors = _anchors_from_nodes(nodes, node_ids)
+    return {
+        "id": f"issue-reading-order-{node_ids[0]}",
+        "ruleId": "reading_order",
+        "title": "Reading order may be ambiguous",
+        "severity": "warning",
+        "description": "Structure tree order includes nodes that move backward in page order.",
+        "locationHint": "Structure tree order",
+        "recommendation": "Verify reading order and adjust tags if needed.",
+        "evidence": {"nodeIds": node_ids, "pages": pages, "anchors": anchors},
+    }
 
 
 def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -637,6 +993,7 @@ def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional
     walk(root)
     prev_level: Optional[int] = None
     prev_tag: Optional[str] = None
+    prev_node_id: Optional[str] = None
     for node_id in order:
         node = nodes.get(node_id)
         if not node:
@@ -646,7 +1003,15 @@ def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional
             level = int(tag[1])
             if prev_level is not None and level > prev_level + 1:
                 page_value = nodes.get(node_id, {}).get("page")
-                pages = [page_value] if isinstance(page_value, int) else []
+                pages = []
+                if isinstance(page_value, int):
+                    pages.append(page_value)
+                if prev_node_id:
+                    prev_page = nodes.get(prev_node_id, {}).get("page")
+                    if isinstance(prev_page, int) and prev_page not in pages:
+                        pages.append(prev_page)
+                node_ids = [value for value in [prev_node_id, node_id] if value]
+                anchors = _anchors_from_nodes(nodes, node_ids)
                 return {
                     "id": f"issue-skipped-heading-{node_id}",
                     "ruleId": "skipped_heading_level",
@@ -659,12 +1024,15 @@ def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional
                         "from": prev_tag,
                         "to": tag,
                         "nodeId": node_id,
+                        "nodeIds": node_ids,
                         "pages": pages,
+                        "anchors": anchors,
                         "page": page_value if isinstance(page_value, int) else None,
                     },
                 }
             prev_level = level
             prev_tag = tag
+            prev_node_id = node_id
     return None
 
 
@@ -703,6 +1071,7 @@ def _scan_worker(job_id: str, doc_id: str) -> None:
             ISSUES[doc_id] = issues
     with LOCK:
         ISSUES[doc_id] = issues
+        DOCS[doc_id]["issues"] = issues
         JOBS[job_id].update(status="done", progress=100, message="Scan complete")
 
 
@@ -754,7 +1123,7 @@ async def get_issues(doc_id: str) -> List[Dict[str, object]]:
 
 
 @router.post("/documents/{doc_id}/apply-fixes")
-async def apply_fixes(doc_id: str, mode: Optional[str] = "in_place") -> dict:
+async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     _ensure_dirs()
     with LOCK:
         doc = DOCS.get(doc_id)
@@ -766,28 +1135,67 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "in_place") -> dict:
     fixed_dest = fixed_dir / "fixed.pdf"
     rebuild_dest = fixed_dir / "rebuilt.pdf"
     fix_result = _apply_pdf_fixes(doc_id, src, fixed_dest)
+    rebuild_result: Dict[str, object] = {"manual_review_added": []}
     rebuilt = False
     if mode == "rebuild":
-        rebuilt = False
+        rebuild_result = _rebuild_pdf(doc_id, src, rebuild_dest)
+        rebuilt = True
+    fixed_issues: List[Dict[str, object]] = []
+    scan_after_error: Optional[str] = None
     try:
+        scan_target = rebuild_dest if rebuilt else fixed_dest
         try:
-            tag_tree = extract_tag_tree(PdfReader(str(fixed_dest), strict=False))
+            tag_tree = extract_tag_tree(PdfReader(str(scan_target), strict=False))
         except Exception as exc:
             tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
         tag_path = _write_tag_tree(doc_id, tag_tree)
         with LOCK:
             DOCS[doc_id]["tagTreePath"] = str(tag_path)
             DOCS[doc_id]["tagSummary"] = tag_tree.get("summary", {})
-        fixed_issues = _analyze_pdf(doc_id, fixed_dest, tag_tree=tag_tree)
+        fixed_issues = _analyze_pdf(doc_id, scan_target, tag_tree=tag_tree)
         with LOCK:
             ISSUES[doc_id] = fixed_issues
+    except Exception as exc:
+        scan_after_error = f"after-scan failed: {exc.__class__.__name__}: {exc}"
+        fixed_issues = []
+    before_issues = DOCS.get(doc_id, {}).get("issues", [])
+    if scan_after_error:
+        after_issues = list(before_issues)
+        delta = {"fixed": [], "remaining": list(before_issues), "introduced": []}
+    else:
+        after_issues = fixed_issues
+        delta = _compute_delta(before_issues, after_issues)
+    try:
+        fixed_size = fixed_dest.stat().st_size
     except Exception:
-        pass
+        fixed_size = 0
+    fixed_exists = fixed_dest.exists() and fixed_size > 0
+    try:
+        rebuilt_size = rebuild_dest.stat().st_size
+    except Exception:
+        rebuilt_size = 0
+    rebuilt_exists = rebuilt and rebuild_dest.exists() and rebuilt_size > 0
+    print(f"[apply_fixes] fixed_path={fixed_dest} size={fixed_size}")
+    print(f"[apply_fixes] before={len(before_issues)} after={len(after_issues)}")
+    fixed_doc_id = f"{doc_id}:fixed"
+    rebuilt_doc_id = f"{doc_id}:rebuilt"
     report = {
-        "applied_fixes": fix_result.get("applied", []),
-        "remaining_issues": ISSUES.get(doc_id, []),
-        "manual_review_added": fix_result.get("manual_review_added", []),
-        "before_after": {
+        "docId": doc_id,
+        "fixedDocId": fixed_doc_id,
+        "fixedPath": str(fixed_dest),
+        "rebuiltDocId": rebuilt_doc_id if rebuilt else None,
+        "rebuiltPath": str(rebuild_dest) if rebuilt else None,
+        "scanTargetPath": str(scan_target),
+        "fixedExists": fixed_exists,
+        "rebuiltExists": rebuilt_exists,
+        "fixedSize": fixed_size,
+        "rebuiltSize": rebuilt_size,
+        "appliedFixes": fix_result.get("applied", []),
+        "before": _summarize_issues(before_issues),
+        "after": _summarize_issues(after_issues),
+        "delta": delta,
+        "manualReview": fix_result.get("manual_review_added", []) + rebuild_result.get("manual_review_added", []),
+        "beforeAfter": {
             "metadata_before": fix_result.get("metadata_before", {}),
             "metadata_after": fix_result.get("metadata_after", {}),
         },
@@ -795,6 +1203,12 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "in_place") -> dict:
         "mode": mode,
         "rebuilt": rebuilt,
     }
+    report["scanAfterOk"] = scan_after_error is None
+    if scan_after_error:
+        report["scanAfterError"] = scan_after_error
+    DOCS[doc_id]["fixReport"] = report
+    DOCS[doc_id]["issues_before"] = before_issues
+    DOCS[doc_id]["issues_after"] = after_issues
     report_path = RESULTS_DIR / doc_id / "fix_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -849,6 +1263,23 @@ async def download_pdf_fixed(doc_id: str) -> FileResponse:
 @router.head("/documents/{doc_id}/pdf-fixed")
 async def head_pdf_fixed(doc_id: str) -> FileResponse:
     return await download_pdf_fixed(doc_id)
+
+
+@router.get("/documents/{doc_id}/pdf-rebuilt")
+async def download_pdf_rebuilt(doc_id: str) -> FileResponse:
+    with LOCK:
+        doc = DOCS.get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    rebuilt_path = FIXED_DIR / doc_id / "rebuilt.pdf"
+    if not rebuilt_path.exists():
+        raise HTTPException(status_code=404, detail="Rebuilt document not found")
+    return FileResponse(str(rebuilt_path), filename=rebuilt_path.name, media_type="application/pdf")
+
+
+@router.head("/documents/{doc_id}/pdf-rebuilt")
+async def head_pdf_rebuilt(doc_id: str) -> FileResponse:
+    return await download_pdf_rebuilt(doc_id)
 
 
 @router.get("/documents/{doc_id}/summary")
@@ -923,3 +1354,98 @@ async def get_tag_tree(doc_id: str) -> Dict[str, object]:
         return json.loads(tag_path.read_text(encoding="utf-8"))
     except Exception:
         return _safe_tag_tree(["tag tree: failed to load cached results"])
+
+
+@router.get("/documents/{doc_id}/fix-report")
+async def get_fix_report(doc_id: str) -> Dict[str, object]:
+    with LOCK:
+        doc = DOCS.get(doc_id, {})
+    report = doc.get("fixReport")
+    if report:
+        return report
+    report_path = RESULTS_DIR / doc_id / "fix_report.json"
+    if report_path.exists():
+        try:
+            return json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    raise HTTPException(status_code=404, detail="Fix report not found")
+
+
+@router.get("/documents/{doc_id}/debug-issues")
+async def debug_issues(doc_id: str) -> Dict[str, object]:
+    with LOCK:
+        doc = DOCS.get(doc_id, {})
+    before_issues = doc.get("issues_before", doc.get("issues", [])) or []
+    after_issues = doc.get("issues_after", []) or []
+    before_keys = [_issue_key(issue) for issue in before_issues][:5]
+    after_keys = [_issue_key(issue) for issue in after_issues][:5]
+    fixed_path = doc.get("fixReport", {}).get("fixedPath")
+    rebuilt_path = doc.get("fixReport", {}).get("rebuiltPath")
+    scan_target_path = doc.get("fixReport", {}).get("scanTargetPath")
+    fixed_size = 0
+    if fixed_path:
+        try:
+            fixed_size = Path(str(fixed_path)).stat().st_size
+        except Exception:
+            fixed_size = 0
+    rebuilt_size = 0
+    if rebuilt_path:
+        try:
+            rebuilt_size = Path(str(rebuilt_path)).stat().st_size
+        except Exception:
+            rebuilt_size = 0
+    fixed_exists = doc.get("fixReport", {}).get("fixedExists")
+    rebuilt_exists = doc.get("fixReport", {}).get("rebuiltExists")
+    scan_after_error = doc.get("fixReport", {}).get("scanAfterError")
+    mcid_counts: List[int] = []
+    text_mcid_counts: List[int] = []
+    struct_root_exists = False
+    if rebuilt_path and Path(str(rebuilt_path)).exists():
+        try:
+            rebuilt_reader = PdfReader(str(rebuilt_path), strict=False)
+            root = rebuilt_reader.trailer.get("/Root", {})
+            struct_root_exists = "/StructTreeRoot" in root
+            for page in rebuilt_reader.pages:
+                count = 0
+                text_count = 0
+                try:
+                    content_stream = ContentStream(page.get("/Contents"), rebuilt_reader)
+                    for operands, operator in content_stream.operations:
+                        if operator == b"BDC" and len(operands) >= 2:
+                            props = operands[1]
+                            try:
+                                mcid = props.get("/MCID")
+                                if mcid is not None:
+                                    count += 1
+                                    if operands[0] == "/Span" or operands[0] == NameObject("/Span"):
+                                        text_count += 1
+                            except Exception:
+                                continue
+                except Exception:
+                    count = 0
+                    text_count = 0
+                mcid_counts.append(count)
+                text_mcid_counts.append(text_count)
+        except Exception:
+            mcid_counts = []
+            text_mcid_counts = []
+    return {
+        "before_count": len(before_issues),
+        "after_count": len(after_issues),
+        "before_sample_keys": before_keys,
+        "after_sample_keys": after_keys,
+        "fixedPath": fixed_path,
+        "rebuiltPath": rebuilt_path,
+        "scanTargetPath": scan_target_path,
+        "fixedExists": fixed_exists,
+        "rebuiltExists": rebuilt_exists,
+        "fixedSize": fixed_size,
+        "rebuiltSize": rebuilt_size,
+        "scanAfterError": scan_after_error,
+        "rebuiltStructRoot": struct_root_exists,
+        "mcidCounts": mcid_counts,
+        "textMcidCounts": text_mcid_counts,
+        "anchorCountsByRuleId": _anchor_counts_by_rule(after_issues),
+        "sampleAnchorsByRuleId": _sample_anchors_by_rule(after_issues),
+    }
