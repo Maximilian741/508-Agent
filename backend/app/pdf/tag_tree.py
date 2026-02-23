@@ -173,9 +173,26 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
                     kids_value = obj.get("/K") if isinstance(obj, dict) else None
                     child_ids: List[str] = []
                     if kids_value is not None:
-                        for child_id, child_obj, child_depth in enqueue_children(kids_value, node_id, depth):
-                            child_ids.append(child_id)
-                            stack.append((child_id, child_obj, child_depth, node_id))
+                        if isinstance(kids_value, list):
+                            for idx, kid in enumerate(kids_value):
+                                if isinstance(kid, int):
+                                    mcid_id = f"{node_id}.mcid.{idx}"
+                                    add_node(mcid_id, "MCID", "MCID", None, None, None, None, [], {"mcid": kid})
+                                    child_ids.append(mcid_id)
+                                    node_count += 1
+                                else:
+                                    for child_id, child_obj, child_depth in enqueue_children(kid, node_id, depth):
+                                        child_ids.append(child_id)
+                                        stack.append((child_id, child_obj, child_depth, node_id))
+                        elif isinstance(kids_value, int):
+                            mcid_id = f"{node_id}.mcid.0"
+                            add_node(mcid_id, "MCID", "MCID", None, None, None, None, [], {"mcid": kids_value})
+                            child_ids.append(mcid_id)
+                            node_count += 1
+                        else:
+                            for child_id, child_obj, child_depth in enqueue_children(kids_value, node_id, depth):
+                                child_ids.append(child_id)
+                                stack.append((child_id, child_obj, child_depth, node_id))
                     role = tag if tag else "StructElem"
                     add_node(node_id, role, tag, title, alt, actual_text, lang, child_ids, {"page": page_num})
                     node_count += 1

@@ -14,8 +14,10 @@ from app.models.accessibility import AccessibilityTree, ActionCode
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus
 from app.services.remediators.registry import execute_plans
+from app.repositories.factory import get_repository
 
 router = APIRouter()
+REPO = get_repository()
 
 
 class RemediateRequest(BaseModel):
@@ -153,13 +155,13 @@ async def remediate(request: RemediateRequest) -> RemediateResponse:
 
     for result in api_results:
         if result.status != ExecutionStatus.SUCCESS.value:
-            state.manual_review_queue.append(
-                _manual_review_item(
-                    request.issueId,
-                    result.targetNodeId,
-                    "Execution did not complete automatically.",
-                    result.notes,
-                )
+            item = _manual_review_item(
+                request.issueId,
+                result.targetNodeId,
+                "Execution did not complete automatically.",
+                result.notes,
             )
+            state.manual_review_queue.append(item)
+            REPO.add_manual_review_items(state.last_document_id or "doc-1", [item])
 
     return RemediateResponse(results=api_results)

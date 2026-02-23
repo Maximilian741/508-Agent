@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -14,8 +15,14 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, NameObject, NumberObject, TextStringObject
 import difflib
 import json
+from docx import Document as DocxDocument
+from pptx import Presentation
 
 from app.pdf.tag_tree import extract_tag_tree
+from app.parsers.docx_parser import DOCXParser
+from app.parsers.pptx_parser import PPTXParser
+from app.ai.alt_text_suggester import build_alt_text_suggestions
+from app.repositories.factory import get_repository
 
 router = APIRouter()
 
@@ -30,6 +37,13 @@ DOCS: Dict[str, Dict[str, object]] = {}
 ISSUES: Dict[str, List[Dict[str, object]]] = {}
 LOCK = threading.Lock()
 MAX_DIFF_CHARS = 20000
+REPO = get_repository()
+
+
+class DocumentType(str, Enum):
+    PDF = "pdf"
+    DOCX = "docx"
+    PPTX = "pptx"
 
 
 def _ensure_dirs() -> None:
@@ -38,10 +52,58 @@ def _ensure_dirs() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _infer_doc_type(filename: str) -> DocumentType:
+    name = filename.lower().strip()
+    if name.endswith(".docx"):
+        return DocumentType.DOCX
+    if name.endswith(".pptx"):
+        return DocumentType.PPTX
+    return DocumentType.PDF
+
+
+def _get_doc(doc_id: str) -> Optional[Dict[str, object]]:
+    with LOCK:
+        cached = DOCS.get(doc_id)
+    if cached:
+        return cached
+    persisted = REPO.get_document(doc_id)
+    if persisted:
+        with LOCK:
+            DOCS[doc_id] = {
+                "filename": persisted.get("filename"),
+                "path": persisted.get("path"),
+                "docType": persisted.get("docType", "pdf"),
+                "tagTreePath": persisted.get("tagTreePath"),
+                "tagSummary": persisted.get("tagSummary"),
+                "fixReport": persisted.get("fixReport"),
+            }
+    return DOCS.get(doc_id)
+
+
+def _save_doc(doc_id: str, doc: Dict[str, object]) -> None:
+    with LOCK:
+        DOCS[doc_id] = doc
+    payload = {
+        "id": doc_id,
+        "filename": doc.get("filename"),
+        "docType": doc.get("docType", "pdf"),
+        "path": doc.get("path"),
+        "tagTreePath": doc.get("tagTreePath"),
+        "tagSummary": doc.get("tagSummary"),
+        "fixReport": doc.get("fixReport"),
+    }
+    if doc.get("fixedPath"):
+        payload["fixedPath"] = doc.get("fixedPath")
+    if doc.get("rebuiltPath"):
+        payload["rebuiltPath"] = doc.get("rebuiltPath")
+    REPO.save_document(payload)
+
+
 def _job_update(job_id: str, **updates: object) -> None:
     with LOCK:
         if job_id in JOBS:
             JOBS[job_id].update(updates)
+            REPO.update_job(job_id, updates)
 
 
 def _extract_images(reader: PdfReader, on_progress: Optional[callable] = None) -> int:
@@ -462,6 +524,142 @@ def _apply_pdf_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     }
 
 
+def _apply_docx_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
+    shutil.copy2(src, dest)
+    doc = DocxDocument(str(dest))
+    core = doc.core_properties
+    applied: List[Dict[str, object]] = []
+    manual_review_added: List[Dict[str, object]] = []
+    metadata_before = {"Title": (core.title or "").strip() or None, "Language": (getattr(core, "language", None) or "").strip() or None}
+    metadata_after = dict(metadata_before)
+    if not metadata_before["Title"]:
+        core.title = src.stem
+        metadata_after["Title"] = src.stem
+        applied.append(
+            {
+                "fixId": f"{doc_id}-fix-title",
+                "ruleId": "missing_document_title",
+                "severity": "warning",
+                "action": "Set DOCX title from filename.",
+                "pages": [],
+                "anchors": [],
+                "deterministic": True,
+            }
+        )
+    if not metadata_before["Language"]:
+        try:
+            core.language = "en-US"
+            metadata_after["Language"] = "en-US"
+            applied.append(
+                {
+                    "fixId": f"{doc_id}-fix-language",
+                    "ruleId": "missing_language",
+                    "severity": "warning",
+                    "action": "Set DOCX language to en-US.",
+                    "pages": [],
+                    "anchors": [],
+                    "deterministic": True,
+                }
+            )
+        except Exception:
+            pass
+    image_count = 0
+    for rel in doc.part.rels.values():
+        if "image" in str(rel.reltype):
+            image_count += 1
+    if image_count > 0:
+        manual_review_added.append(
+            _queue_manual_review(
+                doc_id,
+                "missing_alt_text",
+                "doc-1",
+                "Image alt text requires review",
+                "DOCX image alt text cannot be safely remediated automatically.",
+                pages=[],
+                anchors=[],
+                suggested_fix="Review all images and set meaningful alt text.",
+                confidence=0.7,
+            )
+        )
+    doc.save(str(dest))
+    return {
+        "applied": applied,
+        "manual_review_added": manual_review_added,
+        "metadata_before": metadata_before,
+        "metadata_after": metadata_after,
+    }
+
+
+def _apply_pptx_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
+    shutil.copy2(src, dest)
+    prs = Presentation(str(dest))
+    core = prs.core_properties
+    applied: List[Dict[str, object]] = []
+    manual_review_added: List[Dict[str, object]] = []
+    metadata_before = {"Title": (core.title or "").strip() or None, "Language": (getattr(core, "language", None) or "").strip() or None}
+    metadata_after = dict(metadata_before)
+    if not metadata_before["Title"]:
+        core.title = src.stem
+        metadata_after["Title"] = src.stem
+        applied.append(
+            {
+                "fixId": f"{doc_id}-fix-title",
+                "ruleId": "missing_document_title",
+                "severity": "warning",
+                "action": "Set PPTX title from filename.",
+                "pages": [],
+                "anchors": [],
+                "deterministic": True,
+            }
+        )
+    if not metadata_before["Language"]:
+        try:
+            core.language = "en-US"
+            metadata_after["Language"] = "en-US"
+            applied.append(
+                {
+                    "fixId": f"{doc_id}-fix-language",
+                    "ruleId": "missing_language",
+                    "severity": "warning",
+                    "action": "Set PPTX language to en-US.",
+                    "pages": [],
+                    "anchors": [],
+                    "deterministic": True,
+                }
+            )
+        except Exception:
+            pass
+    image_count = 0
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            try:
+                if shape.shape_type == 13:  # PICTURE
+                    image_count += 1
+            except Exception:
+                continue
+    if image_count > 0:
+        manual_review_added.append(
+            _queue_manual_review(
+                doc_id,
+                "missing_alt_text",
+                "doc-1",
+                "Image alt text requires review",
+                "PPTX image alt text should be reviewed manually after deterministic fixes.",
+                pages=[],
+                anchors=[],
+                suggested_fix="Review all slide images and add alt text where needed.",
+                confidence=0.7,
+            )
+        )
+    prs.save(str(dest))
+    return {
+        "applied": applied,
+        "manual_review_added": manual_review_added,
+        "metadata_before": metadata_before,
+        "metadata_after": metadata_after,
+    }
+
+
 def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     reader = PdfReader(str(src), strict=False)
     writer = PdfWriter()
@@ -514,13 +712,18 @@ def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
                         if xobj.get("/Subtype") == "/Image":
                             image_xobjects[name] = xobj
                 contents = page_obj.get("/Contents")
-                if contents and image_xobjects:
+                if contents:
                     content_stream = ContentStream(contents, writer)
                     new_ops = []
                     mcid = 0
-                    text_mcids = 0
                     text_ops = {b"Tj", b"TJ", b"'", b"\""}
+                    text_items: List[Dict[str, object]] = []
+                    image_items: List[int] = []
+                    font_size = 12.0
                     for operands, operator in content_stream.operations:
+                        if operator == b"Tf" and operands and len(operands) >= 2:
+                            if isinstance(operands[1], (int, float)):
+                                font_size = float(operands[1])
                         if operator == b"Do" and operands:
                             name_obj = operands[0]
                             if name_obj in image_xobjects:
@@ -535,18 +738,7 @@ def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
                                 )
                                 new_ops.append((operands, operator))
                                 new_ops.append(([], b"EMC"))
-                                fig_elem = DictionaryObject(
-                                    {
-                                        NameObject("/Type"): NameObject("/StructElem"),
-                                        NameObject("/S"): NameObject("/Figure"),
-                                        NameObject("/Alt"): TextStringObject("[TODO] Add alt text"),
-                                        NameObject("/Pg"): page_ref,
-                                        NameObject("/K"): NumberObject(mcid),
-                                    }
-                                )
-                                fig_elem_ref = writer._add_object(fig_elem)
-                                sect_elem_ref.get_object()[NameObject("/K")].append(fig_elem_ref)
-                                page_fig_refs.append(fig_elem_ref)
+                                image_items.append(mcid)
                                 mcid += 1
                                 continue
                         if operator in text_ops:
@@ -561,27 +753,151 @@ def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
                             )
                             new_ops.append((operands, operator))
                             new_ops.append(([], b"EMC"))
-                            text_elem = DictionaryObject(
-                                {
-                                    NameObject("/Type"): NameObject("/StructElem"),
-                                    NameObject("/S"): NameObject("/Span"),
-                                    NameObject("/Pg"): page_ref,
-                                    NameObject("/K"): NumberObject(mcid),
-                                }
-                            )
-                            text_elem_ref = writer._add_object(text_elem)
-                            sect_elem_ref.get_object()[NameObject("/K")].append(text_elem_ref)
-                            page_fig_refs.append(text_elem_ref)
-                            text_mcids += 1
+                            text_value = ""
+                            if operator == b"Tj" and operands:
+                                text_value = str(operands[0])
+                            elif operator == b"TJ" and operands:
+                                text_value = "".join([str(part) for part in operands[0] if isinstance(part, str)])
+                            elif operator in {b"'", b"\""} and operands:
+                                text_value = str(operands[-1])
+                            text_items.append({"mcid": mcid, "text": text_value, "fontSize": font_size})
                             mcid += 1
                             continue
                         new_ops.append((operands, operator))
                     content_stream.operations = new_ops
                     page_obj.update({NameObject("/Contents"): content_stream})
+
+                    def is_list_prefix(value: str) -> bool:
+                        prefix = value.strip().split(" ")[0]
+                        if prefix.startswith(("-", "•")):
+                            return True
+                        if prefix.endswith(".") and prefix[:-1].isdigit():
+                            return True
+                        return False
+
+                    text_items_sorted = sorted(text_items, key=lambda item: int(item["mcid"]))
+                    font_sizes = [item.get("fontSize", 0) for item in text_items_sorted if item.get("fontSize")]
+                    body_font = 12.0
+                    if font_sizes:
+                        sorted_sizes = sorted(font_sizes)
+                        body_font = sorted_sizes[len(sorted_sizes) // 2]
+                    unique_sizes = sorted({item.get("fontSize", 0) for item in text_items_sorted}, reverse=True)
+                    heading_levels = {size: min(idx + 1, 6) for idx, size in enumerate(unique_sizes)}
+
+                    blocks: List[Dict[str, object]] = []
+                    idx_item = 0
+                    while idx_item < len(text_items_sorted):
+                        item = text_items_sorted[idx_item]
+                        text_val = str(item.get("text", ""))
+                        size = float(item.get("fontSize", body_font))
+                        if size >= body_font * 1.25:
+                            level = heading_levels.get(size, 1)
+                            blocks.append({"type": f"H{level}", "mcids": [item["mcid"]]})
+                            idx_item += 1
+                            continue
+                        if text_val and is_list_prefix(text_val):
+                            blocks.append(
+                                {
+                                    "type": "L",
+                                    "items": [
+                                        {"label": [item["mcid"]], "body": [item["mcid"]]},
+                                    ],
+                                }
+                            )
+                            idx_item += 1
+                            continue
+                        para_mcids = [item["mcid"]]
+                        idx_item += 1
+                        while idx_item < len(text_items_sorted):
+                            next_item = text_items_sorted[idx_item]
+                            next_text = str(next_item.get("text", ""))
+                            next_size = float(next_item.get("fontSize", body_font))
+                            if next_size >= body_font * 1.25 or (next_text and is_list_prefix(next_text)):
+                                break
+                            para_mcids.append(next_item["mcid"])
+                            idx_item += 1
+                        blocks.append({"type": "P", "mcids": para_mcids})
+
+                    for mcid_value in image_items:
+                        blocks.append({"type": "Figure", "mcids": [mcid_value]})
+
+                    blocks_sorted = sorted(blocks, key=lambda b: min(b.get("mcids", [0])))
+                    max_mcid = -1
+                    for block in blocks_sorted:
+                        for m in block.get("mcids", []):
+                            max_mcid = max(max_mcid, int(m))
+                        for item in block.get("items", []):
+                            for m in item.get("label", []) + item.get("body", []):
+                                max_mcid = max(max_mcid, int(m))
+                    mcid_map = ArrayObject([None] * (max_mcid + 1 if max_mcid >= 0 else 0))
+
+                    for block in blocks_sorted:
+                        block_type = block.get("type")
+                        if block_type == "L":
+                            list_elem = DictionaryObject(
+                                {
+                                    NameObject("/Type"): NameObject("/StructElem"),
+                                    NameObject("/S"): NameObject("/L"),
+                                    NameObject("/Pg"): page_ref,
+                                    NameObject("/K"): ArrayObject(),
+                                }
+                            )
+                            list_elem_ref = writer._add_object(list_elem)
+                            for li in block.get("items", []):
+                                li_elem = DictionaryObject(
+                                    {
+                                        NameObject("/Type"): NameObject("/StructElem"),
+                                        NameObject("/S"): NameObject("/LI"),
+                                        NameObject("/Pg"): page_ref,
+                                        NameObject("/K"): ArrayObject(),
+                                    }
+                                )
+                                li_elem_ref = writer._add_object(li_elem)
+                                lbl_elem = DictionaryObject(
+                                    {
+                                        NameObject("/Type"): NameObject("/StructElem"),
+                                        NameObject("/S"): NameObject("/Lbl"),
+                                        NameObject("/Pg"): page_ref,
+                                        NameObject("/K"): ArrayObject([NumberObject(m) for m in li.get("label", [])]),
+                                    }
+                                )
+                                lbl_ref = writer._add_object(lbl_elem)
+                                body_elem = DictionaryObject(
+                                    {
+                                        NameObject("/Type"): NameObject("/StructElem"),
+                                        NameObject("/S"): NameObject("/LBody"),
+                                        NameObject("/Pg"): page_ref,
+                                        NameObject("/K"): ArrayObject([NumberObject(m) for m in li.get("body", [])]),
+                                    }
+                                )
+                                body_ref = writer._add_object(body_elem)
+                                li_elem_ref.get_object()[NameObject("/K")].extend([lbl_ref, body_ref])
+                                list_elem_ref.get_object()[NameObject("/K")].append(li_elem_ref)
+                                for m in li.get("label", []) + li.get("body", []):
+                                    if 0 <= int(m) < len(mcid_map):
+                                        mcid_map[int(m)] = li_elem_ref
+                            sect_elem_ref.get_object()[NameObject("/K")].append(list_elem_ref)
+                            continue
+                        tag = block_type if isinstance(block_type, str) else "P"
+                        mcid_list = [NumberObject(m) for m in block.get("mcids", [])]
+                        elem_dict = {
+                            NameObject("/Type"): NameObject("/StructElem"),
+                            NameObject("/S"): NameObject(f"/{tag}"),
+                            NameObject("/Pg"): page_ref,
+                            NameObject("/K"): ArrayObject(mcid_list) if len(mcid_list) > 1 else (mcid_list[0] if mcid_list else ArrayObject()),
+                        }
+                        if tag == "Figure":
+                            elem_dict[NameObject("/Alt")] = TextStringObject("[TODO] Add alt text")
+                        elem = DictionaryObject(elem_dict)
+                        elem_ref = writer._add_object(elem)
+                        sect_elem_ref.get_object()[NameObject("/K")].append(elem_ref)
+                        for m in block.get("mcids", []):
+                            if 0 <= int(m) < len(mcid_map):
+                                mcid_map[int(m)] = elem_ref
+
+                    parent_nums.append(mcid_map)
             except Exception:
                 continue
-
-            parent_nums.append(page_fig_refs)
 
         doc_elem.update({NameObject("/K"): doc_kids})
         doc_elem_ref = writer._add_object(doc_elem)
@@ -624,13 +940,13 @@ def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     manual_review_added.append(
         _queue_manual_review(
             doc_id,
-            "rebuild_text_not_tagged",
+            "rebuild_structure_heuristic",
             "doc-1",
-            "Rebuild text tagging incomplete",
-            "Rebuild currently tags images with MCIDs; text tagging/headings require semantic inference.",
+            "Rebuild structure inferred",
+            "Structure tags inferred deterministically; verify headings, lists, and reading order.",
             pages=[],
             anchors=[],
-            suggested_fix="Add text structure tags and headings manually.",
+            suggested_fix="Review inferred structure and adjust tags for semantic accuracy.",
             confidence=0.6,
         )
     )
@@ -712,6 +1028,7 @@ def _queue_manual_review(
         "requiresHuman": True,
     }
     state.manual_review_queue.append(item)
+    REPO.add_manual_review_items(doc_id, [item])
     return item
 
 
@@ -726,6 +1043,30 @@ def _extract_text(path: Path) -> str:
         if text:
             chunks.append(text)
     return "\n".join(chunks).strip()
+
+
+def _extract_text_any(path: Path, doc_type: str) -> str:
+    if doc_type == DocumentType.PDF.value:
+        return _extract_text(path)
+    if doc_type == DocumentType.DOCX.value:
+        try:
+            doc = DocxDocument(str(path))
+            return "\n".join([(p.text or "") for p in doc.paragraphs]).strip()
+        except Exception:
+            return ""
+    if doc_type == DocumentType.PPTX.value:
+        try:
+            prs = Presentation(str(path))
+            chunks: List[str] = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    text = getattr(shape, "text", "") or ""
+                    if text:
+                        chunks.append(str(text))
+            return "\n".join(chunks).strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def _build_diff(before_text: str, after_text: str) -> str:
@@ -896,6 +1237,171 @@ def _analyze_pdf(
     return issues
 
 
+def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
+    parser = DOCXParser()
+    parsed = parser.parse(str(path))
+    issues: List[Dict[str, object]] = []
+    title = str(parsed.get("title", "") or "").strip()
+    language = str(parsed.get("language", "") or "").strip()
+    headings = parsed.get("headings", []) if isinstance(parsed.get("headings", []), list) else []
+    heading_jumps = parsed.get("headingJumps", []) if isinstance(parsed.get("headingJumps", []), list) else []
+    image_count = int(parsed.get("imageCount", 0) or 0)
+    missing_alt = int(parsed.get("missingAltCount", 0) or 0)
+
+    if not title:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-title",
+                "ruleId": "missing_document_title",
+                "title": "Missing document title",
+                "severity": "warning",
+                "description": "DOCX metadata title is missing.",
+                "locationHint": "Document metadata",
+                "recommendation": "Set a descriptive title in document properties.",
+                "evidence": {"sections": []},
+            }
+        )
+    if not language:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-language",
+                "ruleId": "missing_language",
+                "title": "Missing document language",
+                "severity": "warning",
+                "description": "DOCX metadata language is missing.",
+                "locationHint": "Document metadata",
+                "recommendation": "Set document language metadata.",
+                "evidence": {"sections": []},
+            }
+        )
+    if len(headings) == 0:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-headings",
+                "ruleId": "missing_heading_structure",
+                "title": "Missing heading structure",
+                "severity": "warning",
+                "description": "No heading styles were detected.",
+                "locationHint": "Document body",
+                "recommendation": "Apply Heading 1-6 styles to section headers.",
+                "evidence": {"sections": []},
+            }
+        )
+    if heading_jumps:
+        first = heading_jumps[0]
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-skipped-heading",
+                "ruleId": "skipped_heading_level",
+                "title": "Skipped heading level",
+                "severity": "warning",
+                "description": "Heading levels skip at least one level.",
+                "locationHint": f"Section {first.get('section', 0)}",
+                "recommendation": "Ensure heading levels progress without skips.",
+                "evidence": {"anchors": [{"section": first.get("section"), "kind": "heading"}], "jumps": heading_jumps[:10]},
+            }
+        )
+    if image_count > 0:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-alt-review",
+                "ruleId": "missing_alt_text",
+                "title": "Image alt text requires review",
+                "severity": "warning",
+                "description": "Programmatic DOCX alt text extraction is limited; manual validation required.",
+                "locationHint": f"{image_count} image(s) detected",
+                "recommendation": "Review each image and add meaningful alt text where needed.",
+                "evidence": {"images": image_count, "missingAltUnverified": missing_alt},
+            }
+        )
+    return issues
+
+
+def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
+    parser = PPTXParser()
+    parsed = parser.parse(str(path))
+    issues: List[Dict[str, object]] = []
+    title = str(parsed.get("title", "") or "").strip()
+    language = str(parsed.get("language", "") or "").strip()
+    headings = parsed.get("headings", []) if isinstance(parsed.get("headings", []), list) else []
+    slide_details = parsed.get("slides", []) if isinstance(parsed.get("slides", []), list) else []
+    reading_order_warnings = parsed.get("readingOrderWarnings", []) if isinstance(parsed.get("readingOrderWarnings", []), list) else []
+    image_count = int(parsed.get("imageCount", 0) or 0)
+    missing_alt = int(parsed.get("missingAltCount", 0) or 0)
+
+    if not title:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-title",
+                "ruleId": "missing_document_title",
+                "title": "Missing presentation title",
+                "severity": "warning",
+                "description": "PPTX metadata title is missing.",
+                "locationHint": "Presentation metadata",
+                "recommendation": "Set a descriptive title in presentation properties.",
+                "evidence": {"slides": []},
+            }
+        )
+    if not language:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-language",
+                "ruleId": "missing_language",
+                "title": "Missing presentation language",
+                "severity": "warning",
+                "description": "PPTX metadata language is missing.",
+                "locationHint": "Presentation metadata",
+                "recommendation": "Set presentation language metadata.",
+                "evidence": {"slides": []},
+            }
+        )
+    if not headings:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-headings",
+                "ruleId": "missing_heading_structure",
+                "title": "Missing slide title structure",
+                "severity": "warning",
+                "description": "No slide titles were detected.",
+                "locationHint": "Slides",
+                "recommendation": "Add title placeholders to improve navigability.",
+                "evidence": {"slides": [int(s.get("slide")) for s in slide_details if not s.get("title")]},
+            }
+        )
+    if image_count > 0 and missing_alt > 0:
+        slides = [int(s.get("slide")) for s in slide_details if int(s.get("images", 0) or 0) > 0][:10]
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-alt",
+                "ruleId": "missing_alt_text",
+                "title": "Images may be missing alt text",
+                "severity": "error",
+                "description": "One or more slide images are missing alternative text.",
+                "locationHint": f"{missing_alt} of {image_count} image(s)",
+                "recommendation": "Provide meaningful alt text on slide images.",
+                "evidence": {"slides": slides, "anchors": [{"slide": s, "kind": "image"} for s in slides]},
+            }
+        )
+    if reading_order_warnings:
+        first = reading_order_warnings[0]
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-reading-order",
+                "ruleId": "reading_order",
+                "title": "Reading order may be ambiguous",
+                "severity": "warning",
+                "description": "Shape order suggests potential reading order ambiguity on one or more slides.",
+                "locationHint": f"Slide {first.get('slide')}",
+                "recommendation": "Verify and adjust reading order in the selection pane.",
+                "evidence": {
+                    "slides": [int(item.get("slide")) for item in reading_order_warnings[:10]],
+                    "anchors": [{"slide": int(item.get("slide")), "kind": "shape-order"} for item in reading_order_warnings[:10]],
+                },
+            }
+        )
+    return issues
+
+
 def _anchors_from_nodes(nodes: Dict[str, Dict[str, object]], node_ids: List[Optional[str]]) -> List[Dict[str, object]]:
     anchors: List[Dict[str, object]] = []
     for node_id in node_ids:
@@ -1038,14 +1544,14 @@ def _find_skipped_heading_issue(nodes: Dict[str, Dict[str, object]]) -> Optional
 
 def _scan_worker(job_id: str, doc_id: str) -> None:
     _job_update(job_id, status="running", progress=0, message="Scanning document")
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         _job_update(job_id, status="error", progress=0, message="Document not found")
         return
     doc_path = Path(str(doc["path"]))
+    doc_type = str(doc.get("docType", "pdf")).lower()
     try:
-        _job_update(job_id, progress=5, message="Loading PDF")
+        _job_update(job_id, progress=5, message=f"Loading {doc_type.upper()}")
 
         def update_page_progress(current: int, total: int) -> None:
             if total <= 0:
@@ -1053,26 +1559,34 @@ def _scan_worker(job_id: str, doc_id: str) -> None:
             progress = 5 + int((current / total) * 85)
             _job_update(job_id, progress=progress, message=f"Scanning page {current} of {total}")
 
-        try:
-            tag_tree = extract_tag_tree(PdfReader(str(doc_path), strict=False))
-        except Exception as exc:
-            tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
-        tag_path = _write_tag_tree(doc_id, tag_tree)
-        with LOCK:
-            DOCS[doc_id]["tagTreePath"] = str(tag_path)
-            DOCS[doc_id]["tagSummary"] = tag_tree.get("summary", {})
-        issues = _analyze_pdf(doc_id, doc_path, on_page_progress=update_page_progress, tag_tree=tag_tree)
+        if doc_type == DocumentType.PDF.value:
+            try:
+                tag_tree = extract_tag_tree(PdfReader(str(doc_path), strict=False))
+            except Exception as exc:
+                tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
+            tag_path = _write_tag_tree(doc_id, tag_tree)
+            doc["tagTreePath"] = str(tag_path)
+            doc["tagSummary"] = tag_tree.get("summary", {})
+            _save_doc(doc_id, doc)
+            issues = _analyze_pdf(doc_id, doc_path, on_page_progress=update_page_progress, tag_tree=tag_tree)
+        elif doc_type == DocumentType.DOCX.value:
+            issues = _analyze_docx(doc_id, doc_path)
+        elif doc_type == DocumentType.PPTX.value:
+            issues = _analyze_pptx(doc_id, doc_path)
+        else:
+            issues = []
         _job_update(job_id, progress=95, message="Finalizing issues")
     except Exception as exc:
         _job_update(job_id, status="error", progress=0, message=f"Scan failed: {exc.__class__.__name__}")
         return
-    if issues:
-        with LOCK:
-            ISSUES[doc_id] = issues
+    keys = [_issue_key(issue) for issue in issues]
+    REPO.save_issues(doc_id, "before", issues, keys)
     with LOCK:
         ISSUES[doc_id] = issues
-        DOCS[doc_id]["issues"] = issues
         JOBS[job_id].update(status="done", progress=100, message="Scan complete")
+    doc["issues"] = issues
+    _save_doc(doc_id, doc)
+    REPO.update_job(job_id, {"status": "done", "progress": 100, "message": "Scan complete"})
 
 
 @router.post("/documents/upload")
@@ -1085,22 +1599,30 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
     with dest.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     size = dest.stat().st_size
+    doc_type = _infer_doc_type(file.filename or "").value
     with LOCK:
         DOCS[doc_id] = {
             "filename": file.filename,
             "path": str(dest),
+            "docType": doc_type,
         }
-    return {"docId": doc_id, "filename": file.filename, "sizeBytes": size}
+    _save_doc(doc_id, DOCS[doc_id])
+    return {"docId": doc_id, "filename": file.filename, "sizeBytes": size, "docType": doc_type}
+
+
+@router.get("/documents")
+async def list_documents() -> List[Dict[str, object]]:
+    return REPO.list_documents()
 
 
 @router.post("/documents/{doc_id}/scan")
 async def start_scan(doc_id: str) -> dict:
-    with LOCK:
-        if doc_id not in DOCS:
-            raise HTTPException(status_code=404, detail="Document not found")
+    if _get_doc(doc_id) is None:
+        raise HTTPException(status_code=404, detail="Document not found")
     job_id = f"job-{int(time.time() * 1000)}"
     with LOCK:
         JOBS[job_id] = {"jobId": job_id, "status": "queued", "progress": 0}
+    REPO.save_job({"jobId": job_id, "docId": doc_id, "status": "queued", "progress": 0, "message": "Queued"})
     thread = threading.Thread(target=_scan_worker, args=(job_id, doc_id), daemon=True)
     thread.start()
     return {"jobId": job_id}
@@ -1111,6 +1633,8 @@ async def get_job(job_id: str) -> dict:
     with LOCK:
         job = JOBS.get(job_id)
     if not job:
+        job = REPO.get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
@@ -1119,46 +1643,64 @@ async def get_job(job_id: str) -> dict:
 async def get_issues(doc_id: str) -> List[Dict[str, object]]:
     with LOCK:
         issues = ISSUES.get(doc_id, [])
+    if not issues:
+        issues = REPO.get_latest_issues(doc_id)
     return issues
 
 
 @router.post("/documents/{doc_id}/apply-fixes")
 async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     _ensure_dirs()
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
+    doc_type = str(doc.get("docType", "pdf")).lower()
     fixed_dir = FIXED_DIR / doc_id
     fixed_dir.mkdir(parents=True, exist_ok=True)
-    fixed_dest = fixed_dir / "fixed.pdf"
+    suffix = src.suffix if src.suffix else ".bin"
+    fixed_dest = fixed_dir / f"fixed{suffix}"
     rebuild_dest = fixed_dir / "rebuilt.pdf"
-    fix_result = _apply_pdf_fixes(doc_id, src, fixed_dest)
+    before_issues = REPO.get_issues(doc_id, "before")
+    if not before_issues:
+        before_issues = doc.get("issues", []) if isinstance(doc.get("issues"), list) else []
+    if doc_type == DocumentType.PDF.value:
+        fix_result = _apply_pdf_fixes(doc_id, src, fixed_dest)
+    elif doc_type == DocumentType.DOCX.value:
+        fix_result = _apply_docx_fixes(doc_id, src, fixed_dest)
+    elif doc_type == DocumentType.PPTX.value:
+        fix_result = _apply_pptx_fixes(doc_id, src, fixed_dest)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported document type: {doc_type}")
     rebuild_result: Dict[str, object] = {"manual_review_added": []}
     rebuilt = False
-    if mode == "rebuild":
+    if mode == "rebuild" and doc_type == DocumentType.PDF.value:
         rebuild_result = _rebuild_pdf(doc_id, src, rebuild_dest)
         rebuilt = True
     fixed_issues: List[Dict[str, object]] = []
     scan_after_error: Optional[str] = None
     try:
         scan_target = rebuild_dest if rebuilt else fixed_dest
-        try:
-            tag_tree = extract_tag_tree(PdfReader(str(scan_target), strict=False))
-        except Exception as exc:
-            tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
-        tag_path = _write_tag_tree(doc_id, tag_tree)
-        with LOCK:
-            DOCS[doc_id]["tagTreePath"] = str(tag_path)
-            DOCS[doc_id]["tagSummary"] = tag_tree.get("summary", {})
-        fixed_issues = _analyze_pdf(doc_id, scan_target, tag_tree=tag_tree)
+        if doc_type == DocumentType.PDF.value:
+            try:
+                tag_tree = extract_tag_tree(PdfReader(str(scan_target), strict=False))
+            except Exception as exc:
+                tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
+            tag_path = _write_tag_tree(doc_id, tag_tree)
+            doc["tagTreePath"] = str(tag_path)
+            doc["tagSummary"] = tag_tree.get("summary", {})
+            fixed_issues = _analyze_pdf(doc_id, scan_target, tag_tree=tag_tree)
+        elif doc_type == DocumentType.DOCX.value:
+            fixed_issues = _analyze_docx(doc_id, scan_target)
+        elif doc_type == DocumentType.PPTX.value:
+            fixed_issues = _analyze_pptx(doc_id, scan_target)
+        else:
+            fixed_issues = []
         with LOCK:
             ISSUES[doc_id] = fixed_issues
     except Exception as exc:
         scan_after_error = f"after-scan failed: {exc.__class__.__name__}: {exc}"
         fixed_issues = []
-    before_issues = DOCS.get(doc_id, {}).get("issues", [])
     if scan_after_error:
         after_issues = list(before_issues)
         delta = {"fixed": [], "remaining": list(before_issues), "introduced": []}
@@ -1177,13 +1719,17 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     rebuilt_exists = rebuilt and rebuild_dest.exists() and rebuilt_size > 0
     print(f"[apply_fixes] fixed_path={fixed_dest} size={fixed_size}")
     print(f"[apply_fixes] before={len(before_issues)} after={len(after_issues)}")
-    fixed_doc_id = f"{doc_id}:fixed"
-    rebuilt_doc_id = f"{doc_id}:rebuilt"
+    fixed_doc_id = doc_id
+    rebuilt_doc_id = doc_id if rebuilt else None
+    ai_suggestions = build_alt_text_suggestions(doc_id, doc_type, src, before_issues)
+    manual_review_items = fix_result.get("manual_review_added", []) + rebuild_result.get("manual_review_added", [])
+    manual_review_items.extend(ai_suggestions)
+
     report = {
         "docId": doc_id,
         "fixedDocId": fixed_doc_id,
         "fixedPath": str(fixed_dest),
-        "rebuiltDocId": rebuilt_doc_id if rebuilt else None,
+        "rebuiltDocId": rebuilt_doc_id,
         "rebuiltPath": str(rebuild_dest) if rebuilt else None,
         "scanTargetPath": str(scan_target),
         "fixedExists": fixed_exists,
@@ -1194,7 +1740,7 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
         "before": _summarize_issues(before_issues),
         "after": _summarize_issues(after_issues),
         "delta": delta,
-        "manualReview": fix_result.get("manual_review_added", []) + rebuild_result.get("manual_review_added", []),
+        "manualReview": manual_review_items,
         "beforeAfter": {
             "metadata_before": fix_result.get("metadata_before", {}),
             "metadata_after": fix_result.get("metadata_after", {}),
@@ -1206,9 +1752,17 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     report["scanAfterOk"] = scan_after_error is None
     if scan_after_error:
         report["scanAfterError"] = scan_after_error
-    DOCS[doc_id]["fixReport"] = report
-    DOCS[doc_id]["issues_before"] = before_issues
-    DOCS[doc_id]["issues_after"] = after_issues
+    doc["fixReport"] = report
+    doc["issues_before"] = before_issues
+    doc["issues_after"] = after_issues
+    doc["fixedPath"] = str(fixed_dest)
+    if rebuilt:
+        doc["rebuiltPath"] = str(rebuild_dest)
+    _save_doc(doc_id, doc)
+    REPO.save_issues(doc_id, "before", before_issues, [_issue_key(i) for i in before_issues])
+    REPO.save_issues(doc_id, "after", after_issues, [_issue_key(i) for i in after_issues])
+    REPO.save_fix_report(doc_id, report)
+    REPO.add_manual_review_items(doc_id, report.get("manualReview", []) if isinstance(report.get("manualReview"), list) else [])
     report_path = RESULTS_DIR / doc_id / "fix_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -1217,13 +1771,12 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
 
 @router.get("/documents/{doc_id}/download")
 async def download_document(doc_id: str, variant: Optional[str] = "original") -> FileResponse:
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
     if variant == "fixed":
-        fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
+        fixed_path = Path(str(doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath") or ""))
         if not fixed_path.exists():
             raise HTTPException(status_code=404, detail="Fixed document not found")
         return FileResponse(str(fixed_path), filename=fixed_path.name)
@@ -1232,10 +1785,11 @@ async def download_document(doc_id: str, variant: Optional[str] = "original") ->
 
 @router.get("/documents/{doc_id}/pdf")
 async def download_pdf(doc_id: str) -> FileResponse:
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    if str(doc.get("docType", "pdf")) != DocumentType.PDF.value:
+        raise HTTPException(status_code=400, detail="Document is not a PDF")
     src = Path(str(doc["path"]))
     if not src.exists():
         raise HTTPException(status_code=404, detail="Document file not found")
@@ -1249,15 +1803,18 @@ async def head_pdf(doc_id: str) -> FileResponse:
 
 @router.get("/documents/{doc_id}/pdf-fixed")
 async def download_pdf_fixed(doc_id: str) -> FileResponse:
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    src = Path(str(doc["path"]))
-    fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
+    fixed_path = Path(str(doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath") or ""))
+    if not str(fixed_path):
+        report = REPO.get_fix_report(doc_id)
+        if report and report.get("fixedPath"):
+            fixed_path = Path(str(report["fixedPath"]))
     if not fixed_path.exists():
         raise HTTPException(status_code=404, detail="Fixed document not found")
-    return FileResponse(str(fixed_path), filename=fixed_path.name, media_type="application/pdf")
+    media_type = "application/pdf" if fixed_path.suffix.lower() == ".pdf" else None
+    return FileResponse(str(fixed_path), filename=fixed_path.name, media_type=media_type)
 
 
 @router.head("/documents/{doc_id}/pdf-fixed")
@@ -1265,13 +1822,17 @@ async def head_pdf_fixed(doc_id: str) -> FileResponse:
     return await download_pdf_fixed(doc_id)
 
 
+@router.get("/documents/{doc_id}/file-fixed")
+async def download_fixed_file(doc_id: str) -> FileResponse:
+    return await download_pdf_fixed(doc_id)
+
+
 @router.get("/documents/{doc_id}/pdf-rebuilt")
 async def download_pdf_rebuilt(doc_id: str) -> FileResponse:
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    rebuilt_path = FIXED_DIR / doc_id / "rebuilt.pdf"
+    rebuilt_path = Path(str(doc.get("rebuiltPath") or ""))
     if not rebuilt_path.exists():
         raise HTTPException(status_code=404, detail="Rebuilt document not found")
     return FileResponse(str(rebuilt_path), filename=rebuilt_path.name, media_type="application/pdf")
@@ -1284,51 +1845,86 @@ async def head_pdf_rebuilt(doc_id: str) -> FileResponse:
 
 @router.get("/documents/{doc_id}/summary")
 async def document_summary(doc_id: str) -> Dict[str, object]:
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
-    reader = PdfReader(str(src), strict=False)
-    metadata = reader.metadata
-    title = metadata.title if metadata else None
-    image_count = _extract_images(reader)
-    try:
-        tag_tree = extract_tag_tree(reader)
-    except Exception as exc:
-        tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
-    summary = tag_tree.get("summary", {})
-    outline_count = _outline_count(reader)
-    form_counts = _form_field_counts(reader)
+    doc_type = str(doc.get("docType", "pdf"))
+    if doc_type == DocumentType.PDF.value:
+        reader = PdfReader(str(src), strict=False)
+        metadata = reader.metadata
+        title = metadata.title if metadata else None
+        image_count = _extract_images(reader)
+        try:
+            tag_tree = extract_tag_tree(reader)
+        except Exception as exc:
+            tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
+        summary = tag_tree.get("summary", {})
+        outline_count = _outline_count(reader)
+        form_counts = _form_field_counts(reader)
+        return {
+            "docId": doc_id,
+            "title": title if title else "",
+            "pages": len(reader.pages),
+            "images": image_count,
+            "tagged": bool(tag_tree.get("tagged")),
+            "nodeCount": summary.get("nodeCount", 0),
+            "tagCounts": summary.get("tagCounts", {}),
+            "figures": summary.get("figures", 0),
+            "figuresMissingAlt": summary.get("figuresMissingAlt", 0),
+            "outlineCount": outline_count,
+            "formFields": form_counts["total"],
+            "unlabeledFields": form_counts["unlabeled"],
+            "docType": doc_type,
+        }
+    if doc_type == DocumentType.DOCX.value:
+        parsed = DOCXParser().parse(str(src))
+        return {
+            "docId": doc_id,
+            "title": parsed.get("title", ""),
+            "pages": 0,
+            "images": parsed.get("imageCount", 0),
+            "tagged": False,
+            "nodeCount": 0,
+            "tagCounts": {},
+            "figures": parsed.get("imageCount", 0),
+            "figuresMissingAlt": parsed.get("missingAltCount", 0),
+            "outlineCount": parsed.get("outlineCount", 0),
+            "formFields": 0,
+            "unlabeledFields": 0,
+            "docType": doc_type,
+        }
+    parsed = PPTXParser().parse(str(src))
     return {
         "docId": doc_id,
-        "title": title if title else "",
-        "pages": len(reader.pages),
-        "images": image_count,
-        "tagged": bool(tag_tree.get("tagged")),
-        "nodeCount": summary.get("nodeCount", 0),
-        "tagCounts": summary.get("tagCounts", {}),
-        "figures": summary.get("figures", 0),
-        "figuresMissingAlt": summary.get("figuresMissingAlt", 0),
-        "outlineCount": outline_count,
-        "formFields": form_counts["total"],
-        "unlabeledFields": form_counts["unlabeled"],
+        "title": parsed.get("title", ""),
+        "pages": parsed.get("slideCount", 0),
+        "images": parsed.get("imageCount", 0),
+        "tagged": False,
+        "nodeCount": 0,
+        "tagCounts": {},
+        "figures": parsed.get("imageCount", 0),
+        "figuresMissingAlt": parsed.get("missingAltCount", 0),
+        "outlineCount": len(parsed.get("headings", [])) if isinstance(parsed.get("headings", []), list) else 0,
+        "formFields": 0,
+        "unlabeledFields": 0,
+        "docType": doc_type,
     }
 
 
 @router.get("/documents/{doc_id}/diff")
 async def document_diff(doc_id: str) -> Dict[str, object]:
-    with LOCK:
-        doc = DOCS.get(doc_id)
+    doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     src = Path(str(doc["path"]))
-    fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
+    fixed_path = Path(str(doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath") or ""))
+    doc_type = str(doc.get("docType", "pdf"))
     if not fixed_path.exists():
         raise HTTPException(status_code=404, detail="Fixed document not found")
 
-    before_text = _extract_text(src)
-    after_text = _extract_text(fixed_path)
+    before_text = _extract_text_any(src, doc_type)
+    after_text = _extract_text_any(fixed_path, doc_type)
     diff_text = _build_diff(before_text, after_text)
 
     if len(before_text) > MAX_DIFF_CHARS:
@@ -1358,26 +1954,33 @@ async def get_tag_tree(doc_id: str) -> Dict[str, object]:
 
 @router.get("/documents/{doc_id}/fix-report")
 async def get_fix_report(doc_id: str) -> Dict[str, object]:
-    with LOCK:
-        doc = DOCS.get(doc_id, {})
+    doc = _get_doc(doc_id) or {}
     report = doc.get("fixReport")
     if report:
         return report
+    persisted = REPO.get_fix_report(doc_id)
+    if persisted:
+        return persisted
     report_path = RESULTS_DIR / doc_id / "fix_report.json"
     if report_path.exists():
         try:
             return json.loads(report_path.read_text(encoding="utf-8"))
         except Exception:
             pass
+    fixed_path = FIXED_DIR / doc_id / "fixed.pdf"
+    if fixed_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Fix report not found (fixed.pdf exists but fix_report.json is missing).",
+        )
     raise HTTPException(status_code=404, detail="Fix report not found")
 
 
 @router.get("/documents/{doc_id}/debug-issues")
 async def debug_issues(doc_id: str) -> Dict[str, object]:
-    with LOCK:
-        doc = DOCS.get(doc_id, {})
-    before_issues = doc.get("issues_before", doc.get("issues", [])) or []
-    after_issues = doc.get("issues_after", []) or []
+    doc = _get_doc(doc_id) or {}
+    before_issues = REPO.get_issues(doc_id, "before") or (doc.get("issues_before", doc.get("issues", [])) or [])
+    after_issues = REPO.get_issues(doc_id, "after") or (doc.get("issues_after", []) or [])
     before_keys = [_issue_key(issue) for issue in before_issues][:5]
     after_keys = [_issue_key(issue) for issue in after_issues][:5]
     fixed_path = doc.get("fixReport", {}).get("fixedPath")
@@ -1401,11 +2004,27 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
     mcid_counts: List[int] = []
     text_mcid_counts: List[int] = []
     struct_root_exists = False
+    parent_tree_ok = False
+    struct_counts: Dict[str, int] = {}
+    mcid_coverage: List[Dict[str, object]] = []
     if rebuilt_path and Path(str(rebuilt_path)).exists():
         try:
             rebuilt_reader = PdfReader(str(rebuilt_path), strict=False)
             root = rebuilt_reader.trailer.get("/Root", {})
             struct_root_exists = "/StructTreeRoot" in root
+            if struct_root_exists:
+                try:
+                    summary = extract_tag_tree(rebuilt_reader).get("summary", {})
+                    struct_counts = summary.get("tagCounts", {})
+                except Exception:
+                    struct_counts = {}
+            parent_tree = None
+            try:
+                struct_root = root.get("/StructTreeRoot")
+                if struct_root:
+                    parent_tree = struct_root.get("/ParentTree")
+            except Exception:
+                parent_tree = None
             for page in rebuilt_reader.pages:
                 count = 0
                 text_count = 0
@@ -1427,6 +2046,25 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
                     text_count = 0
                 mcid_counts.append(count)
                 text_mcid_counts.append(text_count)
+            if parent_tree and isinstance(parent_tree, dict):
+                nums = parent_tree.get("/Nums")
+                if isinstance(nums, list) and len(nums) >= 2:
+                    parent_tree_ok = True
+                    for idx in range(0, len(nums), 2):
+                        page_index = nums[idx]
+                        arr = nums[idx + 1] if idx + 1 < len(nums) else None
+                        if isinstance(page_index, int) and isinstance(arr, list):
+                            max_mcid = len(arr) - 1
+                            mapped = sum(1 for entry in arr if entry is not None)
+                            total = mcid_counts[page_index] if page_index < len(mcid_counts) else 0
+                            mcid_coverage.append(
+                                {
+                                    "page": page_index + 1,
+                                    "maxMcid": max_mcid,
+                                    "mappedMcids": mapped,
+                                    "totalMcids": total,
+                                }
+                            )
         except Exception:
             mcid_counts = []
             text_mcid_counts = []
@@ -1446,6 +2084,9 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
         "rebuiltStructRoot": struct_root_exists,
         "mcidCounts": mcid_counts,
         "textMcidCounts": text_mcid_counts,
+        "parentTreeOk": parent_tree_ok,
+        "structCounts": struct_counts,
+        "mcidCoverage": mcid_coverage,
         "anchorCountsByRuleId": _anchor_counts_by_rule(after_issues),
         "sampleAnchorsByRuleId": _sample_anchors_by_rule(after_issues),
     }

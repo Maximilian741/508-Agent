@@ -1,14 +1,14 @@
 import { ReactNode } from "react";
-import { StyleSheet, Text, View, ViewStyle } from "react-native";
+import { StyleProp, StyleSheet, Text, TextStyle, View, ViewStyle } from "react-native";
 
 import { useTheme } from "../useTheme";
 
 interface ChipProps {
   label: string;
   tone?: "default" | "success" | "warning" | "danger" | "info";
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
   icon?: ReactNode;
-  textStyle?: ViewStyle;
+  textStyle?: StyleProp<TextStyle>;
 }
 
 export function Chip({ label, tone = "default", style, icon, textStyle }: ChipProps) {

@@ -32,10 +32,9 @@ export function Button({
     <Pressable
       onPress={onPress}
       disabled={isDisabled}
-      style={({ pressed, hovered }) => [
+      style={({ pressed }) => [
         styles.base,
         styles[variant],
-        hovered && !isDisabled ? styles.hovered : null,
         pressed && !isDisabled ? styles.pressed : null,
         isDisabled ? styles.disabled : null,
         style,
@@ -103,10 +102,6 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
     pressed: {
       opacity: 0.85,
       transform: [{ scale: 0.98 }],
-    },
-    hovered: {
-      opacity: 0.95,
-      transform: [{ scale: 0.99 }],
     },
     disabled: {
       opacity: 0.5,

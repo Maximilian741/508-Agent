@@ -58,7 +58,22 @@ export const shadows = {
   subtle: baseShadow,
 } as const;
 
-export const lightColors = {
+export type ThemeColors = {
+  bg: string;
+  surface: string;
+  surface2: string;
+  text: string;
+  textMuted: string;
+  border: string;
+  shadow: string;
+  accent: string;
+  success: string;
+  warning: string;
+  danger: string;
+  info: string;
+};
+
+export const lightColors: ThemeColors = {
   bg: "#F6F7FB",
   surface: "#FFFFFF",
   surface2: "#F1F3F8",
@@ -73,7 +88,7 @@ export const lightColors = {
   info: "#0EA5E9",
 } as const;
 
-export const darkColors = {
+export const darkColors: ThemeColors = {
   bg: "#0B0F1A",
   surface: "#121826",
   surface2: "#1A2233",
@@ -87,8 +102,6 @@ export const darkColors = {
   danger: "#F87171",
   info: "#38BDF8",
 } as const;
-
-export type ThemeColors = typeof lightColors;
 
 export type Theme = {
   colors: ThemeColors;

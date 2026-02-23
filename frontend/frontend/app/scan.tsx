@@ -3,6 +3,7 @@ import {
   FlatList,
   Platform,
   Pressable,
+  PressableStateCallbackType,
   StyleSheet,
   Text,
   TextInput,
@@ -58,6 +59,8 @@ export default function ScanScreen() {
   const [noVisualDiff, setNoVisualDiff] = useState(false);
   const [showIssueHighlight, setShowIssueHighlight] = useState(true);
   const [fixReportFilter, setFixReportFilter] = useState<"all" | "fixed" | "remaining" | "manual">("all");
+  const [showBeforeIssues, setShowBeforeIssues] = useState(false);
+  const [showAfterIssues, setShowAfterIssues] = useState(false);
   const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
   const originalCanvasRefs = useRef<HTMLCanvasElement[]>([]);
   const fixedCanvasRefs = useRef<HTMLCanvasElement[]>([]);
@@ -65,6 +68,37 @@ export default function ScanScreen() {
   const renderSeqRef = useRef(0);
   const overlayCanvasRefs = useRef<HTMLCanvasElement[]>([]);
   const overlayFixedCanvasRefs = useRef<HTMLCanvasElement[]>([]);
+  const originalDocRef = useRef<any | null>(null);
+  const afterDocRef = useRef<any | null>(null);
+  const cachedOriginalUrlRef = useRef<string | null>(null);
+  const cachedAfterUrlRef = useRef<string | null>(null);
+
+  const resetPdfCache = async () => {
+    try {
+      await originalDocRef.current?.destroy?.();
+    } catch {
+      // ignore
+    }
+    try {
+      await afterDocRef.current?.destroy?.();
+    } catch {
+      // ignore
+    }
+    originalDocRef.current = null;
+    afterDocRef.current = null;
+    cachedOriginalUrlRef.current = null;
+    cachedAfterUrlRef.current = null;
+  };
+
+  const resetAfterCache = async () => {
+    try {
+      await afterDocRef.current?.destroy?.();
+    } catch {
+      // ignore
+    }
+    afterDocRef.current = null;
+    cachedAfterUrlRef.current = null;
+  };
 
   const isWide = Platform.OS === "web" && width >= 980;
 
@@ -77,7 +111,7 @@ export default function ScanScreen() {
         term.length === 0 ||
         issue.description.toLowerCase().includes(term) ||
         issue.ruleId.toLowerCase().includes(term) ||
-        issue.nodeId.toLowerCase().includes(term);
+        issue.locationHint.toLowerCase().includes(term);
       return matchesSeverity && matchesSearch;
     });
     const sorted = [...filtered].sort((a, b) => {
@@ -148,6 +182,16 @@ export default function ScanScreen() {
     return { fixed, remaining, introduced, manual };
   }, [fixReport, fixReportFilter]);
 
+  const beforeIssues = useMemo(() => {
+    if (!fixReport) return [];
+    return uniqueIssues([...(fixReport.delta?.fixed ?? []), ...(fixReport.delta?.remaining ?? [])]);
+  }, [fixReport]);
+
+  const afterIssues = useMemo(() => {
+    if (!fixReport) return [];
+    return uniqueIssues([...(fixReport.delta?.remaining ?? []), ...(fixReport.delta?.introduced ?? [])]);
+  }, [fixReport]);
+
   const focusedIssueStatus = useMemo(() => {
     if (!fixReport || !focusedIssue) return "unknown";
     const key = makeIssueKey(focusedIssue);
@@ -173,13 +217,23 @@ export default function ScanScreen() {
   }
 
   const displayDocumentId = uploadedDocument?.docId ?? scanResults?.documentId ?? "doc-1";
-  const originalUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf` : null;
-  const fixedUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf-fixed` : null;
+  const docExt = (uploadedDocument?.filename ?? "").toLowerCase();
+  const isPdfDoc = (uploadedDocument?.docType ?? (docExt.endsWith(".pdf") ? "pdf" : docExt.endsWith(".docx") ? "docx" : docExt.endsWith(".pptx") ? "pptx" : "pdf")) === "pdf";
+  const originalUrl = uploadedDocument
+    ? isPdfDoc
+      ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf`
+      : `${apiBaseUrl}/documents/${uploadedDocument.docId}/download`
+    : null;
+  const fixedUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/file-fixed` : null;
   const rebuiltUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf-rebuilt` : null;
   const fixedAvailable = fixReport?.fixedExists === true;
   const rebuiltAvailable = fixReport?.rebuiltExists === true;
   const afterUrl =
-    afterVariant === "rebuilt" && rebuiltAvailable
+    !isPdfDoc
+      ? fixedAvailable
+        ? fixedUrl
+        : null
+      : afterVariant === "rebuilt" && rebuiltAvailable
       ? rebuiltUrl
       : fixedAvailable
       ? fixedUrl
@@ -226,8 +280,16 @@ export default function ScanScreen() {
   }, [afterUrl, fixReport]);
 
   useEffect(() => {
+    void resetPdfCache();
+  }, [uploadedDocument?.docId]);
+
+  useEffect(() => {
+    void resetAfterCache();
+  }, [afterVariant, fixReport?.fixedPath, fixReport?.rebuiltPath]);
+
+  useEffect(() => {
     const renderVisualDiff = async () => {
-      if (!uploadedDocument || !afterUrl) return;
+      if (!uploadedDocument || !afterUrl || !isPdfDoc) return;
       if (Platform.OS !== "web") return;
       setPdfLoading(true);
       setPdfError(null);
@@ -245,7 +307,7 @@ export default function ScanScreen() {
               return;
             }
             const url = `${window.location.origin}/pdfjs/pdf.mjs`;
-            const dynamicImport = (0, eval) as (code: string) => Promise<any>;
+            const dynamicImport = eval as (code: string) => Promise<any>;
             dynamicImport(`import("${url}")`)
               .then((module) => {
                 const resolved = module?.default ?? module;
@@ -267,27 +329,47 @@ export default function ScanScreen() {
           setPdfError("Missing document URLs for diff rendering.");
           return;
         }
-        const [originalResponse, fixedResponse] = await Promise.all([
-          fetch(originalUrl, { cache: "no-store", mode: "cors" }),
-          fetch(afterUrl, { cache: "no-store", mode: "cors" }),
-        ]);
-        if (!originalResponse.ok) {
-          throw new Error(`Original PDF fetch failed: ${originalResponse.status}`);
+        if (cachedOriginalUrlRef.current !== originalUrl || !originalDocRef.current) {
+          if (originalDocRef.current) {
+            try {
+              await originalDocRef.current.destroy?.();
+            } catch {
+              // ignore
+            }
+            originalDocRef.current = null;
+          }
+          const originalResponse = await fetch(originalUrl, { cache: "no-store", mode: "cors" });
+          if (!originalResponse.ok) {
+            throw new Error(`Original PDF fetch failed: ${originalResponse.status}`);
+          }
+          const originalBuffer = await originalResponse.arrayBuffer();
+          const originalTask = pdfjs.getDocument({ data: originalBuffer, disableWorker: true });
+          originalDocRef.current = await originalTask.promise;
+          cachedOriginalUrlRef.current = originalUrl;
         }
-        if (!fixedResponse.ok) {
-          const targetLabel = afterVariant === "rebuilt" ? "rebuilt" : "fixed";
-          throw new Error(
-            `After PDF fetch failed (${targetLabel}): ${fixedResponse.status} for ${afterUrl ?? "unknown URL"}`,
-          );
+        if (cachedAfterUrlRef.current !== afterUrl || !afterDocRef.current) {
+          if (afterDocRef.current) {
+            try {
+              await afterDocRef.current.destroy?.();
+            } catch {
+              // ignore
+            }
+            afterDocRef.current = null;
+          }
+          const fixedResponse = await fetch(afterUrl, { cache: "no-store", mode: "cors" });
+          if (!fixedResponse.ok) {
+            const targetLabel = afterVariant === "rebuilt" ? "rebuilt" : "fixed";
+            throw new Error(
+              `After PDF fetch failed (${targetLabel}): ${fixedResponse.status} for ${afterUrl ?? "unknown URL"}`,
+            );
+          }
+          const fixedBuffer = await fixedResponse.arrayBuffer();
+          const fixedTask = pdfjs.getDocument({ data: fixedBuffer, disableWorker: true });
+          afterDocRef.current = await fixedTask.promise;
+          cachedAfterUrlRef.current = afterUrl;
         }
-        const [originalBuffer, fixedBuffer] = await Promise.all([
-          originalResponse.arrayBuffer(),
-          fixedResponse.arrayBuffer(),
-        ]);
-        const originalTask = pdfjs.getDocument({ data: originalBuffer, disableWorker: true });
-        const fixedTask = pdfjs.getDocument({ data: fixedBuffer, disableWorker: true });
-        const originalPdf = await originalTask.promise;
-        const fixedPdf = await fixedTask.promise;
+        const originalPdf = originalDocRef.current;
+        const fixedPdf = afterDocRef.current;
         const maxPages = Math.min(originalPdf.numPages, fixedPdf.numPages);
         setPageCount(maxPages);
         const safePage = Math.min(Math.max(currentPage, 1), maxPages || 1);
@@ -382,7 +464,7 @@ export default function ScanScreen() {
       }
     };
     void renderVisualDiff();
-  }, [uploadedDocument, afterUrl, originalUrl, currentPage, focusedIssue, afterVariant]);
+  }, [uploadedDocument, afterUrl, originalUrl, currentPage, focusedIssue, afterVariant, isPdfDoc]);
 
   return (
     <Screen scroll>
@@ -413,7 +495,7 @@ export default function ScanScreen() {
           <View style={styles.filterRow}>
             {(["all", "error", "warning", "info"] as const).map((value) => (
               <Pressable key={value} onPress={() => setSeverityFilter(value)}>
-                {({ hovered, pressed }) => (
+                {({ pressed }: PressableStateCallbackType) => (
                   <Chip
                     label={value === "all" ? "All" : value === "error" ? "Issue" : value === "warning" ? "Warning" : "Info"}
                     tone={value === "error" ? "danger" : value === "warning" ? "warning" : value === "info" ? "info" : "default"}
@@ -438,7 +520,6 @@ export default function ScanScreen() {
                                 : theme.colors.accent,
                           }
                         : undefined,
-                      hovered ? styles.filterHover : null,
                       pressed ? styles.filterPressed : null,
                     ]}
                     textStyle={severityFilter === value ? { color: theme.colors.surface } : undefined}
@@ -537,24 +618,62 @@ export default function ScanScreen() {
               <View style={styles.diffPanel}>
                 <Text style={[styles.diffTitle, { color: theme.colors.text }]}>Before</Text>
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                  {documentIssues.length + 1} issues detected before fixes
+                  {beforeIssues.length} issues detected before fixes
                 </Text>
-                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                  {fixReport?.applied_fixes?.[0]
-                    ? `Top fixed: ${fixReport.applied_fixes[0].ruleId}`
-                    : "Top fixed: none"}
-                </Text>
+                <Pressable onPress={() => setShowBeforeIssues((prev) => !prev)}>
+                  <Text style={[styles.link, { color: theme.colors.accent }]}>
+                    {showBeforeIssues ? "Hide issues" : "Show issues"}
+                  </Text>
+                </Pressable>
+                {showBeforeIssues && (
+                  <View style={styles.panelIssueList}>
+                    {beforeIssues.length === 0 ? (
+                      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No issues captured.</Text>
+                    ) : (
+                      beforeIssues.map((issue) => (
+                        <View key={`before-${issue.id}`} style={styles.panelIssueRow}>
+                          <Chip
+                            label={issue.severity.toUpperCase()}
+                            tone={issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info"}
+                          />
+                          <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                            {issue.ruleId}: {issue.title}
+                          </Text>
+                        </View>
+                      ))
+                    )}
+                  </View>
+                )}
               </View>
               <View style={styles.diffPanel}>
                 <Text style={[styles.diffTitle, { color: theme.colors.text }]}>After</Text>
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                  {documentIssues.length} issues remaining after fixes
+                  {afterIssues.length} issues remaining/introduced after fixes
                 </Text>
-                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                  {fixReport?.remaining_issues?.[0]
-                    ? `Top remaining: ${fixReport.remaining_issues[0].ruleId}`
-                    : "Top remaining: none"}
-                </Text>
+                <Pressable onPress={() => setShowAfterIssues((prev) => !prev)}>
+                  <Text style={[styles.link, { color: theme.colors.accent }]}>
+                    {showAfterIssues ? "Hide issues" : "Show issues"}
+                  </Text>
+                </Pressable>
+                {showAfterIssues && (
+                  <View style={styles.panelIssueList}>
+                    {afterIssues.length === 0 ? (
+                      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No issues captured.</Text>
+                    ) : (
+                      afterIssues.map((issue) => (
+                        <View key={`after-${issue.id}`} style={styles.panelIssueRow}>
+                          <Chip
+                            label={issue.severity.toUpperCase()}
+                            tone={issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info"}
+                          />
+                          <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                            {issue.ruleId}: {issue.title}
+                          </Text>
+                        </View>
+                      ))
+                    )}
+                  </View>
+                )}
               </View>
             </View>
           )}
@@ -738,6 +857,11 @@ export default function ScanScreen() {
                 Visual diff is available on web only.
               </Text>
             )}
+            {!isPdfDoc && (
+              <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                Preview not available for this file type yet. Issues and fix report are still available.
+              </Text>
+            )}
             {pdfError && (
               <Text style={[styles.nodeId, { color: theme.colors.danger }]}>{pdfError}</Text>
             )}
@@ -746,7 +870,7 @@ export default function ScanScreen() {
                 No structural highlight available for this issue on this page.
               </Text>
             )}
-            {Platform.OS === "web" && !pdfError && (
+            {Platform.OS === "web" && !pdfError && isPdfDoc && (
               <View style={styles.visualDiffGrid}>
                 <View style={styles.summaryRow}>
                   <Pressable
@@ -825,10 +949,10 @@ export default function ScanScreen() {
                   </Pressable>
                 </View>
                 <View style={styles.visualDiffRow}>
-                  <View
+                  <Pressable
                     style={styles.visualPanel}
-                    onMouseEnter={() => setShowPdfHover(true)}
-                    onMouseLeave={() => setShowPdfHover(false)}
+                    onHoverIn={() => setShowPdfHover(true)}
+                    onHoverOut={() => setShowPdfHover(false)}
                   >
                     <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                       Before p.{currentPage}
@@ -857,11 +981,11 @@ export default function ScanScreen() {
                         </View>
                       )}
                     </View>
-                  </View>
-                  <View
+                  </Pressable>
+                  <Pressable
                     style={styles.visualPanel}
-                    onMouseEnter={() => setShowPdfHover(true)}
-                    onMouseLeave={() => setShowPdfHover(false)}
+                    onHoverIn={() => setShowPdfHover(true)}
+                    onHoverOut={() => setShowPdfHover(false)}
                   >
                     <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                       After p.{currentPage}
@@ -890,7 +1014,7 @@ export default function ScanScreen() {
                         </View>
                       )}
                     </View>
-                  </View>
+                  </Pressable>
                 </View>
               </View>
             )}
@@ -1101,7 +1225,7 @@ function makeIssueKey(issue: DocumentIssue): string {
   const severity = (issue.severity ?? "").trim().toLowerCase();
   const title = (issue.title ?? "").trim().toLowerCase();
   const location = (issue.locationHint ?? "").trim().toLowerCase();
-  const evidence = issue.evidence ?? {};
+  const evidence = (issue.evidence ?? {}) as Record<string, unknown>;
   const nodeIds = Array.isArray(evidence.nodeIds)
     ? (evidence.nodeIds as string[]).map((value) => String(value)).slice(0, 10).sort()
     : [];
@@ -1116,6 +1240,18 @@ function makeIssueKey(issue: DocumentIssue): string {
     `loc:${location}`,
     `title:${title}`,
   ].join("|");
+}
+
+function uniqueIssues(issues: DocumentIssue[]): DocumentIssue[] {
+  const seen = new Set<string>();
+  const ordered: DocumentIssue[] = [];
+  for (const issue of issues) {
+    const key = makeIssueKey(issue);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ordered.push(issue);
+  }
+  return ordered;
 }
 
 function getIssuePage(issue: DocumentIssue): number | null {
@@ -1196,7 +1332,7 @@ function DocumentIssueRow({
             Pages: {(issue.evidence.pages as number[]).slice(0, 6).join(", ")}
           </Text>
         )}
-        {issue.evidence?.nodeIds && (
+        {Array.isArray(issue.evidence?.nodeIds) && (
           <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
             Tag nodes: {(issue.evidence.nodeIds as string[]).slice(0, 3).join(", ")}
           </Text>
@@ -1293,7 +1429,7 @@ type HighlightTone = "danger" | "success";
 function getCanvasStyle(
   baseStyle: object,
   size: { width: number; height: number } | null,
-): Record<string, unknown> {
+): any {
   const flattened = StyleSheet.flatten(baseStyle) ?? {};
   if (!size) return flattened;
   return { ...flattened, width: size.width, height: size.height };
@@ -1686,9 +1822,14 @@ const styles = StyleSheet.create({
   link: { fontWeight: "600" },
   diffRow: { marginTop: 16, flexDirection: "row", gap: 12, flexWrap: "wrap" },
   diffPanel: { flex: 1, minWidth: 220, borderWidth: 1, borderColor: "#E2E8F0", borderRadius: 12, padding: 12 },
+  panelIssueList: { marginTop: 8, gap: 6 },
+  panelIssueRow: { flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" },
   diffHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
   diffTitle: { fontWeight: "700", marginBottom: 8 },
   diffTextCard: { marginTop: 12 },
+  fixReport: { marginTop: 12, gap: 8 },
+  fixList: { marginTop: 8, gap: 8 },
+  fixRow: { flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" },
   diffText: { fontFamily: "Courier", fontSize: 12 },
   visualDiffGrid: { gap: 16 },
   visualDiffRow: { flexDirection: "row", gap: 16, flexWrap: "wrap" },

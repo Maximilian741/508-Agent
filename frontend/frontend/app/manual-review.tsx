@@ -1,5 +1,5 @@
-import { FlatList, Linking, Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import { useEffect, useMemo } from "react";
+import { FlatList, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
 
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
@@ -14,15 +14,23 @@ export default function ManualReviewScreen() {
   const clearManualReviewQueue = useAppStore((state) => state.clearManualReviewQueue);
   const fetchManualReview = useAppStore((state) => state.fetchManualReview);
   const clearManualReview = useAppStore((state) => state.clearManualReview);
+  const updateManualReview = useAppStore((state) => state.updateManualReview);
     const lastFetched = useAppStore((state) => state.manualReviewLastFetched);
     const uploadedDocument = useAppStore((state) => state.uploadedDocument);
     const fixedDocId = useAppStore((state) => state.fixedDocId);
     const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
     const mockMode = useAppStore((state) => state.mockMode);
     const theme = useTheme();
+    const [editedText, setEditedText] = useState<Record<string, string>>({});
 
-    const originalUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf` : null;
-    const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/pdf-fixed` : null;
+    const docName = (uploadedDocument?.filename ?? "").toLowerCase();
+    const isPdfDoc = docName.endsWith(".pdf");
+    const originalUrl = uploadedDocument
+      ? isPdfDoc
+        ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf`
+        : `${apiBaseUrl}/documents/${uploadedDocument.docId}/download`
+      : null;
+    const fixedUrl = fixedDocId ? `${apiBaseUrl}/documents/${fixedDocId}/file-fixed` : null;
 
   useEffect(() => {
     if (!mockMode) {
@@ -78,7 +86,7 @@ export default function ManualReviewScreen() {
       {originalUrl && (
         <Card style={styles.card}>
           <Text style={[styles.title, { color: theme.colors.text }]}>Document Preview</Text>
-          {Platform.OS === "web" && originalUrl.endsWith(".pdf") ? (
+          {Platform.OS === "web" && isPdfDoc ? (
             // @ts-ignore - iframe is valid on web
             <iframe src={fixedUrl ?? originalUrl} style={{ width: "100%", height: 360, border: "none" }} />
           ) : (
@@ -105,6 +113,31 @@ export default function ManualReviewScreen() {
             <Text style={{ color: theme.colors.textMuted }}>Node: {item.targetNodeId}</Text>
             <Text style={{ color: theme.colors.textMuted }}>Reason: {item.reason}</Text>
             {item.notes && <Text style={{ color: theme.colors.textMuted }}>Notes: {item.notes}</Text>}
+            {item.suggestedText && (
+              <View style={styles.suggestionBox}>
+                <Text style={{ color: theme.colors.textMuted }}>Suggested alt text</Text>
+                <TextInput
+                  value={editedText[item.id] ?? item.approvedText ?? item.suggestedText}
+                  onChangeText={(value) => setEditedText((prev) => ({ ...prev, [item.id]: value }))}
+                  style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+                  placeholder="Edit suggested text"
+                  placeholderTextColor={theme.colors.textMuted}
+                />
+                <View style={styles.buttonRow}>
+                  <Button
+                    title="Approve"
+                    onPress={() =>
+                      updateManualReview(item.id, {
+                        status: "approved",
+                        approvedText: editedText[item.id] ?? item.approvedText ?? item.suggestedText,
+                      })
+                    }
+                    variant="secondary"
+                  />
+                  <Button title="Reject" onPress={() => updateManualReview(item.id, { status: "rejected" })} variant="danger" />
+                </View>
+              </View>
+            )}
             {item.createdAt && (
               <Text style={{ color: theme.colors.textMuted }}>
                 Created: {new Date(item.createdAt).toLocaleString()}
@@ -124,4 +157,6 @@ const styles = StyleSheet.create({
     title: { fontWeight: "700" },
     linkRow: { gap: 8 },
     link: { fontWeight: "600" },
+    suggestionBox: { gap: 8, marginTop: 6 },
+    input: { borderWidth: 1, borderRadius: 8, padding: 8 },
 });

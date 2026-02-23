@@ -58,9 +58,13 @@ export interface ManualReviewItem {
     notes?: string;
     createdAt?: string;
     pages?: number[];
-    anchors?: string[];
+    anchors?: Array<string | Record<string, unknown>>;
     instructions?: string;
     suggestedFix?: string;
+    suggestedText?: string;
+    approvedText?: string;
+    status?: "pending" | "approved" | "rejected" | string;
+    aiSuggested?: boolean;
     confidence?: number;
     requiresHuman?: boolean;
 }
@@ -69,6 +73,7 @@ export interface UploadResponse {
     docId: string;
     filename: string;
     sizeBytes: number;
+    docType?: "pdf" | "docx" | "pptx";
 }
 
 export interface ScanJobResponse {
@@ -205,6 +210,7 @@ export interface ApiClient {
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     manualReview: () => Promise<ManualReviewItem[]>;
     clearManualReview: () => Promise<{ cleared: number }>;
+    updateManualReview: (itemId: string, payload: { status: "pending" | "approved" | "rejected"; approvedText?: string }) => Promise<ManualReviewItem>;
     uploadDocument: (file: File) => Promise<UploadResponse>;
     startDocumentScan: (docId: string) => Promise<{ jobId: string }>;
     getJob: (jobId: string) => Promise<ScanJobResponse>;
@@ -316,6 +322,32 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             return { cleared: 0 };
         }
         return (await response.json()) as { cleared: number };
+    };
+
+    const updateManualReview = async (
+        itemId: string,
+        payload: { status: "pending" | "approved" | "rejected"; approvedText?: string },
+    ): Promise<ManualReviewItem> => {
+        if (mockMode) {
+            return {
+                id: itemId,
+                issueId: "mock",
+                targetNodeId: "doc-1",
+                reason: "mock",
+                status: payload.status,
+                approvedText: payload.approvedText,
+            };
+        }
+        const response = await fetch(`${baseUrl}/manual-review/${itemId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Manual review update failed");
+        }
+        return (await response.json()) as ManualReviewItem;
     };
 
     const uploadDocument = async (file: File): Promise<UploadResponse> => {
@@ -472,6 +504,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         remediate,
         manualReview,
         clearManualReview,
+        updateManualReview,
         uploadDocument,
         startDocumentScan,
         getJob,

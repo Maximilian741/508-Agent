@@ -64,6 +64,10 @@ interface AppState {
     clearManualReviewQueue: () => void;
     fetchManualReview: () => Promise<RunResult<ManualReviewItem[]>>;
     clearManualReview: () => Promise<RunResult<{ cleared: number }>>;
+    updateManualReview: (
+        itemId: string,
+        payload: { status: "pending" | "approved" | "rejected"; approvedText?: string },
+    ) => Promise<RunResult<ManualReviewItem>>;
     runScan: (request: ScanRequest) => Promise<RunResult<ScanResponse>>;
     runRemediate: (request: RemediateRequest) => Promise<RunResult<ExecutionResult[]>>;
     uploadDocument: (file: File) => Promise<RunResult<UploadResponse>>;
@@ -254,6 +258,17 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: false, error: (error as Error).message };
         }
     },
+    updateManualReview: async (itemId, payload) => {
+        const client = getClient(get());
+        try {
+            const item = await client.updateManualReview(itemId, payload);
+            const refreshed = await client.manualReview();
+            set({ manualReviewQueue: refreshed, manualReviewLastFetched: new Date().toISOString() });
+            return { ok: true, data: item };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
     runScan: async (request) => {
         const client = getClient(get());
         set({ isScanning: true });
@@ -308,17 +323,34 @@ export const useAppStore = create<AppState>((set, get) => ({
                 fixReport: null,
             });
             const poll = async (): Promise<void> => {
-                const current = await client.getJob(start.jobId);
-                set({
-                    scanJob: {
-                        jobId: current.jobId,
-                        status: current.status,
-                        progress: current.progress,
-                        message: current.message,
-                    },
-                });
-                const issues = await client.getIssues(docId);
-                set({ documentIssues: issues });
+                let current: { jobId: string; status: string; progress: number; message?: string } | null = null;
+                try {
+                    current = await client.getJob(start.jobId);
+                    set({
+                        scanJob: {
+                            jobId: current.jobId,
+                            status: current.status,
+                            progress: current.progress,
+                            message: current.message,
+                        },
+                    });
+                    const issues = await client.getIssues(docId);
+                    set({ documentIssues: issues });
+                } catch (error) {
+                    const message = (error as Error).message || "Job not found";
+                    set({
+                        scanJob: {
+                            jobId: start.jobId,
+                            status: "error",
+                            progress: 0,
+                            message,
+                        },
+                    });
+                    return;
+                }
+                if (!current) {
+                    return;
+                }
                 if (current.status === "done") {
                     try {
                         const summary = await client.getDocumentSummary(docId);
@@ -404,7 +436,12 @@ export const useAppStore = create<AppState>((set, get) => ({
             set({ fixReport: response });
             return { ok: true, data: response };
         } catch (error) {
-            return { ok: false, error: (error as Error).message };
+            const message = (error as Error).message || "";
+            if (message.includes("Fix report not found") || message.includes("404")) {
+                set({ fixReport: null });
+                return { ok: true };
+            }
+            return { ok: false, error: message };
         }
     },
 }));

@@ -150,7 +150,7 @@ export default function IssueDetailScreen() {
           <Card
             style={[
               styles.actionCard,
-              selectedAction?.actionCode === action.actionCode && styles.actionSelected,
+              selectedAction?.actionCode === action.actionCode ? styles.actionSelected : undefined,
             ]}
           >
             <Text style={[styles.actionTitle, { color: theme.colors.text }]}>{action.actionCode}</Text>
