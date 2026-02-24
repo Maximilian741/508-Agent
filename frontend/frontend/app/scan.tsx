@@ -40,6 +40,9 @@ export default function ScanScreen() {
   const documentSummary = useAppStore((state) => state.documentSummary);
   const tagTree = useAppStore((state) => state.tagTree);
   const fixReport = useAppStore((state) => state.fixReport);
+  const mockMode = useAppStore((state) => state.mockMode);
+  const themeMode = useAppStore((state) => state.themeMode);
+  const setThemeMode = useAppStore((state) => state.setThemeMode);
   const [afterVariant, setAfterVariant] = useState<"fixed" | "rebuilt">("fixed");
   const [sortDescending, setSortDescending] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
@@ -61,6 +64,18 @@ export default function ScanScreen() {
   const [fixReportFilter, setFixReportFilter] = useState<"all" | "fixed" | "remaining" | "manual">("all");
   const [showBeforeIssues, setShowBeforeIssues] = useState(false);
   const [showAfterIssues, setShowAfterIssues] = useState(false);
+  const [documentsTab, setDocumentsTab] = useState<"tree" | "completed">("tree");
+  const [recentDocuments, setRecentDocuments] = useState<
+    Array<{
+      docId: string;
+      filename: string;
+      docType?: string;
+      createdAt?: string;
+      fixedPath?: string | null;
+      rebuiltPath?: string | null;
+    }>
+  >([]);
+  const [recentDocsError, setRecentDocsError] = useState<string | null>(null);
   const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
   const originalCanvasRefs = useRef<HTMLCanvasElement[]>([]);
   const fixedCanvasRefs = useRef<HTMLCanvasElement[]>([]);
@@ -204,6 +219,11 @@ export default function ScanScreen() {
     return "unknown";
   }, [fixReport, focusedIssue]);
 
+  const fixedDocuments = useMemo(
+    () => recentDocuments.filter((doc) => Boolean(doc.fixedPath) || Boolean(doc.rebuiltPath)),
+    [recentDocuments],
+  );
+
   if (!scanResults && documentIssues.length === 0 && !scanJob) {
     return (
       <Screen>
@@ -263,6 +283,44 @@ export default function ScanScreen() {
     };
     void loadDiff();
   }, [uploadedDocument, afterUrl, fetchDocumentDiff]);
+
+  useEffect(() => {
+    const loadRecentDocuments = async () => {
+      if (mockMode) {
+        setRecentDocuments([]);
+        setRecentDocsError(null);
+        return;
+      }
+      try {
+        const response = await fetch(`${apiBaseUrl}/documents`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error((await response.text()) || "Failed to load persisted documents.");
+        }
+        const payload = (await response.json()) as Array<Record<string, unknown>>;
+        if (!Array.isArray(payload)) {
+          setRecentDocuments([]);
+          setRecentDocsError(null);
+          return;
+        }
+        setRecentDocuments(
+          payload
+            .map((item) => ({
+              docId: String(item.docId ?? ""),
+              filename: String(item.filename ?? "Untitled document"),
+              docType: item.docType ? String(item.docType) : undefined,
+              createdAt: item.createdAt ? String(item.createdAt) : undefined,
+              fixedPath: typeof item.fixedPath === "string" ? item.fixedPath : null,
+              rebuiltPath: typeof item.rebuiltPath === "string" ? item.rebuiltPath : null,
+            }))
+            .filter((item) => item.docId.length > 0),
+        );
+        setRecentDocsError(null);
+      } catch (error) {
+        setRecentDocsError((error as Error).message || "Unable to load persisted documents.");
+      }
+    };
+    void loadRecentDocuments();
+  }, [apiBaseUrl, mockMode, uploadedDocument?.docId, fixedDocId]);
 
   useEffect(() => {
     if (afterVariant === "rebuilt" && !rebuiltAvailable) {
@@ -475,11 +533,124 @@ export default function ScanScreen() {
             {counts.total} issues detected for {displayDocumentId}
           </Text>
         </View>
-        <Chip label={`Sorted ${sortDescending ? "High to Low" : "Low to High"}`} tone="info" />
+        <Pressable
+          onPress={() => setThemeMode(themeMode === "light" ? "dark" : "light")}
+          style={styles.headerAction}
+        >
+          <Chip
+            label={themeMode === "light" ? "Dark Theme" : "Light Theme"}
+            tone="default"
+            style={
+              themeMode === "light"
+                ? { backgroundColor: "#111827", borderColor: "#111827" }
+                : { backgroundColor: "#F8FAFC", borderColor: "#CBD5E1" }
+            }
+            textStyle={themeMode === "light" ? { color: "#F8FAFC" } : { color: "#111827" }}
+          />
+        </Pressable>
       </View>
+
+      {scanJob && scanJob.status !== "done" && (
+        <InlineNotice
+          title="Scanning in progress"
+          message={`${scanJob.status} - ${scanJob.progress}%`}
+          tone="info"
+        />
+      )}
+      {scanJob && scanJob.status === "done" && documentIssues.length === 0 && (
+        <InlineNotice
+          title="Finalizing results"
+          message="Scan completed. Loading issues..."
+          tone="info"
+        />
+      )}
+
+      <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Documents</Text>
+        <View style={styles.documentsTabRow}>
+          <Pressable onPress={() => setDocumentsTab("tree")}>
+            <Chip
+              label="Document Tree"
+              tone="default"
+              style={documentsTab === "tree" ? styles.filterActiveDefault : undefined}
+              textStyle={documentsTab === "tree" ? styles.filterActiveText : undefined}
+            />
+          </Pressable>
+          <Pressable onPress={() => setDocumentsTab("completed")}>
+            <Chip
+              label="Completed & Fixed"
+              tone="default"
+              style={documentsTab === "completed" ? styles.filterActiveDefault : undefined}
+              textStyle={documentsTab === "completed" ? styles.filterActiveText : undefined}
+            />
+          </Pressable>
+        </View>
+        {documentsTab === "tree" ? (
+          uploadedDocument ? (
+            <View>
+              <View style={styles.summaryRow}>
+                <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Active Document</Text>
+                <Chip label={`Doc ${uploadedDocument.docId}`} tone="info" />
+              </View>
+              <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                {uploadedDocument.filename}
+              </Text>
+              <DocumentTree
+                documentId={displayDocumentId}
+                filename={uploadedDocument?.filename ?? null}
+                issues={documentIssues}
+                summary={documentSummary}
+                tagTree={tagTree}
+                highlightNodeId={highlightNodeId}
+                treeLimit={treeLimit}
+                onShowMore={() => setTreeLimit((prev) => prev + 500)}
+              />
+            </View>
+          ) : (
+            <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+              Upload and scan a document to view its document tree.
+            </Text>
+          )
+        ) : (
+          <View>
+            <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+              {fixedDocuments.length} fixed artifacts across {recentDocuments.length} persisted documents
+            </Text>
+            {recentDocsError ? (
+              <Text style={[styles.nodeId, { color: theme.colors.warning }]}>{recentDocsError}</Text>
+            ) : recentDocuments.length === 0 ? (
+              <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No persisted documents yet.</Text>
+            ) : (
+              <View style={styles.completedDocsList}>
+                {recentDocuments.slice(0, 10).map((doc) => {
+                  const isFixed = Boolean(doc.fixedPath) || Boolean(doc.rebuiltPath);
+                  return (
+                    <View key={doc.docId} style={styles.completedDocRow}>
+                      <View style={styles.completedDocMeta}>
+                        <Text style={[styles.description, { color: theme.colors.text }]} numberOfLines={1}>
+                          {doc.filename}
+                        </Text>
+                        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                          {doc.docId}
+                          {doc.docType ? ` • ${doc.docType.toUpperCase()}` : ""}
+                        </Text>
+                      </View>
+                      <Chip label={isFixed ? "Fixed" : "Completed"} tone={isFixed ? "success" : "default"} />
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        )}
+      </Card>
 
       {documentIssues.length > 0 && (
         <Card>
+          <View style={styles.issuesHeaderRow}>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Document Issues</Text>
+            <View style={styles.summaryRow}>{uploadedDocument && <Chip label={`Doc ${uploadedDocument.docId}`} tone="info" />}</View>
+          </View>
           <View style={styles.searchRow}>
             <TextInput
               value={searchTerm}
@@ -488,9 +659,6 @@ export default function ScanScreen() {
               placeholderTextColor={theme.colors.textMuted}
               style={[styles.searchInput, { borderColor: theme.colors.border, color: theme.colors.text }]}
             />
-            <Pressable onPress={() => setSortDescending((prev) => !prev)}>
-              <Text style={[styles.sortLink, { color: theme.colors.accent }]}>Toggle sort</Text>
-            </Pressable>
           </View>
           <View style={styles.filterRow}>
             {(["all", "error", "warning", "info"] as const).map((value) => (
@@ -528,56 +696,11 @@ export default function ScanScreen() {
               </Pressable>
             ))}
           </View>
-        </Card>
-      )}
-
-      {scanJob && scanJob.status !== "done" && (
-        <InlineNotice
-          title="Scanning in progress"
-          message={`${scanJob.status} - ${scanJob.progress}%`}
-          tone="info"
-        />
-      )}
-      {scanJob && scanJob.status === "done" && documentIssues.length === 0 && (
-        <InlineNotice
-          title="Finalizing results"
-          message="Scan completed. Loading issues..."
-          tone="info"
-        />
-      )}
-
-      {uploadedDocument && (
-        <Card>
-          <View style={styles.summaryRow}>
-            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Active Document</Text>
-            <Chip label={`Doc ${uploadedDocument.docId}`} tone="info" />
-          </View>
-          <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-            {uploadedDocument.filename}
-          </Text>
-          <View style={styles.summaryRow}>
-            <Pressable onPress={openManualReview}>
-              <Chip label="Manual Review Queue" tone="warning" />
+          <View style={styles.issueControlsRow}>
+            <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Sort by severity</Text>
+            <Pressable onPress={() => setSortDescending((prev) => !prev)}>
+              <Chip label={sortDescending ? "High to low" : "Low to high"} tone="info" />
             </Pressable>
-          </View>
-          <DocumentTree
-            documentId={displayDocumentId}
-            filename={uploadedDocument?.filename ?? null}
-            issues={documentIssues}
-            summary={documentSummary}
-            tagTree={tagTree}
-            highlightNodeId={highlightNodeId}
-            treeLimit={treeLimit}
-            onShowMore={() => setTreeLimit((prev) => prev + 500)}
-          />
-        </Card>
-      )}
-
-      {documentIssues.length > 0 && (
-        <Card>
-          <View style={styles.summaryRow}>
-            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Document Issues</Text>
-            {uploadedDocument && <Chip label={`Doc ${uploadedDocument.docId}`} tone="info" />}
           </View>
           <IssuesList
             issues={issues}
@@ -595,12 +718,14 @@ export default function ScanScreen() {
               }
             }}
           />
-          <Pressable
-            onPress={() => uploadedDocument && applyDocumentFixes(uploadedDocument.docId)}
-            style={styles.applyFixes}
-          >
-            <Chip label={fixedDocId ? "Fixes applied" : "Apply Fixes"} tone={fixedDocId ? "success" : "info"} />
-          </Pressable>
+          <View style={styles.issueActionsRow}>
+            <Pressable
+              onPress={() => uploadedDocument && applyDocumentFixes(uploadedDocument.docId)}
+              style={styles.applyFixes}
+            >
+              <Chip label={fixedDocId ? "Fixes applied" : "Apply Fixes"} tone={fixedDocId ? "success" : "info"} />
+            </Pressable>
+          </View>
           {originalUrl && (
             <View style={styles.downloadRow}>
               <Pressable onPress={() => openUrl(originalUrl)}>
@@ -677,6 +802,11 @@ export default function ScanScreen() {
               </View>
             </View>
           )}
+          <View style={styles.manualReviewRow}>
+            <Pressable onPress={openManualReview}>
+              <Chip label="Manual Review Queue" tone="warning" />
+            </Pressable>
+          </View>
         </Card>
       )}
 
@@ -1777,9 +1907,16 @@ async function computeBoxesForAnchors(
 
 const styles = StyleSheet.create({
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  headerAction: { alignItems: "flex-end" },
   summaryRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   issueCategoryList: { marginTop: 12, gap: 8 },
   issueCategoryCard: { gap: 6 },
+  documentsTabRow: { marginTop: 10, marginBottom: 10, flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  completedDocsList: { marginTop: 12, gap: 10 },
+  completedDocRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
+  completedDocMeta: { flex: 1, minWidth: 0 },
+  issuesHeaderRow: { marginTop: 4, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  issueControlsRow: { marginTop: 10, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
   searchRow: { marginTop: 12, gap: 8 },
   searchInput: { borderWidth: 1, borderRadius: 12, padding: 10 },
   filterRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginTop: 12 },
@@ -1817,7 +1954,9 @@ const styles = StyleSheet.create({
   description: { marginTop: 4 },
   separator: { height: 12 },
   docIssueCard: { marginTop: 12, gap: 6 },
+  issueActionsRow: { marginTop: 10, flexDirection: "row", gap: 12, flexWrap: "wrap" },
   applyFixes: { marginTop: 12, alignItems: "flex-start" },
+  manualReviewRow: { marginTop: 16, alignItems: "flex-start" },
   downloadRow: { marginTop: 12, flexDirection: "row", gap: 12 },
   link: { fontWeight: "600" },
   diffRow: { marginTop: 16, flexDirection: "row", gap: 12, flexWrap: "wrap" },

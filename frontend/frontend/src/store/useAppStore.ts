@@ -39,6 +39,7 @@ interface AppState {
     backendUrlWarning: string | null;
     backendHealth: "unknown" | "ok" | "error";
     backendHealthMessage: string | null;
+    themeMode: "system" | "light" | "dark";
     mockMode: boolean;
     selectedDocument: DocumentPayload | null;
     scanResults: ScanResponse | null;
@@ -58,6 +59,7 @@ interface AppState {
     setBackendUrlInfo: (url: string, source: BackendUrlSource, warning?: string) => void;
     refreshBackendUrl: () => Promise<void>;
     setMockMode: (value: boolean) => void;
+    setThemeMode: (value: "system" | "light" | "dark") => void;
     setSelectedDocument: (doc: DocumentPayload) => void;
     setScanResults: (results: ScanResponse) => void;
     addManualReviewItem: (item: ManualReviewItem) => void;
@@ -152,6 +154,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     backendUrlWarning: resolved.warning ?? null,
     backendHealth: "unknown",
     backendHealthMessage: null,
+    themeMode: "system",
     mockMode: true,
     selectedDocument: null,
     scanResults: null,
@@ -233,6 +236,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         });
     },
     setMockMode: (value) => set({ mockMode: value }),
+    setThemeMode: (value) => set({ themeMode: value }),
     setSelectedDocument: (doc) => set({ selectedDocument: doc }),
     setScanResults: (results) => set({ scanResults: results }),
     addManualReviewItem: (item) =>

@@ -5,9 +5,10 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -22,7 +23,7 @@ from app.pdf.tag_tree import extract_tag_tree
 from app.parsers.docx_parser import DOCXParser
 from app.parsers.pptx_parser import PPTXParser
 from app.ai.alt_text_suggester import build_alt_text_suggestions
-from app.repositories.factory import get_repository
+from app.persistence.db import get_repo
 
 router = APIRouter()
 
@@ -37,7 +38,7 @@ DOCS: Dict[str, Dict[str, object]] = {}
 ISSUES: Dict[str, List[Dict[str, object]]] = {}
 LOCK = threading.Lock()
 MAX_DIFF_CHARS = 20000
-REPO = get_repository()
+REPO = get_repo()
 
 
 class DocumentType(str, Enum):
@@ -88,6 +89,7 @@ def _save_doc(doc_id: str, doc: Dict[str, object]) -> None:
         "filename": doc.get("filename"),
         "docType": doc.get("docType", "pdf"),
         "path": doc.get("path"),
+        "scanTargetPath": doc.get("scanTargetPath"),
         "tagTreePath": doc.get("tagTreePath"),
         "tagSummary": doc.get("tagSummary"),
         "fixReport": doc.get("fixReport"),
@@ -986,6 +988,186 @@ def _add_placeholder_alt(writer: PdfWriter) -> int:
         return 0
 
 
+def _collect_mcids_from_k(k_value: object) -> List[int]:
+    mcids: List[int] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, int):
+            mcids.append(int(value))
+            return
+        try:
+            obj = value.get_object()  # type: ignore[attr-defined]
+        except Exception:
+            obj = value
+        if isinstance(obj, dict):
+            if obj.get("/Type") == "/MCR":
+                m = obj.get("/MCID")
+                if isinstance(m, int):
+                    mcids.append(int(m))
+            k = obj.get("/K")
+            if isinstance(k, list):
+                for child in k:
+                    walk(child)
+            elif k is not None:
+                walk(k)
+        elif isinstance(obj, list):
+            for child in obj:
+                walk(child)
+
+    walk(k_value)
+    return mcids
+
+
+def _extract_approved_alt_updates(doc_id: str, reader: PdfReader) -> Dict[Tuple[int, int], Tuple[str, str]]:
+    items = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=True)
+    updates: Dict[Tuple[int, int], Tuple[str, str]] = {}
+    pending_node_ids: List[Tuple[str, str, str]] = []  # item_id, node_id, approved_text
+
+    for item in items:
+        status = str(item.get("status", "")).lower()
+        approved_text = str(item.get("approvedText", "")).strip()
+        issue_id = str(item.get("issueId", "")).lower()
+        reason = str(item.get("reason", "")).lower()
+        if status != "approved" or not approved_text:
+            continue
+        if "missing_alt_text" not in issue_id and "issue-alt" not in issue_id and "alt text" not in reason:
+            continue
+        item_id = str(item.get("id", ""))
+        anchor = item.get("anchor")
+        anchors = item.get("anchors", [])
+        candidates: List[object] = []
+        if anchor is not None:
+            candidates.append(anchor)
+        if isinstance(anchors, list):
+            candidates.extend(anchors)
+        found_anchor = False
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            page = candidate.get("page")
+            mcid = candidate.get("mcid")
+            if isinstance(page, int) and isinstance(mcid, int):
+                updates[(int(page), int(mcid))] = (approved_text, item_id)
+                found_anchor = True
+        if not found_anchor:
+            node_id = str(item.get("targetNodeId", "")).strip()
+            if node_id:
+                pending_node_ids.append((item_id, node_id, approved_text))
+
+    if pending_node_ids:
+        try:
+            tree = extract_tag_tree(reader)
+            nodes = tree.get("tree", {}).get("nodes", {}) if isinstance(tree.get("tree", {}), dict) else {}
+            if isinstance(nodes, dict):
+                for item_id, node_id, approved_text in pending_node_ids:
+                    node = nodes.get(node_id, {}) if isinstance(nodes.get(node_id, {}), dict) else {}
+                    page = node.get("page")
+                    mcid = None
+                    if isinstance(node.get("mcid"), int):
+                        mcid = int(node.get("mcid"))
+                    if mcid is None:
+                        for kid_id in node.get("kids", []) if isinstance(node.get("kids", []), list) else []:
+                            kid = nodes.get(kid_id, {}) if isinstance(nodes.get(kid_id, {}), dict) else {}
+                            if isinstance(kid.get("mcid"), int):
+                                mcid = int(kid.get("mcid"))
+                                break
+                    if isinstance(page, int) and isinstance(mcid, int):
+                        updates[(int(page), int(mcid))] = (approved_text, item_id)
+        except Exception:
+            pass
+
+    return updates
+
+
+def _apply_approved_alt_to_pdf(doc_id: str, pdf_path: Path) -> List[str]:
+    if not pdf_path.exists():
+        return []
+    try:
+        reader = PdfReader(str(pdf_path), strict=False)
+    except Exception:
+        return []
+
+    updates = _extract_approved_alt_updates(doc_id, reader)
+    if not updates:
+        return []
+
+    page_ref_map: Dict[Tuple[int, int], int] = {}
+    for idx, page in enumerate(reader.pages, start=1):
+        try:
+            ref = page.indirect_reference
+            if ref is not None:
+                page_ref_map[(ref.idnum, ref.generation)] = idx
+        except Exception:
+            continue
+
+    writer = PdfWriter()
+    if hasattr(writer, "clone_document_from_reader"):
+        try:
+            writer.clone_document_from_reader(reader)
+        except Exception:
+            for page in reader.pages:
+                writer.add_page(page)
+    else:
+        for page in reader.pages:
+            writer.add_page(page)
+
+    applied_item_ids: Set[str] = set()
+    try:
+        root = writer._root_object
+        struct_root = root.get("/StructTreeRoot")
+        if struct_root:
+            stack = [struct_root]
+            while stack:
+                node = stack.pop()
+                try:
+                    obj = node.get_object()
+                except Exception:
+                    obj = node
+                if not isinstance(obj, dict):
+                    continue
+                tag = obj.get("/S")
+                if tag == "/Figure":
+                    page_num = None
+                    pg = obj.get("/Pg")
+                    if pg is not None and hasattr(pg, "idnum"):
+                        page_num = page_ref_map.get((pg.idnum, pg.generation))
+                    mcids = _collect_mcids_from_k(obj.get("/K"))
+                    if page_num is not None:
+                        for mcid in mcids:
+                            update = updates.get((int(page_num), int(mcid)))
+                            if update:
+                                approved_text, item_id = update
+                                obj.update({NameObject("/Alt"): TextStringObject(approved_text)})
+                                applied_item_ids.add(item_id)
+                                break
+                kids = obj.get("/K")
+                if isinstance(kids, list):
+                    stack.extend(kids)
+                elif kids is not None:
+                    stack.append(kids)
+    except Exception:
+        return []
+
+    if not applied_item_ids:
+        return []
+
+    try:
+        with pdf_path.open("wb") as out:
+            writer.write(out)
+    except Exception:
+        return []
+
+    for item_id in sorted(applied_item_ids):
+        item = REPO.get_manual_review_item(item_id)
+        if not item:
+            continue
+        item["applied"] = True
+        item["appliedAt"] = datetime.utcnow().isoformat() + "Z"
+        REPO.update_manual_review_item(item_id, item, resolved=True)
+
+    return sorted(applied_item_ids)
+
+
 def _extract_heading_titles(reader: PdfReader) -> List[str]:
     tag_tree = extract_tag_tree(reader)
     if not tag_tree.get("tagged"):
@@ -1677,6 +1859,13 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     if mode == "rebuild" and doc_type == DocumentType.PDF.value:
         rebuild_result = _rebuild_pdf(doc_id, src, rebuild_dest)
         rebuilt = True
+    applied_manual_item_ids: List[str] = []
+    if doc_type == DocumentType.PDF.value:
+        applied_manual_item_ids.extend(_apply_approved_alt_to_pdf(doc_id, fixed_dest))
+        if rebuilt:
+            applied_manual_item_ids.extend(_apply_approved_alt_to_pdf(doc_id, rebuild_dest))
+    if applied_manual_item_ids:
+        applied_manual_item_ids = sorted(set(applied_manual_item_ids))
     fixed_issues: List[Dict[str, object]] = []
     scan_after_error: Optional[str] = None
     try:
@@ -1748,6 +1937,8 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
         "deterministic": True,
         "mode": mode,
         "rebuilt": rebuilt,
+        "appliedManualReviewCount": len(applied_manual_item_ids),
+        "appliedManualReviewItemIds": applied_manual_item_ids,
     }
     report["scanAfterOk"] = scan_after_error is None
     if scan_after_error:
@@ -1756,6 +1947,7 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     doc["issues_before"] = before_issues
     doc["issues_after"] = after_issues
     doc["fixedPath"] = str(fixed_dest)
+    doc["scanTargetPath"] = str(scan_target)
     if rebuilt:
         doc["rebuiltPath"] = str(rebuild_dest)
     _save_doc(doc_id, doc)
@@ -2007,6 +2199,7 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
     parent_tree_ok = False
     struct_counts: Dict[str, int] = {}
     mcid_coverage: List[Dict[str, object]] = []
+    figure_counts_after: Dict[str, int] = {"figures": 0, "figuresMissingAlt": 0, "figuresWithAlt": 0}
     if rebuilt_path and Path(str(rebuilt_path)).exists():
         try:
             rebuilt_reader = PdfReader(str(rebuilt_path), strict=False)
@@ -2068,6 +2261,25 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
         except Exception:
             mcid_counts = []
             text_mcid_counts = []
+    target_for_alt = None
+    if scan_target_path and Path(str(scan_target_path)).exists() and str(scan_target_path).lower().endswith(".pdf"):
+        target_for_alt = Path(str(scan_target_path))
+    elif fixed_path and Path(str(fixed_path)).exists() and str(fixed_path).lower().endswith(".pdf"):
+        target_for_alt = Path(str(fixed_path))
+    elif rebuilt_path and Path(str(rebuilt_path)).exists() and str(rebuilt_path).lower().endswith(".pdf"):
+        target_for_alt = Path(str(rebuilt_path))
+    if target_for_alt:
+        try:
+            summary_after = extract_tag_tree(PdfReader(str(target_for_alt), strict=False)).get("summary", {})
+            figures = int(summary_after.get("figures", 0) or 0)
+            missing = int(summary_after.get("figuresMissingAlt", 0) or 0)
+            figure_counts_after = {
+                "figures": figures,
+                "figuresMissingAlt": missing,
+                "figuresWithAlt": max(0, figures - missing),
+            }
+        except Exception:
+            figure_counts_after = {"figures": 0, "figuresMissingAlt": 0, "figuresWithAlt": 0}
     return {
         "before_count": len(before_issues),
         "after_count": len(after_issues),
@@ -2087,6 +2299,9 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
         "parentTreeOk": parent_tree_ok,
         "structCounts": struct_counts,
         "mcidCoverage": mcid_coverage,
+        "figureCountsAfter": figure_counts_after,
+        "appliedManualReviewCount": int(doc.get("fixReport", {}).get("appliedManualReviewCount", 0) or 0),
+        "appliedManualReviewItemIds": doc.get("fixReport", {}).get("appliedManualReviewItemIds", []),
         "anchorCountsByRuleId": _anchor_counts_by_rule(after_issues),
         "sampleAnchorsByRuleId": _sample_anchors_by_rule(after_issues),
     }

@@ -8,10 +8,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.api import state
-from app.repositories.factory import get_repository
+from app.persistence.db import get_repo
 
 router = APIRouter()
-REPO = get_repository()
+REPO = get_repo()
 
 
 class ManualReviewItem(BaseModel):

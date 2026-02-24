@@ -14,10 +14,10 @@ from app.models.accessibility import AccessibilityTree, ActionCode
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus
 from app.services.remediators.registry import execute_plans
-from app.repositories.factory import get_repository
+from app.persistence.db import get_repo
 
 router = APIRouter()
-REPO = get_repository()
+REPO = get_repo()
 
 
 class RemediateRequest(BaseModel):

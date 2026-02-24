@@ -8,8 +8,10 @@ from app.api.documents import router as documents_router
 from app.api.manual_review import router as manual_review_router
 from app.api.remediate import router as remediate_router
 from app.api.scan import router as scan_router
+from app.persistence.db import init_db
 
 app = FastAPI(title="508-Agent", version="0.1.0")
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
