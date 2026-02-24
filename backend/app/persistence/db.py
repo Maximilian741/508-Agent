@@ -12,6 +12,94 @@ _LOCK = threading.Lock()
 _CONN: sqlite3.Connection | None = None
 
 
+def _utc_now() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _default_policy_json(name: str, targets: List[str], severity_weights: Dict[str, float], overrides: Dict[str, Dict[str, object]]) -> Dict[str, object]:
+    return {
+        "schemaVersion": 1,
+        "name": name,
+        "targets": targets,
+        "thresholds": {
+            "statusRules": {
+                "pass": {"maxCritical": 0, "maxSerious": 2},
+                "needs_review": {"maxCritical": 0, "maxSerious": 10},
+            }
+        },
+        "scoring": {
+            "baseScore": 100,
+            "severityWeights": severity_weights,
+            "confidenceMultiplier": True,
+            "coveragePenalty": {"enabled": True, "perSkippedRule": 0.2, "maxPenalty": 10},
+        },
+        "rules": {
+            "defaults": {"enabled": True},
+            "overrides": overrides,
+        },
+        "export": {
+            "includeOriginal": False,
+            "includeFixedIfAvailable": True,
+            "templates": {"summaryPdf": "default_v1"},
+        },
+    }
+
+
+_DEFAULT_POLICY_PACKS: List[Dict[str, object]] = [
+    {
+        "id": "policy-508-wcag20-aa",
+        "name": "Section 508 (WCAG 2.0 AA)",
+        "description": "Baseline Section 508-aligned checks for PDF, DOCX, and PPTX.",
+        "version": 1,
+        "is_active": 1,
+        "policy_json": _default_policy_json(
+            name="Section 508 (WCAG 2.0 AA)",
+            targets=["pdf", "docx", "pptx"],
+            severity_weights={"critical": 18, "serious": 8, "moderate": 3, "minor": 1},
+            overrides={
+                "PDF.MISSING_ALT_TEXT": {"enabled": True, "severity": "serious"},
+                "PDF.TAG_TREE_MISSING": {"enabled": True, "severity": "critical"},
+                "DOCX.METADATA_LANGUAGE_MISSING": {"enabled": True, "severity": "moderate"},
+            },
+        ),
+    },
+    {
+        "id": "policy-wcag22-aa-docs",
+        "name": "WCAG 2.2 AA (docs)",
+        "description": "WCAG 2.2 document-focused profile with stricter structure requirements.",
+        "version": 1,
+        "is_active": 1,
+        "policy_json": _default_policy_json(
+            name="WCAG 2.2 AA (docs)",
+            targets=["pdf", "docx", "pptx"],
+            severity_weights={"critical": 20, "serious": 9, "moderate": 4, "minor": 1},
+            overrides={
+                "PDF.MISSING_ALT_TEXT": {"enabled": True, "severity": "serious"},
+                "PDF.TAG_TREE_MISSING": {"enabled": True, "severity": "critical"},
+                "PPTX.READING_ORDER": {"enabled": True, "severity": "serious"},
+            },
+        ),
+    },
+    {
+        "id": "policy-pdf-ua-focused",
+        "name": "PDF/UA-focused (Tagged PDF)",
+        "description": "Prioritizes tagged PDF structure, reading order, and alternate text completeness.",
+        "version": 1,
+        "is_active": 1,
+        "policy_json": _default_policy_json(
+            name="PDF/UA-focused (Tagged PDF)",
+            targets=["pdf"],
+            severity_weights={"critical": 22, "serious": 10, "moderate": 3, "minor": 1},
+            overrides={
+                "PDF.TAG_TREE_MISSING": {"enabled": True, "severity": "critical"},
+                "PDF.MISSING_ALT_TEXT": {"enabled": True, "severity": "critical"},
+                "PDF.READING_ORDER": {"enabled": True, "severity": "serious"},
+            },
+        ),
+    },
+]
+
+
 def _db_path() -> Path:
     url = os.getenv("DATABASE_URL", "").strip()
     if url.startswith("sqlite:///"):
@@ -98,14 +186,151 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_packs (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              description TEXT,
+              version INTEGER NOT NULL,
+              is_active INTEGER NOT NULL DEFAULT 1,
+              policy_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_policy_snapshot (
+              job_id TEXT PRIMARY KEY,
+              policy_pack_id TEXT,
+              policy_name TEXT NOT NULL,
+              policy_version INTEGER NOT NULL,
+              policy_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        now = _utc_now()
+        for pack in _DEFAULT_POLICY_PACKS:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO policy_packs(id, name, description, version, is_active, policy_json, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    str(pack["id"]),
+                    str(pack["name"]),
+                    str(pack.get("description") or ""),
+                    int(pack.get("version") or 1),
+                    int(pack.get("is_active") or 1),
+                    json.dumps(pack["policy_json"]),
+                    now,
+                    now,
+                ),
+            )
         conn.commit()
 
 
 class SqliteRepo:
+    def _policy_from_row(self, row: sqlite3.Row) -> Dict[str, object]:
+        policy_json: Dict[str, object] = {}
+        try:
+            payload = json.loads(row["policy_json"] or "{}")
+            if isinstance(payload, dict):
+                policy_json = payload
+        except Exception:
+            policy_json = {}
+        targets = policy_json.get("targets", [])
+        if not isinstance(targets, list):
+            targets = []
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"] or "",
+            "version": int(row["version"] or 1),
+            "targets": [str(target) for target in targets],
+            "updated_at": row["updated_at"],
+            "policy_json": policy_json,
+        }
+
+    def list_policy_packs(self) -> List[Dict[str, object]]:
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT id, name, description, version, policy_json, updated_at FROM policy_packs WHERE COALESCE(is_active,1)=1 ORDER BY name ASC"
+        ).fetchall()
+        return [self._policy_from_row(row) for row in rows]
+
+    def get_policy_pack(self, policy_id: str) -> Optional[Dict[str, object]]:
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, name, description, version, policy_json, updated_at FROM policy_packs WHERE id=?",
+            (policy_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._policy_from_row(row)
+
+    def save_job_policy_snapshot(
+        self,
+        job_id: str,
+        policy_pack_id: Optional[str],
+        policy_name: str,
+        policy_version: int,
+        policy_json: Dict[str, object],
+    ) -> None:
+        conn = get_connection()
+        with _LOCK:
+            conn.execute(
+                """
+                INSERT INTO job_policy_snapshot(job_id, policy_pack_id, policy_name, policy_version, policy_json, created_at)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                  policy_pack_id=excluded.policy_pack_id,
+                  policy_name=excluded.policy_name,
+                  policy_version=excluded.policy_version,
+                  policy_json=excluded.policy_json
+                """,
+                (
+                    job_id,
+                    policy_pack_id,
+                    policy_name,
+                    int(policy_version),
+                    json.dumps(policy_json),
+                    _utc_now(),
+                ),
+            )
+            conn.commit()
+
+    def get_job_policy_snapshot(self, job_id: str) -> Optional[Dict[str, object]]:
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT job_id, policy_pack_id, policy_name, policy_version, policy_json, created_at FROM job_policy_snapshot WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload: Dict[str, object] = {}
+        try:
+            parsed = json.loads(row["policy_json"] or "{}")
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+        return {
+            "jobId": row["job_id"],
+            "policyPackId": row["policy_pack_id"],
+            "policyName": row["policy_name"],
+            "policyVersion": int(row["policy_version"] or 1),
+            "policyJson": payload,
+            "createdAt": row["created_at"],
+        }
+
     def save_document(self, doc: Dict[str, object]) -> None:
         conn = get_connection()
         doc_id = str(doc["id"])
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now()
         extra = {
             "scanTargetPath": doc.get("scanTargetPath"),
             "tagTreePath": doc.get("tagTreePath"),
@@ -167,6 +392,15 @@ class SqliteRepo:
             "fixReport": extra.get("fixReport"),
         }
         return out
+
+    def update_document(self, doc_id: str, updates: Dict[str, object]) -> None:
+        current = self.get_document(doc_id)
+        if current is None:
+            return
+        merged = dict(current)
+        merged.update(updates)
+        merged["id"] = doc_id
+        self.save_document(merged)
 
     def list_documents(self) -> List[Dict[str, object]]:
         conn = get_connection()
@@ -240,7 +474,7 @@ class SqliteRepo:
             for issue, key in zip(issues, keys):
                 conn.execute(
                     "INSERT INTO issues(doc_id, phase, issue_json, issue_key, created_at) VALUES(?,?,?,?,?)",
-                    (doc_id, phase, json.dumps(issue), key, datetime.utcnow().isoformat() + "Z"),
+                    (doc_id, phase, json.dumps(issue), key, _utc_now()),
                 )
             conn.commit()
 
@@ -271,7 +505,7 @@ class SqliteRepo:
                 INSERT INTO fix_reports(doc_id, report_json, created_at) VALUES(?,?,?)
                 ON CONFLICT(doc_id) DO UPDATE SET report_json=excluded.report_json, created_at=excluded.created_at
                 """,
-                (doc_id, json.dumps(report), datetime.utcnow().isoformat() + "Z"),
+                (doc_id, json.dumps(report), _utc_now()),
             )
             conn.commit()
 
@@ -290,7 +524,7 @@ class SqliteRepo:
         if not items:
             return
         conn = get_connection()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now()
         with _LOCK:
             for item in items:
                 item_id = str(item.get("id") or f"mr-{doc_id}-{int(datetime.utcnow().timestamp() * 1000)}")

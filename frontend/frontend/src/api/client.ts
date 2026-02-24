@@ -208,7 +208,7 @@ export interface DocumentSummary {
 export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
-    manualReview: () => Promise<ManualReviewItem[]>;
+    manualReview: (docId?: string) => Promise<ManualReviewItem[]>;
     clearManualReview: () => Promise<{ cleared: number }>;
     updateManualReview: (itemId: string, payload: { status: "pending" | "approved" | "rejected"; approvedText?: string }) => Promise<ManualReviewItem>;
     uploadDocument: (file: File) => Promise<UploadResponse>;
@@ -300,12 +300,13 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return request<RemediateResponse>("/remediate", payload);
     };
 
-    const manualReview = async (): Promise<ManualReviewItem[]> => {
+    const manualReview = async (docId?: string): Promise<ManualReviewItem[]> => {
         if (mockMode) {
             return [];
         }
-        console.log("[api] GET /manual-review");
-        const response = await fetch(`${baseUrl}/manual-review`);
+        const path = docId ? `/documents/${docId}/manual-review` : "/manual-review";
+        console.log(`[api] GET ${path}`);
+        const response = await fetch(`${baseUrl}${path}`);
         if (!response.ok) {
             return [];
         }

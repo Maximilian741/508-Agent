@@ -64,11 +64,12 @@ interface AppState {
     setScanResults: (results: ScanResponse) => void;
     addManualReviewItem: (item: ManualReviewItem) => void;
     clearManualReviewQueue: () => void;
-    fetchManualReview: () => Promise<RunResult<ManualReviewItem[]>>;
+    fetchManualReview: (docId?: string) => Promise<RunResult<ManualReviewItem[]>>;
     clearManualReview: () => Promise<RunResult<{ cleared: number }>>;
     updateManualReview: (
         itemId: string,
         payload: { status: "pending" | "approved" | "rejected"; approvedText?: string },
+        docId?: string,
     ) => Promise<RunResult<ManualReviewItem>>;
     runScan: (request: ScanRequest) => Promise<RunResult<ScanResponse>>;
     runRemediate: (request: RemediateRequest) => Promise<RunResult<ExecutionResult[]>>;
@@ -242,10 +243,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     addManualReviewItem: (item) =>
         set((state) => ({ manualReviewQueue: [item, ...state.manualReviewQueue] })),
     clearManualReviewQueue: () => set({ manualReviewQueue: [] }),
-    fetchManualReview: async () => {
+    fetchManualReview: async (docId) => {
         const client = getClient(get());
         try {
-            const items = await client.manualReview();
+            const items = await client.manualReview(docId);
             set({ manualReviewQueue: items, manualReviewLastFetched: new Date().toISOString() });
             return { ok: true, data: items };
         } catch (error) {
@@ -262,11 +263,11 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: false, error: (error as Error).message };
         }
     },
-    updateManualReview: async (itemId, payload) => {
+    updateManualReview: async (itemId, payload, docId) => {
         const client = getClient(get());
         try {
             const item = await client.updateManualReview(itemId, payload);
-            const refreshed = await client.manualReview();
+            const refreshed = await client.manualReview(docId);
             set({ manualReviewQueue: refreshed, manualReviewLastFetched: new Date().toISOString() });
             return { ok: true, data: item };
         } catch (error) {

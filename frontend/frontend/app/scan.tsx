@@ -223,6 +223,10 @@ export default function ScanScreen() {
     () => recentDocuments.filter((doc) => Boolean(doc.fixedPath) || Boolean(doc.rebuiltPath)),
     [recentDocuments],
   );
+  const pendingManualCount = useMemo(() => {
+    const items = fixReport?.manualReview ?? [];
+    return items.filter((item) => !item.status || item.status === "pending").length;
+  }, [fixReport]);
 
   if (!scanResults && documentIssues.length === 0 && !scanJob) {
     return (
@@ -725,7 +729,20 @@ export default function ScanScreen() {
             >
               <Chip label={fixedDocId ? "Fixes applied" : "Apply Fixes"} tone={fixedDocId ? "success" : "info"} />
             </Pressable>
+            <Pressable onPress={openManualReview} style={styles.applyFixes}>
+              <Chip
+                label={pendingManualCount > 0 ? `Review Manual Items (${pendingManualCount})` : "Open Manual Review"}
+                tone="warning"
+              />
+            </Pressable>
           </View>
+          {pendingManualCount > 0 && (
+            <InlineNotice
+              title="Manual review required"
+              message={`${pendingManualCount} item(s) need human approval before final output is ready.`}
+              tone="warning"
+            />
+          )}
           {originalUrl && (
             <View style={styles.downloadRow}>
               <Pressable onPress={() => openUrl(originalUrl)}>
@@ -802,11 +819,6 @@ export default function ScanScreen() {
               </View>
             </View>
           )}
-          <View style={styles.manualReviewRow}>
-            <Pressable onPress={openManualReview}>
-              <Chip label="Manual Review Queue" tone="warning" />
-            </Pressable>
-          </View>
         </Card>
       )}
 
@@ -1441,8 +1453,14 @@ function DocumentIssueRow({
 }) {
   const theme = useTheme();
   const severityTone = issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info";
-  const fixableRules = new Set(["document_title_missing", "missing_heading_structure", "unlabeled_form_field"]);
-  const fixLabel = fixableRules.has(issue.ruleId) ? "Auto-fix available" : "Not implemented yet";
+  const fixableRules = new Set([
+    "document_title_missing",
+    "missing_document_title",
+    "missing_language",
+    "missing_outline",
+    "unlabeled_form_field",
+  ]);
+  const fixLabel = fixableRules.has(issue.ruleId) ? "Deterministic fix available" : "Needs manual review";
   const fixTone = fixableRules.has(issue.ruleId) ? "success" : "warning";
   return (
     <Pressable onPress={() => onSelectIssue?.(issue)}>

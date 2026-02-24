@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, NameObject, NumberObject, TextStringObject
 import difflib
@@ -45,6 +46,10 @@ class DocumentType(str, Enum):
     PDF = "pdf"
     DOCX = "docx"
     PPTX = "pptx"
+
+
+class JobPolicyRequest(BaseModel):
+    policy_pack_id: str
 
 
 def _ensure_dirs() -> None:
@@ -106,6 +111,40 @@ def _job_update(job_id: str, **updates: object) -> None:
         if job_id in JOBS:
             JOBS[job_id].update(updates)
             REPO.update_job(job_id, updates)
+
+
+def _resolve_policy_pack(policy_pack_id: Optional[str] = None) -> Dict[str, object]:
+    if policy_pack_id:
+        pack = REPO.get_policy_pack(policy_pack_id)
+        if not pack:
+            raise HTTPException(status_code=404, detail="Policy pack not found")
+        return pack
+    default_id = "policy-508-wcag20-aa"
+    pack = REPO.get_policy_pack(default_id)
+    if pack:
+        return pack
+    packs = REPO.list_policy_packs()
+    if packs:
+        return packs[0]
+    raise HTTPException(status_code=500, detail="No policy packs available")
+
+
+def _snapshot_job_policy(job_id: str, policy_pack_id: Optional[str] = None, overwrite: bool = False) -> Dict[str, object]:
+    existing = REPO.get_job_policy_snapshot(job_id)
+    if existing and not overwrite:
+        return existing
+    pack = _resolve_policy_pack(policy_pack_id)
+    REPO.save_job_policy_snapshot(
+        job_id=job_id,
+        policy_pack_id=str(pack.get("id") or ""),
+        policy_name=str(pack.get("name") or "Unnamed policy"),
+        policy_version=int(pack.get("version") or 1),
+        policy_json=pack.get("policy_json", {}) if isinstance(pack.get("policy_json"), dict) else {},
+    )
+    snapshot = REPO.get_job_policy_snapshot(job_id)
+    if not snapshot:
+        raise HTTPException(status_code=500, detail="Failed to persist job policy snapshot")
+    return snapshot
 
 
 def _extract_images(reader: PdfReader, on_progress: Optional[callable] = None) -> int:
@@ -1214,6 +1253,66 @@ def _queue_manual_review(
     return item
 
 
+def _manual_review_item_from_issue(
+    doc_id: str,
+    issue: Dict[str, object],
+    suggested_fix: str,
+    confidence: float = 0.7,
+) -> Dict[str, object]:
+    evidence = issue.get("evidence", {}) if isinstance(issue.get("evidence"), dict) else {}
+    node_ids = evidence.get("nodeIds", []) if isinstance(evidence.get("nodeIds"), list) else []
+    target_node_id = str(node_ids[0]) if node_ids else "doc-1"
+    pages = [int(p) for p in evidence.get("pages", []) if isinstance(p, int)] if isinstance(evidence.get("pages"), list) else []
+    anchors = evidence.get("anchors", []) if isinstance(evidence.get("anchors"), list) else []
+    issue_id = str(issue.get("id") or issue.get("ruleId") or f"{doc_id}-issue")
+    reason = str(issue.get("title") or issue.get("ruleId") or "Manual review required")
+    notes = str(issue.get("description") or "Issue remains after deterministic fixes.")
+    return {
+        "id": f"mr-{int(time.time() * 1000)}-{issue_id}",
+        "issueId": issue_id,
+        "targetNodeId": target_node_id,
+        "reason": reason,
+        "notes": notes,
+        "pages": pages,
+        "anchors": anchors,
+        "instructions": notes,
+        "suggestedFix": suggested_fix,
+        "confidence": confidence,
+        "requiresHuman": True,
+        "status": "pending",
+    }
+
+
+def _manual_review_for_remaining_issues(
+    doc_id: str,
+    remaining_issues: List[Dict[str, object]],
+    existing_items: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    by_rule_suggestion = {
+        "missing_heading_structure": "Add proper heading structure (H1-H6 or equivalent styles) and rescan.",
+        "skipped_heading_level": "Normalize heading levels so they progress without jumps.",
+        "reading_order": "Review and correct logical reading order in source content.",
+    }
+    existing_issue_ids = {str(item.get("issueId", "")) for item in existing_items}
+    generated: List[Dict[str, object]] = []
+    for issue in remaining_issues:
+        rule_id = str(issue.get("ruleId", "")).strip()
+        if rule_id not in by_rule_suggestion:
+            continue
+        issue_id = str(issue.get("id") or "")
+        if issue_id and issue_id in existing_issue_ids:
+            continue
+        generated.append(
+            _manual_review_item_from_issue(
+                doc_id=doc_id,
+                issue=issue,
+                suggested_fix=by_rule_suggestion[rule_id],
+                confidence=0.75,
+            )
+        )
+    return generated
+
+
 def _extract_text(path: Path) -> str:
     reader = PdfReader(str(path), strict=False)
     chunks: List[str] = []
@@ -1805,6 +1904,7 @@ async def start_scan(doc_id: str) -> dict:
     with LOCK:
         JOBS[job_id] = {"jobId": job_id, "status": "queued", "progress": 0}
     REPO.save_job({"jobId": job_id, "docId": doc_id, "status": "queued", "progress": 0, "message": "Queued"})
+    _snapshot_job_policy(job_id)
     thread = threading.Thread(target=_scan_worker, args=(job_id, doc_id), daemon=True)
     thread.start()
     return {"jobId": job_id}
@@ -1818,7 +1918,36 @@ async def get_job(job_id: str) -> dict:
         job = REPO.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    snapshot = REPO.get_job_policy_snapshot(job_id)
+    if snapshot:
+        job["policy"] = {
+            "policyPackId": snapshot.get("policyPackId"),
+            "name": snapshot.get("policyName"),
+            "version": snapshot.get("policyVersion"),
+        }
     return job
+
+
+@router.post("/jobs/{job_id}/policy")
+async def set_job_policy(job_id: str, request: JobPolicyRequest) -> Dict[str, object]:
+    with LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        job = REPO.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    status = str(job.get("status") or "")
+    if status != "queued":
+        raise HTTPException(status_code=409, detail="Policy can only be set while job is queued")
+    snapshot = _snapshot_job_policy(job_id, policy_pack_id=request.policy_pack_id, overwrite=True)
+    return {
+        "jobId": job_id,
+        "policy": {
+            "policyPackId": snapshot.get("policyPackId"),
+            "name": snapshot.get("policyName"),
+            "version": snapshot.get("policyVersion"),
+        },
+    }
 
 
 @router.get("/documents/{doc_id}/issues")
@@ -1828,6 +1957,13 @@ async def get_issues(doc_id: str) -> List[Dict[str, object]]:
     if not issues:
         issues = REPO.get_latest_issues(doc_id)
     return issues
+
+
+@router.get("/documents/{doc_id}/manual-review")
+async def get_document_manual_review(doc_id: str) -> List[Dict[str, object]]:
+    if _get_doc(doc_id) is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
 
 
 @router.post("/documents/{doc_id}/apply-fixes")
@@ -1913,6 +2049,13 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     ai_suggestions = build_alt_text_suggestions(doc_id, doc_type, src, before_issues)
     manual_review_items = fix_result.get("manual_review_added", []) + rebuild_result.get("manual_review_added", [])
     manual_review_items.extend(ai_suggestions)
+    manual_review_items.extend(
+        _manual_review_for_remaining_issues(
+            doc_id=doc_id,
+            remaining_issues=delta.get("remaining", []) if isinstance(delta.get("remaining", []), list) else [],
+            existing_items=manual_review_items,
+        )
+    )
 
     report = {
         "docId": doc_id,
