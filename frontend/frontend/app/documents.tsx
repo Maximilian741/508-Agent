@@ -11,6 +11,7 @@ import {
 } from "react-native";
 
 import { useAppStore } from "../src/store/useAppStore";
+import { PolicyPicker } from "../src/components/PolicyPicker";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
@@ -30,6 +31,12 @@ export default function DocumentsScreen() {
     scanJob,
     documentIssues,
     isUploading,
+    policies,
+    selectedPolicyId,
+    policyDetailsById,
+    fetchPolicies,
+    setSelectedPolicy,
+    fetchPolicyDetail,
   } = useAppStore();
   const [error, setError] = useState<string | null>(null);
   const [uploadName, setUploadName] = useState<string | null>(null);
@@ -59,6 +66,10 @@ export default function DocumentsScreen() {
     }
     setUploadNotice("Upload is supported on web only in this build. Use Sample Document to continue.");
   };
+
+  useEffect(() => {
+    void fetchPolicies();
+  }, [fetchPolicies]);
 
   useEffect(() => {
     if (Platform.OS !== "web") return;
@@ -120,6 +131,17 @@ export default function DocumentsScreen() {
       </View>
 
       {error && <InlineNotice title="Scan failed" message={error} tone="danger" />}
+
+      <PolicyPicker
+        policies={policies.items}
+        selectedPolicyId={selectedPolicyId}
+        onSelectPolicy={(policyId) => setSelectedPolicy(policyId)}
+        onOpenDetails={(policyId) => {
+          void fetchPolicyDetail(policyId);
+        }}
+        detail={selectedPolicyId ? policyDetailsById[selectedPolicyId] : undefined}
+        error={policies.error}
+      />
 
       <Card>
         <View style={styles.uploadHeader}>

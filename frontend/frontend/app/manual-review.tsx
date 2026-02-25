@@ -46,6 +46,14 @@ export default function ManualReviewScreen() {
     }
   }, [currentDocId]);
 
+  const handleManualDecision = async (
+    itemId: string,
+    status: "approved" | "rejected",
+    approvedText?: string,
+  ) => {
+    await updateManualReview(itemId, { status, approvedText }, scopedDocId);
+  };
+
   useEffect(() => {
     const load = async () => {
       if (mockMode) return;
@@ -172,21 +180,21 @@ export default function ManualReviewScreen() {
       {originalUrl && (
         <Card style={styles.card}>
           <Text style={[styles.title, { color: theme.colors.text }]}>Document Preview</Text>
-          {Platform.OS === "web" && isPdfDoc ? (
-            // @ts-ignore - iframe is valid on web
-            <iframe src={originalUrl} style={{ width: "100%", height: 360, border: "none" }} />
-          ) : (
-            <View style={styles.linkRow}>
-              <Pressable onPress={() => originalUrl && Linking.openURL(originalUrl)}>
-                <Text style={[styles.link, { color: theme.colors.accent }]}>Open original document</Text>
+          <InlineNotice
+            title="Preview not available in this build"
+            message="Use the links below to open the document safely."
+            tone="warning"
+          />
+          <View style={styles.linkRow}>
+            <Pressable onPress={() => originalUrl && Linking.openURL(originalUrl)}>
+              <Text style={[styles.link, { color: theme.colors.accent }]}>Open original document</Text>
+            </Pressable>
+            {fixedUrl && (
+              <Pressable onPress={() => Linking.openURL(fixedUrl)}>
+                <Text style={[styles.link, { color: theme.colors.accent }]}>Open fixed document</Text>
               </Pressable>
-              {fixedUrl && (
-                <Pressable onPress={() => Linking.openURL(fixedUrl)}>
-                  <Text style={[styles.link, { color: theme.colors.accent }]}>Open fixed document</Text>
-                </Pressable>
-              )}
-            </View>
-          )}
+            )}
+          </View>
         </Card>
       )}
 
@@ -219,17 +227,16 @@ export default function ManualReviewScreen() {
                 <View style={styles.buttonRow}>
                   <Button
                     title="Approve"
-                    onPress={() =>
-                      updateManualReview(item.id, {
-                        status: "approved",
-                        approvedText: editedText[item.id] ?? item.approvedText ?? item.suggestedText,
-                      }, scopedDocId)
-                    }
+                    onPress={() => void handleManualDecision(
+                      item.id,
+                      "approved",
+                      editedText[item.id] ?? item.approvedText ?? item.suggestedText,
+                    )}
                     variant="secondary"
                   />
                   <Button
                     title="Reject"
-                    onPress={() => updateManualReview(item.id, { status: "rejected" }, scopedDocId)}
+                    onPress={() => void handleManualDecision(item.id, "rejected")}
                     variant="danger"
                   />
                 </View>
@@ -239,12 +246,12 @@ export default function ManualReviewScreen() {
               <View style={styles.buttonRow}>
                 <Button
                   title="Mark Approved"
-                  onPress={() => updateManualReview(item.id, { status: "approved" }, scopedDocId)}
+                  onPress={() => void handleManualDecision(item.id, "approved")}
                   variant="secondary"
                 />
                 <Button
                   title="Reject"
-                  onPress={() => updateManualReview(item.id, { status: "rejected" }, scopedDocId)}
+                  onPress={() => void handleManualDecision(item.id, "rejected")}
                   variant="danger"
                 />
               </View>

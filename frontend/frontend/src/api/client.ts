@@ -83,6 +83,62 @@ export interface ScanJobResponse {
     message?: string;
 }
 
+export interface PolicySummary {
+    id: string;
+    name: string;
+    description: string;
+    version: number;
+    targets: string[];
+    updated_at: string;
+}
+
+export interface PolicyDetail extends PolicySummary {
+    policy_json?: Record<string, unknown>;
+}
+
+export interface JobScorePass {
+    passType?: string;
+    pass_type?: string;
+    scoreTotal?: number;
+    score_total?: number;
+    status: string;
+    countsBySeverity?: Record<string, number>;
+    counts_by_severity?: Record<string, number>;
+    coverage?: Record<string, number>;
+    createdAt?: string;
+    created_at?: string;
+}
+
+export interface JobScoreResponse {
+    jobId: string;
+    scores: JobScorePass[];
+}
+
+export interface EvidenceBundleSummary {
+    bundleId: string;
+    createdAt: string;
+    bundleHash: string;
+    options: Record<string, unknown>;
+    downloadUrl: string;
+}
+
+export interface EvidenceBundleCreateOptions {
+    includeOriginal?: boolean;
+    includeFixedIfAvailable?: boolean;
+    includeRebuiltIfAvailable?: boolean;
+    includeRawArtifacts?: boolean;
+    includePiiUnsafe?: boolean;
+}
+
+export interface EvidenceBundleCreateResponse {
+    bundleId: string;
+    jobId: string;
+    docId: string;
+    createdAt: string;
+    bundleHash: string;
+    downloadUrl: string;
+}
+
 export interface DocumentIssue {
     id: string;
     ruleId: string;
@@ -222,6 +278,13 @@ export interface ApiClient {
     getTagTree: (docId: string) => Promise<TagTreeResponse>;
     getFixReport: (docId: string) => Promise<FixReport>;
     getRebuiltUrl: (docId: string) => string;
+    listPolicies: () => Promise<PolicySummary[]>;
+    getPolicy: (policyId: string) => Promise<PolicyDetail>;
+    setJobPolicy: (jobId: string, policyPackId: string) => Promise<{ jobId: string; policy: Record<string, unknown> }>;
+    getJobScore: (jobId: string) => Promise<JobScoreResponse>;
+    createEvidenceBundle: (jobId: string, options?: EvidenceBundleCreateOptions) => Promise<EvidenceBundleCreateResponse>;
+    listEvidenceBundlesForDoc: (docId: string) => Promise<EvidenceBundleSummary[]>;
+    getEvidenceBundleDownloadUrl: (bundleId: string) => string;
 }
 
 interface ApiClientConfig {
@@ -262,6 +325,15 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Request failed");
+        }
+        return (await response.json()) as T;
+    };
+
+    const getJson = async <T>(path: string): Promise<T> => {
+        const response = await fetch(`${baseUrl}${path}`);
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Request failed");
@@ -500,6 +572,81 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return (await response.json()) as FixReport;
     };
 
+    const listPolicies = async (): Promise<PolicySummary[]> => {
+        if (mockMode) {
+            return [];
+        }
+        try {
+            return await getJson<PolicySummary[]>("/api/policies");
+        } catch {
+            return await getJson<PolicySummary[]>("/policies");
+        }
+    };
+
+    const getPolicy = async (policyId: string): Promise<PolicyDetail> => {
+        if (mockMode) {
+            return {
+                id: policyId,
+                name: "Mock Policy",
+                description: "Mock policy detail",
+                version: 1,
+                targets: ["pdf"],
+                updated_at: new Date().toISOString(),
+                policy_json: {},
+            };
+        }
+        try {
+            return await getJson<PolicyDetail>(`/api/policies/${policyId}`);
+        } catch {
+            return await getJson<PolicyDetail>(`/policies/${policyId}`);
+        }
+    };
+
+    const setJobPolicy = async (
+        jobId: string,
+        policyPackId: string,
+    ): Promise<{ jobId: string; policy: Record<string, unknown> }> => {
+        if (mockMode) {
+            return { jobId, policy: { policyPackId } };
+        }
+        return request<{ jobId: string; policy: Record<string, unknown> }>(`/jobs/${jobId}/policy`, {
+            policy_pack_id: policyPackId,
+        });
+    };
+
+    const getJobScore = async (jobId: string): Promise<JobScoreResponse> => {
+        if (mockMode) {
+            return { jobId, scores: [] };
+        }
+        return getJson<JobScoreResponse>(`/jobs/${jobId}/score`);
+    };
+
+    const createEvidenceBundle = async (
+        jobId: string,
+        options: EvidenceBundleCreateOptions = {},
+    ): Promise<EvidenceBundleCreateResponse> => {
+        if (mockMode) {
+            return {
+                bundleId: `bundle-${Date.now()}`,
+                jobId,
+                docId: "doc-mock",
+                createdAt: new Date().toISOString(),
+                bundleHash: "mock",
+                downloadUrl: `/evidence-bundles/bundle-${Date.now()}/download`,
+            };
+        }
+        return request<EvidenceBundleCreateResponse>(`/jobs/${jobId}/evidence-bundle`, options);
+    };
+
+    const listEvidenceBundlesForDoc = async (docId: string): Promise<EvidenceBundleSummary[]> => {
+        if (mockMode) {
+            return [];
+        }
+        return getJson<EvidenceBundleSummary[]>(`/documents/${docId}/evidence-bundles`);
+    };
+
+    const getEvidenceBundleDownloadUrl = (bundleId: string): string => `${baseUrl}/evidence-bundles/${bundleId}/download`;
+
     return {
         scan,
         remediate,
@@ -517,6 +664,13 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         getTagTree,
         getFixReport,
         getRebuiltUrl,
+        listPolicies,
+        getPolicy,
+        setJobPolicy,
+        getJobScore,
+        createEvidenceBundle,
+        listEvidenceBundlesForDoc,
+        getEvidenceBundleDownloadUrl,
     };
 }
 

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.api.documents import router as documents_router
+from app.api.evidence_bundles import router as evidence_bundles_router
 from app.api.manual_review import router as manual_review_router
 from app.api.policies import router as policies_router
 from app.api.remediate import router as remediate_router
@@ -33,3 +34,4 @@ app.include_router(scan_router, tags=["scan"])
 app.include_router(remediate_router, tags=["remediate"])
 app.include_router(manual_review_router, tags=["manual-review"])
 app.include_router(policies_router, tags=["policies"])
+app.include_router(evidence_bundles_router, tags=["evidence-bundles"])

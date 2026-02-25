@@ -25,6 +25,7 @@ from app.parsers.docx_parser import DOCXParser
 from app.parsers.pptx_parser import PPTXParser
 from app.ai.alt_text_suggester import build_alt_text_suggestions
 from app.persistence.db import get_repo
+from app.schemas.status import DocStatusListResponse, DocStatusSummary
 
 router = APIRouter()
 
@@ -2028,6 +2029,28 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
 @router.get("/documents")
 async def list_documents() -> List[Dict[str, object]]:
     return REPO.list_documents()
+
+
+@router.get("/documents/status", response_model=DocStatusListResponse)
+async def list_documents_status(limit: int = 50, offset: int = 0) -> Dict[str, object]:
+    safe_limit = max(1, min(1000, int(limit or 50)))
+    safe_offset = max(0, int(offset or 0))
+    items = REPO.list_documents_with_status(limit=safe_limit, offset=safe_offset)
+    total = REPO.count_documents()
+    return {
+        "items": items,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+
+
+@router.get("/documents/{doc_id}/status", response_model=DocStatusSummary)
+async def get_document_status(doc_id: str) -> Dict[str, object]:
+    payload = REPO.get_document_status(doc_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return payload
 
 
 @router.post("/documents/{doc_id}/scan")

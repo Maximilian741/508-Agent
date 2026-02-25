@@ -186,6 +186,10 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_jobs_doc_id ON scan_jobs(doc_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fix_reports_doc_id ON fix_reports(doc_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_review_doc_id ON manual_review(doc_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_doc_phase ON issues(doc_id, phase)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS policy_packs (
@@ -228,6 +232,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_bundles (
+              id TEXT PRIMARY KEY,
+              job_id TEXT NOT NULL,
+              doc_id TEXT NOT NULL,
+              bundle_path TEXT NOT NULL,
+              bundle_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              created_by TEXT,
+              options_json TEXT NOT NULL,
+              status TEXT NOT NULL,
+              error_text TEXT
+            )
+            """
+        )
         now = _utc_now()
         for pack in _DEFAULT_POLICY_PACKS:
             conn.execute(
@@ -250,6 +270,43 @@ def init_db() -> None:
 
 
 class SqliteRepo:
+    @staticmethod
+    def _issue_severity_bucket(raw: object) -> str:
+        severity = str(raw or "").strip().lower()
+        if severity in {"critical", "serious", "moderate", "minor"}:
+            return severity
+        if severity == "error":
+            return "serious"
+        if severity == "warning":
+            return "moderate"
+        return "minor"
+
+    @staticmethod
+    def _empty_severity_counts() -> Dict[str, int]:
+        return {"critical": 0, "serious": 0, "moderate": 0, "minor": 0}
+
+    @classmethod
+    def _normalized_severity_counts(cls, payload: Dict[str, object]) -> Dict[str, int]:
+        out = cls._empty_severity_counts()
+        for key, value in payload.items():
+            bucket = cls._issue_severity_bucket(key)
+            try:
+                out[bucket] += int(value or 0)
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _normalize_job_status(raw: object) -> str:
+        value = str(raw or "").strip().lower()
+        if value in {"queued", "running"}:
+            return value
+        if value in {"done", "completed"}:
+            return "completed"
+        if value in {"error", "failed"}:
+            return "failed"
+        return value or "unknown"
+
     def _policy_from_row(self, row: sqlite3.Row) -> Dict[str, object]:
         policy_json: Dict[str, object] = {}
         try:
@@ -431,6 +488,135 @@ class SqliteRepo:
             )
         return out
 
+    def create_evidence_bundle_record(
+        self,
+        bundle_id: str,
+        job_id: str,
+        doc_id: str,
+        bundle_path: str,
+        bundle_hash: str,
+        options: Dict[str, object],
+        status: str = "created",
+        created_by: Optional[str] = None,
+        error_text: Optional[str] = None,
+    ) -> None:
+        conn = get_connection()
+        with _LOCK:
+            conn.execute(
+                """
+                INSERT INTO evidence_bundles(id, job_id, doc_id, bundle_path, bundle_hash, created_at, created_by, options_json, status, error_text)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    bundle_id,
+                    job_id,
+                    doc_id,
+                    bundle_path,
+                    bundle_hash,
+                    _utc_now(),
+                    created_by,
+                    json.dumps(options),
+                    status,
+                    error_text,
+                ),
+            )
+            conn.commit()
+
+    def update_evidence_bundle_record(
+        self,
+        bundle_id: str,
+        *,
+        bundle_path: Optional[str] = None,
+        bundle_hash: Optional[str] = None,
+        status: Optional[str] = None,
+        error_text: Optional[str] = None,
+    ) -> bool:
+        conn = get_connection()
+        row = conn.execute("SELECT * FROM evidence_bundles WHERE id=?", (bundle_id,)).fetchone()
+        if row is None:
+            return False
+        next_path = bundle_path if bundle_path is not None else row["bundle_path"]
+        next_hash = bundle_hash if bundle_hash is not None else row["bundle_hash"]
+        next_status = status if status is not None else row["status"]
+        next_error = error_text if error_text is not None else row["error_text"]
+        with _LOCK:
+            conn.execute(
+                """
+                UPDATE evidence_bundles
+                SET bundle_path=?, bundle_hash=?, status=?, error_text=?
+                WHERE id=?
+                """,
+                (next_path, next_hash, next_status, next_error, bundle_id),
+            )
+            conn.commit()
+        return True
+
+    def list_evidence_bundles_for_doc(self, doc_id: str) -> List[Dict[str, object]]:
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT id, job_id, doc_id, bundle_path, bundle_hash, created_at, created_by, options_json, status, error_text
+            FROM evidence_bundles
+            WHERE doc_id=?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (doc_id,),
+        ).fetchall()
+        out: List[Dict[str, object]] = []
+        for row in rows:
+            try:
+                options = json.loads(row["options_json"] or "{}")
+                if not isinstance(options, dict):
+                    options = {}
+            except Exception:
+                options = {}
+            out.append(
+                {
+                    "bundleId": row["id"],
+                    "jobId": row["job_id"],
+                    "docId": row["doc_id"],
+                    "bundlePath": row["bundle_path"],
+                    "bundleHash": row["bundle_hash"],
+                    "createdAt": row["created_at"],
+                    "createdBy": row["created_by"],
+                    "options": options,
+                    "status": row["status"],
+                    "errorText": row["error_text"],
+                }
+            )
+        return out
+
+    def get_evidence_bundle(self, bundle_id: str) -> Optional[Dict[str, object]]:
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT id, job_id, doc_id, bundle_path, bundle_hash, created_at, created_by, options_json, status, error_text
+            FROM evidence_bundles
+            WHERE id=?
+            """,
+            (bundle_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            options = json.loads(row["options_json"] or "{}")
+            if not isinstance(options, dict):
+                options = {}
+        except Exception:
+            options = {}
+        return {
+            "bundleId": row["id"],
+            "jobId": row["job_id"],
+            "docId": row["doc_id"],
+            "bundlePath": row["bundle_path"],
+            "bundleHash": row["bundle_hash"],
+            "createdAt": row["created_at"],
+            "createdBy": row["created_by"],
+            "options": options,
+            "status": row["status"],
+            "errorText": row["error_text"],
+        }
+
     def save_document(self, doc: Dict[str, object]) -> None:
         conn = get_connection()
         doc_id = str(doc["id"])
@@ -523,6 +709,315 @@ class SqliteRepo:
             }
             for row in rows
         ]
+
+    def count_documents(self) -> int:
+        conn = get_connection()
+        row = conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()
+        return int(row["c"] if row else 0)
+
+    def _build_document_status_summaries(self, rows: List[sqlite3.Row]) -> List[Dict[str, object]]:
+        from app.status.classifier import compute_doc_status
+
+        if not rows:
+            return []
+
+        conn = get_connection()
+        doc_ids = [str(row["id"]) for row in rows]
+        placeholders = ",".join(["?"] * len(doc_ids))
+
+        latest_job_by_doc: Dict[str, sqlite3.Row] = {}
+        job_rows = conn.execute(
+            f"""
+            SELECT id, doc_id, status, started_at, finished_at
+            FROM scan_jobs
+            WHERE doc_id IN ({placeholders})
+            ORDER BY doc_id ASC, started_at DESC, id DESC
+            """,
+            tuple(doc_ids),
+        ).fetchall()
+        for row in job_rows:
+            doc_id = str(row["doc_id"])
+            if doc_id not in latest_job_by_doc:
+                latest_job_by_doc[doc_id] = row
+
+        latest_job_ids = [str(row["id"]) for row in latest_job_by_doc.values()]
+        job_placeholders = ",".join(["?"] * len(latest_job_ids)) if latest_job_ids else ""
+
+        fix_report_by_doc: Dict[str, Dict[str, object]] = {}
+        fix_rows = conn.execute(
+            f"SELECT doc_id, report_json FROM fix_reports WHERE doc_id IN ({placeholders})",
+            tuple(doc_ids),
+        ).fetchall()
+        for row in fix_rows:
+            try:
+                parsed = json.loads(row["report_json"] or "{}")
+                if isinstance(parsed, dict):
+                    fix_report_by_doc[str(row["doc_id"])] = parsed
+            except Exception:
+                continue
+
+        manual_counts_by_doc: Dict[str, Dict[str, int]] = {
+            doc_id: {"pending": 0, "approved": 0, "rejected": 0} for doc_id in doc_ids
+        }
+        manual_rows = conn.execute(
+            f"SELECT doc_id, item_json, resolved FROM manual_review WHERE doc_id IN ({placeholders})",
+            tuple(doc_ids),
+        ).fetchall()
+        for row in manual_rows:
+            doc_id = str(row["doc_id"])
+            counts = manual_counts_by_doc.get(doc_id)
+            if counts is None:
+                continue
+            status = ""
+            try:
+                payload = json.loads(row["item_json"] or "{}")
+                if isinstance(payload, dict):
+                    status = str(payload.get("status") or "").strip().lower()
+            except Exception:
+                status = ""
+            if status not in {"pending", "approved", "rejected"}:
+                status = "rejected" if int(row["resolved"] or 0) == 1 else "pending"
+            counts[status] = int(counts.get(status, 0)) + 1
+
+        issue_aggregate: Dict[str, Dict[str, object]] = {
+            doc_id: {
+                "before_total": 0,
+                "before_by_severity": self._empty_severity_counts(),
+                "after_total": 0,
+                "after_by_severity": self._empty_severity_counts(),
+                "before_seen": False,
+                "after_seen": False,
+            }
+            for doc_id in doc_ids
+        }
+        issue_rows = conn.execute(
+            f"""
+            SELECT doc_id, phase, issue_json
+            FROM issues
+            WHERE doc_id IN ({placeholders}) AND phase IN ('before', 'after')
+            ORDER BY id ASC
+            """,
+            tuple(doc_ids),
+        ).fetchall()
+        for row in issue_rows:
+            doc_id = str(row["doc_id"])
+            phase = str(row["phase"] or "")
+            state = issue_aggregate.get(doc_id)
+            if state is None:
+                continue
+            try:
+                issue = json.loads(row["issue_json"] or "{}")
+            except Exception:
+                continue
+            if not isinstance(issue, dict):
+                continue
+            bucket = self._issue_severity_bucket(issue.get("severity"))
+            if phase == "before":
+                state["before_seen"] = True
+                state["before_total"] = int(state["before_total"]) + 1
+                by = state["before_by_severity"]
+                if isinstance(by, dict):
+                    by[bucket] = int(by.get(bucket, 0)) + 1
+            elif phase == "after":
+                state["after_seen"] = True
+                state["after_total"] = int(state["after_total"]) + 1
+                by = state["after_by_severity"]
+                if isinstance(by, dict):
+                    by[bucket] = int(by.get(bucket, 0)) + 1
+
+        scores_by_job: Dict[str, Dict[str, Dict[str, object]]] = {}
+        if latest_job_ids:
+            score_rows = conn.execute(
+                f"""
+                SELECT job_id, pass_type, score_total, status, created_at
+                FROM job_scoring
+                WHERE job_id IN ({job_placeholders})
+                """,
+                tuple(latest_job_ids),
+            ).fetchall()
+            for row in score_rows:
+                job_id = str(row["job_id"])
+                pass_type = str(row["pass_type"])
+                if job_id not in scores_by_job:
+                    scores_by_job[job_id] = {}
+                scores_by_job[job_id][pass_type] = {
+                    "scoreTotal": int(row["score_total"] or 0),
+                    "status": str(row["status"] or ""),
+                    "createdAt": row["created_at"],
+                }
+
+        policy_by_job: Dict[str, Dict[str, object]] = {}
+        if latest_job_ids:
+            policy_rows = conn.execute(
+                f"""
+                SELECT job_id, policy_pack_id, policy_name, policy_version
+                FROM job_policy_snapshot
+                WHERE job_id IN ({job_placeholders})
+                """,
+                tuple(latest_job_ids),
+            ).fetchall()
+            for row in policy_rows:
+                policy_by_job[str(row["job_id"])] = {
+                    "policyPackId": row["policy_pack_id"],
+                    "name": str(row["policy_name"] or ""),
+                    "version": int(row["policy_version"] or 1),
+                }
+
+        summaries: List[Dict[str, object]] = []
+        for row in rows:
+            doc_id = str(row["id"])
+            issue_state = issue_aggregate.get(doc_id, {})
+            fix_report = fix_report_by_doc.get(doc_id)
+            manual_counts = manual_counts_by_doc.get(doc_id, {"pending": 0, "approved": 0, "rejected": 0})
+
+            before_counts: Optional[Dict[str, object]] = None
+            after_counts: Optional[Dict[str, object]] = None
+            delta_counts: Optional[Dict[str, int]] = None
+
+            if isinstance(fix_report, dict):
+                before_payload = fix_report.get("before")
+                if isinstance(before_payload, dict):
+                    before_by = before_payload.get("bySeverity", {})
+                    before_counts = {
+                        "total": int(before_payload.get("issueCount", 0) or 0),
+                        "bySeverity": self._normalized_severity_counts(before_by if isinstance(before_by, dict) else {}),
+                    }
+                after_payload = fix_report.get("after")
+                if isinstance(after_payload, dict):
+                    after_by = after_payload.get("bySeverity", {})
+                    after_counts = {
+                        "total": int(after_payload.get("issueCount", 0) or 0),
+                        "bySeverity": self._normalized_severity_counts(after_by if isinstance(after_by, dict) else {}),
+                    }
+                delta_payload = fix_report.get("delta")
+                if isinstance(delta_payload, dict):
+                    fixed_list = delta_payload.get("fixed", [])
+                    remaining_list = delta_payload.get("remaining", [])
+                    introduced_list = delta_payload.get("introduced", [])
+                    delta_counts = {
+                        "fixed": len(fixed_list) if isinstance(fixed_list, list) else 0,
+                        "remaining": len(remaining_list) if isinstance(remaining_list, list) else 0,
+                        "introduced": len(introduced_list) if isinstance(introduced_list, list) else 0,
+                    }
+
+            if before_counts is None and bool(issue_state.get("before_seen")):
+                before_counts = {
+                    "total": int(issue_state.get("before_total", 0) or 0),
+                    "bySeverity": issue_state.get("before_by_severity", self._empty_severity_counts()),
+                }
+            if after_counts is None and bool(issue_state.get("after_seen")):
+                after_counts = {
+                    "total": int(issue_state.get("after_total", 0) or 0),
+                    "bySeverity": issue_state.get("after_by_severity", self._empty_severity_counts()),
+                }
+
+            latest_job_row = latest_job_by_doc.get(doc_id)
+            latest_job: Optional[Dict[str, object]] = None
+            job_id: Optional[str] = None
+            normalized_job_status = ""
+            if latest_job_row is not None:
+                job_id = str(latest_job_row["id"])
+                normalized_job_status = self._normalize_job_status(latest_job_row["status"])
+                latest_job = {
+                    "jobId": job_id,
+                    "status": normalized_job_status,
+                    "startedAt": latest_job_row["started_at"],
+                    "finishedAt": latest_job_row["finished_at"],
+                }
+
+            score_map = scores_by_job.get(job_id or "", {})
+            score_summary = {
+                "baseline": score_map.get("baseline"),
+                "postFix": score_map.get("post_fix"),
+                "postManual": score_map.get("post_manual"),
+            }
+            preferred_score_status = ""
+            for key in ("postManual", "postFix", "baseline"):
+                entry = score_summary.get(key)
+                if isinstance(entry, dict) and str(entry.get("status") or ""):
+                    preferred_score_status = str(entry.get("status") or "")
+                    break
+
+            critical_remaining = 0
+            if isinstance(after_counts, dict):
+                by = after_counts.get("bySeverity")
+                if isinstance(by, dict):
+                    critical_remaining = int(by.get("critical", 0) or 0)
+
+            remaining_count = 0
+            introduced_count = 0
+            if isinstance(delta_counts, dict):
+                remaining_count = int(delta_counts.get("remaining", 0) or 0)
+                introduced_count = int(delta_counts.get("introduced", 0) or 0)
+            elif isinstance(after_counts, dict):
+                remaining_count = int(after_counts.get("total", 0) or 0)
+
+            classification = compute_doc_status(
+                {
+                    "latestJobStatus": normalized_job_status,
+                    "hasJobs": latest_job_row is not None,
+                    "hasFixReport": isinstance(fix_report, dict),
+                    "pendingManual": int(manual_counts.get("pending", 0) or 0),
+                    "remainingCount": remaining_count,
+                    "introducedCount": introduced_count,
+                    "criticalRemaining": critical_remaining,
+                    "preferredScoreStatus": preferred_score_status,
+                }
+            )
+
+            summaries.append(
+                {
+                    "docId": doc_id,
+                    "filename": str(row["filename"] or ""),
+                    "docType": str(row["doc_type"] or "unknown"),
+                    "createdAt": row["created_at"],
+                    "latestJob": latest_job,
+                    "policy": policy_by_job.get(job_id or ""),
+                    "score": score_summary,
+                    "counts": {
+                        "before": before_counts,
+                        "after": after_counts,
+                        "delta": delta_counts,
+                        "manualReview": {
+                            "pending": int(manual_counts.get("pending", 0) or 0),
+                            "approved": int(manual_counts.get("approved", 0) or 0),
+                            "rejected": int(manual_counts.get("rejected", 0) or 0),
+                        },
+                    },
+                    "status": str(classification.get("status") or "needs_review"),
+                    "reasons": classification.get("reasons", []),
+                }
+            )
+
+        return summaries
+
+    def list_documents_with_status(self, limit: int = 50, offset: int = 0) -> List[Dict[str, object]]:
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path
+            FROM documents
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (max(1, int(limit or 50)), max(0, int(offset or 0))),
+        ).fetchall()
+        return self._build_document_status_summaries(list(rows))
+
+    def get_document_status(self, doc_id: str) -> Optional[Dict[str, object]]:
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path
+            FROM documents
+            WHERE id=?
+            """,
+            (doc_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        items = self._build_document_status_summaries([row])
+        return items[0] if items else None
 
     def save_job(self, job: Dict[str, object]) -> None:
         conn = get_connection()

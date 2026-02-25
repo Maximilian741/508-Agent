@@ -6,10 +6,16 @@ import {
     DocumentDiffResponse,
     DocumentSummary,
     DocumentIssue,
+    EvidenceBundleCreateOptions,
+    EvidenceBundleCreateResponse,
+    EvidenceBundleSummary,
     ExecutionResult,
     FixReport,
     Issue,
+    JobScorePass,
     ManualReviewItem,
+    PolicyDetail,
+    PolicySummary,
     RemediateRequest,
     ScanRequest,
     ScanResponse,
@@ -52,6 +58,13 @@ interface AppState {
     documentSummary: DocumentSummary | null;
     tagTree: TagTreeResponse | null;
     fixReport: FixReport | null;
+    policies: { items: PolicySummary[]; loaded: boolean; error?: string };
+    policyDetailsById: Record<string, PolicyDetail>;
+    selectedPolicyId: string | null;
+    jobScoresByJobId: Record<string, JobScorePass[]>;
+    evidenceBundlesByDocId: Record<string, EvidenceBundleSummary[]>;
+    isExportingBundle: boolean;
+    exportError?: string;
     isScanning: boolean;
     isUploading: boolean;
     setApiBaseUrl: (value: string) => void;
@@ -80,11 +93,23 @@ interface AppState {
     fetchDocumentSummary: (docId: string) => Promise<RunResult<DocumentSummary>>;
     fetchTagTree: (docId: string) => Promise<RunResult<TagTreeResponse>>;
     fetchFixReport: (docId: string) => Promise<RunResult<FixReport>>;
+    fetchPolicies: () => Promise<RunResult<PolicySummary[]>>;
+    setSelectedPolicy: (policyId: string | null) => void;
+    fetchPolicyDetail: (policyId: string) => Promise<RunResult<PolicyDetail>>;
+    applySelectedPolicyToJob: (jobId: string) => Promise<RunResult<{ jobId: string; policy: Record<string, unknown> }>>;
+    fetchJobScores: (jobId: string) => Promise<RunResult<JobScorePass[]>>;
+    exportEvidenceBundle: (
+        jobId: string,
+        docId: string,
+        options?: EvidenceBundleCreateOptions,
+    ) => Promise<RunResult<EvidenceBundleCreateResponse>>;
+    fetchEvidenceBundles: (docId: string) => Promise<RunResult<EvidenceBundleSummary[]>>;
 }
 
 const resolved = getBackendUrlInfo();
 const defaultBaseUrl = resolved.url;
 const baseUrlKey = "apiBaseUrl";
+const selectedPolicyKey = "selectedPolicyId";
 
 const emptyTagTree: TagTreeResponse = {
     tagged: false,
@@ -113,6 +138,28 @@ function storeBaseUrl(value: string) {
     if (Platform.OS !== "web") return;
     try {
         window.localStorage.setItem(baseUrlKey, value);
+    } catch (error) {
+        return;
+    }
+}
+
+function readStoredSelectedPolicyId(): string | null {
+    if (Platform.OS !== "web") return null;
+    try {
+        return window.localStorage.getItem(selectedPolicyKey);
+    } catch (error) {
+        return null;
+    }
+}
+
+function storeSelectedPolicyId(value: string | null) {
+    if (Platform.OS !== "web") return;
+    try {
+        if (!value) {
+            window.localStorage.removeItem(selectedPolicyKey);
+            return;
+        }
+        window.localStorage.setItem(selectedPolicyKey, value);
     } catch (error) {
         return;
     }
@@ -168,6 +215,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     documentSummary: null,
     tagTree: null,
     fixReport: null,
+    policies: { items: [], loaded: false },
+    policyDetailsById: {},
+    selectedPolicyId: readStoredSelectedPolicyId(),
+    jobScoresByJobId: {},
+    evidenceBundlesByDocId: {},
+    isExportingBundle: false,
+    exportError: undefined,
     isScanning: false,
     isUploading: false,
     setApiBaseUrl: (value) => {
@@ -307,6 +361,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 fixedDocId: null,
                 documentSummary: null,
                 tagTree: null,
+                jobScoresByJobId: {},
+                evidenceBundlesByDocId: {},
                 isUploading: false,
             });
             return { ok: true, data: response };
@@ -319,6 +375,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         const client = getClient(get());
         try {
             const start = await client.startDocumentScan(docId);
+            const selectedPolicyId = get().selectedPolicyId;
+            if (selectedPolicyId) {
+                try {
+                    await client.setJobPolicy(start.jobId, selectedPolicyId);
+                } catch (error) {
+                    // If job already left queued state, keep scan flow alive.
+                }
+            }
             set({
                 scanJob: { jobId: start.jobId, status: "queued", progress: 0 },
                 documentIssues: [],
@@ -375,6 +439,17 @@ export const useAppStore = create<AppState>((set, get) => ({
                     } catch (error) {
                         return;
                     }
+                    try {
+                        const scorePayload = await client.getJobScore(start.jobId);
+                        set((state) => ({
+                            jobScoresByJobId: {
+                                ...state.jobScoresByJobId,
+                                [start.jobId]: scorePayload.scores ?? [],
+                            },
+                        }));
+                    } catch (error) {
+                        // keep UX non-blocking if score is unavailable
+                    }
                 }
                 if (current.status === "done") {
                     return;
@@ -398,6 +473,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             set({ fixedDocId: resolvedFixedDocId, fixReport: response.report ?? null });
             if (response.report?.after?.issueCount !== undefined) {
                 set({ documentIssues: response.report.delta?.remaining ?? [] });
+            }
+            const currentJobId = get().scanJob?.jobId;
+            if (currentJobId) {
+                try {
+                    const scorePayload = await client.getJobScore(currentJobId);
+                    set((state) => ({
+                        jobScoresByJobId: {
+                            ...state.jobScoresByJobId,
+                            [currentJobId]: scorePayload.scores ?? [],
+                        },
+                    }));
+                } catch (error) {
+                    // score can be unavailable until backend updates
+                }
             }
             return { ok: true, data: response };
         } catch (error) {
@@ -447,6 +536,109 @@ export const useAppStore = create<AppState>((set, get) => ({
                 return { ok: true };
             }
             return { ok: false, error: message };
+        }
+    },
+    fetchPolicies: async () => {
+        const client = getClient(get());
+        try {
+            const items = await client.listPolicies();
+            const currentSelected = get().selectedPolicyId;
+            let nextSelected = currentSelected;
+            if (!nextSelected || !items.some((item) => item.id === nextSelected)) {
+                nextSelected = items.length > 0 ? items[0].id : null;
+                storeSelectedPolicyId(nextSelected);
+            }
+            set({
+                policies: { items, loaded: true },
+                selectedPolicyId: nextSelected,
+            });
+            return { ok: true, data: items };
+        } catch (error) {
+            const message = (error as Error).message;
+            set({ policies: { items: [], loaded: true, error: message } });
+            return { ok: false, error: message };
+        }
+    },
+    setSelectedPolicy: (policyId) => {
+        storeSelectedPolicyId(policyId);
+        set({ selectedPolicyId: policyId });
+    },
+    fetchPolicyDetail: async (policyId) => {
+        const client = getClient(get());
+        try {
+            const detail = await client.getPolicy(policyId);
+            set((state) => ({
+                policyDetailsById: {
+                    ...state.policyDetailsById,
+                    [policyId]: detail,
+                },
+            }));
+            return { ok: true, data: detail };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    applySelectedPolicyToJob: async (jobId) => {
+        const selectedPolicyId = get().selectedPolicyId;
+        if (!selectedPolicyId) {
+            return { ok: false, error: "No selected policy." };
+        }
+        const client = getClient(get());
+        try {
+            const payload = await client.setJobPolicy(jobId, selectedPolicyId);
+            return { ok: true, data: payload };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    fetchJobScores: async (jobId) => {
+        const client = getClient(get());
+        try {
+            const payload = await client.getJobScore(jobId);
+            set((state) => ({
+                jobScoresByJobId: {
+                    ...state.jobScoresByJobId,
+                    [jobId]: payload.scores ?? [],
+                },
+            }));
+            return { ok: true, data: payload.scores ?? [] };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    exportEvidenceBundle: async (jobId, docId, options) => {
+        const client = getClient(get());
+        set({ isExportingBundle: true, exportError: undefined });
+        try {
+            const payload = await client.createEvidenceBundle(jobId, options);
+            const bundles = await client.listEvidenceBundlesForDoc(docId);
+            set((state) => ({
+                isExportingBundle: false,
+                evidenceBundlesByDocId: {
+                    ...state.evidenceBundlesByDocId,
+                    [docId]: bundles,
+                },
+            }));
+            return { ok: true, data: payload };
+        } catch (error) {
+            const message = (error as Error).message;
+            set({ isExportingBundle: false, exportError: message });
+            return { ok: false, error: message };
+        }
+    },
+    fetchEvidenceBundles: async (docId) => {
+        const client = getClient(get());
+        try {
+            const bundles = await client.listEvidenceBundlesForDoc(docId);
+            set((state) => ({
+                evidenceBundlesByDocId: {
+                    ...state.evidenceBundlesByDocId,
+                    [docId]: bundles,
+                },
+            }));
+            return { ok: true, data: bundles };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
         }
     },
 }));

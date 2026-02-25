@@ -13,8 +13,11 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 
-import { DocumentIssue, TagTreeResponse, TagTreeNode } from "../src/api/client";
+import { DocumentIssue, JobScorePass, TagTreeResponse, TagTreeNode, UploadResponse, createApiClient } from "../src/api/client";
+import { ExportsList } from "../src/components/ExportsList";
+import { ScoreCard } from "../src/components/ScoreCard";
 import { useAppStore } from "../src/store/useAppStore";
+import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { EmptyState } from "../src/ui/components/EmptyState";
@@ -36,10 +39,25 @@ export default function ScanScreen() {
   const applyDocumentFixes = useAppStore((state) => state.applyDocumentFixes);
   const fixedDocId = useAppStore((state) => state.fixedDocId);
   const fetchDocumentDiff = useAppStore((state) => state.fetchDocumentDiff);
+  const fetchDocumentSummary = useAppStore((state) => state.fetchDocumentSummary);
+  const fetchTagTree = useAppStore((state) => state.fetchTagTree);
+  const fetchFixReport = useAppStore((state) => state.fetchFixReport);
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const documentSummary = useAppStore((state) => state.documentSummary);
   const tagTree = useAppStore((state) => state.tagTree);
   const fixReport = useAppStore((state) => state.fixReport);
+  const selectedPolicyId = useAppStore((state) => state.selectedPolicyId);
+  const policyDetailsById = useAppStore((state) => state.policyDetailsById);
+  const fetchPolicyDetail = useAppStore((state) => state.fetchPolicyDetail);
+  const fetchJobScores = useAppStore((state) => state.fetchJobScores);
+  const jobScoresByJobId = useAppStore((state) => state.jobScoresByJobId);
+  const fetchEvidenceBundles = useAppStore((state) => state.fetchEvidenceBundles);
+  const exportEvidenceBundle = useAppStore((state) => state.exportEvidenceBundle);
+  const evidenceBundlesByDocId = useAppStore((state) => state.evidenceBundlesByDocId);
+  const isExportingBundle = useAppStore((state) => state.isExportingBundle);
+  const exportError = useAppStore((state) => state.exportError);
+  const fetchManualReview = useAppStore((state) => state.fetchManualReview);
+  const manualReviewQueue = useAppStore((state) => state.manualReviewQueue);
   const mockMode = useAppStore((state) => state.mockMode);
   const themeMode = useAppStore((state) => state.themeMode);
   const setThemeMode = useAppStore((state) => state.setThemeMode);
@@ -65,6 +83,8 @@ export default function ScanScreen() {
   const [showBeforeIssues, setShowBeforeIssues] = useState(false);
   const [showAfterIssues, setShowAfterIssues] = useState(false);
   const [documentsTab, setDocumentsTab] = useState<"tree" | "completed">("tree");
+  const [scoreMessage, setScoreMessage] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [recentDocuments, setRecentDocuments] = useState<
     Array<{
       docId: string;
@@ -73,6 +93,8 @@ export default function ScanScreen() {
       createdAt?: string;
       fixedPath?: string | null;
       rebuiltPath?: string | null;
+      status?: "in_progress" | "fixed" | "needs_review" | "errors" | "not_run";
+      reasons?: string[];
     }>
   >([]);
   const [recentDocsError, setRecentDocsError] = useState<string | null>(null);
@@ -219,14 +241,44 @@ export default function ScanScreen() {
     return "unknown";
   }, [fixReport, focusedIssue]);
 
-  const fixedDocuments = useMemo(
-    () => recentDocuments.filter((doc) => Boolean(doc.fixedPath) || Boolean(doc.rebuiltPath)),
-    [recentDocuments],
-  );
+  const bucketedDocuments = useMemo(() => {
+    const buckets: Record<"in_progress" | "fixed" | "needs_review" | "errors" | "not_run", typeof recentDocuments> = {
+      in_progress: [],
+      fixed: [],
+      needs_review: [],
+      errors: [],
+      not_run: [],
+    };
+    for (const doc of recentDocuments) {
+      let status = doc.status;
+      if (!status) {
+        status = Boolean(doc.fixedPath) || Boolean(doc.rebuiltPath) ? "fixed" : "needs_review";
+      }
+      buckets[status].push(doc);
+    }
+    return buckets;
+  }, [recentDocuments]);
+  const statusSections: Array<{
+    key: "in_progress" | "fixed" | "needs_review" | "errors" | "not_run";
+    label: string;
+    tone: "info" | "success" | "warning" | "danger" | "default";
+  }> = [
+    { key: "in_progress", label: "In Progress", tone: "info" },
+    { key: "fixed", label: "Fixed", tone: "success" },
+    { key: "needs_review", label: "Needs Review", tone: "warning" },
+    { key: "errors", label: "Errors", tone: "danger" },
+    { key: "not_run", label: "Not Run", tone: "default" },
+  ];
   const pendingManualCount = useMemo(() => {
-    const items = fixReport?.manualReview ?? [];
+    const items = manualReviewQueue ?? [];
     return items.filter((item) => !item.status || item.status === "pending").length;
-  }, [fixReport]);
+  }, [manualReviewQueue]);
+  const jobScores: JobScorePass[] = useMemo(() => {
+    const jobId = scanJob?.jobId;
+    if (!jobId) return [];
+    return jobScoresByJobId[jobId] ?? [];
+  }, [scanJob?.jobId, jobScoresByJobId]);
+  const selectedPolicyDetail = selectedPolicyId ? policyDetailsById[selectedPolicyId] : undefined;
 
   if (!scanResults && documentIssues.length === 0 && !scanJob) {
     return (
@@ -274,6 +326,28 @@ export default function ScanScreen() {
     router.push("/manual-review");
   };
 
+  const handleExportEvidenceBundle = async () => {
+    const jobId = scanJob?.jobId;
+    const docId = uploadedDocument?.docId;
+    if (!jobId || !docId) {
+      setExportNotice("Export is available after upload and scan start.");
+      return;
+    }
+    const result = await exportEvidenceBundle(jobId, docId, {
+      includeOriginal: false,
+      includeFixedIfAvailable: true,
+      includeRebuiltIfAvailable: true,
+      includeRawArtifacts: false,
+      includePiiUnsafe: false,
+    });
+    if (result.ok) {
+      setExportNotice("Bundle created.");
+      void fetchEvidenceBundles(docId);
+      return;
+    }
+    setExportNotice(result.error ?? "Evidence bundle export failed.");
+  };
+
   useEffect(() => {
     const loadDiff = async () => {
       if (!uploadedDocument || !afterUrl) return;
@@ -289,6 +363,42 @@ export default function ScanScreen() {
   }, [uploadedDocument, afterUrl, fetchDocumentDiff]);
 
   useEffect(() => {
+    const jobId = scanJob?.jobId;
+    if (!jobId) {
+      setScoreMessage("Score unavailable until scan starts.");
+      return;
+    }
+    const loadScore = async () => {
+      const result = await fetchJobScores(jobId);
+      if (result.ok) {
+        const rows = result.data ?? [];
+        setScoreMessage(rows.length === 0 ? "Score will appear after scan completes." : null);
+      } else {
+        setScoreMessage(result.error ?? "Score unavailable.");
+      }
+    };
+    void loadScore();
+  }, [scanJob?.jobId, scanJob?.status, fetchJobScores]);
+
+  useEffect(() => {
+    const docId = uploadedDocument?.docId;
+    if (!docId) return;
+    void fetchEvidenceBundles(docId);
+  }, [uploadedDocument?.docId, fetchEvidenceBundles]);
+
+  useEffect(() => {
+    const docId = uploadedDocument?.docId;
+    if (!docId || mockMode) return;
+    void fetchManualReview(docId);
+  }, [uploadedDocument?.docId, mockMode, fetchManualReview]);
+
+  useEffect(() => {
+    if (!selectedPolicyId) return;
+    if (policyDetailsById[selectedPolicyId]) return;
+    void fetchPolicyDetail(selectedPolicyId);
+  }, [selectedPolicyId, policyDetailsById, fetchPolicyDetail]);
+
+  useEffect(() => {
     const loadRecentDocuments = async () => {
       if (mockMode) {
         setRecentDocuments([]);
@@ -296,28 +406,56 @@ export default function ScanScreen() {
         return;
       }
       try {
-        const response = await fetch(`${apiBaseUrl}/documents`, { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error((await response.text()) || "Failed to load persisted documents.");
-        }
-        const payload = (await response.json()) as Array<Record<string, unknown>>;
-        if (!Array.isArray(payload)) {
-          setRecentDocuments([]);
-          setRecentDocsError(null);
-          return;
-        }
-        setRecentDocuments(
-          payload
+        let normalized: Array<{
+          docId: string;
+          filename: string;
+          docType?: string;
+          createdAt?: string;
+          fixedPath?: string | null;
+          rebuiltPath?: string | null;
+          status?: "in_progress" | "fixed" | "needs_review" | "errors" | "not_run";
+          reasons?: string[];
+        }> = [];
+
+        const statusResponse = await fetch(`${apiBaseUrl}/documents/status?limit=200&offset=0`, { cache: "no-store" });
+        if (statusResponse.ok) {
+          const statusPayload = (await statusResponse.json()) as { items?: Array<Record<string, unknown>> };
+          const items = Array.isArray(statusPayload.items) ? statusPayload.items : [];
+          normalized = items
             .map((item) => ({
               docId: String(item.docId ?? ""),
               filename: String(item.filename ?? "Untitled document"),
               docType: item.docType ? String(item.docType) : undefined,
               createdAt: item.createdAt ? String(item.createdAt) : undefined,
-              fixedPath: typeof item.fixedPath === "string" ? item.fixedPath : null,
-              rebuiltPath: typeof item.rebuiltPath === "string" ? item.rebuiltPath : null,
+              fixedPath: null,
+              rebuiltPath: null,
+              status: (item.status as "in_progress" | "fixed" | "needs_review" | "errors" | "not_run") ?? undefined,
+              reasons: Array.isArray(item.reasons) ? item.reasons.map((reason) => String(reason)) : [],
             }))
-            .filter((item) => item.docId.length > 0),
-        );
+            .filter((item) => item.docId.length > 0);
+        } else {
+          const legacyResponse = await fetch(`${apiBaseUrl}/documents`, { cache: "no-store" });
+          if (!legacyResponse.ok) {
+            throw new Error((await legacyResponse.text()) || "Failed to load persisted documents.");
+          }
+          const payload = (await legacyResponse.json()) as Array<Record<string, unknown>>;
+          if (Array.isArray(payload)) {
+            normalized = payload
+              .map((item) => ({
+                docId: String(item.docId ?? ""),
+                filename: String(item.filename ?? "Untitled document"),
+                docType: item.docType ? String(item.docType) : undefined,
+                createdAt: item.createdAt ? String(item.createdAt) : undefined,
+                fixedPath: typeof item.fixedPath === "string" ? item.fixedPath : null,
+                rebuiltPath: typeof item.rebuiltPath === "string" ? item.rebuiltPath : null,
+                status: undefined,
+                reasons: [],
+              }))
+              .filter((item) => item.docId.length > 0);
+          }
+        }
+
+        setRecentDocuments(normalized);
         setRecentDocsError(null);
       } catch (error) {
         setRecentDocsError((error as Error).message || "Unable to load persisted documents.");
@@ -325,6 +463,52 @@ export default function ScanScreen() {
     };
     void loadRecentDocuments();
   }, [apiBaseUrl, mockMode, uploadedDocument?.docId, fixedDocId]);
+
+  useEffect(() => {
+    const hydrateFromRecent = async () => {
+      if (mockMode) return;
+      if (uploadedDocument) return;
+      if (recentDocuments.length === 0) return;
+      const latest = recentDocuments[0];
+      if (!latest?.docId) return;
+
+      const hydratedUpload: UploadResponse = {
+        docId: latest.docId,
+        filename: latest.filename,
+        sizeBytes: 0,
+        docType:
+          latest.docType === "pdf" || latest.docType === "docx" || latest.docType === "pptx"
+            ? latest.docType
+            : "pdf",
+      };
+      useAppStore.setState({ uploadedDocument: hydratedUpload });
+
+      try {
+        const client = createApiClient({ baseUrl: apiBaseUrl, mockMode: false });
+        const issues = await client.getIssues(latest.docId);
+        useAppStore.setState({ documentIssues: issues });
+      } catch {
+        // leave empty state if no issues available
+      }
+
+      void fetchDocumentSummary(latest.docId);
+      void fetchTagTree(latest.docId);
+      void fetchFixReport(latest.docId);
+      void fetchManualReview(latest.docId);
+      void fetchEvidenceBundles(latest.docId);
+    };
+    void hydrateFromRecent();
+  }, [
+    mockMode,
+    uploadedDocument,
+    recentDocuments,
+    apiBaseUrl,
+    fetchDocumentSummary,
+    fetchTagTree,
+    fetchFixReport,
+    fetchManualReview,
+    fetchEvidenceBundles,
+  ]);
 
   useEffect(() => {
     if (afterVariant === "rebuilt" && !rebuiltAvailable) {
@@ -639,7 +823,12 @@ export default function ScanScreen() {
                           {doc.docType ? ` • ${doc.docType.toUpperCase()}` : ""}
                         </Text>
                       </View>
-                      <Chip label={isFixed ? "Fixed" : "Completed"} tone={isFixed ? "success" : "default"} />
+                      <View style={styles.summaryRow}>
+                        <Pressable onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
+                          <Chip label="Exports" tone="info" />
+                        </Pressable>
+                        <Chip label={isFixed ? "Fixed" : "Completed"} tone={isFixed ? "success" : "default"} />
+                      </View>
                     </View>
                   );
                 })}
@@ -648,6 +837,45 @@ export default function ScanScreen() {
           </View>
         )}
       </Card>
+
+      <ScoreCard
+        scores={jobScores}
+        policyDetail={selectedPolicyDetail}
+        emptyMessage={scoreMessage ?? "Score will appear after scan completes."}
+      />
+
+      <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Evidence Bundle</Text>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          Export a compliance artifact with policy, scores, issues, delta, and manual review history.
+        </Text>
+        <View style={styles.issueActionsRow}>
+          <Button
+            title={isExportingBundle ? "Exporting..." : "Export Evidence Bundle"}
+            onPress={() => void handleExportEvidenceBundle()}
+            loading={isExportingBundle}
+            disabled={!scanJob?.jobId || !uploadedDocument?.docId || isExportingBundle}
+          />
+          <Pressable onPress={() => router.push(uploadedDocument?.docId ? `/exports?docId=${uploadedDocument.docId}` : "/exports")}>
+            <Chip label="Open exports workspace" tone="info" />
+          </Pressable>
+        </View>
+        {exportNotice ? <InlineNotice title="Export status" message={exportNotice} tone="success" /> : null}
+        {exportError ? <InlineNotice title="Export failed" message={exportError} tone="danger" /> : null}
+      </Card>
+
+      <ExportsList
+        title="Recent Evidence Bundles"
+        docId={uploadedDocument?.docId ?? null}
+        bundles={uploadedDocument?.docId ? evidenceBundlesByDocId[uploadedDocument.docId] ?? [] : []}
+        error={exportError}
+        loading={isExportingBundle}
+        onRefresh={() => {
+          if (uploadedDocument?.docId) {
+            void fetchEvidenceBundles(uploadedDocument.docId);
+          }
+        }}
+      />
 
       {documentIssues.length > 0 && (
         <Card>
@@ -1460,8 +1688,10 @@ function DocumentIssueRow({
     "missing_outline",
     "unlabeled_form_field",
   ]);
-  const fixLabel = fixableRules.has(issue.ruleId) ? "Deterministic fix available" : "Needs manual review";
-  const fixTone = fixableRules.has(issue.ruleId) ? "success" : "warning";
+  const explicitlyNotFixableRules = new Set(["missing_heading_structure", "skipped_heading_level", "reading_order"]);
+  const hasDeterministicFix = fixableRules.has(issue.ruleId) && !explicitlyNotFixableRules.has(issue.ruleId);
+  const fixLabel = hasDeterministicFix ? "Deterministic fix available" : "Needs manual review";
+  const fixTone = hasDeterministicFix ? "success" : "warning";
   return (
     <Pressable onPress={() => onSelectIssue?.(issue)}>
       <Card style={styles.rowCard}>
