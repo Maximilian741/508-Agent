@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime
+.runtime/
+backend/.runtime/
+
+# Node
+node_modules/
+
+# Build outputs
+build/
+dist/
+frontend/frontend/.expo/
+frontend/frontend/web-build/

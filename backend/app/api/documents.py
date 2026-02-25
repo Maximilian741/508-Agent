@@ -7,11 +7,12 @@ import threading
 import time
 from datetime import datetime
 from enum import Enum
+import mimetypes
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, BooleanObject, ContentStream, DictionaryObject, NameObject, NumberObject, TextStringObject
@@ -24,8 +25,10 @@ from app.pdf.tag_tree import extract_tag_tree
 from app.parsers.docx_parser import DOCXParser
 from app.parsers.pptx_parser import PPTXParser
 from app.ai.alt_text_suggester import build_alt_text_suggestions
+from app.config import get_settings
 from app.persistence.db import get_repo
 from app.schemas.status import DocStatusListResponse, DocStatusSummary
+from app.storage import encode_storage_key, get_storage, parse_artifact_ref
 
 router = APIRouter()
 
@@ -41,6 +44,8 @@ ISSUES: Dict[str, List[Dict[str, object]]] = {}
 LOCK = threading.Lock()
 MAX_DIFF_CHARS = 20000
 REPO = get_repo()
+SETTINGS = get_settings()
+STORAGE = get_storage()
 
 
 class DocumentType(str, Enum):
@@ -57,6 +62,71 @@ def _ensure_dirs() -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     FIXED_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+_ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
+_ALLOWED_MIME_HINTS = {
+    ".pdf": {"application/pdf"},
+    ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    ".pptx": {"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+}
+
+
+def _sniff_signature(payload: bytes, suffix: str) -> bool:
+    if suffix == ".pdf":
+        return payload.startswith(b"%PDF-")
+    if suffix in {".docx", ".pptx"}:
+        return payload.startswith(b"PK\x03\x04")
+    return False
+
+
+def _validate_upload(filename: str, content_type: str, payload: bytes) -> None:
+    suffix = Path(filename or "").suffix.lower().strip()
+    if suffix not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Only PDF, DOCX, and PPTX are allowed.")
+    if len(payload) > SETTINGS.max_upload_bytes:
+        raise HTTPException(status_code=413, detail=f"File exceeds MAX_UPLOAD_MB ({SETTINGS.max_upload_mb}MB).")
+    hinted = (content_type or "").split(";")[0].strip().lower()
+    expected_hints = _ALLOWED_MIME_HINTS.get(suffix, set())
+    if hinted and hinted != "application/octet-stream" and expected_hints and hinted not in expected_hints:
+        raise HTTPException(status_code=400, detail="Upload MIME type does not match file extension.")
+    if not _sniff_signature(payload[:16], suffix):
+        raise HTTPException(status_code=400, detail="Upload signature does not match expected file type.")
+
+
+def _content_type_for_name(name: str) -> Optional[str]:
+    media_type, _ = mimetypes.guess_type(name)
+    return media_type
+
+
+def _download_response_from_ref(ref_value: object, *, filename_hint: Optional[str] = None, media_type: Optional[str] = None):
+    parsed = parse_artifact_ref(ref_value)
+    if parsed.type == "storage_key":
+        if SETTINGS.storage_provider == "s3":
+            return RedirectResponse(url=STORAGE.get_download_url(parsed.value, expires_seconds=3600), status_code=302)
+        if not STORAGE.exists(parsed.value):
+            raise HTTPException(status_code=404, detail="Stored object not found")
+        local_path = STORAGE.resolve_local_path(parsed.value)
+        return FileResponse(str(local_path), filename=filename_hint or local_path.name, media_type=media_type or _content_type_for_name(local_path.name))
+
+    path = Path(parsed.value)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+    return FileResponse(str(path), filename=filename_hint or path.name, media_type=media_type or _content_type_for_name(path.name))
+
+
+def _materialize_local_path(doc_id: str, ref_value: object, fallback_name: str) -> Path:
+    parsed = parse_artifact_ref(ref_value)
+    if parsed.type == "local_path":
+        if not parsed.value:
+            raise HTTPException(status_code=404, detail="Artifact path missing")
+        return Path(parsed.value)
+    local_dir = UPLOADS_DIR / doc_id / "materialized"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    local_path = local_dir / Path(fallback_name or "document.bin").name
+    with STORAGE.open_stream(parsed.value) as stream:
+        local_path.write_bytes(stream.read())
+    return local_path
 
 
 def _infer_doc_type(filename: str) -> DocumentType:
@@ -79,10 +149,14 @@ def _get_doc(doc_id: str) -> Optional[Dict[str, object]]:
             DOCS[doc_id] = {
                 "filename": persisted.get("filename"),
                 "path": persisted.get("path"),
+                "localPath": persisted.get("localPath"),
                 "docType": persisted.get("docType", "pdf"),
                 "tagTreePath": persisted.get("tagTreePath"),
                 "tagSummary": persisted.get("tagSummary"),
                 "fixReport": persisted.get("fixReport"),
+                "localFixedPath": persisted.get("localFixedPath"),
+                "localRebuiltPath": persisted.get("localRebuiltPath"),
+                "localScanTargetPath": persisted.get("localScanTargetPath"),
             }
     return DOCS.get(doc_id)
 
@@ -95,15 +169,21 @@ def _save_doc(doc_id: str, doc: Dict[str, object]) -> None:
         "filename": doc.get("filename"),
         "docType": doc.get("docType", "pdf"),
         "path": doc.get("path"),
+        "localPath": doc.get("localPath"),
         "scanTargetPath": doc.get("scanTargetPath"),
+        "localScanTargetPath": doc.get("localScanTargetPath"),
         "tagTreePath": doc.get("tagTreePath"),
         "tagSummary": doc.get("tagSummary"),
         "fixReport": doc.get("fixReport"),
     }
     if doc.get("fixedPath"):
         payload["fixedPath"] = doc.get("fixedPath")
+    if doc.get("localFixedPath"):
+        payload["localFixedPath"] = doc.get("localFixedPath")
     if doc.get("rebuiltPath"):
         payload["rebuiltPath"] = doc.get("rebuiltPath")
+    if doc.get("localRebuiltPath"):
+        payload["localRebuiltPath"] = doc.get("localRebuiltPath")
     REPO.save_document(payload)
 
 
@@ -1960,7 +2040,8 @@ def _scan_worker(job_id: str, doc_id: str) -> None:
     if not doc:
         _job_update(job_id, status="error", progress=0, message="Document not found")
         return
-    doc_path = Path(str(doc["path"]))
+    source_ref = doc.get("localPath") or doc.get("path")
+    doc_path = _materialize_local_path(doc_id, source_ref, str(doc.get("filename") or "document.bin"))
     doc_type = str(doc.get("docType", "pdf")).lower()
     try:
         _job_update(job_id, progress=5, message=f"Loading {doc_type.upper()}")
@@ -2011,15 +2092,29 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
     doc_id = f"doc-{int(time.time())}"
     doc_dir = UPLOADS_DIR / doc_id
     doc_dir.mkdir(parents=True, exist_ok=True)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    quarantine_dir = doc_dir / "quarantine"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    quarantine_path = quarantine_dir / file.filename
+    payload = await file.read()
+    _validate_upload(file.filename, file.content_type or "", payload)
+    quarantine_path.write_bytes(payload)
     dest = doc_dir / file.filename
-    with dest.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    shutil.move(str(quarantine_path), str(dest))
     size = dest.stat().st_size
     doc_type = _infer_doc_type(file.filename or "").value
+    storage_key = f"documents/{doc_id}/original/{Path(file.filename).name}"
+    try:
+        STORAGE.save_file(key=storage_key, src_path=str(dest), content_type=file.content_type or _content_type_for_name(file.filename))
+        persisted_path = encode_storage_key(storage_key)
+    except Exception:
+        persisted_path = str(dest)
     with LOCK:
         DOCS[doc_id] = {
             "filename": file.filename,
-            "path": str(dest),
+            "path": persisted_path,
+            "localPath": str(dest),
             "docType": doc_type,
         }
     _save_doc(doc_id, DOCS[doc_id])
@@ -2154,7 +2249,8 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    src = Path(str(doc["path"]))
+    source_ref = doc.get("localPath") or doc.get("path")
+    src = _materialize_local_path(doc_id, source_ref, str(doc.get("filename") or "document.bin"))
     doc_type = str(doc.get("docType", "pdf")).lower()
     fixed_dir = FIXED_DIR / doc_id
     fixed_dir.mkdir(parents=True, exist_ok=True)
@@ -2224,6 +2320,29 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     except Exception:
         rebuilt_size = 0
     rebuilt_exists = rebuilt and rebuild_dest.exists() and rebuilt_size > 0
+    fixed_ref: Optional[str] = None
+    rebuilt_ref: Optional[str] = None
+    scan_target_ref: Optional[str] = None
+    if fixed_exists:
+        fixed_key = f"documents/{doc_id}/fixed/{fixed_dest.name}"
+        try:
+            STORAGE.save_file(key=fixed_key, src_path=str(fixed_dest), content_type=_content_type_for_name(fixed_dest.name))
+            fixed_ref = encode_storage_key(fixed_key)
+        except Exception:
+            fixed_ref = str(fixed_dest)
+    if rebuilt_exists:
+        rebuilt_key = f"documents/{doc_id}/rebuilt/{rebuild_dest.name}"
+        try:
+            STORAGE.save_file(key=rebuilt_key, src_path=str(rebuild_dest), content_type="application/pdf")
+            rebuilt_ref = encode_storage_key(rebuilt_key)
+        except Exception:
+            rebuilt_ref = str(rebuild_dest)
+    if rebuilt and rebuilt_ref:
+        scan_target_ref = rebuilt_ref
+    elif fixed_ref:
+        scan_target_ref = fixed_ref
+    else:
+        scan_target_ref = str(scan_target)
     print(f"[apply_fixes] fixed_path={fixed_dest} size={fixed_size}")
     print(f"[apply_fixes] before={len(before_issues)} after={len(after_issues)}")
     fixed_doc_id = doc_id
@@ -2242,10 +2361,13 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     report = {
         "docId": doc_id,
         "fixedDocId": fixed_doc_id,
-        "fixedPath": str(fixed_dest),
+        "fixedPath": fixed_ref or str(fixed_dest),
         "rebuiltDocId": rebuilt_doc_id,
-        "rebuiltPath": str(rebuild_dest) if rebuilt else None,
-        "scanTargetPath": str(scan_target),
+        "rebuiltPath": rebuilt_ref if rebuilt else None,
+        "scanTargetPath": scan_target_ref,
+        "localFixedPath": str(fixed_dest),
+        "localRebuiltPath": str(rebuild_dest) if rebuilt else None,
+        "localScanTargetPath": str(scan_target),
         "fixedExists": fixed_exists,
         "rebuiltExists": rebuilt_exists,
         "fixedSize": fixed_size,
@@ -2271,10 +2393,13 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     doc["fixReport"] = report
     doc["issues_before"] = before_issues
     doc["issues_after"] = after_issues
-    doc["fixedPath"] = str(fixed_dest)
-    doc["scanTargetPath"] = str(scan_target)
+    doc["fixedPath"] = fixed_ref or str(fixed_dest)
+    doc["localFixedPath"] = str(fixed_dest)
+    doc["scanTargetPath"] = scan_target_ref
+    doc["localScanTargetPath"] = str(scan_target)
     if rebuilt:
-        doc["rebuiltPath"] = str(rebuild_dest)
+        doc["rebuiltPath"] = rebuilt_ref or str(rebuild_dest)
+        doc["localRebuiltPath"] = str(rebuild_dest)
     _save_doc(doc_id, doc)
     REPO.save_issues(doc_id, "before", before_issues, [_issue_key(i) for i in before_issues])
     REPO.save_issues(doc_id, "after", after_issues, [_issue_key(i) for i in after_issues])
@@ -2295,30 +2420,26 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
 
 
 @router.get("/documents/{doc_id}/download")
-async def download_document(doc_id: str, variant: Optional[str] = "original") -> FileResponse:
+async def download_document(doc_id: str, variant: Optional[str] = "original"):
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    src = Path(str(doc["path"]))
     if variant == "fixed":
-        fixed_path = Path(str(doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath") or ""))
-        if not fixed_path.exists():
+        fixed_ref = doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath")
+        if not fixed_ref:
             raise HTTPException(status_code=404, detail="Fixed document not found")
-        return FileResponse(str(fixed_path), filename=fixed_path.name)
-    return FileResponse(str(src), filename=src.name)
+        return _download_response_from_ref(fixed_ref, filename_hint=str(doc.get("filename") or "fixed"))
+    return _download_response_from_ref(doc.get("path"), filename_hint=str(doc.get("filename") or "document"))
 
 
 @router.get("/documents/{doc_id}/pdf")
-async def download_pdf(doc_id: str) -> FileResponse:
+async def download_pdf(doc_id: str):
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     if str(doc.get("docType", "pdf")) != DocumentType.PDF.value:
         raise HTTPException(status_code=400, detail="Document is not a PDF")
-    src = Path(str(doc["path"]))
-    if not src.exists():
-        raise HTTPException(status_code=404, detail="Document file not found")
-    return FileResponse(str(src), filename=src.name, media_type="application/pdf")
+    return _download_response_from_ref(doc.get("path"), filename_hint=str(doc.get("filename") or "document.pdf"), media_type="application/pdf")
 
 
 @router.head("/documents/{doc_id}/pdf")
@@ -2327,19 +2448,18 @@ async def head_pdf(doc_id: str) -> FileResponse:
 
 
 @router.get("/documents/{doc_id}/pdf-fixed")
-async def download_pdf_fixed(doc_id: str) -> FileResponse:
+async def download_pdf_fixed(doc_id: str):
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    fixed_path = Path(str(doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath") or ""))
-    if not str(fixed_path):
+    fixed_ref = doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath")
+    if not str(fixed_ref or ""):
         report = REPO.get_fix_report(doc_id)
         if report and report.get("fixedPath"):
-            fixed_path = Path(str(report["fixedPath"]))
-    if not fixed_path.exists():
+            fixed_ref = report["fixedPath"]
+    if not fixed_ref:
         raise HTTPException(status_code=404, detail="Fixed document not found")
-    media_type = "application/pdf" if fixed_path.suffix.lower() == ".pdf" else None
-    return FileResponse(str(fixed_path), filename=fixed_path.name, media_type=media_type)
+    return _download_response_from_ref(fixed_ref, filename_hint=f"fixed-{doc_id}", media_type=None)
 
 
 @router.head("/documents/{doc_id}/pdf-fixed")
@@ -2353,14 +2473,14 @@ async def download_fixed_file(doc_id: str) -> FileResponse:
 
 
 @router.get("/documents/{doc_id}/pdf-rebuilt")
-async def download_pdf_rebuilt(doc_id: str) -> FileResponse:
+async def download_pdf_rebuilt(doc_id: str):
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    rebuilt_path = Path(str(doc.get("rebuiltPath") or ""))
-    if not rebuilt_path.exists():
+    rebuilt_ref = doc.get("rebuiltPath")
+    if not rebuilt_ref:
         raise HTTPException(status_code=404, detail="Rebuilt document not found")
-    return FileResponse(str(rebuilt_path), filename=rebuilt_path.name, media_type="application/pdf")
+    return _download_response_from_ref(rebuilt_ref, filename_hint=f"rebuilt-{doc_id}.pdf", media_type="application/pdf")
 
 
 @router.head("/documents/{doc_id}/pdf-rebuilt")
@@ -2373,7 +2493,8 @@ async def document_summary(doc_id: str) -> Dict[str, object]:
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    src = Path(str(doc["path"]))
+    source_ref = doc.get("localPath") or doc.get("path")
+    src = _materialize_local_path(doc_id, source_ref, str(doc.get("filename") or "document.bin"))
     doc_type = str(doc.get("docType", "pdf"))
     if doc_type == DocumentType.PDF.value:
         reader = PdfReader(str(src), strict=False)
@@ -2442,8 +2563,10 @@ async def document_diff(doc_id: str) -> Dict[str, object]:
     doc = _get_doc(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    src = Path(str(doc["path"]))
-    fixed_path = Path(str(doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath") or ""))
+    source_ref = doc.get("localPath") or doc.get("path")
+    src = _materialize_local_path(doc_id, source_ref, str(doc.get("filename") or "document.bin"))
+    fixed_ref = doc.get("fixedPath") or (doc.get("fixReport", {}) if isinstance(doc.get("fixReport"), dict) else {}).get("fixedPath")
+    fixed_path = _materialize_local_path(doc_id, fixed_ref, f"fixed-{doc_id}.bin")
     doc_type = str(doc.get("docType", "pdf"))
     if not fixed_path.exists():
         raise HTTPException(status_code=404, detail="Fixed document not found")
@@ -2511,16 +2634,34 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
     fixed_path = doc.get("fixReport", {}).get("fixedPath")
     rebuilt_path = doc.get("fixReport", {}).get("rebuiltPath")
     scan_target_path = doc.get("fixReport", {}).get("scanTargetPath")
+    local_fixed_path: Optional[Path] = None
+    local_rebuilt_path: Optional[Path] = None
+    local_scan_target_path: Optional[Path] = None
+    try:
+        if fixed_path:
+            local_fixed_path = _materialize_local_path(doc_id, fixed_path, f"fixed-{doc_id}.bin")
+    except Exception:
+        local_fixed_path = None
+    try:
+        if rebuilt_path:
+            local_rebuilt_path = _materialize_local_path(doc_id, rebuilt_path, f"rebuilt-{doc_id}.pdf")
+    except Exception:
+        local_rebuilt_path = None
+    try:
+        if scan_target_path:
+            local_scan_target_path = _materialize_local_path(doc_id, scan_target_path, f"scan-target-{doc_id}.bin")
+    except Exception:
+        local_scan_target_path = None
     fixed_size = 0
-    if fixed_path:
+    if local_fixed_path:
         try:
-            fixed_size = Path(str(fixed_path)).stat().st_size
+            fixed_size = local_fixed_path.stat().st_size
         except Exception:
             fixed_size = 0
     rebuilt_size = 0
-    if rebuilt_path:
+    if local_rebuilt_path:
         try:
-            rebuilt_size = Path(str(rebuilt_path)).stat().st_size
+            rebuilt_size = local_rebuilt_path.stat().st_size
         except Exception:
             rebuilt_size = 0
     fixed_exists = doc.get("fixReport", {}).get("fixedExists")
@@ -2533,9 +2674,9 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
     struct_counts: Dict[str, int] = {}
     mcid_coverage: List[Dict[str, object]] = []
     figure_counts_after: Dict[str, int] = {"figures": 0, "figuresMissingAlt": 0, "figuresWithAlt": 0}
-    if rebuilt_path and Path(str(rebuilt_path)).exists():
+    if local_rebuilt_path and local_rebuilt_path.exists():
         try:
-            rebuilt_reader = PdfReader(str(rebuilt_path), strict=False)
+            rebuilt_reader = PdfReader(str(local_rebuilt_path), strict=False)
             root = rebuilt_reader.trailer.get("/Root", {})
             struct_root_exists = "/StructTreeRoot" in root
             if struct_root_exists:
@@ -2595,12 +2736,12 @@ async def debug_issues(doc_id: str) -> Dict[str, object]:
             mcid_counts = []
             text_mcid_counts = []
     target_for_alt = None
-    if scan_target_path and Path(str(scan_target_path)).exists() and str(scan_target_path).lower().endswith(".pdf"):
-        target_for_alt = Path(str(scan_target_path))
-    elif fixed_path and Path(str(fixed_path)).exists() and str(fixed_path).lower().endswith(".pdf"):
-        target_for_alt = Path(str(fixed_path))
-    elif rebuilt_path and Path(str(rebuilt_path)).exists() and str(rebuilt_path).lower().endswith(".pdf"):
-        target_for_alt = Path(str(rebuilt_path))
+    if local_scan_target_path and local_scan_target_path.exists() and local_scan_target_path.suffix.lower() == ".pdf":
+        target_for_alt = local_scan_target_path
+    elif local_fixed_path and local_fixed_path.exists() and local_fixed_path.suffix.lower() == ".pdf":
+        target_for_alt = local_fixed_path
+    elif local_rebuilt_path and local_rebuilt_path.exists() and local_rebuilt_path.suffix.lower() == ".pdf":
+        target_for_alt = local_rebuilt_path
     if target_for_alt:
         try:
             summary_after = extract_tag_tree(PdfReader(str(target_for_alt), strict=False)).get("summary", {})

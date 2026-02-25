@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from app.config import get_settings
+
 _LOCK = threading.Lock()
 _CONN: sqlite3.Connection | None = None
 
@@ -101,13 +103,22 @@ _DEFAULT_POLICY_PACKS: List[Dict[str, object]] = [
 
 
 def _db_path() -> Path:
-    url = os.getenv("DATABASE_URL", "").strip()
+    settings = get_settings()
+    url = settings.database_url
     if url.startswith("sqlite:///"):
         raw = url.replace("sqlite:///", "", 1)
         return Path(raw)
     explicit = os.getenv("DATABASE_PATH", "").strip()
     if explicit:
         return Path(explicit)
+    if url.startswith("postgres"):
+        if settings.environment == "production":
+            raise RuntimeError(
+                "Postgres DATABASE_URL is not supported by sqlite3 persistence in production. "
+                "Postgres repository support is required before startup."
+            )
+        print("[db] Postgres DATABASE_URL detected in development; using local sqlite fallback.")
+        return Path("./.runtime/508_agent.db")
     return Path("./.runtime/508_agent.db")
 
 
@@ -190,6 +201,8 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fix_reports_doc_id ON fix_reports(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_review_doc_id ON manual_review(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_doc_phase ON issues(doc_id, phase)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_doc_id ON evidence_bundles(doc_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_job_id ON evidence_bundles(job_id)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS policy_packs (
@@ -622,10 +635,14 @@ class SqliteRepo:
         doc_id = str(doc["id"])
         now = _utc_now()
         extra = {
+            "localPath": doc.get("localPath"),
             "scanTargetPath": doc.get("scanTargetPath"),
+            "localScanTargetPath": doc.get("localScanTargetPath"),
             "tagTreePath": doc.get("tagTreePath"),
             "tagSummary": doc.get("tagSummary"),
             "fixReport": doc.get("fixReport"),
+            "localFixedPath": doc.get("localFixedPath"),
+            "localRebuiltPath": doc.get("localRebuiltPath"),
         }
         with _LOCK:
             conn.execute(
@@ -674,12 +691,16 @@ class SqliteRepo:
             "filename": row["filename"],
             "docType": row["doc_type"] or "pdf",
             "path": row["original_path"],
+            "localPath": extra.get("localPath"),
             "fixedPath": row["fixed_path"] or None,
             "rebuiltPath": row["rebuilt_path"] or None,
             "scanTargetPath": extra.get("scanTargetPath"),
+            "localScanTargetPath": extra.get("localScanTargetPath"),
             "tagTreePath": extra.get("tagTreePath"),
             "tagSummary": extra.get("tagSummary"),
             "fixReport": extra.get("fixReport"),
+            "localFixedPath": extra.get("localFixedPath"),
+            "localRebuiltPath": extra.get("localRebuiltPath"),
         }
         return out
 

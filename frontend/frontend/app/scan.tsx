@@ -802,7 +802,7 @@ export default function ScanScreen() {
         ) : (
           <View>
             <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-              {fixedDocuments.length} fixed artifacts across {recentDocuments.length} persisted documents
+              {recentDocuments.length} persisted documents grouped by backend status
             </Text>
             {recentDocsError ? (
               <Text style={[styles.nodeId, { color: theme.colors.warning }]}>{recentDocsError}</Text>
@@ -810,25 +810,38 @@ export default function ScanScreen() {
               <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No persisted documents yet.</Text>
             ) : (
               <View style={styles.completedDocsList}>
-                {recentDocuments.slice(0, 10).map((doc) => {
-                  const isFixed = Boolean(doc.fixedPath) || Boolean(doc.rebuiltPath);
+                {statusSections.map((section) => {
+                  const docs = bucketedDocuments[section.key];
                   return (
-                    <View key={doc.docId} style={styles.completedDocRow}>
-                      <View style={styles.completedDocMeta}>
-                        <Text style={[styles.description, { color: theme.colors.text }]} numberOfLines={1}>
-                          {doc.filename}
-                        </Text>
-                        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                          {doc.docId}
-                          {doc.docType ? ` • ${doc.docType.toUpperCase()}` : ""}
-                        </Text>
-                      </View>
+                    <View key={section.key}>
                       <View style={styles.summaryRow}>
-                        <Pressable onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
-                          <Chip label="Exports" tone="info" />
-                        </Pressable>
-                        <Chip label={isFixed ? "Fixed" : "Completed"} tone={isFixed ? "success" : "default"} />
+                        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>{section.label}</Text>
+                        <Chip label={`${docs.length}`} tone={section.tone} />
                       </View>
+                      {docs.length === 0 ? (
+                        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>None</Text>
+                      ) : (
+                        docs.slice(0, 8).map((doc) => (
+                          <View key={`${section.key}-${doc.docId}`} style={styles.completedDocRow}>
+                            <View style={styles.completedDocMeta}>
+                              <Text style={[styles.description, { color: theme.colors.text }]} numberOfLines={1}>
+                                {doc.filename}
+                              </Text>
+                              <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                                {doc.docId}
+                                {doc.docType ? ` • ${doc.docType.toUpperCase()}` : ""}
+                                {doc.reasons && doc.reasons.length > 0 ? ` • ${doc.reasons[0]}` : ""}
+                              </Text>
+                            </View>
+                            <View style={styles.summaryRow}>
+                              <Pressable onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
+                                <Chip label="Exports" tone="info" />
+                              </Pressable>
+                              <Chip label={section.label} tone={section.tone} />
+                            </View>
+                          </View>
+                        ))
+                      )}
                     </View>
                   );
                 })}

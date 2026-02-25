@@ -10,20 +10,23 @@ from app.api.manual_review import router as manual_review_router
 from app.api.policies import router as policies_router
 from app.api.remediate import router as remediate_router
 from app.api.scan import router as scan_router
+from app.config import get_settings
+from app.db.migrations import run_migrations
 from app.persistence.db import init_db
+from app.security import RequestIdLoggingMiddleware, SecurityHeadersMiddleware
+from app.storage.router import router as storage_router
 
-app = FastAPI(title="508-Agent", version="0.1.0")
+settings = get_settings()
+app = FastAPI(title="508-Agent", version=settings.app_version)
+run_migrations()
 init_db()
 
+app.add_middleware(RequestIdLoggingMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-    ],
-    allow_credentials=True,
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -35,3 +38,4 @@ app.include_router(remediate_router, tags=["remediate"])
 app.include_router(manual_review_router, tags=["manual-review"])
 app.include_router(policies_router, tags=["policies"])
 app.include_router(evidence_bundles_router, tags=["evidence-bundles"])
+app.include_router(storage_router, tags=["storage"])

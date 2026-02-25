@@ -15,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from app.config import get_settings
 from app.persistence.db import get_repo
+from app.storage import encode_storage_key, get_storage, parse_artifact_ref
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = BASE_DIR / ".runtime"
@@ -28,6 +30,8 @@ DEFAULT_BUNDLE_OPTIONS: Dict[str, bool] = {
     "includeRawArtifacts": False,
     "includePiiUnsafe": False,
 }
+SETTINGS = get_settings()
+STORAGE = get_storage()
 
 _SEVERITY_ORDER = {
     "critical": 0,
@@ -492,10 +496,21 @@ def _make_zip(source_dir: Path, out_zip: Path) -> None:
 def _copy_artifact_if_present(src_path: object, dest_dir: Path) -> Optional[str]:
     if not isinstance(src_path, str) or not src_path.strip():
         return None
-    src = Path(src_path)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ref = parse_artifact_ref(src_path)
+    if ref.type == "storage_key":
+        if not STORAGE.exists(ref.value):
+            return None
+        src_name = Path(ref.value).name
+        dest_name = _sanitize_filename(src_name)
+        dest = dest_dir / dest_name
+        with STORAGE.open_stream(ref.value) as stream:
+            dest.write_bytes(stream.read())
+        return dest_name
+
+    src = Path(ref.value)
     if not src.exists() or not src.is_file():
         return None
-    dest_dir.mkdir(parents=True, exist_ok=True)
     dest_name = _sanitize_filename(src.name)
     dest = dest_dir / dest_name
     shutil.copy2(src, dest)
@@ -706,19 +721,29 @@ def build_evidence_bundle(job_id: str, options: Optional[Dict[str, object]] = No
         _make_zip(temp_dir, bundle_path)
 
     bundle_hash = _sha256_file(bundle_path)
+    stored_bundle_ref = str(bundle_path)
+    bundle_key = f"bundles/{bundle_id}/evidence.zip"
+    try:
+        STORAGE.save_file(key=bundle_key, src_path=str(bundle_path), content_type="application/zip")
+        if SETTINGS.storage_provider == "s3":
+            stored_bundle_ref = encode_storage_key(bundle_key)
+        else:
+            stored_bundle_ref = str(bundle_path)
+    except Exception:
+        stored_bundle_ref = str(bundle_path)
 
     repo.create_evidence_bundle_record(
         bundle_id=bundle_id,
         job_id=job_id,
         doc_id=doc_id,
-        bundle_path=str(bundle_path),
+        bundle_path=stored_bundle_ref,
         bundle_hash=bundle_hash,
         options=normalized_options,
         status="created",
     )
 
     return bundle_id, bundle_hash, {
-        "bundlePath": str(bundle_path),
+        "bundlePath": stored_bundle_ref,
         "createdAt": created_at,
         "docId": doc_id,
         "jobId": job_id,

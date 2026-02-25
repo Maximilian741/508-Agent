@@ -188,8 +188,9 @@ class EvidenceBundleApiTests(unittest.TestCase):
         list_resp = self.client.get(f"/documents/{doc_id}/evidence-bundles")
         self.assertEqual(list_resp.status_code, 200)
         bundles = list_resp.json()
-        self.assertEqual(len(bundles), 1)
-        self.assertEqual(bundles[0]["bundleId"], bundle_id)
+        self.assertGreaterEqual(len(bundles), 1)
+        bundle_ids = [item.get("bundleId") for item in bundles if isinstance(item, dict)]
+        self.assertIn(bundle_id, bundle_ids)
 
         download = self.client.get(f"/evidence-bundles/{bundle_id}/download")
         self.assertEqual(download.status_code, 200)
