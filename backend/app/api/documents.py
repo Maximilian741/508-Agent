@@ -147,6 +147,136 @@ def _snapshot_job_policy(job_id: str, policy_pack_id: Optional[str] = None, over
     return snapshot
 
 
+def _normalize_scoring_severity(raw: str) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"critical", "serious", "moderate", "minor"}:
+        return value
+    if value == "error":
+        return "serious"
+    if value == "warning":
+        return "moderate"
+    return "minor"
+
+
+def _policy_override_for_rule(policy_json: Dict[str, object], rule_id: str, doc_type: str) -> Dict[str, object]:
+    rules = policy_json.get("rules", {}) if isinstance(policy_json.get("rules"), dict) else {}
+    overrides = rules.get("overrides", {}) if isinstance(rules.get("overrides"), dict) else {}
+    normalized_rule = str(rule_id or "").strip()
+    normalized_doc = str(doc_type or "").strip().upper()
+    candidates = [
+        normalized_rule,
+        normalized_rule.upper(),
+        f"{normalized_doc}.{normalized_rule}",
+        f"{normalized_doc}.{normalized_rule.upper()}",
+    ]
+    for key in candidates:
+        if key in overrides and isinstance(overrides.get(key), dict):
+            return overrides.get(key)  # type: ignore[return-value]
+    return {}
+
+
+def _compute_score_payload(
+    issues: List[Dict[str, object]],
+    policy_json: Dict[str, object],
+    doc_type: str,
+) -> Dict[str, object]:
+    scoring = policy_json.get("scoring", {}) if isinstance(policy_json.get("scoring"), dict) else {}
+    thresholds = policy_json.get("thresholds", {}) if isinstance(policy_json.get("thresholds"), dict) else {}
+    status_rules = thresholds.get("statusRules", {}) if isinstance(thresholds.get("statusRules"), dict) else {}
+    pass_rule = status_rules.get("pass", {}) if isinstance(status_rules.get("pass"), dict) else {}
+    needs_review_rule = status_rules.get("needs_review", {}) if isinstance(status_rules.get("needs_review"), dict) else {}
+    rules_config = policy_json.get("rules", {}) if isinstance(policy_json.get("rules"), dict) else {}
+    defaults = rules_config.get("defaults", {}) if isinstance(rules_config.get("defaults"), dict) else {}
+    default_enabled = bool(defaults.get("enabled", True))
+
+    severity_weights = scoring.get("severityWeights", {}) if isinstance(scoring.get("severityWeights"), dict) else {}
+    base_score = float(scoring.get("baseScore", 100) or 100)
+    confidence_multiplier = bool(scoring.get("confidenceMultiplier", False))
+    coverage_penalty = scoring.get("coveragePenalty", {}) if isinstance(scoring.get("coveragePenalty"), dict) else {}
+    coverage_enabled = bool(coverage_penalty.get("enabled", False))
+    per_skipped = float(coverage_penalty.get("perSkippedRule", 0.0) or 0.0)
+    max_penalty = float(coverage_penalty.get("maxPenalty", 0.0) or 0.0)
+
+    counts = {"critical": 0, "serious": 0, "moderate": 0, "minor": 0}
+    points_by_category = {"issuePenalty": 0.0, "coveragePenalty": 0.0}
+    applicable = 0
+    executed = 0
+    skipped = 0
+    total_deduction = 0.0
+
+    for issue in issues:
+        rule_id = str(issue.get("ruleId", "")).strip()
+        override = _policy_override_for_rule(policy_json, rule_id, doc_type)
+        enabled = bool(override.get("enabled", default_enabled))
+        if not enabled:
+            continue
+        applicable += 1
+        executed += 1
+        severity = _normalize_scoring_severity(str(override.get("severity") or issue.get("severity") or "minor"))
+        counts[severity] = int(counts.get(severity, 0)) + 1
+        weight = float(severity_weights.get(severity, 0.0) or 0.0)
+        confidence = 1.0
+        if confidence_multiplier:
+            evidence = issue.get("evidence", {}) if isinstance(issue.get("evidence"), dict) else {}
+            raw_conf = evidence.get("confidence")
+            if isinstance(raw_conf, (int, float)):
+                confidence = max(0.0, min(1.0, float(raw_conf)))
+        penalty = weight * confidence
+        total_deduction += penalty
+        points_by_category["issuePenalty"] += penalty
+
+    coverage_penalty_points = 0.0
+    if coverage_enabled:
+        coverage_penalty_points = min(max_penalty, float(skipped) * per_skipped)
+        total_deduction += coverage_penalty_points
+        points_by_category["coveragePenalty"] = coverage_penalty_points
+
+    raw_score = base_score - total_deduction
+    score_total = int(max(0, min(100, round(raw_score))))
+
+    pass_critical = int(pass_rule.get("maxCritical", 0) or 0)
+    pass_serious = int(pass_rule.get("maxSerious", 0) or 0)
+    needs_critical = int(needs_review_rule.get("maxCritical", 0) or 0)
+    needs_serious = int(needs_review_rule.get("maxSerious", 0) or 0)
+    if counts["critical"] <= pass_critical and counts["serious"] <= pass_serious:
+        status = "pass"
+    elif counts["critical"] <= needs_critical and counts["serious"] <= needs_serious:
+        status = "needs_review"
+    else:
+        status = "fail"
+
+    return {
+        "scoreTotal": score_total,
+        "status": status,
+        "countsBySeverity": counts,
+        "pointsByCategory": points_by_category,
+        "coverage": {"applicable": applicable, "executed": executed, "skipped": skipped},
+    }
+
+
+def _compute_and_store_job_score(
+    job_id: str,
+    pass_type: str,
+    issues: List[Dict[str, object]],
+    doc_type: str,
+) -> Dict[str, object]:
+    snapshot = REPO.get_job_policy_snapshot(job_id)
+    if not snapshot:
+        snapshot = _snapshot_job_policy(job_id)
+    policy_json = snapshot.get("policyJson", {}) if isinstance(snapshot.get("policyJson"), dict) else {}
+    result = _compute_score_payload(issues=issues, policy_json=policy_json, doc_type=doc_type)
+    REPO.save_job_score(
+        job_id=job_id,
+        pass_type=pass_type,
+        score_total=int(result["scoreTotal"]),
+        status=str(result["status"]),
+        counts_by_severity=result["countsBySeverity"],  # type: ignore[arg-type]
+        points_by_category=result["pointsByCategory"],  # type: ignore[arg-type]
+        coverage=result["coverage"],  # type: ignore[arg-type]
+    )
+    return result
+
+
 def _extract_images(reader: PdfReader, on_progress: Optional[callable] = None) -> int:
     count = 0
     total_pages = len(reader.pages)
@@ -1867,6 +1997,10 @@ def _scan_worker(job_id: str, doc_id: str) -> None:
         JOBS[job_id].update(status="done", progress=100, message="Scan complete")
     doc["issues"] = issues
     _save_doc(doc_id, doc)
+    try:
+        _compute_and_store_job_score(job_id=job_id, pass_type="baseline", issues=issues, doc_type=doc_type)
+    except Exception:
+        pass
     REPO.update_job(job_id, {"status": "done", "progress": 100, "message": "Scan complete"})
 
 
@@ -1948,6 +2082,31 @@ async def set_job_policy(job_id: str, request: JobPolicyRequest) -> Dict[str, ob
             "version": snapshot.get("policyVersion"),
         },
     }
+
+
+@router.get("/jobs/{job_id}/score")
+async def get_job_score(job_id: str) -> Dict[str, object]:
+    with LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        job = REPO.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    doc_id = str(job.get("docId") or "")
+    if not doc_id:
+        raise HTTPException(status_code=400, detail="Job has no document context")
+    doc = _get_doc(doc_id) or {}
+    doc_type = str(doc.get("docType", "pdf")).lower()
+    scores = REPO.get_job_scores(job_id)
+    if not scores:
+        before_issues = REPO.get_issues(doc_id, "before")
+        if before_issues:
+            _compute_and_store_job_score(job_id=job_id, pass_type="baseline", issues=before_issues, doc_type=doc_type)
+        after_issues = REPO.get_issues(doc_id, "after")
+        if after_issues:
+            _compute_and_store_job_score(job_id=job_id, pass_type="post_fix", issues=after_issues, doc_type=doc_type)
+        scores = REPO.get_job_scores(job_id)
+    return {"jobId": job_id, "scores": scores}
 
 
 @router.get("/documents/{doc_id}/issues")
@@ -2098,6 +2257,14 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     REPO.save_issues(doc_id, "after", after_issues, [_issue_key(i) for i in after_issues])
     REPO.save_fix_report(doc_id, report)
     REPO.add_manual_review_items(doc_id, report.get("manualReview", []) if isinstance(report.get("manualReview"), list) else [])
+    latest_job = REPO.get_latest_job_for_doc(doc_id)
+    if latest_job and latest_job.get("jobId"):
+        try:
+            job_id = str(latest_job.get("jobId"))
+            _compute_and_store_job_score(job_id=job_id, pass_type="baseline", issues=before_issues, doc_type=doc_type)
+            _compute_and_store_job_score(job_id=job_id, pass_type="post_fix", issues=after_issues, doc_type=doc_type)
+        except Exception:
+            pass
     report_path = RESULTS_DIR / doc_id / "fix_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")

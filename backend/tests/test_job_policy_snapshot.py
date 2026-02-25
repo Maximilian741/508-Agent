@@ -92,6 +92,64 @@ class JobPolicySnapshotTests(unittest.TestCase):
         self.assertIn("policy", payload)
         self.assertEqual(payload["policy"]["policyPackId"], "policy-wcag22-aa-docs")
 
+    def test_job_score_endpoint_returns_baseline_and_post_fix(self) -> None:
+        from app.persistence.db import get_repo
+
+        repo = get_repo()
+        doc_id = "doc-score-test"
+        job_id = "job-score-test"
+        repo.save_document(
+            {
+                "id": doc_id,
+                "filename": "score.pdf",
+                "docType": "pdf",
+                "path": str(Path(self.tmp_dir.name) / "score.pdf"),
+            }
+        )
+        repo.save_job({"jobId": job_id, "docId": doc_id, "status": "done", "progress": 100, "message": "Done"})
+        pack = repo.get_policy_pack("policy-508-wcag20-aa")
+        assert pack is not None
+        repo.save_job_policy_snapshot(
+            job_id=job_id,
+            policy_pack_id=str(pack["id"]),
+            policy_name=str(pack["name"]),
+            policy_version=int(pack["version"]),
+            policy_json=pack.get("policy_json", {}),
+        )
+        before = [
+            {
+                "id": "issue-before-1",
+                "ruleId": "missing_heading_structure",
+                "severity": "warning",
+                "title": "Missing heading structure",
+                "description": "No headings found.",
+                "locationHint": "Document",
+                "recommendation": "Add headings.",
+            }
+        ]
+        after = [
+            {
+                "id": "issue-after-1",
+                "ruleId": "missing_heading_structure",
+                "severity": "warning",
+                "title": "Missing heading structure",
+                "description": "No headings found.",
+                "locationHint": "Document",
+                "recommendation": "Add headings.",
+            }
+        ]
+        repo.save_issues(doc_id, "before", before, ["before-1"])
+        repo.save_issues(doc_id, "after", after, ["after-1"])
+
+        response = self.client.get(f"/jobs/{job_id}/score")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["jobId"], job_id)
+        self.assertTrue(isinstance(payload["scores"], list))
+        pass_types = {entry["passType"] for entry in payload["scores"]}
+        self.assertIn("baseline", pass_types)
+        self.assertIn("post_fix", pass_types)
+
 
 if __name__ == "__main__":
     unittest.main()

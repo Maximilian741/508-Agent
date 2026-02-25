@@ -212,6 +212,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_scoring (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_id TEXT NOT NULL,
+              pass_type TEXT NOT NULL,
+              score_total INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              counts_by_severity TEXT NOT NULL,
+              points_by_category TEXT,
+              coverage TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(job_id, pass_type)
+            )
+            """
+        )
         now = _utc_now()
         for pack in _DEFAULT_POLICY_PACKS:
             conn.execute(
@@ -327,6 +343,94 @@ class SqliteRepo:
             "createdAt": row["created_at"],
         }
 
+    def save_job_score(
+        self,
+        job_id: str,
+        pass_type: str,
+        score_total: int,
+        status: str,
+        counts_by_severity: Dict[str, int],
+        points_by_category: Dict[str, float],
+        coverage: Dict[str, float],
+    ) -> None:
+        conn = get_connection()
+        with _LOCK:
+            conn.execute(
+                """
+                INSERT INTO job_scoring(job_id, pass_type, score_total, status, counts_by_severity, points_by_category, coverage, created_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id, pass_type) DO UPDATE SET
+                  score_total=excluded.score_total,
+                  status=excluded.status,
+                  counts_by_severity=excluded.counts_by_severity,
+                  points_by_category=excluded.points_by_category,
+                  coverage=excluded.coverage,
+                  created_at=excluded.created_at
+                """,
+                (
+                    job_id,
+                    pass_type,
+                    int(score_total),
+                    status,
+                    json.dumps(counts_by_severity),
+                    json.dumps(points_by_category),
+                    json.dumps(coverage),
+                    _utc_now(),
+                ),
+            )
+            conn.commit()
+
+    def get_job_scores(self, job_id: str) -> List[Dict[str, object]]:
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT pass_type, score_total, status, counts_by_severity, points_by_category, coverage, created_at
+            FROM job_scoring
+            WHERE job_id=?
+            ORDER BY
+              CASE pass_type
+                WHEN 'baseline' THEN 0
+                WHEN 'post_fix' THEN 1
+                WHEN 'post_manual' THEN 2
+                ELSE 9
+              END ASC,
+              created_at ASC
+            """,
+            (job_id,),
+        ).fetchall()
+        out: List[Dict[str, object]] = []
+        for row in rows:
+            try:
+                counts = json.loads(row["counts_by_severity"] or "{}")
+                if not isinstance(counts, dict):
+                    counts = {}
+            except Exception:
+                counts = {}
+            try:
+                points = json.loads(row["points_by_category"] or "{}")
+                if not isinstance(points, dict):
+                    points = {}
+            except Exception:
+                points = {}
+            try:
+                coverage = json.loads(row["coverage"] or "{}")
+                if not isinstance(coverage, dict):
+                    coverage = {}
+            except Exception:
+                coverage = {}
+            out.append(
+                {
+                    "passType": row["pass_type"],
+                    "scoreTotal": int(row["score_total"] or 0),
+                    "status": row["status"],
+                    "countsBySeverity": counts,
+                    "pointsByCategory": points,
+                    "coverage": coverage,
+                    "createdAt": row["created_at"],
+                }
+            )
+        return out
+
     def save_document(self, doc: Dict[str, object]) -> None:
         conn = get_connection()
         doc_id = str(doc["id"])
@@ -422,7 +526,7 @@ class SqliteRepo:
 
     def save_job(self, job: Dict[str, object]) -> None:
         conn = get_connection()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now()
         with _LOCK:
             conn.execute(
                 """
@@ -446,6 +550,28 @@ class SqliteRepo:
                 ),
             )
             conn.commit()
+
+    def get_latest_job_for_doc(self, doc_id: str) -> Optional[Dict[str, object]]:
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT id, doc_id, status, progress, message
+            FROM scan_jobs
+            WHERE doc_id=?
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """,
+            (doc_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "jobId": row["id"],
+            "docId": row["doc_id"],
+            "status": row["status"],
+            "progress": int(row["progress"] or 0),
+            "message": row["message"],
+        }
 
     def get_job(self, job_id: str) -> Optional[Dict[str, object]]:
         conn = get_connection()
