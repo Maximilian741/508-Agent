@@ -12,6 +12,7 @@ def run_migrations() -> None:
         return
     env = dict(os.environ)
     env.setdefault("DATABASE_URL", os.getenv("DATABASE_URL", "sqlite:///./.runtime/508_agent.db"))
+    is_postgres = str(env.get("DATABASE_URL", "")).startswith("postgres")
     try:
         subprocess.run(
             ["alembic", "-c", str(alembic_ini), "upgrade", "head"],
@@ -21,6 +22,8 @@ def run_migrations() -> None:
             capture_output=True,
             text=True,
         )
-    except Exception:
-        # Keep startup resilient in development where alembic may be unavailable.
+    except Exception as exc:
+        if is_postgres:
+            raise RuntimeError(f"Failed to run Alembic migrations for Postgres: {exc}") from exc
+        # Keep sqlite development startup resilient.
         return

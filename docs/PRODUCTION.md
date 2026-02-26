@@ -3,7 +3,7 @@
 ## Target Architecture
 
 - FastAPI backend
-- Relational DB via `DATABASE_URL` (sqlite in dev, Postgres target in prod)
+- Relational DB via `DATABASE_URL` (sqlite in dev, Postgres supported in prod/dev)
 - Artifact/object storage via storage provider abstraction:
   - `local` for dev
   - `s3` for prod
@@ -43,3 +43,22 @@
 - Auth/workspaces
 - Worker queue migration
 - Full IaC provisioning (CDK/Terraform)
+
+## DATABASE_URL formats
+
+- sqlite: `sqlite:///./.runtime/508_agent.db`
+- postgres: `postgresql+psycopg://user:pass@host:5432/dbname`
+
+## Docker Compose Postgres
+
+```bash
+docker compose up --build
+```
+
+Compose now points backend `DATABASE_URL` to Postgres service by default.
+
+## No AWS Fees (local mode)
+
+- Local dev can run with sqlite + local storage only.
+- MinIO/localstack can emulate S3 locally if needed.
+- AWS costs are only incurred when using real AWS resources (RDS/S3/etc).

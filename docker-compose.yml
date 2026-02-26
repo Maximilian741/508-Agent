@@ -11,6 +11,11 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agentdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   backend:
     build:
@@ -19,7 +24,7 @@ services:
     environment:
       APP_ENV: development
       APP_VERSION: 0.1.0
-      DATABASE_URL: sqlite:///./.runtime/508_agent.db
+      DATABASE_URL: postgresql+psycopg://agent:agent@postgres:5432/agentdb
       STORAGE_PROVIDER: local
       STORAGE_LOCAL_ROOT: /app/.runtime/storage
       CORS_ALLOW_ORIGINS: http://localhost:8081,http://127.0.0.1:8081,http://localhost:3000,http://127.0.0.1:3000
@@ -29,7 +34,8 @@ services:
     volumes:
       - backend_runtime:/app/.runtime
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
 volumes:
   pg_data:

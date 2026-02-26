@@ -11,14 +11,12 @@ from app.api.policies import router as policies_router
 from app.api.remediate import router as remediate_router
 from app.api.scan import router as scan_router
 from app.config import get_settings
-from app.db.migrations import run_migrations
 from app.persistence.db import init_db
 from app.security import RequestIdLoggingMiddleware, SecurityHeadersMiddleware
 from app.storage.router import router as storage_router
 
 settings = get_settings()
 app = FastAPI(title="508-Agent", version=settings.app_version)
-run_migrations()
 init_db()
 
 app.add_middleware(RequestIdLoggingMiddleware)

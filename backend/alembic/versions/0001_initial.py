@@ -26,6 +26,7 @@ def upgrade() -> None:
             sa.Column("filename", sa.Text()),
             sa.Column("doc_type", sa.Text()),
             sa.Column("created_at", sa.Text()),
+            sa.Column("updated_at", sa.Text()),
             sa.Column("status", sa.Text()),
             sa.Column("original_path", sa.Text()),
             sa.Column("fixed_path", sa.Text()),

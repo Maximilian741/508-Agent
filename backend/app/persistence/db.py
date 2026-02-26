@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from app.config import get_settings
+from app.db.migrations import run_migrations
+from app.db.models import PolicyPackRow
+from app.db.session_sqlalchemy import SessionLocal
+from app.persistence.repo_postgres import PostgresRepository
 
 _LOCK = threading.Lock()
 _CONN: sqlite3.Connection | None = None
@@ -112,18 +116,15 @@ def _db_path() -> Path:
     if explicit:
         return Path(explicit)
     if url.startswith("postgres"):
-        if settings.environment == "production":
-            raise RuntimeError(
-                "Postgres DATABASE_URL is not supported by sqlite3 persistence in production. "
-                "Postgres repository support is required before startup."
-            )
-        print("[db] Postgres DATABASE_URL detected in development; using local sqlite fallback.")
-        return Path("./.runtime/508_agent.db")
+        raise RuntimeError("sqlite3 db path resolution called for Postgres DATABASE_URL")
     return Path("./.runtime/508_agent.db")
 
 
 def get_connection() -> sqlite3.Connection:
     global _CONN
+    settings = get_settings()
+    if settings.database_url.startswith("postgres"):
+        raise RuntimeError("sqlite3 connection requested while DATABASE_URL is Postgres")
     if _CONN is not None:
         return _CONN
     path = _db_path()
@@ -134,6 +135,12 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    settings = get_settings()
+    if settings.database_url.startswith("postgres"):
+        run_migrations()
+        _seed_postgres_policy_packs()
+        return
+
     conn = get_connection()
     with _LOCK:
         conn.execute(
@@ -280,6 +287,28 @@ def init_db() -> None:
                 ),
             )
         conn.commit()
+
+
+def _seed_postgres_policy_packs() -> None:
+    with SessionLocal() as db:
+        now = datetime.utcnow()
+        for pack in _DEFAULT_POLICY_PACKS:
+            exists = db.get(PolicyPackRow, str(pack["id"]))
+            if exists is not None:
+                continue
+            db.add(
+                PolicyPackRow(
+                    id=str(pack["id"]),
+                    name=str(pack["name"]),
+                    description=str(pack.get("description") or ""),
+                    version=int(pack.get("version") or 1),
+                    is_active=bool(pack.get("is_active", 1)),
+                    policy_json=json.dumps(pack["policy_json"]),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        db.commit()
 
 
 class SqliteRepo:
@@ -1259,8 +1288,23 @@ class SqliteRepo:
             return True
 
 
-_REPO = SqliteRepo()
+_REPO: object | None = None
 
 
-def get_repo() -> SqliteRepo:
+def get_repo():
+    global _REPO
+    settings = get_settings()
+    wants_postgres = settings.database_url.startswith("postgres")
+    if _REPO is not None:
+        if wants_postgres and isinstance(_REPO, PostgresRepository):
+            return _REPO
+        if (not wants_postgres) and isinstance(_REPO, SqliteRepo):
+            return _REPO
+        _REPO = None
+    if settings.database_url.startswith("postgres"):
+        _REPO = PostgresRepository()
+        print("[db] using PostgresRepository")
+    else:
+        _REPO = SqliteRepo()
+        print("[db] using SqliteRepo")
     return _REPO

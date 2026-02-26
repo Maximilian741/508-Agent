@@ -93,9 +93,4 @@ def get_settings() -> Settings:
     if settings.environment == "production" and settings.require_strict_cors:
         if "*" in settings.cors_allow_origins:
             raise RuntimeError("CORS_ALLOW_ORIGINS cannot include '*' in production.")
-    if settings.environment == "production" and settings.database_url.startswith("postgres"):
-        raise RuntimeError(
-            "Postgres DATABASE_URL detected in production, but Postgres persistence is not implemented yet. "
-            "Use sqlite for now or complete PR8 Postgres repository support before enabling production."
-        )
     return settings
