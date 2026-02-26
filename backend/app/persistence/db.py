@@ -1265,12 +1265,15 @@ class SqliteRepo:
 
     def get_manual_review_item(self, item_id: str) -> Optional[Dict[str, object]]:
         conn = get_connection()
-        row = conn.execute("SELECT item_json FROM manual_review WHERE id=?", (item_id,)).fetchone()
+        row = conn.execute("SELECT doc_id, item_json FROM manual_review WHERE id=?", (item_id,)).fetchone()
         if row is None:
             return None
         try:
             payload = json.loads(row["item_json"])
-            return payload if isinstance(payload, dict) else None
+            if isinstance(payload, dict):
+                payload.setdefault("docId", row["doc_id"])
+                return payload
+            return None
         except Exception:
             return None
 

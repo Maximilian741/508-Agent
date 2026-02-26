@@ -43,6 +43,10 @@ class Settings:
     s3_bucket: str
     s3_prefix: str
     s3_endpoint_url: str
+    s3_force_path_style: bool
+    presign_expires_seconds: int
+    enable_dev_storage_endpoint: bool
+    materialized_root: Path
     cors_allow_origins: List[str]
     max_upload_mb: int
     require_strict_cors: bool
@@ -57,6 +61,7 @@ def get_settings() -> Settings:
     backend_root = Path(__file__).resolve().parents[1]
     default_db_url = "sqlite:///./.runtime/508_agent.db"
     default_storage_root = backend_root / ".runtime" / "storage"
+    default_materialized_root = backend_root / ".runtime" / "materialized"
 
     environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").strip().lower() or "development"
     settings = Settings(
@@ -69,6 +74,10 @@ def get_settings() -> Settings:
         s3_bucket=os.getenv("S3_BUCKET", "").strip(),
         s3_prefix=os.getenv("S3_PREFIX", "").strip(),
         s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", "").strip(),
+        s3_force_path_style=_env_bool("S3_FORCE_PATH_STYLE", True),
+        presign_expires_seconds=max(60, _env_int("PRESIGN_EXPIRES_SECONDS", 3600)),
+        enable_dev_storage_endpoint=_env_bool("ENABLE_DEV_STORAGE_ENDPOINT", False),
+        materialized_root=Path(os.getenv("MATERIALIZED_ROOT", str(default_materialized_root))).resolve(),
         cors_allow_origins=_env_list(
             "CORS_ALLOW_ORIGINS",
             [

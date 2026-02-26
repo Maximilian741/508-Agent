@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from enum import Enum
 import mimetypes
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -29,6 +30,7 @@ from app.config import get_settings
 from app.persistence.db import get_repo
 from app.schemas.status import DocStatusListResponse, DocStatusSummary
 from app.storage import encode_storage_key, get_storage, parse_artifact_ref
+from app.storage.materialize import cleanup_materialized_scope, materialize_to_path
 
 router = APIRouter()
 
@@ -58,6 +60,10 @@ class JobPolicyRequest(BaseModel):
     policy_pack_id: str
 
 
+class ScanStartRequest(BaseModel):
+    policy_pack_id: Optional[str] = None
+
+
 def _ensure_dirs() -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     FIXED_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,18 +86,46 @@ def _sniff_signature(payload: bytes, suffix: str) -> bool:
     return False
 
 
-def _validate_upload(filename: str, content_type: str, payload: bytes) -> None:
+def _safe_filename(raw_name: str) -> str:
+    name = Path(str(raw_name or "upload.bin")).name
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", ".", " "} else "_" for ch in name).strip()
+    if not safe:
+        safe = "upload.bin"
+    return safe
+
+
+def _validate_upload_header(filename: str, content_type: str) -> str:
     suffix = Path(filename or "").suffix.lower().strip()
     if suffix not in _ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Only PDF, DOCX, and PPTX are allowed.")
-    if len(payload) > SETTINGS.max_upload_bytes:
-        raise HTTPException(status_code=413, detail=f"File exceeds MAX_UPLOAD_MB ({SETTINGS.max_upload_mb}MB).")
     hinted = (content_type or "").split(";")[0].strip().lower()
     expected_hints = _ALLOWED_MIME_HINTS.get(suffix, set())
     if hinted and hinted != "application/octet-stream" and expected_hints and hinted not in expected_hints:
         raise HTTPException(status_code=400, detail="Upload MIME type does not match file extension.")
-    if not _sniff_signature(payload[:16], suffix):
-        raise HTTPException(status_code=400, detail="Upload signature does not match expected file type.")
+    return suffix
+
+
+def _stream_to_quarantine(upload: UploadFile, dest_path: Path, *, max_bytes: int) -> Tuple[int, bytes]:
+    size = 0
+    sniff = bytearray()
+    with dest_path.open("wb") as handle:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            if len(sniff) < 64:
+                remaining = 64 - len(sniff)
+                sniff.extend(chunk[:remaining])
+            size += len(chunk)
+            if size > max_bytes:
+                handle.close()
+                try:
+                    dest_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=413, detail=f"File exceeds MAX_UPLOAD_MB ({SETTINGS.max_upload_mb}MB).")
+            handle.write(chunk)
+    return size, bytes(sniff[:64])
 
 
 def _content_type_for_name(name: str) -> Optional[str]:
@@ -103,7 +137,10 @@ def _download_response_from_ref(ref_value: object, *, filename_hint: Optional[st
     parsed = parse_artifact_ref(ref_value)
     if parsed.type == "storage_key":
         if SETTINGS.storage_provider == "s3":
-            return RedirectResponse(url=STORAGE.get_download_url(parsed.value, expires_seconds=3600), status_code=302)
+            return RedirectResponse(
+                url=STORAGE.get_download_url(parsed.value, expires_seconds=SETTINGS.presign_expires_seconds),
+                status_code=302,
+            )
         if not STORAGE.exists(parsed.value):
             raise HTTPException(status_code=404, detail="Stored object not found")
         local_path = STORAGE.resolve_local_path(parsed.value)
@@ -121,12 +158,22 @@ def _materialize_local_path(doc_id: str, ref_value: object, fallback_name: str) 
         if not parsed.value:
             raise HTTPException(status_code=404, detail="Artifact path missing")
         return Path(parsed.value)
-    local_dir = UPLOADS_DIR / doc_id / "materialized"
-    local_dir.mkdir(parents=True, exist_ok=True)
-    local_path = local_dir / Path(fallback_name or "document.bin").name
-    with STORAGE.open_stream(parsed.value) as stream:
-        local_path.write_bytes(stream.read())
-    return local_path
+    scope = f"{doc_id}-{int(time.time() * 1000)}"
+    path = materialize_to_path(
+        storage=STORAGE,
+        artifact_ref=ref_value,
+        base_dir=SETTINGS.materialized_root,
+        scope=scope,
+        filename_hint=fallback_name,
+    )
+    try:
+        scopes = [p for p in SETTINGS.materialized_root.glob(f"{doc_id}-*") if p.is_dir()]
+        scopes = sorted(scopes, key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in scopes[5:]:
+            cleanup_materialized_scope(SETTINGS.materialized_root, stale.name)
+    except Exception:
+        pass
+    return path
 
 
 def _infer_doc_type(filename: str) -> DocumentType:
@@ -2094,31 +2141,35 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
     doc_dir.mkdir(parents=True, exist_ok=True)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
+    safe_name = _safe_filename(file.filename)
+    suffix = _validate_upload_header(safe_name, file.content_type or "")
     quarantine_dir = doc_dir / "quarantine"
     quarantine_dir.mkdir(parents=True, exist_ok=True)
-    quarantine_path = quarantine_dir / file.filename
-    payload = await file.read()
-    _validate_upload(file.filename, file.content_type or "", payload)
-    quarantine_path.write_bytes(payload)
-    dest = doc_dir / file.filename
+    quarantine_path = quarantine_dir / safe_name
+    size, signature = _stream_to_quarantine(file, quarantine_path, max_bytes=SETTINGS.max_upload_bytes)
+    if not _sniff_signature(signature, suffix):
+        quarantine_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Upload signature does not match expected file type.")
+    dest = doc_dir / safe_name
     shutil.move(str(quarantine_path), str(dest))
-    size = dest.stat().st_size
-    doc_type = _infer_doc_type(file.filename or "").value
-    storage_key = f"documents/{doc_id}/original/{Path(file.filename).name}"
+    doc_type = _infer_doc_type(safe_name).value
+    storage_key = f"documents/{doc_id}/original/{Path(safe_name).name}"
     try:
-        STORAGE.save_file(key=storage_key, src_path=str(dest), content_type=file.content_type or _content_type_for_name(file.filename))
+        STORAGE.save_file(key=storage_key, src_path=str(dest), content_type=file.content_type or _content_type_for_name(safe_name))
         persisted_path = encode_storage_key(storage_key)
-    except Exception:
+    except Exception as exc:
+        if SETTINGS.storage_provider == "s3":
+            raise HTTPException(status_code=500, detail=f"Failed to store upload artifact: {exc}")
         persisted_path = str(dest)
     with LOCK:
         DOCS[doc_id] = {
-            "filename": file.filename,
+            "filename": safe_name,
             "path": persisted_path,
             "localPath": str(dest),
             "docType": doc_type,
         }
     _save_doc(doc_id, DOCS[doc_id])
-    return {"docId": doc_id, "filename": file.filename, "sizeBytes": size, "docType": doc_type}
+    return {"docId": doc_id, "filename": safe_name, "sizeBytes": size, "docType": doc_type}
 
 
 @router.get("/documents")
@@ -2149,14 +2200,21 @@ async def get_document_status(doc_id: str) -> Dict[str, object]:
 
 
 @router.post("/documents/{doc_id}/scan")
-async def start_scan(doc_id: str) -> dict:
+async def start_scan(doc_id: str, request: Optional[ScanStartRequest] = None) -> dict:
     if _get_doc(doc_id) is None:
         raise HTTPException(status_code=404, detail="Document not found")
     job_id = f"job-{int(time.time() * 1000)}"
     with LOCK:
-        JOBS[job_id] = {"jobId": job_id, "status": "queued", "progress": 0}
+        JOBS[job_id] = {
+            "jobId": job_id,
+            "docId": doc_id,
+            "status": "queued",
+            "progress": 0,
+            "message": "Queued",
+        }
     REPO.save_job({"jobId": job_id, "docId": doc_id, "status": "queued", "progress": 0, "message": "Queued"})
-    _snapshot_job_policy(job_id)
+    policy_pack_id = request.policy_pack_id if request else None
+    _snapshot_job_policy(job_id, policy_pack_id=policy_pack_id)
     thread = threading.Thread(target=_scan_worker, args=(job_id, doc_id), daemon=True)
     thread.start()
     return {"jobId": job_id}
@@ -2189,8 +2247,10 @@ async def set_job_policy(job_id: str, request: JobPolicyRequest) -> Dict[str, ob
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     status = str(job.get("status") or "")
-    if status != "queued":
-        raise HTTPException(status_code=409, detail="Policy can only be set while job is queued")
+    if status in {"done", "completed", "error", "failed"}:
+        raise HTTPException(status_code=409, detail="Policy can only be changed before job completion")
+    if REPO.get_job_scores(job_id):
+        raise HTTPException(status_code=409, detail="Policy can no longer be changed after scoring starts")
     snapshot = _snapshot_job_policy(job_id, policy_pack_id=request.policy_pack_id, overwrite=True)
     return {
         "jobId": job_id,
@@ -2210,20 +2270,28 @@ async def get_job_score(job_id: str) -> Dict[str, object]:
         job = REPO.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    doc_id = str(job.get("docId") or "")
+    doc_id = str(job.get("docId") or job.get("doc_id") or "")
     if not doc_id:
-        raise HTTPException(status_code=400, detail="Job has no document context")
+        persisted_job = REPO.get_job(job_id) or {}
+        doc_id = str(persisted_job.get("docId") or persisted_job.get("doc_id") or "")
+    if not doc_id:
+        print(f"[score] job_id={job_id} passes=0 computed=false reason=no_doc_context")
+        return {"jobId": job_id, "scores": []}
     doc = _get_doc(doc_id) or {}
     doc_type = str(doc.get("docType", "pdf")).lower()
+    computed = False
     scores = REPO.get_job_scores(job_id)
     if not scores:
         before_issues = REPO.get_issues(doc_id, "before")
         if before_issues:
             _compute_and_store_job_score(job_id=job_id, pass_type="baseline", issues=before_issues, doc_type=doc_type)
+            computed = True
         after_issues = REPO.get_issues(doc_id, "after")
         if after_issues:
             _compute_and_store_job_score(job_id=job_id, pass_type="post_fix", issues=after_issues, doc_type=doc_type)
+            computed = True
         scores = REPO.get_job_scores(job_id)
+    print(f"[score] job_id={job_id} passes={len(scores)} computed={'true' if computed else 'false'}")
     return {"jobId": job_id, "scores": scores}
 
 
@@ -2328,14 +2396,18 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
         try:
             STORAGE.save_file(key=fixed_key, src_path=str(fixed_dest), content_type=_content_type_for_name(fixed_dest.name))
             fixed_ref = encode_storage_key(fixed_key)
-        except Exception:
+        except Exception as exc:
+            if SETTINGS.storage_provider == "s3":
+                raise HTTPException(status_code=500, detail=f"Failed to store fixed artifact: {exc}")
             fixed_ref = str(fixed_dest)
     if rebuilt_exists:
         rebuilt_key = f"documents/{doc_id}/rebuilt/{rebuild_dest.name}"
         try:
             STORAGE.save_file(key=rebuilt_key, src_path=str(rebuild_dest), content_type="application/pdf")
             rebuilt_ref = encode_storage_key(rebuilt_key)
-        except Exception:
+        except Exception as exc:
+            if SETTINGS.storage_provider == "s3":
+                raise HTTPException(status_code=500, detail=f"Failed to store rebuilt artifact: {exc}")
             rebuilt_ref = str(rebuild_dest)
     if rebuilt and rebuilt_ref:
         scan_target_ref = rebuilt_ref
@@ -2406,17 +2478,162 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
     REPO.save_fix_report(doc_id, report)
     REPO.add_manual_review_items(doc_id, report.get("manualReview", []) if isinstance(report.get("manualReview"), list) else [])
     latest_job = REPO.get_latest_job_for_doc(doc_id)
+    job_id_for_scores: Optional[str] = None
     if latest_job and latest_job.get("jobId"):
         try:
-            job_id = str(latest_job.get("jobId"))
-            _compute_and_store_job_score(job_id=job_id, pass_type="baseline", issues=before_issues, doc_type=doc_type)
-            _compute_and_store_job_score(job_id=job_id, pass_type="post_fix", issues=after_issues, doc_type=doc_type)
+            job_id_for_scores = str(latest_job.get("jobId"))
+            _compute_and_store_job_score(job_id=job_id_for_scores, pass_type="baseline", issues=before_issues, doc_type=doc_type)
+            _compute_and_store_job_score(job_id=job_id_for_scores, pass_type="post_fix", issues=after_issues, doc_type=doc_type)
         except Exception:
             pass
     report_path = RESULTS_DIR / doc_id / "fix_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    return {"docId": doc_id, "fixed": True, "report": report}
+    return {"docId": doc_id, "jobId": job_id_for_scores, "fixed": True, "report": report}
+
+
+@router.post("/documents/{doc_id}/finalize")
+async def finalize_document(doc_id: str) -> Dict[str, object]:
+    _ensure_dirs()
+    doc = _get_doc(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_type = str(doc.get("docType", "pdf")).lower()
+    report = REPO.get_fix_report(doc_id) or {}
+    base_ref = (
+        doc.get("rebuiltPath")
+        or (report.get("rebuiltPath") if isinstance(report, dict) else None)
+        or doc.get("fixedPath")
+        or (report.get("fixedPath") if isinstance(report, dict) else None)
+        or doc.get("path")
+    )
+    if not base_ref:
+        raise HTTPException(status_code=404, detail="No artifact available to finalize")
+    base_path = _materialize_local_path(doc_id, base_ref, str(doc.get("filename") or "document.bin"))
+
+    fixed_dir = FIXED_DIR / doc_id
+    fixed_dir.mkdir(parents=True, exist_ok=True)
+    suffix = base_path.suffix if base_path.suffix else ".bin"
+    final_dest = fixed_dir / f"final{suffix}"
+    shutil.copyfile(str(base_path), str(final_dest))
+
+    applied_manual_item_ids: List[str] = []
+    if doc_type == DocumentType.PDF.value:
+        applied_manual_item_ids = _apply_approved_alt_to_pdf(doc_id, final_dest)
+
+    before_issues = REPO.get_issues(doc_id, "before")
+    if not before_issues:
+        before_issues = doc.get("issues_before", doc.get("issues", [])) if isinstance(doc, dict) else []
+    if not isinstance(before_issues, list):
+        before_issues = []
+
+    try:
+        if doc_type == DocumentType.PDF.value:
+            try:
+                tag_tree = extract_tag_tree(PdfReader(str(final_dest), strict=False))
+            except Exception as exc:
+                tag_tree = _safe_tag_tree([f"tag tree: parse failed: {exc.__class__.__name__}"])
+            tag_path = _write_tag_tree(doc_id, tag_tree)
+            doc["tagTreePath"] = str(tag_path)
+            doc["tagSummary"] = tag_tree.get("summary", {})
+            after_issues = _analyze_pdf(doc_id, final_dest, tag_tree=tag_tree)
+        elif doc_type == DocumentType.DOCX.value:
+            after_issues = _analyze_docx(doc_id, final_dest)
+        elif doc_type == DocumentType.PPTX.value:
+            after_issues = _analyze_pptx(doc_id, final_dest)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported document type: {doc_type}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Finalize scan failed: {exc.__class__.__name__}")
+
+    delta = _compute_delta(before_issues, after_issues)
+    final_key = f"documents/{doc_id}/fixed/{final_dest.name}"
+    try:
+        STORAGE.save_file(key=final_key, src_path=str(final_dest), content_type=_content_type_for_name(final_dest.name))
+        final_ref = encode_storage_key(final_key)
+    except Exception as exc:
+        if SETTINGS.storage_provider == "s3":
+            raise HTTPException(status_code=500, detail=f"Failed to store finalized artifact: {exc}")
+        final_ref = str(final_dest)
+
+    manual_items_all = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=True)
+    pending_manual = 0
+    approved_manual = 0
+    rejected_manual = 0
+    for item in manual_items_all:
+        status = str(item.get("status") or "pending").strip().lower()
+        if status == "approved":
+            approved_manual += 1
+        elif status == "rejected":
+            rejected_manual += 1
+        else:
+            pending_manual += 1
+
+    report = report if isinstance(report, dict) else {}
+    report.update(
+        {
+            "docId": doc_id,
+            "fixedDocId": doc_id,
+            "fixedPath": final_ref,
+            "localFixedPath": str(final_dest),
+            "scanTargetPath": final_ref,
+            "localScanTargetPath": str(final_dest),
+            "before": _summarize_issues(before_issues),
+            "after": _summarize_issues(after_issues),
+            "delta": delta,
+            "mode": "finalize",
+            "finalized": True,
+            "appliedManualReviewCount": len(applied_manual_item_ids),
+            "appliedManualReviewItemIds": sorted(set(applied_manual_item_ids)),
+            "manualReviewSummary": {
+                "pending": pending_manual,
+                "approved": approved_manual,
+                "rejected": rejected_manual,
+            },
+        }
+    )
+
+    with LOCK:
+        ISSUES[doc_id] = after_issues
+    doc["issues_after"] = after_issues
+    doc["fixReport"] = report
+    doc["fixedPath"] = final_ref
+    doc["localFixedPath"] = str(final_dest)
+    doc["scanTargetPath"] = final_ref
+    doc["localScanTargetPath"] = str(final_dest)
+    _save_doc(doc_id, doc)
+
+    REPO.save_issues(doc_id, "before", before_issues, [_issue_key(i) for i in before_issues])
+    REPO.save_issues(doc_id, "after", after_issues, [_issue_key(i) for i in after_issues])
+    REPO.save_fix_report(doc_id, report)
+
+    latest_job = REPO.get_latest_job_for_doc(doc_id)
+    job_id_for_scores: Optional[str] = None
+    if latest_job and latest_job.get("jobId"):
+        try:
+            job_id_for_scores = str(latest_job.get("jobId"))
+            _compute_and_store_job_score(job_id=job_id_for_scores, pass_type="post_manual", issues=after_issues, doc_type=doc_type)
+        except Exception:
+            pass
+
+    report_path = RESULTS_DIR / doc_id / "fix_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return {
+        "docId": doc_id,
+        "jobId": job_id_for_scores,
+        "finalized": True,
+        "finalizedPath": final_ref,
+        "report": report,
+        "counts": {
+            "remaining": len(delta.get("remaining", [])) if isinstance(delta.get("remaining"), list) else 0,
+            "introduced": len(delta.get("introduced", [])) if isinstance(delta.get("introduced"), list) else 0,
+            "pendingManual": pending_manual,
+            "approvedManual": approved_manual,
+            "rejectedManual": rejected_manual,
+        },
+    }
 
 
 @router.get("/documents/{doc_id}/download")

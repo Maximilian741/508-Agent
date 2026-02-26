@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
 from pathlib import Path
 from typing import BinaryIO, Optional
 
@@ -9,7 +8,7 @@ from app.storage.base import StoredObject, sanitize_storage_key, utc_now
 
 
 class S3Storage:
-    def __init__(self, *, bucket: str, region: str, prefix: str = "", endpoint_url: str = "") -> None:
+    def __init__(self, *, bucket: str, region: str, prefix: str = "", endpoint_url: str = "", force_path_style: bool = True) -> None:
         try:
             import boto3
         except Exception as exc:  # pragma: no cover - import guard
@@ -20,7 +19,12 @@ class S3Storage:
         self.region = region
         self.prefix = prefix.strip("/")
         self.endpoint_url = endpoint_url or None
-        self.client = boto3.client("s3", region_name=region, endpoint_url=self.endpoint_url)
+        config = None
+        if force_path_style:
+            from botocore.config import Config
+
+            config = Config(s3={"addressing_style": "path"})
+        self.client = boto3.client("s3", region_name=region, endpoint_url=self.endpoint_url, config=config)
 
     def _full_key(self, key: str) -> str:
         clean = sanitize_storage_key(key)
@@ -68,8 +72,8 @@ class S3Storage:
     def open_stream(self, key: str) -> BinaryIO:
         full_key = self._full_key(key)
         response = self.client.get_object(Bucket=self.bucket, Key=full_key)
-        body = response["Body"].read()
-        return io.BytesIO(body)
+        body = response["Body"]
+        return body
 
     def exists(self, key: str) -> bool:
         full_key = self._full_key(key)

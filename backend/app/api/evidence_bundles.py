@@ -76,7 +76,10 @@ async def download_evidence_bundle(bundle_id: str):
     bundle_ref = parse_artifact_ref(bundle.get("bundlePath"))
     if bundle_ref.type == "storage_key":
         if SETTINGS.storage_provider == "s3":
-            return RedirectResponse(url=STORAGE.get_download_url(bundle_ref.value, expires_seconds=3600), status_code=302)
+            return RedirectResponse(
+                url=STORAGE.get_download_url(bundle_ref.value, expires_seconds=SETTINGS.presign_expires_seconds),
+                status_code=302,
+            )
         if not STORAGE.exists(bundle_ref.value):
             raise HTTPException(status_code=404, detail="Evidence bundle file not found")
         local_path = STORAGE.resolve_local_path(bundle_ref.value)

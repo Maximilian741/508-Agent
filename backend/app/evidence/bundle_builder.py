@@ -504,8 +504,12 @@ def _copy_artifact_if_present(src_path: object, dest_dir: Path) -> Optional[str]
         src_name = Path(ref.value).name
         dest_name = _sanitize_filename(src_name)
         dest = dest_dir / dest_name
-        with STORAGE.open_stream(ref.value) as stream:
-            dest.write_bytes(stream.read())
+        with STORAGE.open_stream(ref.value) as stream, dest.open("wb") as handle:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
         return dest_name
 
     src = Path(ref.value)

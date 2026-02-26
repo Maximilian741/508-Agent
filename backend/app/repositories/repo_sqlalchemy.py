@@ -260,7 +260,10 @@ class SqlAlchemyRepository(Repository):
             if row is None:
                 return None
             parsed = _loads(row.item_json, None)
-            return parsed if isinstance(parsed, dict) else None
+            if isinstance(parsed, dict):
+                parsed.setdefault("docId", row.doc_id)
+                return parsed
+            return None
 
     def update_manual_review_item(self, item_id: str, item: Dict[str, object], resolved: bool = False) -> bool:
         with SessionLocal() as db:

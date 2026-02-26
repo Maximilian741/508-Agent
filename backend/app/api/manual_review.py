@@ -30,6 +30,8 @@ class ManualReviewItem(BaseModel):
     suggestedText: str | None = None
     approvedText: str | None = None
     status: str | None = None
+    docId: str | None = None
+    readyToFinalize: bool | None = None
     aiSuggested: bool | None = None
     confidence: float | None = None
     requiresHuman: bool = True
@@ -79,4 +81,9 @@ async def update_manual_review(item_id: str, request: ManualReviewUpdateRequest)
     ok = REPO.update_manual_review_item(item_id, current, resolved=resolved)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to update manual review item")
+    doc_id = str(current.get("docId") or "").strip()
+    if doc_id:
+        pending = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
+        all_items = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=True)
+        current["readyToFinalize"] = len(all_items) > 0 and len(pending) == 0
     return ManualReviewItem(**current)

@@ -17,6 +17,8 @@ async def download_storage_object(key: str) -> FileResponse:
     settings = get_settings()
     storage = get_storage()
     clean = sanitize_storage_key(key)
+    if settings.environment == "production" and not settings.enable_dev_storage_endpoint:
+        raise HTTPException(status_code=404, detail="Not found")
     if settings.storage_provider != "local" or not isinstance(storage, LocalStorage):
         raise HTTPException(status_code=404, detail="Storage endpoint is only available for local provider")
     path = storage.resolve_local_path(clean)

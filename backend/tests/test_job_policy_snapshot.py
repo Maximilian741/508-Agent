@@ -70,6 +70,29 @@ class JobPolicySnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["policyPackId"], "policy-508-wcag20-aa")
         self.assertEqual(snapshot["policyName"], "Section 508 (WCAG 2.0 AA)")
 
+    def test_scan_accepts_policy_pack_id_and_snapshots(self) -> None:
+        pdf_bytes = self._build_min_pdf_bytes()
+        upload = self.client.post(
+            "/documents/upload",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        self.assertEqual(upload.status_code, 200)
+        doc_id = upload.json()["docId"]
+
+        with patch("app.api.documents.threading.Thread") as thread_cls:
+            thread = thread_cls.return_value
+            thread.start.return_value = None
+            start = self.client.post(f"/documents/{doc_id}/scan", json={"policy_pack_id": "policy-wcag22-aa-docs"})
+        self.assertEqual(start.status_code, 200)
+        job_id = start.json()["jobId"]
+
+        from app.persistence.db import get_repo
+
+        snapshot = get_repo().get_job_policy_snapshot(job_id)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["policyPackId"], "policy-wcag22-aa-docs")
+
     def test_set_policy_on_queued_job_and_job_detail_includes_policy(self) -> None:
         from app.persistence.db import get_repo
 
@@ -149,6 +172,45 @@ class JobPolicySnapshotTests(unittest.TestCase):
         pass_types = {entry["passType"] for entry in payload["scores"]}
         self.assertIn("baseline", pass_types)
         self.assertIn("post_fix", pass_types)
+
+    def test_score_endpoint_returns_200_empty_when_no_scores(self) -> None:
+        from app.persistence.db import get_repo
+
+        repo = get_repo()
+        doc_id = "doc-score-empty"
+        job_id = "job-score-empty"
+        doc_path = Path(self.tmp_dir.name) / "score-empty.pdf"
+        doc_path.write_bytes(self._build_min_pdf_bytes())
+        repo.save_document(
+            {
+                "id": doc_id,
+                "filename": "score-empty.pdf",
+                "docType": "pdf",
+                "path": str(doc_path),
+            }
+        )
+        repo.save_job({"jobId": job_id, "docId": doc_id, "status": "done", "progress": 100, "message": "Done"})
+
+        response = self.client.get(f"/jobs/{job_id}/score")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["jobId"], job_id)
+        self.assertEqual(payload["scores"], [])
+
+    def test_job_policy_endpoint_allows_setting_when_running(self) -> None:
+        from app.persistence.db import get_repo
+
+        repo = get_repo()
+        job_id = "job-test-policy-running"
+        repo.save_job({"jobId": job_id, "docId": "doc-test", "status": "running", "progress": 50, "message": "Running"})
+
+        set_policy = self.client.post(
+            f"/jobs/{job_id}/policy",
+            json={"policy_pack_id": "policy-wcag22-aa-docs"},
+        )
+        self.assertEqual(set_policy.status_code, 200)
+        body = set_policy.json()
+        self.assertEqual(body["policy"]["policyPackId"], "policy-wcag22-aa-docs")
 
 
 if __name__ == "__main__":

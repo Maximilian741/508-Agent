@@ -18,6 +18,7 @@ def get_storage() -> Any:
             region=settings.aws_region,
             prefix=settings.s3_prefix,
             endpoint_url=settings.s3_endpoint_url,
+            force_path_style=settings.s3_force_path_style,
         )
     return LocalStorage(root=settings.storage_local_root)
 
