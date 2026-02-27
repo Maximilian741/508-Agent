@@ -64,6 +64,8 @@ export interface ManualReviewItem {
     suggestedText?: string;
     approvedText?: string;
     status?: "pending" | "approved" | "rejected" | string;
+    docId?: string;
+    readyToFinalize?: boolean;
     aiSuggested?: boolean;
     confidence?: number;
     requiresHuman?: boolean;
@@ -158,6 +160,22 @@ export interface ApplyFixesResponse {
     rebuiltPath?: string;
     fixed: boolean;
     report?: FixReport;
+    jobId?: string;
+}
+
+export interface FinalizeResponse {
+    docId: string;
+    jobId?: string | null;
+    finalized: boolean;
+    finalizedPath?: string;
+    report?: FixReport;
+    counts?: {
+        remaining?: number;
+        introduced?: number;
+        pendingManual?: number;
+        approvedManual?: number;
+        rejectedManual?: number;
+    };
 }
 
 export interface FixReportItem {
@@ -272,6 +290,7 @@ export interface ApiClient {
     getJob: (jobId: string) => Promise<ScanJobResponse>;
     getIssues: (docId: string) => Promise<DocumentIssue[]>;
     applyFixes: (docId: string) => Promise<ApplyFixesResponse>;
+    finalizeDocument: (docId: string) => Promise<FinalizeResponse>;
     getDownloadUrl: (docId: string, variant: "original" | "fixed") => string;
     getDocumentDiff: (docId: string) => Promise<DocumentDiffResponse>;
     getDocumentSummary: (docId: string) => Promise<DocumentSummary>;
@@ -478,6 +497,13 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return request<ApplyFixesResponse>(`/documents/${docId}/apply-fixes`, {});
     };
 
+    const finalizeDocument = async (docId: string): Promise<FinalizeResponse> => {
+        if (mockMode) {
+            return { docId, finalized: true };
+        }
+        return request<FinalizeResponse>(`/documents/${docId}/finalize`, {});
+    };
+
     const getDownloadUrl = (docId: string, variant: "original" | "fixed") => {
         if (variant === "fixed") {
             return `${baseUrl}/documents/${docId}/pdf-fixed`;
@@ -658,6 +684,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         getJob,
         getIssues,
         applyFixes,
+        finalizeDocument,
         getDownloadUrl,
         getDocumentDiff,
         getDocumentSummary,

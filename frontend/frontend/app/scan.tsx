@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FlatList,
   Platform,
@@ -42,6 +42,7 @@ export default function ScanScreen() {
   const fetchDocumentSummary = useAppStore((state) => state.fetchDocumentSummary);
   const fetchTagTree = useAppStore((state) => state.fetchTagTree);
   const fetchFixReport = useAppStore((state) => state.fetchFixReport);
+  const fetchDocumentIssues = useAppStore((state) => state.fetchDocumentIssues);
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const documentSummary = useAppStore((state) => state.documentSummary);
   const tagTree = useAppStore((state) => state.tagTree);
@@ -58,6 +59,10 @@ export default function ScanScreen() {
   const exportError = useAppStore((state) => state.exportError);
   const fetchManualReview = useAppStore((state) => state.fetchManualReview);
   const manualReviewQueue = useAppStore((state) => state.manualReviewQueue);
+  const finalizeDocument = useAppStore((state) => state.finalizeDocument);
+  const isFinalizing = useAppStore((state) => state.isFinalizing);
+  const finalizedPathByDocId = useAppStore((state) => state.finalizedPathByDocId);
+  const readyToFinalizeByDocId = useAppStore((state) => state.readyToFinalizeByDocId);
   const mockMode = useAppStore((state) => state.mockMode);
   const themeMode = useAppStore((state) => state.themeMode);
   const setThemeMode = useAppStore((state) => state.setThemeMode);
@@ -85,6 +90,9 @@ export default function ScanScreen() {
   const [documentsTab, setDocumentsTab] = useState<"tree" | "completed">("tree");
   const [scoreMessage, setScoreMessage] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [finalizeNotice, setFinalizeNotice] = useState<string | null>(null);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [recentDocuments, setRecentDocuments] = useState<
     Array<{
       docId: string;
@@ -206,7 +214,7 @@ export default function ScanScreen() {
     const fixed = fixReport.delta?.fixed ?? [];
     const remaining = fixReport.delta?.remaining ?? [];
     const introduced = fixReport.delta?.introduced ?? [];
-    const manual = fixReport.manualReview ?? [];
+    const manual = manualReviewQueue ?? [];
     if (fixReportFilter === "fixed") {
       return { fixed, remaining: [], introduced: [], manual: [] };
     }
@@ -217,7 +225,7 @@ export default function ScanScreen() {
       return { fixed: [], remaining: [], introduced: [], manual };
     }
     return { fixed, remaining, introduced, manual };
-  }, [fixReport, fixReportFilter]);
+  }, [fixReport, fixReportFilter, manualReviewQueue]);
 
   const beforeIssues = useMemo(() => {
     if (!fixReport) return [];
@@ -273,6 +281,17 @@ export default function ScanScreen() {
     const items = manualReviewQueue ?? [];
     return items.filter((item) => !item.status || item.status === "pending").length;
   }, [manualReviewQueue]);
+  const resolvedManualCount = useMemo(() => {
+    const items = manualReviewQueue ?? [];
+    return items.filter((item) => item.status === "approved" || item.status === "rejected").length;
+  }, [manualReviewQueue]);
+  const manualReviewItemCount = useMemo(() => (manualReviewQueue ?? []).length, [manualReviewQueue]);
+  const manualReadyFlag = useMemo(
+    () => (manualReviewQueue ?? []).some((item) => item.readyToFinalize === true),
+    [manualReviewQueue],
+  );
+  const readyForDocFlag = uploadedDocument?.docId ? Boolean(readyToFinalizeByDocId[uploadedDocument.docId]) : false;
+  const readyToFinalize = readyForDocFlag || ((manualReadyFlag || pendingManualCount === 0) && resolvedManualCount > 0);
   const jobScores: JobScorePass[] = useMemo(() => {
     const jobId = scanJob?.jobId;
     if (!jobId) return [];
@@ -304,6 +323,8 @@ export default function ScanScreen() {
   const rebuiltUrl = uploadedDocument ? `${apiBaseUrl}/documents/${uploadedDocument.docId}/pdf-rebuilt` : null;
   const fixedAvailable = fixReport?.fixedExists === true;
   const rebuiltAvailable = fixReport?.rebuiltExists === true;
+  const finalizedPath = uploadedDocument?.docId ? finalizedPathByDocId[uploadedDocument.docId] : undefined;
+  const finalizedAvailable = (Boolean(finalizedPath) || Boolean((fixReport as unknown as { finalized?: boolean } | null)?.finalized)) && fixedAvailable;
   const afterUrl =
     !isPdfDoc
       ? fixedAvailable
@@ -314,6 +335,16 @@ export default function ScanScreen() {
       : fixedAvailable
       ? fixedUrl
       : null;
+  const latestOutputUrl =
+    ((finalizedPath || finalizedAvailable) && fixedUrl
+      ? fixedUrl
+      : rebuiltAvailable && rebuiltUrl
+      ? rebuiltUrl
+      : fixedAvailable && fixedUrl
+      ? fixedUrl
+      : originalUrl) ?? null;
+  const docBundles = uploadedDocument?.docId ? evidenceBundlesByDocId[uploadedDocument.docId] ?? [] : [];
+  const latestBundle = docBundles.length > 0 ? docBundles[0] : null;
   const openUrl = (url: string) => {
     if (Platform.OS === "web") {
       window.open(url, "_blank");
@@ -346,6 +377,115 @@ export default function ScanScreen() {
       return;
     }
     setExportNotice(result.error ?? "Evidence bundle export failed.");
+  };
+
+  const handleDownloadEvidenceBundle = async () => {
+    if (!latestBundle) {
+      setExportNotice("No bundle available yet. Export a bundle first.");
+      return;
+    }
+    const rawUrl = latestBundle.downloadUrl;
+    const absoluteUrl = rawUrl.startsWith("http") ? rawUrl : `${apiBaseUrl}${rawUrl}`;
+    openUrl(absoluteUrl);
+  };
+
+  const handleDownloadLatestOutput = () => {
+    if (!latestOutputUrl) {
+      setDownloadError("No downloadable output is available yet.");
+      return;
+    }
+    setDownloadError(null);
+    openUrl(latestOutputUrl);
+  };
+
+  const refreshRecentDocuments = useCallback(async () => {
+    if (mockMode) {
+      setRecentDocuments([]);
+      setRecentDocsError(null);
+      return;
+    }
+    try {
+      let normalized: Array<{
+        docId: string;
+        filename: string;
+        docType?: string;
+        createdAt?: string;
+        fixedPath?: string | null;
+        rebuiltPath?: string | null;
+        status?: "in_progress" | "fixed" | "needs_review" | "errors" | "not_run";
+        reasons?: string[];
+      }> = [];
+
+      const statusResponse = await fetch(`${apiBaseUrl}/documents/status?limit=200&offset=0`, { cache: "no-store" });
+      if (statusResponse.ok) {
+        const statusPayload = (await statusResponse.json()) as { items?: Array<Record<string, unknown>> };
+        const items = Array.isArray(statusPayload.items) ? statusPayload.items : [];
+        normalized = items
+          .map((item) => ({
+            docId: String(item.docId ?? ""),
+            filename: String(item.filename ?? "Untitled document"),
+            docType: item.docType ? String(item.docType) : undefined,
+            createdAt: item.createdAt ? String(item.createdAt) : undefined,
+            fixedPath: null,
+            rebuiltPath: null,
+            status: (item.status as "in_progress" | "fixed" | "needs_review" | "errors" | "not_run") ?? undefined,
+            reasons: Array.isArray(item.reasons) ? item.reasons.map((reason) => String(reason)) : [],
+          }))
+          .filter((item) => item.docId.length > 0);
+      } else {
+        const legacyResponse = await fetch(`${apiBaseUrl}/documents`, { cache: "no-store" });
+        if (!legacyResponse.ok) {
+          throw new Error((await legacyResponse.text()) || "Failed to load persisted documents.");
+        }
+        const payload = (await legacyResponse.json()) as Array<Record<string, unknown>>;
+        if (Array.isArray(payload)) {
+          normalized = payload
+            .map((item) => ({
+              docId: String(item.docId ?? ""),
+              filename: String(item.filename ?? "Untitled document"),
+              docType: item.docType ? String(item.docType) : undefined,
+              createdAt: item.createdAt ? String(item.createdAt) : undefined,
+              fixedPath: typeof item.fixedPath === "string" ? item.fixedPath : null,
+              rebuiltPath: typeof item.rebuiltPath === "string" ? item.rebuiltPath : null,
+              status: undefined,
+              reasons: [],
+            }))
+            .filter((item) => item.docId.length > 0);
+        }
+      }
+      setRecentDocuments(normalized);
+      setRecentDocsError(null);
+    } catch (error) {
+      setRecentDocsError((error as Error).message || "Unable to load persisted documents.");
+    }
+  }, [apiBaseUrl, mockMode]);
+
+  const handleFinalize = async () => {
+    const docId = uploadedDocument?.docId;
+    if (!docId) {
+      setFinalizeError("Finalize is available after upload.");
+      return;
+    }
+    setFinalizeNotice(null);
+    setFinalizeError(null);
+    const result = await finalizeDocument(docId);
+    if (!result.ok) {
+      setFinalizeError(result.error ?? "Finalize failed.");
+      return;
+    }
+    await Promise.all([
+      fetchFixReport(docId),
+      fetchDocumentIssues(docId),
+      fetchManualReview(docId),
+      fetchEvidenceBundles(docId),
+      refreshRecentDocuments(),
+    ]);
+    const scoreJobId = result.data?.jobId ?? scanJob?.jobId;
+    if (scoreJobId) {
+      await fetchJobScores(scoreJobId);
+    }
+    setFixReportFilter("all");
+    setFinalizeNotice("Finalized. Fix report and scores refreshed.");
   };
 
   useEffect(() => {
@@ -399,70 +539,8 @@ export default function ScanScreen() {
   }, [selectedPolicyId, policyDetailsById, fetchPolicyDetail]);
 
   useEffect(() => {
-    const loadRecentDocuments = async () => {
-      if (mockMode) {
-        setRecentDocuments([]);
-        setRecentDocsError(null);
-        return;
-      }
-      try {
-        let normalized: Array<{
-          docId: string;
-          filename: string;
-          docType?: string;
-          createdAt?: string;
-          fixedPath?: string | null;
-          rebuiltPath?: string | null;
-          status?: "in_progress" | "fixed" | "needs_review" | "errors" | "not_run";
-          reasons?: string[];
-        }> = [];
-
-        const statusResponse = await fetch(`${apiBaseUrl}/documents/status?limit=200&offset=0`, { cache: "no-store" });
-        if (statusResponse.ok) {
-          const statusPayload = (await statusResponse.json()) as { items?: Array<Record<string, unknown>> };
-          const items = Array.isArray(statusPayload.items) ? statusPayload.items : [];
-          normalized = items
-            .map((item) => ({
-              docId: String(item.docId ?? ""),
-              filename: String(item.filename ?? "Untitled document"),
-              docType: item.docType ? String(item.docType) : undefined,
-              createdAt: item.createdAt ? String(item.createdAt) : undefined,
-              fixedPath: null,
-              rebuiltPath: null,
-              status: (item.status as "in_progress" | "fixed" | "needs_review" | "errors" | "not_run") ?? undefined,
-              reasons: Array.isArray(item.reasons) ? item.reasons.map((reason) => String(reason)) : [],
-            }))
-            .filter((item) => item.docId.length > 0);
-        } else {
-          const legacyResponse = await fetch(`${apiBaseUrl}/documents`, { cache: "no-store" });
-          if (!legacyResponse.ok) {
-            throw new Error((await legacyResponse.text()) || "Failed to load persisted documents.");
-          }
-          const payload = (await legacyResponse.json()) as Array<Record<string, unknown>>;
-          if (Array.isArray(payload)) {
-            normalized = payload
-              .map((item) => ({
-                docId: String(item.docId ?? ""),
-                filename: String(item.filename ?? "Untitled document"),
-                docType: item.docType ? String(item.docType) : undefined,
-                createdAt: item.createdAt ? String(item.createdAt) : undefined,
-                fixedPath: typeof item.fixedPath === "string" ? item.fixedPath : null,
-                rebuiltPath: typeof item.rebuiltPath === "string" ? item.rebuiltPath : null,
-                status: undefined,
-                reasons: [],
-              }))
-              .filter((item) => item.docId.length > 0);
-          }
-        }
-
-        setRecentDocuments(normalized);
-        setRecentDocsError(null);
-      } catch (error) {
-        setRecentDocsError((error as Error).message || "Unable to load persisted documents.");
-      }
-    };
-    void loadRecentDocuments();
-  }, [apiBaseUrl, mockMode, uploadedDocument?.docId, fixedDocId]);
+    void refreshRecentDocuments();
+  }, [refreshRecentDocuments, uploadedDocument?.docId, fixedDocId]);
 
   useEffect(() => {
     const hydrateFromRecent = async () => {
@@ -977,6 +1055,37 @@ export default function ScanScreen() {
               />
             </Pressable>
           </View>
+          <View style={styles.issueActionsRow}>
+            <Button title="Download Latest Output" onPress={handleDownloadLatestOutput} disabled={!latestOutputUrl} />
+            <Button title="Download Evidence Bundle (zip)" onPress={() => void handleDownloadEvidenceBundle()} disabled={!latestBundle} />
+          </View>
+          {downloadError ? <InlineNotice title="Download unavailable" message={downloadError} tone="warning" /> : null}
+          <View style={styles.manualReviewMeta}>
+            <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Approvals apply to the output on Finalize.</Text>
+            <View style={styles.summaryRow}>
+              <Chip label={`Pending: ${pendingManualCount}`} tone="warning" />
+              <Chip label={`Resolved: ${resolvedManualCount}`} tone="default" />
+            </View>
+            <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Resolved != Fixed until Finalize runs.</Text>
+          </View>
+          {readyToFinalize ? (
+            <Card style={styles.finalizeCard}>
+              <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Ready to finalize</Text>
+              <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                Approvals are recorded. Finalize applies approved edits and rescans.
+              </Text>
+              <View style={styles.issueActionsRow}>
+                <Button
+                  title={isFinalizing ? "Finalizing..." : "Finalize Document"}
+                  onPress={() => void handleFinalize()}
+                  loading={isFinalizing}
+                  disabled={!uploadedDocument?.docId || isFinalizing}
+                />
+              </View>
+            </Card>
+          ) : null}
+          {finalizeNotice ? <InlineNotice title="Finalize status" message={finalizeNotice} tone="success" /> : null}
+          {finalizeError ? <InlineNotice title="Finalize failed" message={finalizeError} tone="danger" /> : null}
           {pendingManualCount > 0 && (
             <InlineNotice
               title="Manual review required"
@@ -1099,7 +1208,7 @@ export default function ScanScreen() {
                 </Pressable>
                 <Pressable onPress={() => setFixReportFilter("manual")}>
                   <Chip
-                    label={`Manual review (${fixReport.manualReview?.length ?? 0})`}
+                    label={`Manual review (${manualReviewItemCount})`}
                     tone="info"
                     style={fixReportFilter === "manual" ? styles.filterActiveInfo : undefined}
                     textStyle={fixReportFilter === "manual" ? styles.filterActiveText : undefined}
@@ -1126,7 +1235,7 @@ export default function ScanScreen() {
                       <Chip
                         label={issue.severity.toUpperCase()}
                         tone={issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info"}
-                        icon={<Text style={{ color: theme.colors.success, fontWeight: "700" }}>✓</Text>}
+                        icon={<Text style={{ color: theme.colors.success, fontWeight: "700" }}>?</Text>}
                       />
                       <Chip label={issue.ruleId} />
                     </View>
@@ -1194,10 +1303,26 @@ export default function ScanScreen() {
                           setCurrentPage(clamped);
                         }
                       }}
-                      >
-                      <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                        {item.reason} • {item.suggestedFix ?? "Manual review required"}
-                      </Text>
+                    >
+                      <View style={styles.manualIssueRow}>
+                        <Chip
+                          label={(item.status === "approved" || item.status === "rejected") ? "Resolved" : "Pending"}
+                          tone={(item.status === "approved" || item.status === "rejected") ? "success" : "warning"}
+                          icon={
+                            <Text style={{ color: (item.status === "approved" || item.status === "rejected") ? theme.colors.success : theme.colors.warning, fontWeight: "700" }}>
+                              {(item.status === "approved" || item.status === "rejected") ? "✓" : "⏳"}
+                            </Text>
+                          }
+                        />
+                        <View style={styles.manualIssueMeta}>
+                          <Text style={[styles.nodeId, { color: theme.colors.text }]}>
+                            {item.reason}
+                          </Text>
+                          <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                            {(item.status ?? "pending").toUpperCase()} • {item.suggestedFix ?? "Manual review required"}
+                          </Text>
+                        </View>
+                      </View>
                     </Pressable>
                   ))}
                 </View>
@@ -2218,6 +2343,10 @@ const styles = StyleSheet.create({
   issueActionsRow: { marginTop: 10, flexDirection: "row", gap: 12, flexWrap: "wrap" },
   applyFixes: { marginTop: 12, alignItems: "flex-start" },
   manualReviewRow: { marginTop: 16, alignItems: "flex-start" },
+  manualReviewMeta: { marginTop: 10, gap: 8 },
+  finalizeCard: { marginTop: 10, gap: 8 },
+  manualIssueRow: { flexDirection: "row", gap: 10, alignItems: "flex-start", flexWrap: "nowrap" },
+  manualIssueMeta: { flex: 1, minWidth: 0, gap: 2 },
   downloadRow: { marginTop: 12, flexDirection: "row", gap: 12 },
   link: { fontWeight: "600" },
   diffRow: { marginTop: 16, flexDirection: "row", gap: 12, flexWrap: "wrap" },
@@ -2261,6 +2390,8 @@ const styles = StyleSheet.create({
   overlayText: { fontWeight: "700", fontSize: 12 },
   overlayTextMuted: { fontSize: 11, marginTop: 4 },
 });
+
+
 
 
 

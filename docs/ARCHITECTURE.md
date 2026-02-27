@@ -49,6 +49,10 @@ Core persisted entities (sqlite3 in `backend/.runtime/508_agent.db`):
 1. Queue endpoints expose unresolved items.
 2. Human approves/rejects items.
 3. Approved text (e.g., missing alt text) can be applied on next apply-fixes cycle for supported paths.
+4. Optional AI assist (`POST /documents/{doc_id}/ai-review`) can propose/apply for a gated subset:
+   - v1 scope: PDF missing alt text only.
+   - AI never bypasses deterministic validators.
+   - Applied decisions are auditable via persisted AI fields.
 
 ### Policy Snapshot + Scoring
 
@@ -69,5 +73,13 @@ Core persisted entities (sqlite3 in `backend/.runtime/508_agent.db`):
 - Semantic intent decisions (meaningful alt text authoring, reading order semantics in ambiguous content).
 - Complex heading/content restructuring in DOCX/PPTX where deterministic safety is not guaranteed.
 - Anything likely to alter meaning, not just structure.
+
+## AI Gating Model
+
+- Deterministic analyzers/fixers remain source of truth.
+- AI is optional and policy-safe:
+  - propose phase writes suggestions + confidence + validator state only.
+  - apply phase only approves when deterministic validators pass and confidence threshold is met.
+- Failed validation or weak context is explicitly escalated back to manual review.
 
 Policy and UI should present these boundaries clearly so users know what is guaranteed and what needs human validation.

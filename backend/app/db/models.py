@@ -72,6 +72,12 @@ class ManualReviewRow(Base):
     item_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ai_decision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ai_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    validator_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ai_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    ai_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class PolicyPackRow(Base):
@@ -132,4 +138,3 @@ class EvidenceBundleRow(Base):
     options_json: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-

@@ -18,6 +18,8 @@ export default function ManualReviewScreen() {
   const fetchManualReview = useAppStore((state) => state.fetchManualReview);
   const clearManualReview = useAppStore((state) => state.clearManualReview);
   const updateManualReview = useAppStore((state) => state.updateManualReview);
+  const finalizeDocument = useAppStore((state) => state.finalizeDocument);
+  const isFinalizing = useAppStore((state) => state.isFinalizing);
   const lastFetched = useAppStore((state) => state.manualReviewLastFetched);
   const uploadedDocument = useAppStore((state) => state.uploadedDocument);
   const fixedDocId = useAppStore((state) => state.fixedDocId);
@@ -25,6 +27,9 @@ export default function ManualReviewScreen() {
   const mockMode = useAppStore((state) => state.mockMode);
   const theme = useTheme();
   const [editedText, setEditedText] = useState<Record<string, string>>({});
+  const [readyToFinalize, setReadyToFinalize] = useState(false);
+  const [finalizeMessage, setFinalizeMessage] = useState<string | null>(null);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
   const currentDocId = uploadedDocument?.docId ?? fixedDocId ?? null;
   const [scope, setScope] = useState<"current" | "all">(currentDocId ? "current" : "all");
 
@@ -51,7 +56,12 @@ export default function ManualReviewScreen() {
     status: "approved" | "rejected",
     approvedText?: string,
   ) => {
-    await updateManualReview(itemId, { status, approvedText }, scopedDocId);
+    const result = await updateManualReview(itemId, { status, approvedText }, scopedDocId);
+    if (result.ok && result.data?.readyToFinalize) {
+      setReadyToFinalize(true);
+      setFinalizeMessage("Ready to finalize.");
+      setFinalizeError(null);
+    }
   };
 
   useEffect(() => {
@@ -81,6 +91,35 @@ export default function ManualReviewScreen() {
     () => manualReviewQueue.filter((item) => !item.status || item.status === "pending").length,
     [manualReviewQueue],
   );
+  const resolvedCount = useMemo(
+    () => manualReviewQueue.filter((item) => item.status === "approved" || item.status === "rejected").length,
+    [manualReviewQueue],
+  );
+
+  useEffect(() => {
+    const fromQueue = pendingCount === 0 && resolvedCount > 0;
+    if (fromQueue) {
+      setReadyToFinalize(true);
+    }
+  }, [pendingCount, resolvedCount]);
+
+  const handleFinalizeNow = async () => {
+    if (!currentDocId) {
+      setFinalizeError("No active document available for finalize.");
+      return;
+    }
+    setFinalizeError(null);
+    setFinalizeMessage(null);
+    const result = await finalizeDocument(currentDocId);
+    if (!result.ok) {
+      setFinalizeError(result.error ?? "Finalize failed.");
+      return;
+    }
+    setFinalizeMessage("Finalized. Returning to scan...");
+    setTimeout(() => {
+      router.push("/scan");
+    }, 500);
+  };
 
   if (manualReviewQueue.length === 0) {
     return (
@@ -173,9 +212,29 @@ export default function ManualReviewScreen() {
 
       <InlineNotice
         title={scope === "current" ? "Reviewing current document items" : "Reviewing all unresolved queue items"}
-        message="Approve only human-verified content. Approved alt text is applied on the next Apply Fixes run."
+        message="Approve only human-verified content. Approved changes are applied on Finalize."
         tone="info"
       />
+      {readyToFinalize && currentDocId ? (
+        <Card style={styles.card}>
+          <Text style={[styles.title, { color: theme.colors.text }]}>Ready to finalize</Text>
+          <Text style={{ color: theme.colors.textMuted }}>
+            All pending manual review items are resolved. Finalize applies approvals and refreshes results.
+          </Text>
+          <View style={styles.buttonRow}>
+            <Button
+              title={isFinalizing ? "Finalizing..." : "Finalize now"}
+              onPress={() => void handleFinalizeNow()}
+              loading={isFinalizing}
+              disabled={isFinalizing}
+              variant="secondary"
+            />
+            <Button title="Back to Scan" onPress={() => router.push("/scan")} variant="ghost" />
+          </View>
+        </Card>
+      ) : null}
+      {finalizeMessage ? <InlineNotice title="Finalize status" message={finalizeMessage} tone="success" /> : null}
+      {finalizeError ? <InlineNotice title="Finalize failed" message={finalizeError} tone="danger" /> : null}
 
       {originalUrl && (
         <Card style={styles.card}>

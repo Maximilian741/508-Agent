@@ -28,6 +28,8 @@ Default local runtime paths (relative to `backend/`):
 - `S3_FORCE_PATH_STYLE` (`true` for MinIO)
 - `PRESIGN_EXPIRES_SECONDS` (default `3600`)
 - `ENABLE_DEV_STORAGE_ENDPOINT` (default `false`; dev-only local storage route)
+- `OPENAI_API_KEY` (optional; enables AI manual-review proposals)
+- `OPENAI_MODEL` (optional; default `gpt-4.1-mini`)
 - `CORS_ALLOW_ORIGINS` (comma-separated)
 - `MAX_UPLOAD_MB` (default `25`)
 - `REQUIRE_STRICT_CORS` (`true` default)
@@ -72,3 +74,14 @@ python -B -m app.devtools.e2e_smoke --base-url http://localhost:8000
 - upload rejected (400/413): failed allowlist/signature check or exceeded `MAX_UPLOAD_MB`.
 - download returns 302: expected in S3 mode (presigned URL redirect).
 - CORS blocked: verify `CORS_ALLOW_ORIGINS` has exact frontend origin.
+
+## AI Manual Review (Optional, Gated)
+
+- Endpoint: `POST /documents/{doc_id}/ai-review`
+  - `mode=propose`: generates `aiDecision` and validation metadata for eligible pending items.
+  - `mode=apply`: approves only proposals that pass deterministic validators and confidence threshold.
+- Current scope is intentionally narrow: PDF `missing_alt_text` / figure-alt manual review only.
+- Safety posture:
+  - Deterministic validators gate application.
+  - AI output is persisted for audit (`aiDecision`, confidence, validator status, model, timestamps).
+  - Unsupported or low-confidence cases are escalated and remain pending.

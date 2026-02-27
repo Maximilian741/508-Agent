@@ -187,7 +187,13 @@ def init_db() -> None:
               doc_id TEXT,
               item_json TEXT,
               created_at TEXT,
-              resolved INTEGER DEFAULT 0
+              resolved INTEGER DEFAULT 0,
+              ai_decision_json TEXT,
+              ai_confidence REAL,
+              ai_status TEXT,
+              validator_status TEXT,
+              ai_model TEXT,
+              ai_updated_at TEXT
             )
             """
         )
@@ -208,8 +214,21 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fix_reports_doc_id ON fix_reports(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_review_doc_id ON manual_review(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_doc_phase ON issues(doc_id, phase)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_doc_id ON evidence_bundles(doc_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_job_id ON evidence_bundles(job_id)")
+        existing_cols = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(manual_review)").fetchall()
+        }
+        add_cols = [
+            ("ai_decision_json", "TEXT"),
+            ("ai_confidence", "REAL"),
+            ("ai_status", "TEXT"),
+            ("validator_status", "TEXT"),
+            ("ai_model", "TEXT"),
+            ("ai_updated_at", "TEXT"),
+        ]
+        for col_name, col_type in add_cols:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE manual_review ADD COLUMN {col_name} {col_type}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS policy_packs (
@@ -268,6 +287,8 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_doc_id ON evidence_bundles(doc_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_job_id ON evidence_bundles(job_id)")
         now = _utc_now()
         for pack in _DEFAULT_POLICY_PACKS:
             conn.execute(
@@ -1199,13 +1220,20 @@ class SqliteRepo:
         with _LOCK:
             for item in items:
                 item_id = str(item.get("id") or f"mr-{doc_id}-{int(datetime.utcnow().timestamp() * 1000)}")
+                ai_decision = item.get("aiDecision") if isinstance(item.get("aiDecision"), dict) else None
                 conn.execute(
                     """
-                    INSERT INTO manual_review(id, doc_id, item_json, created_at, resolved)
-                    VALUES(?,?,?,?,?)
+                    INSERT INTO manual_review(id, doc_id, item_json, created_at, resolved, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET
                       doc_id=excluded.doc_id,
-                      item_json=excluded.item_json
+                      item_json=excluded.item_json,
+                      ai_decision_json=excluded.ai_decision_json,
+                      ai_confidence=excluded.ai_confidence,
+                      ai_status=excluded.ai_status,
+                      validator_status=excluded.validator_status,
+                      ai_model=excluded.ai_model,
+                      ai_updated_at=excluded.ai_updated_at
                     """,
                     (
                         item_id,
@@ -1213,6 +1241,12 @@ class SqliteRepo:
                         json.dumps(item),
                         str(item.get("createdAt") or now),
                         0,
+                        json.dumps(ai_decision) if ai_decision is not None else None,
+                        float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None,
+                        str(item.get("aiStatus")) if item.get("aiStatus") is not None else None,
+                        str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None,
+                        str(item.get("aiModel")) if item.get("aiModel") is not None else None,
+                        str(item.get("aiUpdatedAt")) if item.get("aiUpdatedAt") is not None else None,
                     ),
                 )
             conn.commit()
@@ -1220,13 +1254,28 @@ class SqliteRepo:
     def list_manual_review_items(self) -> List[Dict[str, object]]:
         conn = get_connection()
         rows = conn.execute(
-            "SELECT item_json FROM manual_review WHERE COALESCE(resolved,0)=0 ORDER BY created_at DESC"
+            "SELECT item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at FROM manual_review WHERE COALESCE(resolved,0)=0 ORDER BY created_at DESC"
         ).fetchall()
         out: List[Dict[str, object]] = []
         for row in rows:
             try:
                 item = json.loads(row["item_json"])
                 if isinstance(item, dict):
+                    if row["ai_decision_json"] and "aiDecision" not in item:
+                        try:
+                            item["aiDecision"] = json.loads(row["ai_decision_json"])
+                        except Exception:
+                            pass
+                    if row["ai_confidence"] is not None:
+                        item["aiConfidence"] = float(row["ai_confidence"])
+                    if row["ai_status"] is not None:
+                        item["aiStatus"] = str(row["ai_status"])
+                    if row["validator_status"] is not None:
+                        item["validatorStatus"] = str(row["validator_status"])
+                    if row["ai_model"] is not None:
+                        item["aiModel"] = str(row["ai_model"])
+                    if row["ai_updated_at"] is not None:
+                        item["aiUpdatedAt"] = str(row["ai_updated_at"])
                     out.append(item)
             except Exception:
                 continue
@@ -1236,12 +1285,12 @@ class SqliteRepo:
         conn = get_connection()
         if include_resolved:
             rows = conn.execute(
-                "SELECT item_json FROM manual_review WHERE doc_id=? ORDER BY created_at DESC",
+                "SELECT item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at FROM manual_review WHERE doc_id=? ORDER BY created_at DESC",
                 (doc_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT item_json FROM manual_review WHERE doc_id=? AND COALESCE(resolved,0)=0 ORDER BY created_at DESC",
+                "SELECT item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at FROM manual_review WHERE doc_id=? AND COALESCE(resolved,0)=0 ORDER BY created_at DESC",
                 (doc_id,),
             ).fetchall()
         out: List[Dict[str, object]] = []
@@ -1249,6 +1298,21 @@ class SqliteRepo:
             try:
                 item = json.loads(row["item_json"])
                 if isinstance(item, dict):
+                    if row["ai_decision_json"] and "aiDecision" not in item:
+                        try:
+                            item["aiDecision"] = json.loads(row["ai_decision_json"])
+                        except Exception:
+                            pass
+                    if row["ai_confidence"] is not None:
+                        item["aiConfidence"] = float(row["ai_confidence"])
+                    if row["ai_status"] is not None:
+                        item["aiStatus"] = str(row["ai_status"])
+                    if row["validator_status"] is not None:
+                        item["validatorStatus"] = str(row["validator_status"])
+                    if row["ai_model"] is not None:
+                        item["aiModel"] = str(row["ai_model"])
+                    if row["ai_updated_at"] is not None:
+                        item["aiUpdatedAt"] = str(row["ai_updated_at"])
                     out.append(item)
             except Exception:
                 continue
@@ -1265,13 +1329,31 @@ class SqliteRepo:
 
     def get_manual_review_item(self, item_id: str) -> Optional[Dict[str, object]]:
         conn = get_connection()
-        row = conn.execute("SELECT doc_id, item_json FROM manual_review WHERE id=?", (item_id,)).fetchone()
+        row = conn.execute(
+            "SELECT doc_id, item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at FROM manual_review WHERE id=?",
+            (item_id,),
+        ).fetchone()
         if row is None:
             return None
         try:
             payload = json.loads(row["item_json"])
             if isinstance(payload, dict):
                 payload.setdefault("docId", row["doc_id"])
+                if row["ai_decision_json"] and "aiDecision" not in payload:
+                    try:
+                        payload["aiDecision"] = json.loads(row["ai_decision_json"])
+                    except Exception:
+                        pass
+                if row["ai_confidence"] is not None:
+                    payload["aiConfidence"] = float(row["ai_confidence"])
+                if row["ai_status"] is not None:
+                    payload["aiStatus"] = str(row["ai_status"])
+                if row["validator_status"] is not None:
+                    payload["validatorStatus"] = str(row["validator_status"])
+                if row["ai_model"] is not None:
+                    payload["aiModel"] = str(row["ai_model"])
+                if row["ai_updated_at"] is not None:
+                    payload["aiUpdatedAt"] = str(row["ai_updated_at"])
                 return payload
             return None
         except Exception:
@@ -1284,8 +1366,18 @@ class SqliteRepo:
             if exists is None:
                 return False
             conn.execute(
-                "UPDATE manual_review SET item_json=?, resolved=? WHERE id=?",
-                (json.dumps(item), 1 if resolved else 0, item_id),
+                "UPDATE manual_review SET item_json=?, resolved=?, ai_decision_json=?, ai_confidence=?, ai_status=?, validator_status=?, ai_model=?, ai_updated_at=? WHERE id=?",
+                (
+                    json.dumps(item),
+                    1 if resolved else 0,
+                    json.dumps(item.get("aiDecision")) if isinstance(item.get("aiDecision"), dict) else None,
+                    float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None,
+                    str(item.get("aiStatus")) if item.get("aiStatus") is not None else None,
+                    str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None,
+                    str(item.get("aiModel")) if item.get("aiModel") is not None else None,
+                    str(item.get("aiUpdatedAt")) if item.get("aiUpdatedAt") is not None else None,
+                    item_id,
+                ),
             )
             conn.commit()
             return True

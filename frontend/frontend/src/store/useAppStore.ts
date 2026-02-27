@@ -3,6 +3,7 @@ import { create } from "zustand";
 import {
     ApiClient,
     ApplyFixesResponse,
+    FinalizeResponse,
     DocumentDiffResponse,
     DocumentSummary,
     DocumentIssue,
@@ -63,8 +64,11 @@ interface AppState {
     selectedPolicyId: string | null;
     jobScoresByJobId: Record<string, JobScorePass[]>;
     evidenceBundlesByDocId: Record<string, EvidenceBundleSummary[]>;
+    finalizedPathByDocId: Record<string, string>;
+    readyToFinalizeByDocId: Record<string, boolean>;
     isExportingBundle: boolean;
     exportError?: string;
+    isFinalizing: boolean;
     isScanning: boolean;
     isUploading: boolean;
     setApiBaseUrl: (value: string) => void;
@@ -89,6 +93,8 @@ interface AppState {
     uploadDocument: (file: File) => Promise<RunResult<UploadResponse>>;
     runDocumentScan: (docId: string) => Promise<RunResult<{ jobId: string }>>;
     applyDocumentFixes: (docId: string) => Promise<RunResult<ApplyFixesResponse>>;
+    fetchDocumentIssues: (docId: string) => Promise<RunResult<DocumentIssue[]>>;
+    finalizeDocument: (docId: string) => Promise<RunResult<FinalizeResponse>>;
     fetchDocumentDiff: (docId: string) => Promise<RunResult<DocumentDiffResponse>>;
     fetchDocumentSummary: (docId: string) => Promise<RunResult<DocumentSummary>>;
     fetchTagTree: (docId: string) => Promise<RunResult<TagTreeResponse>>;
@@ -220,8 +226,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     selectedPolicyId: readStoredSelectedPolicyId(),
     jobScoresByJobId: {},
     evidenceBundlesByDocId: {},
+    finalizedPathByDocId: {},
+    readyToFinalizeByDocId: {},
     isExportingBundle: false,
     exportError: undefined,
+    isFinalizing: false,
     isScanning: false,
     isUploading: false,
     setApiBaseUrl: (value) => {
@@ -322,7 +331,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         try {
             const item = await client.updateManualReview(itemId, payload);
             const refreshed = await client.manualReview(docId);
-            set({ manualReviewQueue: refreshed, manualReviewLastFetched: new Date().toISOString() });
+            const resolvedDocId = (item.docId || docId || "").toString();
+            set((state) => ({
+                manualReviewQueue: refreshed,
+                manualReviewLastFetched: new Date().toISOString(),
+                readyToFinalizeByDocId: resolvedDocId
+                    ? {
+                          ...state.readyToFinalizeByDocId,
+                          [resolvedDocId]: Boolean(item.readyToFinalize),
+                      }
+                    : state.readyToFinalizeByDocId,
+            }));
             return { ok: true, data: item };
         } catch (error) {
             return { ok: false, error: (error as Error).message };
@@ -363,6 +382,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 tagTree: null,
                 jobScoresByJobId: {},
                 evidenceBundlesByDocId: {},
+                finalizedPathByDocId: {},
+                readyToFinalizeByDocId: {},
                 isUploading: false,
             });
             return { ok: true, data: response };
@@ -490,6 +511,73 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             return { ok: true, data: response };
         } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    fetchDocumentIssues: async (docId) => {
+        const client = getClient(get());
+        try {
+            const issues = await client.getIssues(docId);
+            set({ documentIssues: issues });
+            return { ok: true, data: issues };
+        } catch (error) {
+            return { ok: false, error: (error as Error).message };
+        }
+    },
+    finalizeDocument: async (docId) => {
+        const client = getClient(get());
+        set({ isFinalizing: true });
+        try {
+            const response = await client.finalizeDocument(docId);
+            const finalizedPath = response.finalizedPath;
+            if (finalizedPath) {
+                set((state) => ({
+                    finalizedPathByDocId: {
+                        ...state.finalizedPathByDocId,
+                        [docId]: finalizedPath,
+                    },
+                }));
+            }
+            const [fixRes, issuesRes, manualRes, bundlesRes] = await Promise.all([
+                client.getFixReport(docId).catch(() => null),
+                client.getIssues(docId).catch(() => [] as DocumentIssue[]),
+                client.manualReview(docId).catch(() => []),
+                client.listEvidenceBundlesForDoc(docId).catch(() => []),
+            ]);
+            if (fixRes) {
+                set({ fixReport: fixRes });
+            }
+            set((state) => ({
+                documentIssues: issuesRes,
+                manualReviewQueue: manualRes,
+                manualReviewLastFetched: new Date().toISOString(),
+                evidenceBundlesByDocId: {
+                    ...state.evidenceBundlesByDocId,
+                    [docId]: bundlesRes,
+                },
+                readyToFinalizeByDocId: {
+                    ...state.readyToFinalizeByDocId,
+                    [docId]: false,
+                },
+            }));
+            const scoreJobId = response.jobId || get().scanJob?.jobId;
+            if (scoreJobId) {
+                try {
+                    const scorePayload = await client.getJobScore(scoreJobId);
+                    set((state) => ({
+                        jobScoresByJobId: {
+                            ...state.jobScoresByJobId,
+                            [scoreJobId]: scorePayload.scores ?? [],
+                        },
+                    }));
+                } catch {
+                    // non-blocking
+                }
+            }
+            set({ isFinalizing: false });
+            return { ok: true, data: response };
+        } catch (error) {
+            set({ isFinalizing: false });
             return { ok: false, error: (error as Error).message };
         }
     },

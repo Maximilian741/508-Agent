@@ -32,6 +32,12 @@ class ManualReviewItem(BaseModel):
     status: str | None = None
     docId: str | None = None
     readyToFinalize: bool | None = None
+    aiDecision: Dict[str, Any] | None = None
+    aiConfidence: float | None = None
+    aiStatus: str | None = None
+    validatorStatus: str | None = None
+    aiModel: str | None = None
+    aiUpdatedAt: str | None = None
     aiSuggested: bool | None = None
     confidence: float | None = None
     requiresHuman: bool = True

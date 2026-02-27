@@ -222,13 +222,33 @@ class SqlAlchemyRepository(Repository):
             for item in items:
                 item_id = str(item.get("id", f"mr-{doc_id}-{int(datetime.utcnow().timestamp() * 1000)}"))
                 row = db.get(ManualReviewRow, item_id)
+                ai_decision = item.get("aiDecision") if isinstance(item.get("aiDecision"), dict) else None
                 if row is not None:
                     row.item_json = json.dumps(item)
                     row.doc_id = doc_id
                     row.resolved = False
                     row.created_at = datetime.utcnow()
+                    row.ai_decision_json = json.dumps(ai_decision) if ai_decision is not None else None
+                    row.ai_confidence = float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None
+                    row.ai_status = str(item.get("aiStatus")) if item.get("aiStatus") is not None else None
+                    row.validator_status = str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None
+                    row.ai_model = str(item.get("aiModel")) if item.get("aiModel") is not None else None
+                    row.ai_updated_at = datetime.utcnow() if item.get("aiUpdatedAt") else None
                 else:
-                    db.add(ManualReviewRow(id=item_id, doc_id=doc_id, item_json=json.dumps(item), resolved=False))
+                    db.add(
+                        ManualReviewRow(
+                            id=item_id,
+                            doc_id=doc_id,
+                            item_json=json.dumps(item),
+                            resolved=False,
+                            ai_decision_json=json.dumps(ai_decision) if ai_decision is not None else None,
+                            ai_confidence=float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None,
+                            ai_status=str(item.get("aiStatus")) if item.get("aiStatus") is not None else None,
+                            validator_status=str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None,
+                            ai_model=str(item.get("aiModel")) if item.get("aiModel") is not None else None,
+                            ai_updated_at=datetime.utcnow() if item.get("aiUpdatedAt") else None,
+                        )
+                    )
             db.commit()
 
     def list_manual_review_items(self) -> List[Dict[str, object]]:
@@ -240,6 +260,19 @@ class SqlAlchemyRepository(Repository):
             for row in rows:
                 parsed = _loads(row.item_json, {})
                 if isinstance(parsed, dict):
+                    parsed.setdefault("docId", row.doc_id)
+                    if row.ai_decision_json and "aiDecision" not in parsed:
+                        parsed["aiDecision"] = _loads(row.ai_decision_json, {})
+                    if row.ai_confidence is not None:
+                        parsed["aiConfidence"] = float(row.ai_confidence)
+                    if row.ai_status is not None:
+                        parsed["aiStatus"] = row.ai_status
+                    if row.validator_status is not None:
+                        parsed["validatorStatus"] = row.validator_status
+                    if row.ai_model is not None:
+                        parsed["aiModel"] = row.ai_model
+                    if row.ai_updated_at is not None:
+                        parsed["aiUpdatedAt"] = row.ai_updated_at.isoformat() + "Z"
                     out.append(parsed)
             return out
 
@@ -262,6 +295,18 @@ class SqlAlchemyRepository(Repository):
             parsed = _loads(row.item_json, None)
             if isinstance(parsed, dict):
                 parsed.setdefault("docId", row.doc_id)
+                if row.ai_decision_json and "aiDecision" not in parsed:
+                    parsed["aiDecision"] = _loads(row.ai_decision_json, {})
+                if row.ai_confidence is not None:
+                    parsed["aiConfidence"] = float(row.ai_confidence)
+                if row.ai_status is not None:
+                    parsed["aiStatus"] = row.ai_status
+                if row.validator_status is not None:
+                    parsed["validatorStatus"] = row.validator_status
+                if row.ai_model is not None:
+                    parsed["aiModel"] = row.ai_model
+                if row.ai_updated_at is not None:
+                    parsed["aiUpdatedAt"] = row.ai_updated_at.isoformat() + "Z"
                 return parsed
             return None
 
@@ -272,6 +317,12 @@ class SqlAlchemyRepository(Repository):
                 return False
             row.item_json = json.dumps(item)
             row.resolved = resolved
+            row.ai_decision_json = json.dumps(item.get("aiDecision")) if isinstance(item.get("aiDecision"), dict) else None
+            row.ai_confidence = float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None
+            row.ai_status = str(item.get("aiStatus")) if item.get("aiStatus") is not None else None
+            row.validator_status = str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None
+            row.ai_model = str(item.get("aiModel")) if item.get("aiModel") is not None else None
+            row.ai_updated_at = datetime.utcnow() if item.get("aiUpdatedAt") else None
             db.commit()
             return True
 
@@ -285,6 +336,19 @@ class SqlAlchemyRepository(Repository):
             for row in rows:
                 parsed = _loads(row.item_json, {})
                 if isinstance(parsed, dict):
+                    parsed.setdefault("docId", row.doc_id)
+                    if row.ai_decision_json and "aiDecision" not in parsed:
+                        parsed["aiDecision"] = _loads(row.ai_decision_json, {})
+                    if row.ai_confidence is not None:
+                        parsed["aiConfidence"] = float(row.ai_confidence)
+                    if row.ai_status is not None:
+                        parsed["aiStatus"] = row.ai_status
+                    if row.validator_status is not None:
+                        parsed["validatorStatus"] = row.validator_status
+                    if row.ai_model is not None:
+                        parsed["aiModel"] = row.ai_model
+                    if row.ai_updated_at is not None:
+                        parsed["aiUpdatedAt"] = row.ai_updated_at.isoformat() + "Z"
                     out.append(parsed)
             return out
 

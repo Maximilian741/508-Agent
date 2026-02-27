@@ -26,6 +26,8 @@ from app.pdf.tag_tree import extract_tag_tree
 from app.parsers.docx_parser import DOCXParser
 from app.parsers.pptx_parser import PPTXParser
 from app.ai.alt_text_suggester import build_alt_text_suggestions
+from app.ai.auto_review import apply_decision as ai_apply_decision
+from app.ai.auto_review import build_alt_context, is_alt_text_manual_item, propose_alt_text
 from app.config import get_settings
 from app.persistence.db import get_repo
 from app.schemas.status import DocStatusListResponse, DocStatusSummary
@@ -62,6 +64,12 @@ class JobPolicyRequest(BaseModel):
 
 class ScanStartRequest(BaseModel):
     policy_pack_id: Optional[str] = None
+
+
+class AiReviewRequest(BaseModel):
+    mode: str = "propose"  # propose | apply
+    maxItems: Optional[int] = 20
+    minConfidence: Optional[float] = 0.8
 
 
 def _ensure_dirs() -> None:
@@ -2309,6 +2317,107 @@ async def get_document_manual_review(doc_id: str) -> List[Dict[str, object]]:
     if _get_doc(doc_id) is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
+
+
+@router.post("/documents/{doc_id}/ai-review")
+async def ai_review(doc_id: str, request: AiReviewRequest) -> Dict[str, object]:
+    doc = _get_doc(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    doc_type = str(doc.get("docType", "pdf")).lower()
+    if doc_type != DocumentType.PDF.value:
+        raise HTTPException(status_code=400, detail="AI review is currently supported for PDF alt text only.")
+
+    mode = str(request.mode or "propose").strip().lower()
+    if mode not in {"propose", "apply"}:
+        raise HTTPException(status_code=400, detail="mode must be propose|apply")
+    max_items = max(1, min(int(request.maxItems or 20), 200))
+    min_confidence = float(request.minConfidence if request.minConfidence is not None else 0.8)
+
+    items = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
+    candidates: List[Dict[str, object]] = []
+    for item in items:
+        status = str(item.get("status") or "pending").lower()
+        if status not in {"", "pending"}:
+            continue
+        if not is_alt_text_manual_item(item):
+            continue
+        candidates.append(item)
+    candidates = candidates[:max_items]
+
+    if not candidates:
+        return {
+            "docId": doc_id,
+            "mode": mode,
+            "processed": 0,
+            "approved": 0,
+            "escalated": 0,
+            "notes": ["No eligible pending missing_alt_text manual review items found."],
+            "items": [],
+        }
+
+    source_ref = (
+        doc.get("scanTargetPath")
+        or doc.get("fixedPath")
+        or doc.get("rebuiltPath")
+        or doc.get("localPath")
+        or doc.get("path")
+    )
+    source_path = _materialize_local_path(doc_id, source_ref, str(doc.get("filename") or "document.pdf"))
+    if source_path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="AI review context requires a PDF artifact.")
+
+    processed = 0
+    approved = 0
+    escalated = 0
+    updated: List[Dict[str, object]] = []
+    for item in candidates:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        item["docId"] = doc_id
+        if mode == "propose":
+            context = build_alt_context(item, source_path)
+            proposal = propose_alt_text(item, context)
+            item.update(proposal)
+            item["aiContext"] = {
+                "buildStatus": context.get("buildStatus"),
+                "page": context.get("page"),
+                "mcid": context.get("mcid"),
+            }
+            if str(item.get("aiStatus") or "") == "escalated":
+                escalated += 1
+            REPO.update_manual_review_item(item_id, item, resolved=False)
+        else:
+            item = ai_apply_decision(item, min_confidence=min_confidence)
+            resolved = str(item.get("status") or "").lower() in {"approved", "rejected"}
+            if str(item.get("status") or "").lower() == "approved":
+                approved += 1
+            if str(item.get("aiStatus") or "").lower() == "escalated":
+                escalated += 1
+            REPO.update_manual_review_item(item_id, item, resolved=resolved)
+        processed += 1
+        updated.append(
+            {
+                "id": item_id,
+                "status": item.get("status"),
+                "aiStatus": item.get("aiStatus"),
+                "validatorStatus": item.get("validatorStatus"),
+                "aiConfidence": item.get("aiConfidence"),
+            }
+        )
+
+    pending_items = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
+    pending_alt = [item for item in pending_items if is_alt_text_manual_item(item)]
+    return {
+        "docId": doc_id,
+        "mode": mode,
+        "processed": processed,
+        "approved": approved,
+        "escalated": escalated,
+        "pending": len(pending_alt),
+        "items": updated,
+    }
 
 
 @router.post("/documents/{doc_id}/apply-fixes")
