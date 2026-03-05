@@ -4,7 +4,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib import request as urlrequest
@@ -34,7 +34,7 @@ class AltDecision:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def is_alt_text_manual_item(item: Dict[str, object]) -> bool:
@@ -268,4 +268,3 @@ def apply_decision(item: Dict[str, object], *, min_confidence: float = 0.8) -> D
     item["aiStatus"] = "applied"
     item["aiUpdatedAt"] = _now_iso()
     return item
-

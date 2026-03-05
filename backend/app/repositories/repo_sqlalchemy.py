@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, List, Optional
 
 from sqlalchemy import delete, select
@@ -31,6 +31,23 @@ def _loads(value: Optional[str], default: object) -> object:
         return default
 
 
+def _parse_iso_dt(value: object) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 class SqlAlchemyRepository(Repository):
     def __init__(self) -> None:
         # Schema is managed by Alembic migrations.
@@ -45,7 +62,7 @@ class SqlAlchemyRepository(Repository):
                     filename=str(doc.get("filename", "")),
                     doc_type=str(doc.get("docType", "pdf")),
                     original_path=str(doc.get("path", "")),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(UTC),
                 )
                 db.add(row)
             row.filename = str(doc.get("filename", row.filename))
@@ -148,7 +165,7 @@ class SqlAlchemyRepository(Repository):
             row.progress = int(job.get("progress", row.progress))
             row.message = str(job.get("message")) if job.get("message") is not None else row.message
             if row.status in {"done", "error"}:
-                row.finished_at = datetime.utcnow()
+                row.finished_at = datetime.now(UTC)
             db.commit()
 
     def get_job(self, job_id: str) -> Optional[Dict[str, object]]:
@@ -204,7 +221,7 @@ class SqlAlchemyRepository(Repository):
                 db.add(row)
             else:
                 row.report_json = json.dumps(report)
-                row.created_at = datetime.utcnow()
+                row.created_at = datetime.now(UTC)
             db.commit()
 
     def get_fix_report(self, doc_id: str) -> Optional[Dict[str, object]]:
@@ -220,20 +237,20 @@ class SqlAlchemyRepository(Repository):
             return
         with SessionLocal() as db:
             for item in items:
-                item_id = str(item.get("id", f"mr-{doc_id}-{int(datetime.utcnow().timestamp() * 1000)}"))
+                item_id = str(item.get("id", f"mr-{doc_id}-{int(datetime.now(UTC).timestamp() * 1000)}"))
                 row = db.get(ManualReviewRow, item_id)
                 ai_decision = item.get("aiDecision") if isinstance(item.get("aiDecision"), dict) else None
                 if row is not None:
                     row.item_json = json.dumps(item)
                     row.doc_id = doc_id
                     row.resolved = False
-                    row.created_at = datetime.utcnow()
+                    row.created_at = _parse_iso_dt(item.get("createdAt")) or row.created_at or datetime.now(UTC)
                     row.ai_decision_json = json.dumps(ai_decision) if ai_decision is not None else None
                     row.ai_confidence = float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None
                     row.ai_status = str(item.get("aiStatus")) if item.get("aiStatus") is not None else None
                     row.validator_status = str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None
                     row.ai_model = str(item.get("aiModel")) if item.get("aiModel") is not None else None
-                    row.ai_updated_at = datetime.utcnow() if item.get("aiUpdatedAt") else None
+                    row.ai_updated_at = _parse_iso_dt(item.get("aiUpdatedAt"))
                 else:
                     db.add(
                         ManualReviewRow(
@@ -241,12 +258,13 @@ class SqlAlchemyRepository(Repository):
                             doc_id=doc_id,
                             item_json=json.dumps(item),
                             resolved=False,
+                            created_at=_parse_iso_dt(item.get("createdAt")) or datetime.now(UTC),
                             ai_decision_json=json.dumps(ai_decision) if ai_decision is not None else None,
                             ai_confidence=float(item.get("aiConfidence")) if item.get("aiConfidence") is not None else None,
                             ai_status=str(item.get("aiStatus")) if item.get("aiStatus") is not None else None,
                             validator_status=str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None,
                             ai_model=str(item.get("aiModel")) if item.get("aiModel") is not None else None,
-                            ai_updated_at=datetime.utcnow() if item.get("aiUpdatedAt") else None,
+                            ai_updated_at=_parse_iso_dt(item.get("aiUpdatedAt")),
                         )
                     )
             db.commit()
@@ -322,7 +340,7 @@ class SqlAlchemyRepository(Repository):
             row.ai_status = str(item.get("aiStatus")) if item.get("aiStatus") is not None else None
             row.validator_status = str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None
             row.ai_model = str(item.get("aiModel")) if item.get("aiModel") is not None else None
-            row.ai_updated_at = datetime.utcnow() if item.get("aiUpdatedAt") else None
+            row.ai_updated_at = _parse_iso_dt(item.get("aiUpdatedAt"))
             db.commit()
             return True
 
@@ -672,7 +690,7 @@ class SqlAlchemyRepository(Repository):
                     policy_name=policy_name,
                     policy_version=int(policy_version),
                     policy_json=json.dumps(policy_json),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(UTC),
                 )
                 db.add(row)
             else:
@@ -720,7 +738,7 @@ class SqlAlchemyRepository(Repository):
                     counts_by_severity=json.dumps(counts_by_severity),
                     points_by_category=json.dumps(points_by_category),
                     coverage=json.dumps(coverage),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(UTC),
                 )
                 db.add(row)
             else:
@@ -729,7 +747,7 @@ class SqlAlchemyRepository(Repository):
                 row.counts_by_severity = json.dumps(counts_by_severity)
                 row.points_by_category = json.dumps(points_by_category)
                 row.coverage = json.dumps(coverage)
-                row.created_at = datetime.utcnow()
+                row.created_at = datetime.now(UTC)
             db.commit()
 
     def get_job_scores(self, job_id: str) -> List[Dict[str, object]]:
@@ -781,7 +799,7 @@ class SqlAlchemyRepository(Repository):
                     doc_id=doc_id,
                     bundle_path=bundle_path,
                     bundle_hash=bundle_hash,
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(UTC),
                     created_by=created_by,
                     options_json=json.dumps(options),
                     status=status,
@@ -858,3 +876,4 @@ class SqlAlchemyRepository(Repository):
                 "status": row.status,
                 "errorText": row.error_text,
             }
+

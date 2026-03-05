@@ -30,6 +30,7 @@ export default function ManualReviewScreen() {
   const [readyToFinalize, setReadyToFinalize] = useState(false);
   const [finalizeMessage, setFinalizeMessage] = useState<string | null>(null);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [reviewFilter, setReviewFilter] = useState<"all" | "pending" | "resolved">("pending");
   const currentDocId = uploadedDocument?.docId ?? fixedDocId ?? null;
   const [scope, setScope] = useState<"current" | "all">(currentDocId ? "current" : "all");
 
@@ -53,7 +54,7 @@ export default function ManualReviewScreen() {
 
   const handleManualDecision = async (
     itemId: string,
-    status: "approved" | "rejected",
+    status: "pending" | "approved" | "rejected",
     approvedText?: string,
   ) => {
     const result = await updateManualReview(itemId, { status, approvedText }, scopedDocId);
@@ -102,6 +103,27 @@ export default function ManualReviewScreen() {
       setReadyToFinalize(true);
     }
   }, [pendingCount, resolvedCount]);
+  const stageMessage = useMemo(() => {
+    if (pendingCount > 0) {
+      return {
+        title: "Next step",
+        message: `Resolve ${pendingCount} pending item(s). Finalize unlocks after pending reaches zero.`,
+        tone: "warning" as const,
+      };
+    }
+    if (readyToFinalize && resolvedCount > 0) {
+      return {
+        title: "Ready to finalize",
+        message: "All items are resolved. Run finalize to apply approved edits to the output.",
+        tone: "info" as const,
+      };
+    }
+    return {
+      title: "Queue status",
+      message: "No pending actions right now.",
+      tone: "success" as const,
+    };
+  }, [pendingCount, readyToFinalize, resolvedCount]);
 
   const handleFinalizeNow = async () => {
     if (!currentDocId) {
@@ -167,6 +189,12 @@ export default function ManualReviewScreen() {
     const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return bTime - aTime;
   });
+  const filteredQueue = sortedQueue.filter((item) => {
+    const isPending = !item.status || item.status === "pending";
+    if (reviewFilter === "pending") return isPending;
+    if (reviewFilter === "resolved") return !isPending;
+    return true;
+  });
 
   return (
     <Screen>
@@ -215,6 +243,41 @@ export default function ManualReviewScreen() {
         message="Approve only human-verified content. Approved changes are applied on Finalize."
         tone="info"
       />
+      <InlineNotice title={stageMessage.title} message={stageMessage.message} tone={stageMessage.tone} />
+      <Card style={styles.card}>
+        <Text style={[styles.title, { color: theme.colors.text }]}>Queue Summary</Text>
+        <View style={styles.buttonRow}>
+          <Chip label={`Pending ${pendingCount}`} tone="warning" />
+          <Chip label={`Resolved ${resolvedCount}`} tone="default" />
+        </View>
+        <Text style={{ color: theme.colors.textMuted }}>Resolved items are not applied until Finalize runs.</Text>
+        <View style={styles.scopeRow}>
+          <Pressable onPress={() => setReviewFilter("pending")}>
+            <Chip
+              label={`Pending (${pendingCount})`}
+              tone="warning"
+              style={reviewFilter === "pending" ? styles.filterActiveDefault : undefined}
+              textStyle={reviewFilter === "pending" ? styles.filterActiveText : undefined}
+            />
+          </Pressable>
+          <Pressable onPress={() => setReviewFilter("resolved")}>
+            <Chip
+              label={`Resolved (${resolvedCount})`}
+              tone="default"
+              style={reviewFilter === "resolved" ? styles.filterActiveDefault : undefined}
+              textStyle={reviewFilter === "resolved" ? styles.filterActiveText : undefined}
+            />
+          </Pressable>
+          <Pressable onPress={() => setReviewFilter("all")}>
+            <Chip
+              label={`All (${manualReviewQueue.length})`}
+              tone="info"
+              style={reviewFilter === "all" ? styles.filterActiveDefault : undefined}
+              textStyle={reviewFilter === "all" ? styles.filterActiveText : undefined}
+            />
+          </Pressable>
+        </View>
+      </Card>
       {readyToFinalize && currentDocId ? (
         <Card style={styles.card}>
           <Text style={[styles.title, { color: theme.colors.text }]}>Ready to finalize</Text>
@@ -258,14 +321,28 @@ export default function ManualReviewScreen() {
       )}
 
       <FlatList
-        data={sortedQueue}
+        data={filteredQueue}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
+        ListEmptyComponent={
+          <Card style={styles.card}>
+            <Text style={{ color: theme.colors.textMuted }}>
+              No items match the selected filter.
+            </Text>
+          </Card>
+        }
+        renderItem={({ item }) => {
+          const isPending = !item.status || item.status === "pending";
+          return (
           <Card style={styles.card}>
             <View style={styles.rowHeader}>
-              <Text style={[styles.title, { color: theme.colors.text }]}>{item.reason || item.issueId}</Text>
+              <View style={styles.statusTitleRow}>
+                <Text style={styles.statusIcon}>
+                  {!isPending ? "✓" : "⏳"}
+                </Text>
+                <Text style={[styles.title, { color: theme.colors.text }]}>{item.reason || item.issueId}</Text>
+              </View>
               <Chip
-                label={(item.status || "pending").toUpperCase()}
+                label={item.status === "approved" ? "APPROVED" : item.status === "rejected" ? "REJECTED" : "PENDING"}
                 tone={item.status === "approved" ? "success" : item.status === "rejected" ? "danger" : "warning"}
               />
             </View>
@@ -273,7 +350,7 @@ export default function ManualReviewScreen() {
             <Text style={{ color: theme.colors.textMuted }}>Target: {item.targetNodeId}</Text>
             {item.notes && <Text style={{ color: theme.colors.textMuted }}>Notes: {item.notes}</Text>}
             {item.suggestedFix && <Text style={{ color: theme.colors.textMuted }}>Suggested fix: {item.suggestedFix}</Text>}
-            {item.suggestedText && (
+            {isPending && item.suggestedText && (
               <View style={styles.suggestionBox}>
                 <Text style={{ color: theme.colors.textMuted }}>Suggested alt text</Text>
                 <TextInput
@@ -301,7 +378,7 @@ export default function ManualReviewScreen() {
                 </View>
               </View>
             )}
-            {!item.suggestedText && (
+            {isPending && !item.suggestedText && (
               <View style={styles.buttonRow}>
                 <Button
                   title="Mark Approved"
@@ -315,13 +392,26 @@ export default function ManualReviewScreen() {
                 />
               </View>
             )}
+            {!isPending && (
+              <View style={styles.buttonRow}>
+                <Text style={{ color: theme.colors.textMuted }}>
+                  Decision recorded. Finalize applies approved changes to output.
+                </Text>
+                <Button
+                  title="Set Pending"
+                  onPress={() => void handleManualDecision(item.id, "pending")}
+                  variant="ghost"
+                />
+              </View>
+            )}
             {item.createdAt && (
               <Text style={{ color: theme.colors.textMuted }}>
                 Created: {new Date(item.createdAt).toLocaleString()}
               </Text>
             )}
           </Card>
-        )}
+          );
+        }}
       />
     </Screen>
   );
@@ -333,6 +423,8 @@ const styles = StyleSheet.create({
   scopeRow: { marginTop: 8, marginBottom: 8, flexDirection: "row", gap: 8, flexWrap: "wrap" },
   card: { marginBottom: 12, gap: 6 },
   rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  statusTitleRow: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1, minWidth: 0 },
+  statusIcon: { fontWeight: "800", fontSize: 14 },
   title: { fontWeight: "700" },
   linkRow: { gap: 8 },
   link: { fontWeight: "600" },

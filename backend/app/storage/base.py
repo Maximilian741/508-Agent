@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import BinaryIO, Optional, Protocol
 
@@ -49,7 +49,7 @@ class StorageProvider(Protocol):
 
 
 def utc_now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def sanitize_storage_key(key: str) -> str:

@@ -37,6 +37,7 @@ export default function ScanScreen() {
   const scanJob = useAppStore((state) => state.scanJob);
   const documentIssues = useAppStore((state) => state.documentIssues);
   const applyDocumentFixes = useAppStore((state) => state.applyDocumentFixes);
+  const runDocumentScan = useAppStore((state) => state.runDocumentScan);
   const fixedDocId = useAppStore((state) => state.fixedDocId);
   const fetchDocumentDiff = useAppStore((state) => state.fetchDocumentDiff);
   const fetchDocumentSummary = useAppStore((state) => state.fetchDocumentSummary);
@@ -87,6 +88,10 @@ export default function ScanScreen() {
   const [fixReportFilter, setFixReportFilter] = useState<"all" | "fixed" | "remaining" | "manual">("all");
   const [showBeforeIssues, setShowBeforeIssues] = useState(false);
   const [showAfterIssues, setShowAfterIssues] = useState(false);
+  const [showFixedSection, setShowFixedSection] = useState(true);
+  const [showRemainingSection, setShowRemainingSection] = useState(true);
+  const [showIntroducedSection, setShowIntroducedSection] = useState(true);
+  const [showManualSection, setShowManualSection] = useState(true);
   const [documentsTab, setDocumentsTab] = useState<"tree" | "completed">("tree");
   const [scoreMessage, setScoreMessage] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
@@ -292,12 +297,67 @@ export default function ScanScreen() {
   );
   const readyForDocFlag = uploadedDocument?.docId ? Boolean(readyToFinalizeByDocId[uploadedDocument.docId]) : false;
   const readyToFinalize = readyForDocFlag || ((manualReadyFlag || pendingManualCount === 0) && resolvedManualCount > 0);
+  const normalizedScanStatus = (scanJob?.status ?? "").toLowerCase();
+  const scanInProgress = normalizedScanStatus === "queued" || normalizedScanStatus === "running";
+  const scanComplete = Boolean(scanJob?.jobId) && (normalizedScanStatus === "completed" || normalizedScanStatus === "done");
+  const fixesApplied = Boolean(fixedDocId) || Boolean(fixReport?.fixedExists);
+  const hasManualItems = manualReviewItemCount > 0;
+  const manualComplete = hasManualItems && pendingManualCount === 0;
   const jobScores: JobScorePass[] = useMemo(() => {
     const jobId = scanJob?.jobId;
     if (!jobId) return [];
     return jobScoresByJobId[jobId] ?? [];
   }, [scanJob?.jobId, jobScoresByJobId]);
   const selectedPolicyDetail = selectedPolicyId ? policyDetailsById[selectedPolicyId] : undefined;
+  const nextAction = useMemo((): { title: string; message: string; tone: "info" | "warning" | "success" } => {
+    if (!uploadedDocument?.docId) {
+      return {
+        title: "Next step",
+        message: "Upload a document to start scan and remediation.",
+        tone: "info",
+      };
+    }
+    if (!scanJob?.jobId) {
+      return {
+        title: "Next step",
+        message: "Start scan for this document to generate issues and scores.",
+        tone: "info",
+      };
+    }
+    if (scanInProgress) {
+      return {
+        title: "Next step",
+        message: "Wait for scan to complete, then review issues and apply fixes.",
+        tone: "info",
+      };
+    }
+    if (!fixesApplied) {
+      return {
+        title: "Next step",
+        message: "Run Apply Fixes to generate an improved output artifact.",
+        tone: "warning",
+      };
+    }
+    if (pendingManualCount > 0) {
+      return {
+        title: "Next step",
+        message: `Resolve ${pendingManualCount} manual review item(s), then finalize.`,
+        tone: "warning",
+      };
+    }
+    if (readyToFinalize) {
+      return {
+        title: "Next step",
+        message: "Finalize now to apply approved manual-review decisions and refresh results.",
+        tone: "info",
+      };
+    }
+    return {
+      title: "Status",
+      message: "Document is up to date. Export evidence bundle or download latest output.",
+      tone: "success",
+    };
+  }, [uploadedDocument?.docId, scanJob?.jobId, scanInProgress, fixesApplied, pendingManualCount, readyToFinalize]);
 
   if (!scanResults && documentIssues.length === 0 && !scanJob) {
     return (
@@ -356,6 +416,77 @@ export default function ScanScreen() {
   const openManualReview = () => {
     router.push("/manual-review");
   };
+  const humanizeReason = (reason?: string) => {
+    if (!reason) return "";
+    return reason
+      .replaceAll("_", " ")
+      .replaceAll(">", " > ")
+      .trim();
+  };
+  const formatCreatedAt = (value?: string) => {
+    if (!value) return "time unknown";
+    const ts = Date.parse(value);
+    if (Number.isNaN(ts)) return value;
+    return new Date(ts).toLocaleString();
+  };
+
+  const handleOpenPersistedDocument = async (doc: {
+    docId: string;
+    filename: string;
+    docType?: string;
+  }) => {
+    const hydratedUpload: UploadResponse = {
+      docId: doc.docId,
+      filename: doc.filename,
+      sizeBytes: 0,
+      docType: doc.docType === "pdf" || doc.docType === "docx" || doc.docType === "pptx" ? doc.docType : "pdf",
+    };
+    useAppStore.setState({
+      uploadedDocument: hydratedUpload,
+      fixedDocId: null,
+      scanJob: null,
+    });
+    await Promise.all([
+      fetchDocumentIssues(doc.docId),
+      fetchDocumentSummary(doc.docId),
+      fetchTagTree(doc.docId),
+      fetchFixReport(doc.docId),
+      fetchManualReview(doc.docId),
+      fetchEvidenceBundles(doc.docId),
+    ]);
+    setDocumentsTab("tree");
+  };
+  const handlePrimaryAction = async () => {
+    if (!uploadedDocument?.docId) return;
+    if (!scanJob?.jobId) {
+      await runDocumentScan(uploadedDocument.docId);
+      return;
+    }
+    if (scanInProgress) return;
+    if (!fixesApplied) {
+      await applyDocumentFixes(uploadedDocument.docId);
+      return;
+    }
+    if (pendingManualCount > 0) {
+      openManualReview();
+      return;
+    }
+    if (readyToFinalize) {
+      await handleFinalize();
+      return;
+    }
+    await handleExportEvidenceBundle();
+  };
+  const primaryActionLabel = (() => {
+    if (!uploadedDocument?.docId) return "Upload from Documents";
+    if (!scanJob?.jobId) return "Start Scan";
+    if (scanInProgress) return "Scanning...";
+    if (!fixesApplied) return "Apply Fixes";
+    if (pendingManualCount > 0) return `Review Manual Items (${pendingManualCount})`;
+    if (readyToFinalize) return "Finalize Document";
+    return "Export Evidence Bundle";
+  })();
+  const primaryActionDisabled = !uploadedDocument?.docId || scanInProgress || isFinalizing || isExportingBundle;
 
   const handleExportEvidenceBundle = async () => {
     const jobId = scanJob?.jobId;
@@ -816,20 +947,21 @@ export default function ScanScreen() {
         </Pressable>
       </View>
 
-      {scanJob && scanJob.status !== "done" && (
+      {scanJob && scanInProgress && (
         <InlineNotice
           title="Scanning in progress"
           message={`${scanJob.status} - ${scanJob.progress}%`}
           tone="info"
         />
       )}
-      {scanJob && scanJob.status === "done" && documentIssues.length === 0 && (
+      {scanJob && scanComplete && documentIssues.length === 0 && (
         <InlineNotice
           title="Finalizing results"
           message="Scan completed. Loading issues..."
           tone="info"
         />
       )}
+      <InlineNotice title={nextAction.title} message={nextAction.message} tone={nextAction.tone} />
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Documents</Text>
@@ -844,7 +976,7 @@ export default function ScanScreen() {
           </Pressable>
           <Pressable onPress={() => setDocumentsTab("completed")}>
             <Chip
-              label="Completed & Fixed"
+              label="History & Status"
               tone="default"
               style={documentsTab === "completed" ? styles.filterActiveDefault : undefined}
               textStyle={documentsTab === "completed" ? styles.filterActiveText : undefined}
@@ -908,10 +1040,14 @@ export default function ScanScreen() {
                               <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                                 {doc.docId}
                                 {doc.docType ? ` • ${doc.docType.toUpperCase()}` : ""}
-                                {doc.reasons && doc.reasons.length > 0 ? ` • ${doc.reasons[0]}` : ""}
+                                {doc.createdAt ? ` • ${formatCreatedAt(doc.createdAt)}` : ""}
+                                {doc.reasons && doc.reasons.length > 0 ? ` • ${humanizeReason(doc.reasons[0])}` : ""}
                               </Text>
                             </View>
                             <View style={styles.summaryRow}>
+                              <Pressable onPress={() => void handleOpenPersistedDocument(doc)}>
+                                <Chip label="Open" tone="default" />
+                              </Pressable>
                               <Pressable onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
                                 <Chip label="Exports" tone="info" />
                               </Pressable>
@@ -940,7 +1076,7 @@ export default function ScanScreen() {
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Export a compliance artifact with policy, scores, issues, delta, and manual review history.
         </Text>
-        <View style={styles.issueActionsRow}>
+        <View style={[styles.issueActionsRow, !isWide && styles.issueActionsColumn]}>
           <Button
             title={isExportingBundle ? "Exporting..." : "Export Evidence Bundle"}
             onPress={() => void handleExportEvidenceBundle()}
@@ -1041,7 +1177,7 @@ export default function ScanScreen() {
               }
             }}
           />
-          <View style={styles.issueActionsRow}>
+          <View style={[styles.issueActionsRow, !isWide && styles.issueActionsColumn]}>
             <Pressable
               onPress={() => uploadedDocument && applyDocumentFixes(uploadedDocument.docId)}
               style={styles.applyFixes}
@@ -1055,7 +1191,47 @@ export default function ScanScreen() {
               />
             </Pressable>
           </View>
-          <View style={styles.issueActionsRow}>
+          <Card style={styles.workflowCard}>
+            <Text style={[styles.diffTitle, { color: theme.colors.text }]}>Workflow Status</Text>
+            <View style={styles.summaryRow}>
+              <Chip label={scanComplete ? "Scan complete" : "Scan pending"} tone={scanComplete ? "success" : "warning"} />
+              <Chip label={fixesApplied ? "Fixes applied" : "Fixes pending"} tone={fixesApplied ? "success" : "warning"} />
+              <Chip
+                label={
+                  hasManualItems
+                    ? manualComplete
+                      ? "Manual review resolved"
+                      : `Manual review pending (${pendingManualCount})`
+                    : "No manual review items"
+                }
+                tone={hasManualItems ? (manualComplete ? "success" : "warning") : "default"}
+              />
+              <Chip label={readyToFinalize ? "Ready to finalize" : "Not ready to finalize"} tone={readyToFinalize ? "info" : "default"} />
+            </View>
+            <View style={styles.issueActionsRow}>
+              <Button
+                title={primaryActionLabel}
+                onPress={() => void handlePrimaryAction()}
+                disabled={primaryActionDisabled}
+                loading={isFinalizing || isExportingBundle}
+              />
+              {uploadedDocument?.docId ? (
+                <Button
+                  title="Refresh Document Data"
+                  variant="ghost"
+                  onPress={() =>
+                    void Promise.all([
+                      fetchDocumentIssues(uploadedDocument.docId),
+                      fetchFixReport(uploadedDocument.docId),
+                      fetchManualReview(uploadedDocument.docId),
+                      fetchEvidenceBundles(uploadedDocument.docId),
+                    ])
+                  }
+                />
+              ) : null}
+            </View>
+          </Card>
+          <View style={[styles.issueActionsRow, !isWide && styles.issueActionsColumn]}>
             <Button title="Download Latest Output" onPress={handleDownloadLatestOutput} disabled={!latestOutputUrl} />
             <Button title="Download Evidence Bundle (zip)" onPress={() => void handleDownloadEvidenceBundle()} disabled={!latestBundle} />
           </View>
@@ -1068,18 +1244,24 @@ export default function ScanScreen() {
             </View>
             <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Resolved != Fixed until Finalize runs.</Text>
           </View>
-          {readyToFinalize ? (
+          {(hasManualItems || readyToFinalize || fixesApplied) ? (
             <Card style={styles.finalizeCard}>
-              <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Ready to finalize</Text>
+              <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+                {readyToFinalize ? "Ready to finalize" : "Finalize step"}
+              </Text>
               <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
-                Approvals are recorded. Finalize applies approved edits and rescans.
+                {readyToFinalize
+                  ? "Approvals are recorded. Finalize applies approved edits and rescans."
+                  : hasManualItems
+                  ? "Resolve all pending manual review items to enable finalize."
+                  : "Finalize runs a final pass and refreshes document state."}
               </Text>
               <View style={styles.issueActionsRow}>
                 <Button
                   title={isFinalizing ? "Finalizing..." : "Finalize Document"}
                   onPress={() => void handleFinalize()}
                   loading={isFinalizing}
-                  disabled={!uploadedDocument?.docId || isFinalizing}
+                  disabled={!uploadedDocument?.docId || isFinalizing || !readyToFinalize}
                 />
               </View>
             </Card>
@@ -1184,7 +1366,7 @@ export default function ScanScreen() {
               <View style={styles.summaryRow}>
                 <Pressable onPress={() => setFixReportFilter("all")}>
                   <Chip
-                    label={`All (${(fixReport.delta?.fixed?.length ?? 0) + (fixReport.delta?.remaining?.length ?? 0) + (fixReport.delta?.introduced?.length ?? 0) + (fixReport.manualReview?.length ?? 0)})`}
+                    label={`All (${(fixReport.delta?.fixed?.length ?? 0) + (fixReport.delta?.remaining?.length ?? 0) + (fixReport.delta?.introduced?.length ?? 0) + manualReviewItemCount})`}
                     tone="default"
                     style={fixReportFilter === "all" ? styles.filterActiveDefault : undefined}
                     textStyle={fixReportFilter === "all" ? styles.filterActiveText : undefined}
@@ -1218,34 +1400,51 @@ export default function ScanScreen() {
               <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                 Deterministic: {fixReport.deterministic ? "yes" : "no"} • Mode: {fixReport.mode}
               </Text>
-              <View style={styles.fixList}>
-                {filteredFixReport.fixed.map((issue) => (
-                  <Pressable
-                    key={issue.id}
-                    onPress={() => {
-                      setFocusedIssue(issue);
-                      const page = getIssuePage(issue);
-                      if (page !== null) {
-                        const clamped = pageCount ? Math.min(Math.max(1, page), pageCount) : Math.max(1, page);
-                        setCurrentPage(clamped);
-                      }
-                    }}
-                  >
-                    <View style={styles.fixRow}>
-                      <Chip
-                        label={issue.severity.toUpperCase()}
-                        tone={issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info"}
-                        icon={<Text style={{ color: theme.colors.success, fontWeight: "700" }}>?</Text>}
-                      />
-                      <Chip label={issue.ruleId} />
-                    </View>
-                    <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{issue.title}</Text>
-                  </Pressable>
-                ))}
-              </View>
-              {filteredFixReport.remaining.length > 0 && (
+              <Pressable onPress={() => setShowFixedSection((prev) => !prev)} style={styles.fixSectionHeader}>
+                <Chip label={showFixedSection ? "Hide" : "Show"} tone="default" />
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Fixed issues ({filteredFixReport.fixed.length})
+                </Text>
+              </Pressable>
+              {showFixedSection && (
                 <View style={styles.fixList}>
-                  <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Remaining issues</Text>
+                  {filteredFixReport.fixed.length === 0 ? (
+                    <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No fixed issues in this filter.</Text>
+                  ) : (
+                    filteredFixReport.fixed.map((issue) => (
+                      <Pressable
+                        key={issue.id}
+                        onPress={() => {
+                          setFocusedIssue(issue);
+                          const page = getIssuePage(issue);
+                          if (page !== null) {
+                            const clamped = pageCount ? Math.min(Math.max(1, page), pageCount) : Math.max(1, page);
+                            setCurrentPage(clamped);
+                          }
+                        }}
+                      >
+                        <View style={styles.fixRow}>
+                          <Chip
+                            label={issue.severity.toUpperCase()}
+                            tone={issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "info"}
+                            icon={<Text style={{ color: theme.colors.success, fontWeight: "700" }}>✓</Text>}
+                          />
+                          <Chip label={issue.ruleId} />
+                        </View>
+                        <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>{issue.title}</Text>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+              )}
+              <Pressable onPress={() => setShowRemainingSection((prev) => !prev)} style={styles.fixSectionHeader}>
+                <Chip label={showRemainingSection ? "Hide" : "Show"} tone="default" />
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Remaining issues ({filteredFixReport.remaining.length})
+                </Text>
+              </Pressable>
+              {showRemainingSection && filteredFixReport.remaining.length > 0 && (
+                <View style={styles.fixList}>
                   {filteredFixReport.remaining.map((item) => (
                     <Pressable
                       key={item.id}
@@ -1266,9 +1465,17 @@ export default function ScanScreen() {
                   ))}
                 </View>
               )}
-              {filteredFixReport.introduced.length > 0 && (
+              {showRemainingSection && filteredFixReport.remaining.length === 0 && (
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No remaining issues in this filter.</Text>
+              )}
+              <Pressable onPress={() => setShowIntroducedSection((prev) => !prev)} style={styles.fixSectionHeader}>
+                <Chip label={showIntroducedSection ? "Hide" : "Show"} tone="default" />
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Introduced issues ({filteredFixReport.introduced.length})
+                </Text>
+              </Pressable>
+              {showIntroducedSection && filteredFixReport.introduced.length > 0 && (
                 <View style={styles.fixList}>
-                  <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Introduced issues</Text>
                   {filteredFixReport.introduced.map((item) => (
                     <Pressable
                       key={item.id}
@@ -1290,9 +1497,17 @@ export default function ScanScreen() {
                   ))}
                 </View>
               )}
-              {filteredFixReport.manual.length > 0 && (
+              {showIntroducedSection && filteredFixReport.introduced.length === 0 && (
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No introduced issues in this filter.</Text>
+              )}
+              <Pressable onPress={() => setShowManualSection((prev) => !prev)} style={styles.fixSectionHeader}>
+                <Chip label={showManualSection ? "Hide" : "Show"} tone="default" />
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  Manual review items ({filteredFixReport.manual.length})
+                </Text>
+              </Pressable>
+              {showManualSection && filteredFixReport.manual.length > 0 && (
                 <View style={styles.fixList}>
-                  <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Manual review items</Text>
                   {filteredFixReport.manual.map((item) => (
                     <Pressable
                       key={item.id}
@@ -1326,6 +1541,11 @@ export default function ScanScreen() {
                     </Pressable>
                   ))}
                 </View>
+              )}
+              {showManualSection && filteredFixReport.manual.length === 0 && (
+                <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
+                  No manual review items for this document.
+                </Text>
               )}
             </View>
           ) : (
@@ -2303,6 +2523,7 @@ const styles = StyleSheet.create({
   completedDocMeta: { flex: 1, minWidth: 0 },
   issuesHeaderRow: { marginTop: 4, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
   issueControlsRow: { marginTop: 10, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
+  issueActionsColumn: { flexDirection: "column", alignItems: "stretch" },
   searchRow: { marginTop: 12, gap: 8 },
   searchInput: { borderWidth: 1, borderRadius: 12, padding: 10 },
   filterRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginTop: 12 },
@@ -2344,6 +2565,7 @@ const styles = StyleSheet.create({
   applyFixes: { marginTop: 12, alignItems: "flex-start" },
   manualReviewRow: { marginTop: 16, alignItems: "flex-start" },
   manualReviewMeta: { marginTop: 10, gap: 8 },
+  workflowCard: { marginTop: 12, gap: 8 },
   finalizeCard: { marginTop: 10, gap: 8 },
   manualIssueRow: { flexDirection: "row", gap: 10, alignItems: "flex-start", flexWrap: "nowrap" },
   manualIssueMeta: { flex: 1, minWidth: 0, gap: 2 },
@@ -2357,6 +2579,7 @@ const styles = StyleSheet.create({
   diffTitle: { fontWeight: "700", marginBottom: 8 },
   diffTextCard: { marginTop: 12 },
   fixReport: { marginTop: 12, gap: 8 },
+  fixSectionHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
   fixList: { marginTop: 8, gap: 8 },
   fixRow: { flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" },
   diffText: { fontFamily: "Courier", fontSize: 12 },

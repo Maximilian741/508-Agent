@@ -13,6 +13,11 @@ interface ScoreCardProps {
 }
 
 const PASS_ORDER = ["baseline", "post_fix", "post_manual"];
+const PASS_LABELS: Record<string, string> = {
+  baseline: "Before fixes",
+  post_fix: "After safe fixes",
+  post_manual: "After manual finalize",
+};
 
 export function ScoreCard({ scores, policyDetail, emptyMessage = "Score will appear after scan completes." }: ScoreCardProps) {
   const theme = useTheme();
@@ -28,10 +33,21 @@ export function ScoreCard({ scores, policyDetail, emptyMessage = "Score will app
   const policyJson = policyDetail?.policy_json && typeof policyDetail.policy_json === "object" ? policyDetail.policy_json : undefined;
   const scoring = policyJson?.scoring && typeof policyJson.scoring === "object" ? (policyJson.scoring as Record<string, unknown>) : undefined;
   const thresholds = policyJson?.thresholds && typeof policyJson.thresholds === "object" ? (policyJson.thresholds as Record<string, unknown>) : undefined;
+  const latest = byPass.post_manual ?? byPass.post_fix ?? byPass.baseline;
+  const latestScore = latest ? (latest.scoreTotal ?? latest.score_total ?? 0) : null;
+  const latestStatus = latest?.status;
+  const latestStatusTone =
+    latestStatus === "pass" ? "success" : latestStatus === "needs_review" ? "warning" : latestStatus === "fail" ? "danger" : "default";
 
   return (
     <Card>
       <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Score</Text>
+      {latest ? (
+        <View style={styles.summaryRow}>
+          <Chip label={`Current ${latestScore}`} tone="info" />
+          <Chip label={`Status ${String(latestStatus ?? "unknown").replace("_", " ")}`} tone={latestStatusTone} />
+        </View>
+      ) : null}
       {scores.length === 0 ? (
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>{emptyMessage}</Text>
       ) : (
@@ -42,12 +58,12 @@ export function ScoreCard({ scores, policyDetail, emptyMessage = "Score will app
             const status = entry?.status;
             return (
               <View key={passType} style={styles.row}>
-                <Text style={[theme.typography.body, { color: theme.colors.text }]}>{passType}</Text>
+                <Text style={[theme.typography.body, { color: theme.colors.text }]}>{PASS_LABELS[passType] ?? passType}</Text>
                 {entry ? (
                   <View style={styles.rowRight}>
-                    <Chip label={`${score}`} tone="info" />
+                    <Chip label={`Score ${score}`} tone="info" />
                     <Chip
-                      label={status ?? "unknown"}
+                      label={(status ?? "unknown").replace("_", " ")}
                       tone={status === "pass" ? "success" : status === "needs_review" ? "warning" : status === "fail" ? "danger" : "default"}
                     />
                   </View>
@@ -77,6 +93,7 @@ export function ScoreCard({ scores, policyDetail, emptyMessage = "Score will app
 }
 
 const styles = StyleSheet.create({
+  summaryRow: { marginTop: 8, flexDirection: "row", gap: 8, flexWrap: "wrap" },
   rows: { marginTop: 8, gap: 8 },
   row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   rowRight: { flexDirection: "row", gap: 8, alignItems: "center" },

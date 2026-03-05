@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,7 +19,7 @@ _CONN: sqlite3.Connection | None = None
 
 
 def _utc_now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _default_policy_json(name: str, targets: List[str], severity_weights: Dict[str, float], overrides: Dict[str, Dict[str, object]]) -> Dict[str, object]:
@@ -312,7 +312,7 @@ def init_db() -> None:
 
 def _seed_postgres_policy_packs() -> None:
     with SessionLocal() as db:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         for pack in _DEFAULT_POLICY_PACKS:
             exists = db.get(PolicyPackRow, str(pack["id"]))
             if exists is not None:
@@ -1219,7 +1219,7 @@ class SqliteRepo:
         now = _utc_now()
         with _LOCK:
             for item in items:
-                item_id = str(item.get("id") or f"mr-{doc_id}-{int(datetime.utcnow().timestamp() * 1000)}")
+                item_id = str(item.get("id") or f"mr-{doc_id}-{int(datetime.now(UTC).timestamp() * 1000)}")
                 ai_decision = item.get("aiDecision") if isinstance(item.get("aiDecision"), dict) else None
                 conn.execute(
                     """

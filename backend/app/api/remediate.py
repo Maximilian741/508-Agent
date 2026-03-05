@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
@@ -70,12 +70,12 @@ def _manual_review_item(
     notes: str,
 ) -> Dict[str, Any]:
     return {
-        "id": f"mr-{target_node_id}-{int(datetime.utcnow().timestamp())}",
+        "id": f"mr-{target_node_id}-{int(datetime.now(UTC).timestamp())}",
         "issueId": issue_id or "unknown",
         "targetNodeId": target_node_id,
         "reason": reason,
         "notes": notes,
-        "createdAt": datetime.utcnow().isoformat() + "Z",
+        "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
 
 

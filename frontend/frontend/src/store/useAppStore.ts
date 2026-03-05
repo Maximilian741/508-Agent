@@ -396,6 +396,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         const client = getClient(get());
         try {
             const start = await client.startDocumentScan(docId);
+            const isTerminalStatus = (status: string) =>
+                status === "done" || status === "completed" || status === "error" || status === "failed";
+            const isSuccessStatus = (status: string) => status === "done" || status === "completed";
             const selectedPolicyId = get().selectedPolicyId;
             if (selectedPolicyId) {
                 try {
@@ -441,7 +444,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 if (!current) {
                     return;
                 }
-                if (current.status === "done") {
+                if (isSuccessStatus(current.status)) {
                     try {
                         const summary = await client.getDocumentSummary(docId);
                         set({ documentSummary: summary });
@@ -472,10 +475,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         // keep UX non-blocking if score is unavailable
                     }
                 }
-                if (current.status === "done") {
-                    return;
-                }
-                if (current.status === "error") {
+                if (isTerminalStatus(current.status)) {
                     return;
                 }
                 setTimeout(poll, 1000);

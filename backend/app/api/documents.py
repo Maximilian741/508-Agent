@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 import mimetypes
 import os
@@ -764,30 +764,18 @@ def _apply_pdf_fixes(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     try:
         tag_tree = extract_tag_tree(reader)
         if tag_tree.get("tagged"):
-            added = _add_placeholder_alt(writer)
-            if added > 0:
-                applied.append(
-                    {
-                        "fixId": f"{doc_id}-fix-alt",
-                        "ruleId": "missing_alt_text",
-                        "severity": "error",
-                        "action": "Added placeholder /Alt text for Figure tags.",
-                        "pages": [],
-                        "anchors": [],
-                        "deterministic": True,
-                    }
-                )
+            if int(tag_tree.get("summary", {}).get("figuresMissingAlt", 0) or 0) > 0:
                 manual_review_added.append(
                     _queue_manual_review(
                         doc_id,
                         "missing_alt_text",
                         "doc-1",
                         "Missing alt text",
-                        "Placeholder alt text was added; update with meaningful descriptions.",
+                        "Programmatic placeholder alt text is disabled; add meaningful alt text via manual review or approved AI proposal.",
                         pages=[],
                         anchors=[],
-                        suggested_fix="Replace placeholder alt text with meaningful descriptions.",
-                        confidence=0.6,
+                        suggested_fix="Provide concise, meaningful alt text for each figure.",
+                        confidence=0.7,
                     )
                 )
         else:
@@ -1193,8 +1181,6 @@ def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
                             NameObject("/Pg"): page_ref,
                             NameObject("/K"): ArrayObject(mcid_list) if len(mcid_list) > 1 else (mcid_list[0] if mcid_list else ArrayObject()),
                         }
-                        if tag == "Figure":
-                            elem_dict[NameObject("/Alt")] = TextStringObject("[TODO] Add alt text")
                         elem = DictionaryObject(elem_dict)
                         elem_ref = writer._add_object(elem)
                         sect_elem_ref.get_object()[NameObject("/K")].append(elem_ref)
@@ -1259,38 +1245,6 @@ def _rebuild_pdf(doc_id: str, src: Path, dest: Path) -> Dict[str, object]:
     )
 
     return {"manual_review_added": manual_review_added}
-
-
-def _add_placeholder_alt(writer: PdfWriter) -> int:
-    try:
-        root = writer._root_object
-        struct_root = root.get("/StructTreeRoot")
-        if not struct_root:
-            return 0
-        count = 0
-        stack = [struct_root]
-        while stack:
-            node = stack.pop()
-            try:
-                obj = node.get_object()
-            except Exception:
-                obj = node
-            if isinstance(obj, dict):
-                tag = obj.get("/S")
-                if tag == "/Figure":
-                    alt = obj.get("/Alt")
-                    if not alt or not str(alt).strip():
-                        obj.update({NameObject("/Alt"): TextStringObject("[TODO] Add alt text")})
-                        count += 1
-                kids = obj.get("/K")
-                if kids:
-                    if isinstance(kids, list):
-                        stack.extend(kids)
-                    else:
-                        stack.append(kids)
-        return count
-    except Exception:
-        return 0
 
 
 def _collect_mcids_from_k(k_value: object) -> List[int]:
@@ -1467,7 +1421,7 @@ def _apply_approved_alt_to_pdf(doc_id: str, pdf_path: Path) -> List[str]:
         if not item:
             continue
         item["applied"] = True
-        item["appliedAt"] = datetime.utcnow().isoformat() + "Z"
+        item["appliedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         REPO.update_manual_review_item(item_id, item, resolved=True)
 
     return sorted(applied_item_ids)
@@ -1558,6 +1512,10 @@ def _manual_review_for_remaining_issues(
         "missing_heading_structure": "Add proper heading structure (H1-H6 or equivalent styles) and rescan.",
         "skipped_heading_level": "Normalize heading levels so they progress without jumps.",
         "reading_order": "Review and correct logical reading order in source content.",
+        "empty_heading_text": "Add text content for empty heading elements and rescan.",
+        "table_missing_headers": "Add header labels to table first rows and verify scope associations.",
+        "missing_slide_titles": "Add a title placeholder to each slide and rescan.",
+        "generic_link_text": "Replace generic link labels with descriptive destination-oriented text.",
     }
     existing_issue_ids = {str(item.get("issueId", "")) for item in existing_items}
     generated: List[Dict[str, object]] = []
@@ -1791,9 +1749,22 @@ def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
     title = str(parsed.get("title", "") or "").strip()
     language = str(parsed.get("language", "") or "").strip()
     headings = parsed.get("headings", []) if isinstance(parsed.get("headings", []), list) else []
+    empty_heading_sections = (
+        [int(section) for section in parsed.get("emptyHeadingSections", []) if isinstance(section, int)]
+        if isinstance(parsed.get("emptyHeadingSections", []), list)
+        else []
+    )
     heading_jumps = parsed.get("headingJumps", []) if isinstance(parsed.get("headingJumps", []), list) else []
     image_count = int(parsed.get("imageCount", 0) or 0)
     missing_alt = int(parsed.get("missingAltCount", 0) or 0)
+    hyperlink_count = int(parsed.get("hyperlinkCount", 0) or 0)
+    generic_links = parsed.get("genericLinks", []) if isinstance(parsed.get("genericLinks", []), list) else []
+    table_count = int(parsed.get("tables", 0) or 0)
+    tables_missing_headers = (
+        [int(table_idx) for table_idx in parsed.get("tablesMissingHeaders", []) if isinstance(table_idx, int)]
+        if isinstance(parsed.get("tablesMissingHeaders", []), list)
+        else []
+    )
 
     if not title:
         issues.append(
@@ -1848,6 +1819,59 @@ def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                 "evidence": {"anchors": [{"section": first.get("section"), "kind": "heading"}], "jumps": heading_jumps[:10]},
             }
         )
+    if empty_heading_sections:
+        first_section = empty_heading_sections[0]
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-empty-heading",
+                "ruleId": "empty_heading_text",
+                "title": "Empty heading text",
+                "severity": "warning",
+                "description": "One or more heading paragraphs have empty text.",
+                "locationHint": f"Section {first_section}",
+                "recommendation": "Populate heading text for each heading style paragraph.",
+                "evidence": {
+                    "sections": empty_heading_sections[:20],
+                    "anchors": [{"section": section, "kind": "heading"} for section in empty_heading_sections[:20]],
+                },
+            }
+        )
+    if table_count > 0 and tables_missing_headers:
+        first_table = tables_missing_headers[0]
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-table-headers",
+                "ruleId": "table_missing_headers",
+                "title": "Table may be missing headers",
+                "severity": "warning",
+                "description": "One or more tables have an empty first row; table headers may be missing.",
+                "locationHint": f"Table {first_table}",
+                "recommendation": "Add clear header labels in the first row of each data table.",
+                "evidence": {
+                    "tables": tables_missing_headers[:20],
+                    "anchors": [{"table": table_idx, "kind": "table"} for table_idx in tables_missing_headers[:20]],
+                },
+            }
+        )
+    if hyperlink_count > 0 and generic_links:
+        first_link = generic_links[0] if isinstance(generic_links[0], dict) else {}
+        first_section = int(first_link.get("section", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-generic-link-text",
+                "ruleId": "generic_link_text",
+                "title": "Generic link text detected",
+                "severity": "warning",
+                "description": "One or more links use generic text (for example: 'click here').",
+                "locationHint": f"Section {first_section}" if first_section else "Document body",
+                "recommendation": "Use descriptive link text that explains the destination or action.",
+                "evidence": {
+                    "links": generic_links[:20],
+                    "hyperlinkCount": hyperlink_count,
+                    "genericCount": len(generic_links),
+                },
+            }
+        )
     if image_count > 0:
         issues.append(
             {
@@ -1871,10 +1895,22 @@ def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
     title = str(parsed.get("title", "") or "").strip()
     language = str(parsed.get("language", "") or "").strip()
     headings = parsed.get("headings", []) if isinstance(parsed.get("headings", []), list) else []
+    slides_missing_titles = (
+        [int(slide) for slide in parsed.get("slidesMissingTitles", []) if isinstance(slide, int)]
+        if isinstance(parsed.get("slidesMissingTitles", []), list)
+        else []
+    )
     slide_details = parsed.get("slides", []) if isinstance(parsed.get("slides", []), list) else []
     reading_order_warnings = parsed.get("readingOrderWarnings", []) if isinstance(parsed.get("readingOrderWarnings", []), list) else []
     image_count = int(parsed.get("imageCount", 0) or 0)
     missing_alt = int(parsed.get("missingAltCount", 0) or 0)
+    hyperlink_count = int(parsed.get("hyperlinkCount", 0) or 0)
+    generic_links = parsed.get("genericLinks", []) if isinstance(parsed.get("genericLinks", []), list) else []
+    tables_missing_headers = (
+        [item for item in parsed.get("tablesMissingHeaders", []) if isinstance(item, dict)]
+        if isinstance(parsed.get("tablesMissingHeaders", []), list)
+        else []
+    )
 
     if not title:
         issues.append(
@@ -1915,6 +1951,22 @@ def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                 "evidence": {"slides": [int(s.get("slide")) for s in slide_details if not s.get("title")]},
             }
         )
+    elif slides_missing_titles:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-missing-slide-titles",
+                "ruleId": "missing_slide_titles",
+                "title": "Some slides are missing titles",
+                "severity": "warning",
+                "description": "Some slides do not have a detectable title placeholder.",
+                "locationHint": f"Slides {', '.join(str(slide) for slide in slides_missing_titles[:5])}",
+                "recommendation": "Add title placeholders for slides to improve navigability.",
+                "evidence": {
+                    "slides": slides_missing_titles[:50],
+                    "anchors": [{"slide": slide, "kind": "title"} for slide in slides_missing_titles[:50]],
+                },
+            }
+        )
     if image_count > 0 and missing_alt > 0:
         slides = [int(s.get("slide")) for s in slide_details if int(s.get("images", 0) or 0) > 0][:10]
         issues.append(
@@ -1927,6 +1979,46 @@ def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                 "locationHint": f"{missing_alt} of {image_count} image(s)",
                 "recommendation": "Provide meaningful alt text on slide images.",
                 "evidence": {"slides": slides, "anchors": [{"slide": s, "kind": "image"} for s in slides]},
+            }
+        )
+    if tables_missing_headers:
+        first = tables_missing_headers[0]
+        first_slide = int(first.get("slide", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-table-headers",
+                "ruleId": "table_missing_headers",
+                "title": "Table may be missing headers",
+                "severity": "warning",
+                "description": "One or more slide tables have an empty first row; table headers may be missing.",
+                "locationHint": f"Slide {first_slide}" if first_slide else "Slides",
+                "recommendation": "Add header labels in the first row of each data table.",
+                "evidence": {
+                    "anchors": [
+                        {"slide": int(item.get("slide", 0) or 0), "table": int(item.get("table", 0) or 0), "kind": "table"}
+                        for item in tables_missing_headers[:20]
+                    ],
+                    "count": len(tables_missing_headers),
+                },
+            }
+        )
+    if hyperlink_count > 0 and generic_links:
+        first = generic_links[0] if isinstance(generic_links[0], dict) else {}
+        first_slide = int(first.get("slide", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-generic-link-text",
+                "ruleId": "generic_link_text",
+                "title": "Generic link text detected",
+                "severity": "warning",
+                "description": "One or more slide links use generic text (for example: 'click here').",
+                "locationHint": f"Slide {first_slide}" if first_slide else "Slides",
+                "recommendation": "Use descriptive hyperlink text for each slide link.",
+                "evidence": {
+                    "links": generic_links[:20],
+                    "hyperlinkCount": hyperlink_count,
+                    "genericCount": len(generic_links),
+                },
             }
         )
     if reading_order_warnings:

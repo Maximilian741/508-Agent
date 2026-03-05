@@ -11,7 +11,7 @@ import sys
 import tempfile
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -45,7 +45,7 @@ _SEVERITY_ORDER = {
 
 
 def _utc_now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _sanitize_filename(value: str) -> str:
@@ -603,7 +603,7 @@ def build_evidence_bundle(job_id: str, options: Optional[Dict[str, object]] = No
 
     created_at = _utc_now()
     bundle_id = f"bundle-{uuid.uuid4().hex[:12]}"
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     bundle_name = f"508-agent-evidence_{doc_id}_{job_id}_{stamp}.zip"
     bundle_path = BUNDLES_DIR / bundle_name
 
