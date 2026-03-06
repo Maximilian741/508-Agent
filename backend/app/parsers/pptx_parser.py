@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict, List
+from urllib.parse import urlparse
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -17,8 +18,10 @@ class PPTXParser:
         missing_alt = 0
         total_tables = 0
         tables_missing_headers: List[Dict[str, object]] = []
+        table_header_scope_flags: List[Dict[str, object]] = []
         hyperlink_count = 0
         generic_links: List[Dict[str, object]] = []
+        invalid_links: List[Dict[str, object]] = []
         reading_order_warnings: List[Dict[str, object]] = []
         generic_link_labels = {
             "click here",
@@ -29,6 +32,7 @@ class PPTXParser:
             "link",
             "this",
         }
+        generic_headers = {"column", "column 1", "column 2", "header", "n/a", "na", "value"}
 
         for idx, slide in enumerate(prs.slides, start=1):
             title = slide.shapes.title.text.strip() if slide.shapes.title and slide.shapes.title.text else ""
@@ -56,6 +60,27 @@ class PPTXParser:
                         header_text = [(cell.text or "").strip() for cell in first_row.cells]
                         if not any(header_text):
                             tables_missing_headers.append({"slide": idx, "table": slide_tables})
+                        else:
+                            normalized_headers = [text.lower() for text in header_text if text]
+                            unique_headers = set(normalized_headers)
+                            if len(header_text) > 1 and len(unique_headers) <= 1:
+                                table_header_scope_flags.append(
+                                    {
+                                        "slide": idx,
+                                        "table": slide_tables,
+                                        "reason": "duplicate_or_single_header_label",
+                                        "headers": header_text[:10],
+                                    }
+                                )
+                            elif any(text.lower() in generic_headers for text in header_text if text):
+                                table_header_scope_flags.append(
+                                    {
+                                        "slide": idx,
+                                        "table": slide_tables,
+                                        "reason": "generic_header_labels",
+                                        "headers": header_text[:10],
+                                    }
+                                )
                 link_text = (getattr(shape, "text", None) or "").strip()
                 shape_link = None
                 try:
@@ -66,6 +91,11 @@ class PPTXParser:
                     hyperlink_count += 1
                     if link_text and link_text.lower().strip() in generic_link_labels:
                         generic_links.append({"slide": idx, "text": link_text})
+                    invalid_reason = _invalid_link_reason(str(shape_link))
+                    if invalid_reason:
+                        invalid_links.append(
+                            {"slide": idx, "text": link_text or "(shape link)", "target": str(shape_link), "reason": invalid_reason}
+                        )
                 if hasattr(shape, "text_frame") and shape.text_frame:
                     for paragraph in shape.text_frame.paragraphs:
                         for run in paragraph.runs:
@@ -76,6 +106,11 @@ class PPTXParser:
                             run_text = (run.text or "").strip()
                             if run_text and run_text.lower().strip() in generic_link_labels:
                                 generic_links.append({"slide": idx, "text": run_text})
+                            invalid_reason = _invalid_link_reason(str(run_link))
+                            if invalid_reason:
+                                invalid_links.append(
+                                    {"slide": idx, "text": run_text or "(run link)", "target": str(run_link), "reason": invalid_reason}
+                                )
             total_images += slide_images
             total_tables += slide_tables
             if len(shape_positions) > 2:
@@ -109,7 +144,28 @@ class PPTXParser:
             "missingAltCount": missing_alt,
             "hyperlinkCount": hyperlink_count,
             "genericLinks": generic_links,
+            "invalidLinks": invalid_links,
             "tables": total_tables,
             "tablesMissingHeaders": tables_missing_headers,
+            "tableHeaderScopeFlags": table_header_scope_flags,
             "readingOrderWarnings": reading_order_warnings,
         }
+
+
+def _invalid_link_reason(target: str) -> str:
+    value = (target or "").strip()
+    if not value:
+        return "missing_target"
+    if value.startswith("#"):
+        return ""
+    lowered = value.lower()
+    if lowered in {"http://", "https://", "www.", "mailto:"}:
+        return "placeholder_target"
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https", "mailto"}:
+        if parsed.scheme in {"http", "https"} and not parsed.netloc:
+            return "missing_host"
+        return ""
+    if parsed.scheme == "" and parsed.path:
+        return ""
+    return "unsupported_scheme"

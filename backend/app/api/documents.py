@@ -11,6 +11,7 @@ import mimetypes
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
@@ -1514,8 +1515,10 @@ def _manual_review_for_remaining_issues(
         "reading_order": "Review and correct logical reading order in source content.",
         "empty_heading_text": "Add text content for empty heading elements and rescan.",
         "table_missing_headers": "Add header labels to table first rows and verify scope associations.",
+        "table_header_scope_review": "Review table headers for uniqueness and correct header scope mapping.",
         "missing_slide_titles": "Add a title placeholder to each slide and rescan.",
         "generic_link_text": "Replace generic link labels with descriptive destination-oriented text.",
+        "invalid_link_target": "Repair invalid hyperlink targets and verify each destination.",
     }
     existing_issue_ids = {str(item.get("issueId", "")) for item in existing_items}
     generated: List[Dict[str, object]] = []
@@ -1641,6 +1644,10 @@ def _analyze_pdf(
                 "evidence": {"pages": []},
             }
         )
+    pdf_link_signals = _extract_pdf_link_signals(reader, tree_nodes if isinstance(tree_nodes, dict) else {})
+    hyperlink_count = int(pdf_link_signals.get("hyperlinkCount", 0) or 0)
+    generic_links = pdf_link_signals.get("genericLinks", []) if isinstance(pdf_link_signals.get("genericLinks"), list) else []
+    invalid_links = pdf_link_signals.get("invalidLinks", []) if isinstance(pdf_link_signals.get("invalidLinks"), list) else []
     figures = struct_info.get("figures", 0)
     figures_missing_alt = struct_info.get("figuresMissingAlt", 0)
     missing_alt_nodes: List[str] = []
@@ -1730,6 +1737,70 @@ def _analyze_pdf(
                 "evidence": {"pages": []},
             }
         )
+    if hyperlink_count > 0 and generic_links:
+        first_link = generic_links[0] if isinstance(generic_links[0], dict) else {}
+        first_page = int(first_link.get("page", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-generic-link-text",
+                "ruleId": "generic_link_text",
+                "title": "Generic link text detected",
+                "severity": "warning",
+                "description": "One or more PDF links appear to use generic text (for example: 'click here').",
+                "locationHint": f"Page {first_page}" if first_page else "Tagged link elements",
+                "recommendation": "Use descriptive link text that explains the destination or action.",
+                "evidence": {
+                    "links": generic_links[:20],
+                    "hyperlinkCount": hyperlink_count,
+                    "genericCount": len(generic_links),
+                },
+            }
+        )
+    if hyperlink_count > 0 and invalid_links:
+        first_link = invalid_links[0] if isinstance(invalid_links[0], dict) else {}
+        first_page = int(first_link.get("page", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-invalid-link-target",
+                "ruleId": "invalid_link_target",
+                "title": "Invalid link target detected",
+                "severity": "warning",
+                "description": "One or more PDF link annotations have invalid, missing, or placeholder targets.",
+                "locationHint": f"Page {first_page}" if first_page else "Link annotations",
+                "recommendation": "Replace invalid link targets with valid destinations.",
+                "evidence": {"links": invalid_links[:20], "count": len(invalid_links)},
+            }
+        )
+    table_counts = struct_info.get("tables", {}) if isinstance(struct_info, dict) else {}
+    table_count = int(table_counts.get("Table", 0) or 0)
+    th_count = int(table_counts.get("TH", 0) or 0)
+    td_count = int(table_counts.get("TD", 0) or 0)
+    if tagged and table_count > 0 and th_count == 0:
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-table-headers",
+                "ruleId": "table_missing_headers",
+                "title": "Table headers may be missing",
+                "severity": "warning",
+                "description": "Tagged tables include no TH elements.",
+                "locationHint": "Structure tree tables",
+                "recommendation": "Add table header tags (TH) for data tables.",
+                "evidence": {"tableCount": table_count, "thCount": th_count, "tdCount": td_count},
+            }
+        )
+    elif tagged and table_count > 0 and th_count > 0 and td_count > 0 and th_count <= max(1, td_count // 20):
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-table-header-scope",
+                "ruleId": "table_header_scope_review",
+                "title": "Table header scope requires review",
+                "severity": "warning",
+                "description": "Header-cell density is very low compared with data cells.",
+                "locationHint": "Structure tree tables",
+                "recommendation": "Review table header coverage and scope assignments.",
+                "evidence": {"tableCount": table_count, "thCount": th_count, "tdCount": td_count},
+            }
+        )
 
     skipped_issue = _find_skipped_heading_issue(tree_nodes)
     if skipped_issue:
@@ -1740,6 +1811,78 @@ def _analyze_pdf(
         issues.append(reading_order_issue)
 
     return issues
+
+
+def _invalid_link_reason(target: str) -> str:
+    value = (target or "").strip()
+    if not value:
+        return "missing_target"
+    if value.startswith("#"):
+        return ""
+    lowered = value.lower()
+    if lowered in {"http://", "https://", "www.", "mailto:"}:
+        return "placeholder_target"
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https", "mailto"}:
+        if parsed.scheme in {"http", "https"} and not parsed.netloc:
+            return "missing_host"
+        return ""
+    if parsed.scheme == "" and parsed.path:
+        return ""
+    return "unsupported_scheme"
+
+
+def _extract_pdf_link_signals(reader: PdfReader, tree_nodes: Dict[str, Dict[str, object]]) -> Dict[str, object]:
+    invalid_links: List[Dict[str, object]] = []
+    generic_links: List[Dict[str, object]] = []
+    generic_labels = {"click here", "here", "read more", "learn more", "more", "link", "this"}
+    hyperlink_count = 0
+    for page_index, page in enumerate(reader.pages, start=1):
+        annots = page.get("/Annots")
+        if not isinstance(annots, list):
+            continue
+        for annot_ref in annots:
+            try:
+                annot = annot_ref.get_object()
+            except Exception:
+                continue
+            if not isinstance(annot, dict):
+                continue
+            if str(annot.get("/Subtype", "")) != "/Link":
+                continue
+            hyperlink_count += 1
+            target = ""
+            action = annot.get("/A")
+            if isinstance(action, dict):
+                uri_value = action.get("/URI")
+                if uri_value:
+                    target = str(uri_value)
+            if not target:
+                dest = annot.get("/Dest")
+                if dest is not None:
+                    target = f"#{dest}"
+            reason = _invalid_link_reason(target)
+            if reason:
+                invalid_links.append({"page": page_index, "target": target, "reason": reason})
+
+    if tree_nodes:
+        for node_id, node in tree_nodes.items():
+            if node.get("tag") != "Link":
+                continue
+            candidate = str(node.get("actualText") or node.get("title") or "").strip()
+            if not candidate:
+                continue
+            if candidate.lower() in generic_labels:
+                page_value = node.get("page")
+                generic_links.append(
+                    {"page": int(page_value) if isinstance(page_value, int) else None, "text": candidate, "nodeId": node_id}
+                )
+
+    return {
+        "hyperlinkCount": hyperlink_count,
+        "invalidLinks": invalid_links,
+        "genericLinks": generic_links,
+    }
 
 
 def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
@@ -1759,10 +1902,16 @@ def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
     missing_alt = int(parsed.get("missingAltCount", 0) or 0)
     hyperlink_count = int(parsed.get("hyperlinkCount", 0) or 0)
     generic_links = parsed.get("genericLinks", []) if isinstance(parsed.get("genericLinks", []), list) else []
+    invalid_links = parsed.get("invalidLinks", []) if isinstance(parsed.get("invalidLinks", []), list) else []
     table_count = int(parsed.get("tables", 0) or 0)
     tables_missing_headers = (
         [int(table_idx) for table_idx in parsed.get("tablesMissingHeaders", []) if isinstance(table_idx, int)]
         if isinstance(parsed.get("tablesMissingHeaders", []), list)
+        else []
+    )
+    table_header_scope_flags = (
+        [item for item in parsed.get("tableHeaderScopeFlags", []) if isinstance(item, dict)]
+        if isinstance(parsed.get("tableHeaderScopeFlags", []), list)
         else []
     )
 
@@ -1853,6 +2002,21 @@ def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                 },
             }
         )
+    if table_header_scope_flags:
+        first_flag = table_header_scope_flags[0]
+        first_table = int(first_flag.get("table", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-table-header-scope",
+                "ruleId": "table_header_scope_review",
+                "title": "Table header scope requires review",
+                "severity": "warning",
+                "description": "Table headers may be ambiguous or overly generic.",
+                "locationHint": f"Table {first_table}" if first_table else "Tables",
+                "recommendation": "Use distinct, descriptive header labels and verify header scope.",
+                "evidence": {"flags": table_header_scope_flags[:20]},
+            }
+        )
     if hyperlink_count > 0 and generic_links:
         first_link = generic_links[0] if isinstance(generic_links[0], dict) else {}
         first_section = int(first_link.get("section", 0) or 0)
@@ -1870,6 +2034,21 @@ def _analyze_docx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                     "hyperlinkCount": hyperlink_count,
                     "genericCount": len(generic_links),
                 },
+            }
+        )
+    if hyperlink_count > 0 and invalid_links:
+        first_link = invalid_links[0] if isinstance(invalid_links[0], dict) else {}
+        first_section = int(first_link.get("section", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-invalid-link-target",
+                "ruleId": "invalid_link_target",
+                "title": "Invalid link target detected",
+                "severity": "warning",
+                "description": "One or more hyperlinks have invalid, missing, or placeholder targets.",
+                "locationHint": f"Section {first_section}" if first_section else "Document body",
+                "recommendation": "Replace invalid hyperlink targets with valid destinations.",
+                "evidence": {"links": invalid_links[:20], "count": len(invalid_links)},
             }
         )
     if image_count > 0:
@@ -1906,9 +2085,15 @@ def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
     missing_alt = int(parsed.get("missingAltCount", 0) or 0)
     hyperlink_count = int(parsed.get("hyperlinkCount", 0) or 0)
     generic_links = parsed.get("genericLinks", []) if isinstance(parsed.get("genericLinks", []), list) else []
+    invalid_links = parsed.get("invalidLinks", []) if isinstance(parsed.get("invalidLinks", []), list) else []
     tables_missing_headers = (
         [item for item in parsed.get("tablesMissingHeaders", []) if isinstance(item, dict)]
         if isinstance(parsed.get("tablesMissingHeaders", []), list)
+        else []
+    )
+    table_header_scope_flags = (
+        [item for item in parsed.get("tableHeaderScopeFlags", []) if isinstance(item, dict)]
+        if isinstance(parsed.get("tableHeaderScopeFlags", []), list)
         else []
     )
 
@@ -2002,6 +2187,21 @@ def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                 },
             }
         )
+    if table_header_scope_flags:
+        first = table_header_scope_flags[0]
+        first_slide = int(first.get("slide", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-table-header-scope",
+                "ruleId": "table_header_scope_review",
+                "title": "Table header scope requires review",
+                "severity": "warning",
+                "description": "One or more slide tables have ambiguous or generic header labels.",
+                "locationHint": f"Slide {first_slide}" if first_slide else "Slides",
+                "recommendation": "Use distinct, descriptive table headers and verify header scope.",
+                "evidence": {"flags": table_header_scope_flags[:20]},
+            }
+        )
     if hyperlink_count > 0 and generic_links:
         first = generic_links[0] if isinstance(generic_links[0], dict) else {}
         first_slide = int(first.get("slide", 0) or 0)
@@ -2019,6 +2219,21 @@ def _analyze_pptx(doc_id: str, path: Path) -> List[Dict[str, object]]:
                     "hyperlinkCount": hyperlink_count,
                     "genericCount": len(generic_links),
                 },
+            }
+        )
+    if hyperlink_count > 0 and invalid_links:
+        first = invalid_links[0] if isinstance(invalid_links[0], dict) else {}
+        first_slide = int(first.get("slide", 0) or 0)
+        issues.append(
+            {
+                "id": f"{doc_id}-issue-invalid-link-target",
+                "ruleId": "invalid_link_target",
+                "title": "Invalid link target detected",
+                "severity": "warning",
+                "description": "One or more slide hyperlinks have invalid, missing, or placeholder targets.",
+                "locationHint": f"Slide {first_slide}" if first_slide else "Slides",
+                "recommendation": "Update links to valid destinations.",
+                "evidence": {"links": invalid_links[:20], "count": len(invalid_links)},
             }
         )
     if reading_order_warnings:
