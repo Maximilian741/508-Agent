@@ -27,8 +27,8 @@ NON_DESCRIPTIVE_LINK_TEXT = {
 
 
 def _normalize_text(text: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9\\s]+", "", text.lower())
-    return re.sub(r"\\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"[^a-z0-9\s]+", "", text.lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 class LinkTextAnalyzer(Analyzer):

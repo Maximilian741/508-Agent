@@ -209,7 +209,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     backendHealth: "unknown",
     backendHealthMessage: null,
     themeMode: "system",
-    mockMode: true,
+    mockMode: false,
     selectedDocument: null,
     scanResults: null,
     manualReviewQueue: [],

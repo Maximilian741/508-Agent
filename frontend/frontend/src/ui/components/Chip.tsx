@@ -1,5 +1,5 @@
 import { ReactNode } from "react";
-import { StyleProp, StyleSheet, Text, TextStyle, View, ViewStyle } from "react-native";
+import { Pressable, StyleProp, StyleSheet, Text, TextStyle, View, ViewStyle } from "react-native";
 
 import { useTheme } from "../useTheme";
 
@@ -9,17 +9,46 @@ interface ChipProps {
   style?: StyleProp<ViewStyle>;
   icon?: ReactNode;
   textStyle?: StyleProp<TextStyle>;
+  /** When set, the chip becomes a Pressable button. */
+  onPress?: () => void;
+  accessibilityLabel?: string;
 }
 
-export function Chip({ label, tone = "default", style, icon, textStyle }: ChipProps) {
+export function Chip({
+  label,
+  tone = "default",
+  style,
+  icon,
+  textStyle,
+  onPress,
+  accessibilityLabel,
+}: ChipProps) {
   const theme = useTheme();
   const styles = createStyles(theme);
-  return (
-    <View style={[styles.base, styles[`tone_${tone}`], style]}>
+  const content = (
+    <>
       {icon}
       <Text style={[styles.text, styles[`text_${tone}`], textStyle]}>{label}</Text>
-    </View>
+    </>
   );
+  if (onPress) {
+    return (
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel ?? label}
+        style={({ pressed }: any) => [
+          styles.base,
+          styles[`tone_${tone}`],
+          pressed ? { opacity: 0.85 } : null,
+          style,
+        ]}
+      >
+        {content}
+      </Pressable>
+    );
+  }
+  return <View style={[styles.base, styles[`tone_${tone}`], style]}>{content}</View>;
 }
 
 const createStyles = (theme: ReturnType<typeof useTheme>) =>

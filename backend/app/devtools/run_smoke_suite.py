@@ -23,6 +23,8 @@ SMOKE_MODULES = [
     "app.devtools.smoke_policy_blocks_set_document_title",
     "app.devtools.smoke_dispatcher_prefers_real_action_over_manual",
     "app.devtools.smoke_dispatcher_messages_single_line",
+    # Tree-aware pipeline smoke (added in the 2026 Q1 rewrite)
+    "app.devtools.smoke_pipeline_remediate",
 ]
 
 

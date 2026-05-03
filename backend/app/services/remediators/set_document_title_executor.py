@@ -59,6 +59,8 @@ class SetDocumentTitleExecutor(RemediationExecutor):
                 status=ExecutionStatus.SKIPPED,
                 notes=f"Title already set; no changes applied. Title={before_title!r}.",
             )
+        if target.metadata.properties is None:
+            target.metadata.properties = {}
         target.metadata.properties["title"] = after_title
         return ExecutionResult(
             action_code=action_code,

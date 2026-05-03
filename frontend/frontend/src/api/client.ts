@@ -279,9 +279,76 @@ export interface DocumentSummary {
     unlabeledFields: number;
 }
 
+export interface PipelineSummary {
+    documentId: string;
+    sourceFormat: string;
+    title?: string | null;
+    language?: string | null;
+    pageCount: number;
+    nodeCount: number;
+    imageCount: number;
+    tableCount: number;
+}
+
+export interface PipelineViolation {
+    id: string;
+    ruleId: string;
+    severity: Severity;
+    description: string;
+    nodeId: string;
+    page?: number | null;
+    standards: { wcag_2_1: string[]; section_508: string[]; pdf_ua: string[] };
+    evidence: Record<string, unknown>;
+    recommendedActions: string[];
+}
+
+export interface PipelineExecutionResult {
+    actionCode: string;
+    targetNodeId: string;
+    status: "success" | "skipped" | "not_implemented" | "ready";
+    notes: string;
+}
+
+export interface PipelineScore {
+    initialIssues: number;
+    fixedAutomatically: number;
+    pendingManual: number;
+    score: number;
+    grade: string;
+}
+
+export interface PipelineResponse {
+    summary: PipelineSummary;
+    violations: PipelineViolation[];
+    executions: PipelineExecutionResult[];
+    score: PipelineScore;
+    aiProvider: string;
+}
+
+export interface PipelineRemediateResult {
+    jobId: string;
+    filename: string;
+    downloadUrl: string;
+    approved: string[];
+    rejected: string[];
+    executions: PipelineExecutionResult[];
+    writer: {
+        applied: Array<{ kind: string; target_id: string; summary: string }>;
+        skipped: Array<{ target_id: string; reason: string }>;
+    };
+    manualReviewItemsCreated: number;
+}
+
 export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
+    runPipeline: (file: File, execute?: boolean) => Promise<PipelineResponse>;
+    runPipelineRemediate: (
+        file: File,
+        approvedViolationIds: string[],
+        rejectedViolationIds: string[],
+    ) => Promise<PipelineRemediateResult>;
+    getPipelineFileUrl: (jobId: string, filename: string) => string;
     manualReview: (docId?: string) => Promise<ManualReviewItem[]>;
     clearManualReview: () => Promise<{ cleared: number }>;
     updateManualReview: (itemId: string, payload: { status: "pending" | "approved" | "rejected"; approvedText?: string }) => Promise<ManualReviewItem>;
@@ -371,6 +438,95 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         console.log("[api] POST /scan", payload);
         return request<ScanResponse>("/scan", payload);
     };
+
+    const runPipeline = async (file: File, execute: boolean = true): Promise<PipelineResponse> => {
+        if (mockMode) {
+            return {
+                summary: {
+                    documentId: file.name.replace(/\.[^.]+$/, "") || "doc",
+                    sourceFormat: (file.name.split(".").pop() || "pdf").toLowerCase(),
+                    title: null,
+                    language: null,
+                    pageCount: 1,
+                    nodeCount: 4,
+                    imageCount: 1,
+                    tableCount: 0,
+                },
+                violations: [
+                    {
+                        id: "vio-doc-1-document_title_missing",
+                        ruleId: "DOCUMENT_TITLE_MISSING",
+                        severity: "warning",
+                        description: "Document title is missing.",
+                        nodeId: "doc-1",
+                        page: null,
+                        standards: { wcag_2_1: ["2.4.2"], section_508: ["E207.4"], pdf_ua: ["7.1-2"] },
+                        evidence: {},
+                        recommendedActions: ["SET_DOCUMENT_TITLE", "FLAG_FOR_MANUAL_REVIEW"],
+                    },
+                ],
+                executions: [
+                    {
+                        actionCode: "SET_DOCUMENT_TITLE",
+                        targetNodeId: "doc-1",
+                        status: "success",
+                        notes: "Set document title from None to 'Sample Document'.",
+                    },
+                ],
+                score: { initialIssues: 1, fixedAutomatically: 1, pendingManual: 0, score: 95, grade: "A+" },
+                aiProvider: "heuristic",
+            };
+        }
+        const form = new FormData();
+        form.append("file", file);
+        const url = `${baseUrl}/pipeline/analyze${execute ? "" : "?execute=false"}`;
+        const response = await fetch(url, { method: "POST", body: form });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Pipeline analyze failed");
+        }
+        return (await response.json()) as PipelineResponse;
+    };
+
+    const runPipelineRemediate = async (
+        file: File,
+        approvedIds: string[],
+        rejectedIds: string[],
+    ): Promise<PipelineRemediateResult> => {
+        if (mockMode) {
+            return {
+                jobId: "mock-" + Date.now().toString(36),
+                filename: file.name.replace(/\.([^.]+)$/, "-remediated.$1"),
+                downloadUrl: "",
+                approved: approvedIds,
+                rejected: rejectedIds,
+                executions: approvedIds.map((id) => ({
+                    actionCode: "MOCK",
+                    targetNodeId: id,
+                    status: "success",
+                    notes: "Mock-applied. Demo Mode does not produce a real file.",
+                })),
+                writer: { applied: [], skipped: [] },
+                manualReviewItemsCreated: rejectedIds.length,
+            };
+        }
+        const form = new FormData();
+        form.append("file", file);
+        form.append("approved_violations", JSON.stringify(approvedIds));
+        form.append("rejected_violations", JSON.stringify(rejectedIds));
+        const response = await fetch(`${baseUrl}/pipeline/remediate`, {
+            method: "POST",
+            body: form,
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Remediate failed");
+        }
+        return (await response.json()) as PipelineRemediateResult;
+    };
+
+    const getPipelineFileUrl = (jobId: string, filename: string) =>
+        `${baseUrl}/pipeline/files/${jobId}/${filename}`;
 
     const remediate = async (payload: RemediateRequest): Promise<RemediateResponse> => {
         if (mockMode) {
@@ -676,6 +832,9 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
     return {
         scan,
         remediate,
+        runPipeline,
+        runPipelineRemediate,
+        getPipelineFileUrl,
         manualReview,
         clearManualReview,
         updateManualReview,

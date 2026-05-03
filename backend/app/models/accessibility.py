@@ -77,6 +77,9 @@ class AccessibilityFlagCode(str, Enum):
     DOCUMENT_LANGUAGE_MISSING = "DOCUMENT_LANGUAGE_MISSING"
     DOCUMENT_TITLE_MISSING = "DOCUMENT_TITLE_MISSING"
     READING_ORDER_AMBIGUOUS = "READING_ORDER_AMBIGUOUS"
+    HEADING_TEXT_EMPTY = "HEADING_TEXT_EMPTY"
+    TABLE_CAPTION_MISSING = "TABLE_CAPTION_MISSING"
+    LINK_TARGET_BROKEN = "LINK_TARGET_BROKEN"
 
 
 class StandardReference(BaseModel):
@@ -205,6 +208,36 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["1.3.2"],
             section_508=["E207.2"],
             pdf_ua=["7.3-5"],
+        ),
+    ),
+    AccessibilityFlagCode.HEADING_TEXT_EMPTY: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.HEADING_TEXT_EMPTY,
+        severity=Severity.ERROR,
+        message="Heading has no text content.",
+        standards=StandardReference(
+            wcag_2_1=["2.4.6"],
+            section_508=["E207.2"],
+            pdf_ua=["7.3-5"],
+        ),
+    ),
+    AccessibilityFlagCode.TABLE_CAPTION_MISSING: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.TABLE_CAPTION_MISSING,
+        severity=Severity.WARNING,
+        message="Table is missing a caption or descriptive label.",
+        standards=StandardReference(
+            wcag_2_1=["1.3.1"],
+            section_508=["E205.2"],
+            pdf_ua=["7.3-5"],
+        ),
+    ),
+    AccessibilityFlagCode.LINK_TARGET_BROKEN: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.LINK_TARGET_BROKEN,
+        severity=Severity.WARNING,
+        message="Link target is missing, empty, or unsafe.",
+        standards=StandardReference(
+            wcag_2_1=["2.4.4"],
+            section_508=["E205.4"],
+            pdf_ua=["7.6-6"],
         ),
     ),
 }
@@ -625,6 +658,39 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.DOCUMENT],
             related_flag_code=AccessibilityFlagCode.READING_ORDER_AMBIGUOUS,
+        ),
+    ],
+    AccessibilityFlagCode.HEADING_TEXT_EMPTY: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.HEADING],
+            related_flag_code=AccessibilityFlagCode.HEADING_TEXT_EMPTY,
+        ),
+    ],
+    AccessibilityFlagCode.TABLE_CAPTION_MISSING: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.TABLE],
+            related_flag_code=AccessibilityFlagCode.TABLE_CAPTION_MISSING,
+        ),
+    ],
+    AccessibilityFlagCode.LINK_TARGET_BROKEN: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.LINK],
+            related_flag_code=AccessibilityFlagCode.LINK_TARGET_BROKEN,
         ),
     ],
 }

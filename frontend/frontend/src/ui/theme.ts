@@ -73,31 +73,47 @@ export type ThemeColors = {
   info: string;
 };
 
+/**
+ * Light palette — designed for long reading sessions on document audits.
+ *
+ * Backgrounds use Slate-25/Slate-50 instead of pure white to reduce eye
+ * strain.  Surfaces have a hairline gray-100 border so cards feel like
+ * defined objects rather than floating pieces.  Accent is the same
+ * Indigo-blue we use in the brand mark — accessible against both white
+ * surfaces and the gradient hero.
+ */
 export const lightColors: ThemeColors = {
-  bg: "#F6F7FB",
+  bg: "#F8FAFC",          // Slate-50
   surface: "#FFFFFF",
-  surface2: "#F1F3F8",
-  text: "#0F172A",
-  textMuted: "#5B6475",
-  border: "#E2E8F0",
-  shadow: "rgba(15, 23, 42, 0.12)",
+  surface2: "#F1F5F9",    // Slate-100
+  text: "#0F172A",        // Slate-900
+  textMuted: "#475569",   // Slate-600 — better contrast than the old #5B6475
+  border: "#E2E8F0",      // Slate-200
+  shadow: "rgba(15, 23, 42, 0.10)",
   accent: "#2D5BFF",
-  success: "#16A34A",
-  warning: "#F59E0B",
-  danger: "#DC2626",
-  info: "#0EA5E9",
+  success: "#15803D",     // Green-700 — meets AA on white
+  warning: "#B45309",     // Amber-700 — meets AA on white
+  danger: "#B91C1C",      // Red-700 — meets AA on white
+  info: "#0369A1",        // Sky-700 — meets AA on white
 } as const;
 
+/**
+ * Dark palette — true-black-friendly while preserving cards/accents.
+ *
+ * bg uses #07090F instead of pure #000 so white text doesn't fringe; surface
+ * raises just enough to be discernible.  Accent is brightened slightly so it
+ * still feels like the "primary action" colour against deep navy.
+ */
 export const darkColors: ThemeColors = {
-  bg: "#0B0F1A",
-  surface: "#121826",
-  surface2: "#1A2233",
+  bg: "#07090F",
+  surface: "#11151F",
+  surface2: "#1A2031",
   text: "#F8FAFC",
-  textMuted: "#A0AEC0",
-  border: "#243048",
-  shadow: "rgba(2, 6, 23, 0.6)",
-  accent: "#5B8CFF",
-  success: "#22C55E",
+  textMuted: "#94A3B8",   // Slate-400
+  border: "#1F2A3D",
+  shadow: "rgba(0, 0, 0, 0.65)",
+  accent: "#6488FF",
+  success: "#34D399",
   warning: "#FBBF24",
   danger: "#F87171",
   info: "#38BDF8",

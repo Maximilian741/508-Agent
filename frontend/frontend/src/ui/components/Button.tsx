@@ -13,6 +13,10 @@ interface ButtonProps {
   disabled?: boolean;
   style?: ViewStyle;
   icon?: ReactNode;
+  /** Override the screen-reader label. Defaults to the visible title. */
+  accessibilityLabel?: string;
+  /** Optional one-line hint announced after the label. */
+  accessibilityHint?: string;
 }
 
 export function Button({
@@ -23,6 +27,8 @@ export function Button({
   disabled = false,
   style,
   icon,
+  accessibilityLabel,
+  accessibilityHint,
 }: ButtonProps) {
   const theme = useTheme();
   const styles = createStyles(theme);
@@ -30,12 +36,17 @@ export function Button({
 
   return (
     <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? title}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{ disabled: isDisabled, busy: loading }}
       onPress={onPress}
       disabled={isDisabled}
-      style={({ pressed }) => [
+      style={({ pressed, focused }: any) => [
         styles.base,
         styles[variant],
         pressed && !isDisabled ? styles.pressed : null,
+        focused ? styles.focused : null,
         isDisabled ? styles.disabled : null,
         style,
       ]}
@@ -103,6 +114,12 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       opacity: 0.85,
       transform: [{ scale: 0.98 }],
     },
+    focused: {
+      outlineColor: theme.colors.accent,
+      outlineWidth: 2,
+      outlineStyle: "solid",
+      outlineOffset: 2,
+    } as any,
     disabled: {
       opacity: 0.5,
     },

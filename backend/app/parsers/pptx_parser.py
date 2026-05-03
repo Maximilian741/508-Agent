@@ -1,12 +1,38 @@
-"""PPTX extraction helpers used by scan/fix routes."""
+"""PPTX extraction helpers used by scan/fix routes.
+
+Same dual-API pattern as :mod:`app.parsers.docx_parser`: a legacy
+dict-returning :meth:`PPTXParser.parse` plus a new
+:meth:`PPTXParser.parse_to_tree` that emits an :class:`AccessibilityTree`.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List
+import base64
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+from app.models.accessibility import (
+    AccessibilityTree,
+    ContentKind,
+    DocumentNode,
+    HeadingNode,
+    ImageNode,
+    LinkNode,
+    NodeContent,
+    NodeMetadata,
+    ParagraphNode,
+    ParserResult,
+    SectionNode,
+    TableCellNode,
+    TableCellType,
+    TableHeaderScope,
+    TableNode,
+    TableRowNode,
+)
 
 
 class PPTXParser:
@@ -150,6 +176,213 @@ class PPTXParser:
             "tableHeaderScopeFlags": table_header_scope_flags,
             "readingOrderWarnings": reading_order_warnings,
         }
+
+
+    def parse_to_tree(self, file_path: str) -> ParserResult:
+        path = Path(file_path)
+        prs = Presentation(file_path)
+        title = (prs.core_properties.title or "").strip()
+        language = (getattr(prs.core_properties, "language", None) or "").strip()
+        properties: Dict[str, Any] = {"filename": path.name}
+        if title:
+            properties["title"] = title
+        root = DocumentNode(
+            id="doc-1",
+            content=NodeContent(kind=ContentKind.NONE),
+            metadata=NodeMetadata(
+                language=language or None,
+                source_format="pptx",
+                properties=properties,
+            ),
+            children=[],
+            accessibility_flags=[],
+        )
+        ids = _IdCounter()
+
+        for slide_index, slide in enumerate(prs.slides, start=1):
+            slide_title = ""
+            try:
+                if slide.shapes.title and slide.shapes.title.text:
+                    slide_title = slide.shapes.title.text.strip()
+            except Exception:
+                slide_title = ""
+
+            section = SectionNode(
+                id=ids(f"slide-{slide_index}-section"),
+                content=NodeContent(kind=ContentKind.TEXT, text=slide_title or f"Slide {slide_index}"),
+                metadata=NodeMetadata(
+                    page=slide_index,
+                    source_format="pptx",
+                    properties={"slide_number": slide_index},
+                ),
+                children=[],
+                accessibility_flags=[],
+            )
+            root.children.append(section)
+
+            if slide_title:
+                section.children.append(
+                    HeadingNode(
+                        id=ids(f"slide-{slide_index}-h"),
+                        level=1,
+                        content=NodeContent(kind=ContentKind.TEXT, text=slide_title),
+                        metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                        children=[],
+                        accessibility_flags=[],
+                    )
+                )
+
+            for shape in slide.shapes:
+                top = float(getattr(shape, "top", 0) or 0)
+                left = float(getattr(shape, "left", 0) or 0)
+                shape_meta_props = {"order_hint": (top, left)}
+                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    section.children.append(_picture_to_image_node(shape, slide_index, ids, shape_meta_props))
+                    continue
+                if shape.has_table:
+                    section.children.append(_table_to_node_pptx(shape.table, slide_index, ids))
+                    continue
+                if hasattr(shape, "text_frame") and shape.text_frame:
+                    text = (shape.text or "").strip()
+                    if not text:
+                        continue
+                    section.children.append(
+                        ParagraphNode(
+                            id=ids(f"slide-{slide_index}-p"),
+                            content=NodeContent(kind=ContentKind.TEXT, text=text),
+                            metadata=NodeMetadata(
+                                page=slide_index,
+                                source_format="pptx",
+                                properties=shape_meta_props,
+                            ),
+                            children=[],
+                            accessibility_flags=[],
+                        )
+                    )
+                    # Hyperlinks within runs get their own LinkNode.
+                    for paragraph in shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            try:
+                                href = run.hyperlink.address
+                            except Exception:
+                                href = None
+                            if not href:
+                                continue
+                            section.children.append(
+                                LinkNode(
+                                    id=ids(f"slide-{slide_index}-link"),
+                                    target=str(href),
+                                    content=NodeContent(kind=ContentKind.TEXT, text=(run.text or "").strip() or "link"),
+                                    metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                                    children=[],
+                                    accessibility_flags=[],
+                                )
+                            )
+
+        raw_metadata = {
+            "filename": path.name,
+            "title": title,
+            "language": language,
+            "slide_count": len(prs.slides),
+        }
+        return ParserResult(
+            document_id=path.stem or "doc",
+            format="pptx",
+            tree=AccessibilityTree(root=root, metadata=raw_metadata),
+            raw_metadata=raw_metadata,
+        )
+
+
+# ----- PPTX → AccessibilityTree helpers --------------------------------------
+
+
+class _IdCounter:
+    def __init__(self) -> None:
+        self._counts: Dict[str, int] = {}
+
+    def __call__(self, prefix: str) -> str:
+        i = self._counts.get(prefix, 0) + 1
+        self._counts[prefix] = i
+        return f"{prefix}-{i}"
+
+
+def _picture_to_image_node(shape, slide_index: int, ids: "_IdCounter", extra_props: Dict[str, Any]) -> ImageNode:
+    alt_text = (getattr(shape, "alternative_text", None) or "").strip()
+    is_decorative = False
+    image_b64: Optional[str] = None
+    image_mime: Optional[str] = None
+    try:
+        blob = shape.image.blob
+        if blob and len(blob) <= 2_000_000:
+            image_b64 = base64.b64encode(blob).decode("ascii")
+            content_type = getattr(shape.image, "content_type", None)
+            image_mime = str(content_type) if content_type else "image/png"
+    except Exception:
+        pass
+
+    properties: Dict[str, Any] = dict(extra_props)
+    if image_b64:
+        properties["image_b64"] = image_b64
+        properties["image_mime"] = image_mime or "image/png"
+    properties["shape_id"] = getattr(shape, "shape_id", None)
+    metadata = NodeMetadata(page=slide_index, source_format="pptx", properties=properties)
+    if is_decorative and alt_text:
+        return ImageNode.model_construct(
+            id=ids(f"slide-{slide_index}-img"),
+            node_type=ImageNode.type_value(),
+            content=NodeContent(kind=ContentKind.NONE),
+            metadata=metadata,
+            children=[],
+            accessibility_flags=[],
+            is_decorative=True,
+            alt_text=alt_text,
+        )
+    return ImageNode(
+        id=ids(f"slide-{slide_index}-img"),
+        content=NodeContent(kind=ContentKind.NONE),
+        metadata=metadata,
+        children=[],
+        accessibility_flags=[],
+        is_decorative=is_decorative,
+        alt_text=alt_text or None,
+    )
+
+
+def _table_to_node_pptx(table, slide_index: int, ids: "_IdCounter") -> TableNode:
+    rows: List[TableRowNode] = []
+    row_objects = list(table.rows)
+    for row_index, row in enumerate(row_objects):
+        cells: List[TableCellNode] = []
+        for cell in row.cells:
+            text = (cell.text or "").strip()
+            cell_type = TableCellType.HEADER if row_index == 0 and text else TableCellType.DATA
+            cells.append(
+                TableCellNode(
+                    id=ids(f"slide-{slide_index}-cell"),
+                    cell_type=cell_type,
+                    header_scope=TableHeaderScope.COLUMN if cell_type == TableCellType.HEADER else TableHeaderScope.NONE,
+                    content=NodeContent(kind=ContentKind.TEXT, text=text or " "),
+                    metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                    children=[],
+                    accessibility_flags=[],
+                )
+            )
+        rows.append(
+            TableRowNode(
+                id=ids(f"slide-{slide_index}-row"),
+                content=NodeContent(kind=ContentKind.NONE),
+                metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                children=cells,
+                accessibility_flags=[],
+            )
+        )
+    return TableNode(
+        id=ids(f"slide-{slide_index}-table"),
+        content=NodeContent(kind=ContentKind.NONE),
+        metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+        children=rows,
+        accessibility_flags=[],
+    )
 
 
 def _invalid_link_reason(target: str) -> str:
