@@ -44,6 +44,7 @@ import { useFileDrop } from "../src/hooks/useFileDrop";
 import { useKeyboardShortcuts } from "../src/hooks/useKeyboardShortcuts";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
+import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Dialog } from "../src/ui/components/Dialog";
@@ -57,6 +58,7 @@ import { SeverityHeatmap } from "../src/ui/components/SeverityHeatmap";
 import { IssueNavigator } from "../src/ui/components/IssueNavigator";
 import { PdfPreview } from "../src/ui/components/PdfPreview";
 import { Skeleton, SkeletonBlock } from "../src/ui/components/Skeleton";
+import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
 import { UncertaintyChip } from "../src/ui/components/UncertaintyChip";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
@@ -195,14 +197,6 @@ export default function AuditScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyId]);
 
-  // Track the previously-displayed score so the count-up animation has
-  // a real "from" value when the user makes a decision.
-  useEffect(() => {
-    if (liveScore) {
-      lastScoreRef.current = liveScore.score;
-    }
-  }, [liveScore?.score]);
-
   // Auto-save draft whenever the audit state changes meaningfully.
   useEffect(() => {
     if (!report || !filename) return;
@@ -215,32 +209,6 @@ export default function AuditScreen() {
       savedAt: new Date().toISOString(),
     });
   }, [report, filename, decisions, decisionLog, reviewIndex]);
-
-  // Periodically refresh the history entry's decision counts + snapshot so a
-  // user who closes the tab and re-opens the home page sees an accurate view.
-  useEffect(() => {
-    if (!report || !filename || !liveScore) return;
-    const handle = window.setTimeout(() => {
-      try {
-        appendHistory({
-          id: `${filename}-${reviewIndex < 0 ? "new" : "live"}`,
-          filename,
-          ranAt: new Date().toISOString(),
-          score: liveScore.score,
-          grade: liveScore.grade,
-          totalIssues: report.violations.length,
-          sourceFormat: report.summary.sourceFormat,
-          approved: decisionCounts.approved,
-          rejected: decisionCounts.rejected,
-          pending: decisionCounts.pending,
-          snapshot: { report, decisions, decisionLog: decisionLog.slice(0, 10) },
-        });
-      } catch {
-        // ignore
-      }
-    }, 600);
-    return () => window.clearTimeout(handle);
-  }, [report, filename, liveScore, decisionCounts, decisions, decisionLog, reviewIndex]);
 
   const currentViolation: PipelineViolation | null = filteredViolations[reviewIndex] ?? null;
   const totalIssues = report?.violations.length ?? 0;
@@ -324,6 +292,41 @@ export default function AuditScreen() {
       approvedWeight,
     };
   }, [report, decisions]);
+
+  // Track the previously-displayed score so the count-up animation has
+  // a real "from" value when the user makes a decision.
+  useEffect(() => {
+    if (liveScore) {
+      lastScoreRef.current = liveScore.score;
+    }
+  }, [liveScore?.score]);
+
+  // Periodically refresh the history entry's decision counts + snapshot so a
+  // user who closes the tab and re-opens the home page sees an accurate view.
+  useEffect(() => {
+    if (!report || !filename || !liveScore) return;
+    const handle = window.setTimeout(() => {
+      try {
+        appendHistory({
+          id: `${filename}-${reviewIndex < 0 ? "new" : "live"}`,
+          filename,
+          ranAt: new Date().toISOString(),
+          score: liveScore.score,
+          grade: liveScore.grade,
+          totalIssues: report.violations.length,
+          sourceFormat: report.summary.sourceFormat,
+          approved: decisionCounts.approved,
+          rejected: decisionCounts.rejected,
+          pending: decisionCounts.pending,
+          snapshot: { report, decisions, decisionLog: decisionLog.slice(0, 10) },
+        });
+      } catch {
+        // ignore
+      }
+    }, 600);
+    return () => window.clearTimeout(handle);
+  }, [report, filename, liveScore, decisionCounts, decisions, decisionLog, reviewIndex]);
+
 
   /* ---- Pick file --------------------------------------------------------- */
   const handlePick = useCallback(() => {
@@ -671,12 +674,14 @@ export default function AuditScreen() {
       ) : null}
 
       {/* === Header ============================================================ */}
-      <View style={styles.header}>
+      <View style={{ position: "relative", borderRadius: 18, overflow: "hidden", marginBottom: 16, minHeight: 160, backgroundColor: "#0B1020", padding: 24, justifyContent: "center" }}>
+        <ShaderCanvas variant="aurora" opacity={0.55} />
+      <View style={[styles.header, { position: "relative", zIndex: 1 }]}>
         <View style={{ flex: 1 }}>
-          <Text style={[theme.typography.title, { color: theme.colors.text }]}>
+          <Text style={[theme.typography.title, { color: "#FFFFFF" }]}>
             508 Agent · Audit
           </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          <Text style={[theme.typography.body, { color: "rgba(255,255,255,0.85)" }]}>
             Drop a document, walk through every finding, approve only the fixes you want.
           </Text>
         </View>
@@ -712,9 +717,10 @@ export default function AuditScreen() {
               { borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
             ]}
           >
-            <Text style={[styles.helpButtonText, { color: theme.colors.textMuted }]}>?</Text>
+            <Text style={[styles.helpButtonText, { color: "rgba(255,255,255,0.85)" }]}>?</Text>
           </Pressable>
         </View>
+      </View>
       </View>
 
       {/* === Backend onboarding ================================================= */}
@@ -1329,27 +1335,38 @@ function ProgressBar(props: {
   onJump: (index: number) => void;
 }) {
   const theme = useTheme();
+  // Thin ribbon - 3px tall accent stripe split into one segment per finding.
+  // Decided segments fill in tone-coloured; current pulses brighter.
   return (
-    <View style={styles.progressRow}>
+    <View
+      style={[
+        styles.progressRibbon,
+        { backgroundColor: theme.colors.surface2 },
+      ]}
+    >
       {props.violations.map((v, i) => {
         const decision = props.decisions[v.id]?.decision ?? "pending";
-        let bg = theme.colors.surface2;
-        if (decision === "approved") bg = theme.colors.success;
-        else if (decision === "rejected") bg = theme.colors.danger;
-        else if (i === props.current) bg = theme.colors.accent;
+        let bg = "transparent";
+        let opacity = 0.0;
+        if (decision === "approved") {
+          bg = theme.colors.success;
+          opacity = 0.85;
+        } else if (decision === "rejected") {
+          bg = theme.colors.danger;
+          opacity = 0.7;
+        } else if (i === props.current) {
+          bg = theme.colors.accent;
+          opacity = 1;
+        } else {
+          bg = theme.colors.accent;
+          opacity = 0.18;
+        }
         return (
           <Pressable
             key={v.id}
             onPress={() => props.onJump(i)}
             accessibilityLabel={`Jump to issue ${i + 1}`}
-            style={[
-              styles.progressCell,
-              {
-                backgroundColor: bg,
-                borderColor:
-                  i === props.current ? theme.colors.text : "transparent",
-              },
-            ]}
+            style={[styles.progressSegment, { backgroundColor: bg, opacity }]}
           />
         );
       })}
@@ -1385,25 +1402,36 @@ function IssueCard(props: {
   }, [props.violation.id, props.customText]);
 
   return (
-    <View style={[styles.issueCard, { borderColor: theme.colors.border }]}>
+    <View style={[styles.issueCard, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}>
+      {/* Workshop note - thin coloured rule on the left, serif heading. */}
+      <View style={[styles.issueRule, { backgroundColor: tone }]} />
       <View style={styles.issueTop}>
-        <View style={[styles.severityDot, { backgroundColor: tone }]} />
         <View style={{ flex: 1 }}>
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>{catalog.title}</Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginBottom: 4 },
+            ]}
+          >
+            {v.severity.toUpperCase()}   .   {v.ruleId}
+          </Text>
+          <Text
+            style={[
+              theme.typography.displaySmall as any,
+              { color: theme.colors.text, fontSize: 24, lineHeight: 30 },
+            ]}
+          >
+            {catalog.title}
+          </Text>
+          <Text
+            style={[
+              theme.typography.body,
+              { color: theme.colors.textMuted, marginTop: 8, lineHeight: 22 },
+            ]}
+          >
             {catalog.summary}
           </Text>
         </View>
-        <Chip
-          label={v.severity}
-          tone={
-            v.severity === "error"
-              ? "danger"
-              : v.severity === "warning"
-              ? "warning"
-              : "info"
-          }
-        />
       </View>
 
       <Section title="Why this matters" body={catalog.why} />
@@ -1496,15 +1524,17 @@ function IssueCard(props: {
       ) : (
         <View style={styles.decisionRow}>
           <Button
-            title={props.decision === "approved" ? "✓ Approved (a)" : "Approve (a)"}
+            title={props.decision === "approved" ? "Approved (a)" : "Approve (a)"}
             onPress={() => props.onDecide("approved", props.customText)}
             variant={props.decision === "approved" ? "primary" : "secondary"}
+            icon={<PixelIcon name="check" size={3} color={props.decision === "approved" ? "#FFFFFF" : "#1F140A"} />}
           />
           <Button title="Edit & approve (e)" onPress={() => props.onSetEditing(true)} variant="ghost" />
           <Button
-            title={props.decision === "rejected" ? "✗ Rejected (r)" : "Reject (r)"}
+            title={props.decision === "rejected" ? "Rejected (r)" : "Reject (r)"}
             onPress={() => props.onDecide("rejected")}
             variant={props.decision === "rejected" ? "primary" : "ghost"}
+            icon={<PixelIcon name="x" size={3} color={props.decision === "rejected" ? "#FFFFFF" : "#B43A2E"} />}
           />
         </View>
       )}
@@ -2071,8 +2101,38 @@ const styles = StyleSheet.create({
   filterRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 8 },
   progressRow: { flexDirection: "row", gap: 4, marginVertical: 12, flexWrap: "wrap" },
   progressCell: { width: 14, height: 14, borderRadius: 3, borderWidth: 2 },
-  issueCard: { borderWidth: 1, borderRadius: 12, padding: 14, gap: 12, marginTop: 8 },
-  issueTop: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
+  progressRibbon: {
+    flexDirection: "row",
+    height: 3,
+    borderRadius: 2,
+    overflow: "hidden",
+    marginVertical: 16,
+    gap: 1,
+  },
+  progressSegment: {
+    flex: 1,
+    height: "100%",
+    minWidth: 4,
+  },
+  issueCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+    gap: 14,
+    marginTop: 8,
+    position: "relative",
+  },
+  issueRule: {
+    position: "absolute",
+    top: 24,
+    bottom: 24,
+    left: 0,
+    width: 3,
+    borderTopRightRadius: 2,
+    borderBottomRightRadius: 2,
+  },
+  issueTop: { flexDirection: "row", gap: 12, alignItems: "flex-start", paddingLeft: 14 },
   severityDot: { width: 10, height: 10, borderRadius: 5, marginTop: 6 },
   section: { flexDirection: "row", gap: 10 },
   sectionRule: { width: 3, borderRadius: 2, alignSelf: "stretch" },

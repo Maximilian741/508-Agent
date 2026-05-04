@@ -13,6 +13,11 @@
 import { Platform } from "react-native";
 
 import { PipelineResponse } from "../api/client";
+import {
+  DEFAULT_WORKSPACE_ID,
+  getActiveWorkspace,
+  historyKeyFor,
+} from "./workspaces";
 
 export interface AuditHistoryEntry {
   /** Stable id, generated client-side. */
@@ -69,21 +74,56 @@ export interface AuditSnapshot {
   }>;
 }
 
-const STORAGE_KEY = "508-audit-history-v2";
-const LEGACY_KEY = "508-audit-history-v1";
+const LEGACY_V2_KEY = "508-audit-history-v2";
+const LEGACY_V1_KEY = "508-audit-history-v1";
+const MIGRATION_FLAG_KEY = "508-audit-history-migrated-v3";
 const MAX_ENTRIES = 50;
 const MAX_SNAPSHOT_BYTES = 350_000;
 
-let memoryStore: AuditHistoryEntry[] = [];
+/** In-memory fallback for native platforms; keyed by workspace id. */
+const memoryStore: Record<string, AuditHistoryEntry[]> = {};
+
+function _activeKey(): string {
+  try {
+    return historyKeyFor(getActiveWorkspace().id);
+  } catch {
+    return historyKeyFor(DEFAULT_WORKSPACE_ID);
+  }
+}
+
+/**
+ * One-shot migration: copy any legacy unscoped history into the default
+ * workspace bucket, then mark migration done so we don't re-copy on every
+ * load (which would clobber the user's intentional changes).
+ */
+function _migrateLegacyHistory(): void {
+  if (Platform.OS !== "web") return;
+  try {
+    if (window.localStorage.getItem(MIGRATION_FLAG_KEY)) return;
+    const legacy =
+      window.localStorage.getItem(LEGACY_V2_KEY) ||
+      window.localStorage.getItem(LEGACY_V1_KEY);
+    if (legacy) {
+      const target = historyKeyFor(DEFAULT_WORKSPACE_ID);
+      // Don't clobber if the new bucket already has data.
+      if (!window.localStorage.getItem(target)) {
+        window.localStorage.setItem(target, legacy);
+      }
+    }
+    window.localStorage.setItem(MIGRATION_FLAG_KEY, "1");
+  } catch {
+    // ignore
+  }
+}
 
 export function loadHistory(): AuditHistoryEntry[] {
   if (Platform.OS !== "web") {
-    return [...memoryStore];
+    const key = _activeKey();
+    return [...(memoryStore[key] ?? [])];
   }
+  _migrateLegacyHistory();
   try {
-    const raw =
-      window.localStorage.getItem(STORAGE_KEY) ||
-      window.localStorage.getItem(LEGACY_KEY);
+    const raw = window.localStorage.getItem(_activeKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -98,17 +138,17 @@ export function loadHistory(): AuditHistoryEntry[] {
 export function saveHistory(entries: AuditHistoryEntry[]): void {
   const trimmed = entries.slice(0, MAX_ENTRIES);
   if (Platform.OS !== "web") {
-    memoryStore = trimmed;
+    memoryStore[_activeKey()] = trimmed;
     return;
   }
   try {
     const json = JSON.stringify(trimmed);
-    window.localStorage.setItem(STORAGE_KEY, json);
+    window.localStorage.setItem(_activeKey(), json);
   } catch {
     // Likely quota exceeded — try again with snapshots stripped.
     try {
       const slim = trimmed.map(({ snapshot, ...rest }) => rest);
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+      window.localStorage.setItem(_activeKey(), JSON.stringify(slim));
     } catch {
       // ignore
     }
@@ -140,12 +180,14 @@ export function findHistoryEntry(id: string): AuditHistoryEntry | null {
 
 export function clearHistory(): void {
   if (Platform.OS !== "web") {
-    memoryStore = [];
+    memoryStore[_activeKey()] = [];
     return;
   }
   try {
-    window.localStorage.removeItem(STORAGE_KEY);
-    window.localStorage.removeItem(LEGACY_KEY);
+    window.localStorage.removeItem(_activeKey());
+    // Also clear legacy unscoped keys so a stale row doesn't reappear.
+    window.localStorage.removeItem(LEGACY_V2_KEY);
+    window.localStorage.removeItem(LEGACY_V1_KEY);
   } catch {
     // ignore
   }

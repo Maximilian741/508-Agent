@@ -15,6 +15,14 @@ Most accessibility tools are *checkers* — they flag problems and stop there. M
 
 ## What's in the box
 
+The repo has three top-level folders worth knowing:
+
+- **[`/backend`](./backend)** — FastAPI service, parsers, analyzers, executors, writers, AI provider, and CLI. Start here for backend work.
+- **[`/frontend`](./frontend/frontend)** — Expo Router web/mobile app (`audit`, `home`, `help`, `about`, `contrast`, `settings`). Start here for UI work.
+- **[`/deploy`](./deploy)** — Production deployment scaffolding: nginx config, Cloudflare tunnel notes, and an `.env.example` for hosted setups.
+
+The features below all live across those folders:
+
 **Audit workflow** — Drop a PDF, DOCX, or PPTX. Get a one-screen, one-issue-at-a-time review queue with severity heatmap, navigable side panel, keyboard shortcuts (`j`/`k`/`a`/`r`/`e`/`u`), bulk actions, and a live score that moves as you decide.
 
 **Remediation engine** — Eleven deterministic executors covering missing alt text, decorative-image cleanup, heading-level normalization, table header injection + scope inference, list structure repair, link rewriting, document title/language, and reading-order resolution. Each executor records provenance and confidence so heuristic suggestions can be flagged for review.
@@ -31,32 +39,27 @@ Most accessibility tools are *checkers* — they flag problems and stop there. M
 
 ---
 
-## Quickstart
-
-### Windows one-click
-
-```cmd
-setup.bat        :: install Python + Node deps (run once)
-start.bat        :: launch backend + frontend in two terminals
-```
-
-### Cross-platform manual
+## Quick start
 
 ```bash
-# Backend
-cd backend
-python -m pip install -r requirements.txt -r requirements-dev.txt
+# 1. Backend (from backend/)
 python dev_run.py
 
-# Frontend (separate terminal)
-cd frontend/frontend
-npm install
-npm run web
+# 2. Frontend (separate terminal, from frontend/frontend/)
+npm install && npx expo start --web
 ```
 
-Open the URL Expo prints (typically `http://localhost:8081`). The backend writes its own URL to `backend/.runtime/backend_url.txt`, which the frontend reads on first load.
+Open the URL Expo prints (typically `http://localhost:8081`). The backend writes its own URL to `backend/.runtime/backend_url.txt`, which the frontend reads on first load. Windows users can double-click `setup.bat` once, then `start.bat` to launch both. For non-developer setup instructions, see [`GETTING-STARTED.md`](./GETTING-STARTED.md).
 
-For non-developer setup instructions, see [`GETTING-STARTED.md`](./GETTING-STARTED.md).
+---
+
+## What this audits
+
+- **WCAG 2.1** (Levels A and AA) — the international web/document content accessibility guidelines published by the W3C.
+- **Section 508** — the U.S. federal procurement standard (ICT Refresh) that adopts WCAG 2.0 AA by reference.
+- **PDF/UA** (ISO 14289) — the PDF-specific accessibility specification covering tag trees, reading order, and structure.
+
+Every finding cites the specific success criterion or clause it comes from, and the in-app `/help` glossary explains each rule in plain language.
 
 ---
 

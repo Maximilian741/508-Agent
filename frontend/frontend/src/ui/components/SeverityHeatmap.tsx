@@ -1,5 +1,5 @@
-import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useRef } from "react";
+import { Animated, StyleSheet, Text, View } from "react-native";
 
 import { useTheme } from "../useTheme";
 
@@ -13,32 +13,61 @@ export interface SeverityHeatmapProps {
  * SeverityHeatmap — three colored bars whose widths scale with the count of
  * each severity bucket.  Designed to be small and "glanceable" so users can
  * see at a glance whether a document is in good shape.
+ *
+ * Bars animate their width from zero on first paint instead of jumping —
+ * makes the heatmap feel like the dashboard is filling itself in.
  */
 export function SeverityHeatmap({ errors, warnings, infos }: SeverityHeatmapProps) {
   const theme = useTheme();
   const total = Math.max(errors + warnings + infos, 1);
-  const seg = (count: number, color: string) => (
-    <View
+  const flexAnims = useRef({
+    errors: new Animated.Value(0.0001),
+    warnings: new Animated.Value(0.0001),
+    infos: new Animated.Value(0.0001),
+  }).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(flexAnims.errors, {
+        toValue: errors / total || 0.0001,
+        duration: 600,
+        useNativeDriver: false,
+      }),
+      Animated.timing(flexAnims.warnings, {
+        toValue: warnings / total || 0.0001,
+        duration: 600,
+        useNativeDriver: false,
+      }),
+      Animated.timing(flexAnims.infos, {
+        toValue: infos / total || 0.0001,
+        duration: 600,
+        useNativeDriver: false,
+      }),
+    ]).start();
+  }, [errors, warnings, infos, total, flexAnims]);
+
+  const seg = (count: number, color: string, anim: Animated.Value) => (
+    <Animated.View
       key={color}
       style={[
         styles.seg,
         {
-          flex: count / total || 0.0001,
+          flex: anim,
           backgroundColor: color,
           opacity: count === 0 ? 0.15 : 1,
         },
       ]}
     >
       {count > 0 ? <Text style={styles.count}>{count}</Text> : null}
-    </View>
+    </Animated.View>
   );
 
   return (
     <View style={styles.wrap}>
       <View style={[styles.bar, { backgroundColor: theme.colors.surface2 }]}>
-        {seg(errors, theme.colors.danger)}
-        {seg(warnings, theme.colors.warning)}
-        {seg(infos, theme.colors.info)}
+        {seg(errors, theme.colors.danger, flexAnims.errors)}
+        {seg(warnings, theme.colors.warning, flexAnims.warnings)}
+        {seg(infos, theme.colors.info, flexAnims.infos)}
       </View>
       <View style={styles.legend}>
         <_LegendDot color={theme.colors.danger} label={`Errors ${errors}`} />

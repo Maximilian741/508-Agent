@@ -24,17 +24,21 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import shutil
-import tempfile
+import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
+from app.security.signing import sign_file_url, verify_file_signature
+from app.security.uploads import stream_to_tempfile
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -44,11 +48,17 @@ from app.models.accessibility import (
     iter_reading_order,
 )
 from app.parsers import parse_to_tree
+from app.persistence import audit_log as _audit
 from app.persistence.db import get_repo
 from app.services.remediation_engine import RemediationEngine
 from app.services.remediation_planner import plan_remediations, RemediationPolicy
 from app.services.remediators.registry import execute_plans
 from app.writers import write_remediated
+from app.api.credits import (
+    DOC_FORMAT_COSTS,
+    InsufficientCreditsError,
+    spend_credits_for_user,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pipeline")
@@ -121,7 +131,11 @@ class PipelineResponse(BaseModel):
 
 
 @router.post("/analyze", response_model=PipelineResponse)
-async def analyze(file: UploadFile = File(...), execute: bool = False) -> PipelineResponse:
+async def analyze(
+    request: Request,
+    file: UploadFile = File(...),
+    execute: bool = False,
+) -> PipelineResponse:
     """Analyze a document and return findings.
 
     ``execute=False`` (the default) means the tree is **not** mutated — the
@@ -133,13 +147,13 @@ async def analyze(file: UploadFile = File(...), execute: bool = False) -> Pipeli
     if suffix not in {".pdf", ".docx", ".pptx"}:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
 
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(payload)
-        tmp_path = Path(tmp.name)
+    settings = get_settings()
+    upload_result = await stream_to_tempfile(
+        file,
+        max_bytes=settings.max_upload_bytes,
+        expected_suffix=suffix,
+    )
+    tmp_path = upload_result.path
 
     try:
         result = parse_to_tree(str(tmp_path))
@@ -215,6 +229,30 @@ async def analyze(file: UploadFile = File(...), execute: bool = False) -> Pipeli
     except Exception:
         pass
 
+    # Audit log: record the analyze.  Doc id only — never filename.
+    try:
+        ctx = _audit.context_from_request(request)
+        _audit.record_event(
+            event="analyze",
+            request_id=ctx.get("request_id"),
+            actor_email=ctx.get("actor_email"),
+            actor_sub=ctx.get("actor_sub"),
+            ip=ctx.get("ip"),
+            doc_id=summary.documentId,
+            details={
+                "sourceFormat": summary.sourceFormat,
+                "violationCount": len(api_violations),
+                "executionCount": len(api_executions),
+                "score": score.score,
+                "grade": score.grade,
+                "aiProvider": provider_name,
+                "execute": bool(execute),
+            },
+        )
+    except Exception:
+        # Never let audit failure take out a real response.
+        pass
+
     return PipelineResponse(
         summary=summary,
         violations=api_violations,
@@ -224,11 +262,38 @@ async def analyze(file: UploadFile = File(...), execute: bool = False) -> Pipeli
     )
 
 
+
+
+def _charge_credits(user_id: str, doc_format: str, doc_id: str | None = None) -> int:
+    """Charge the per-format credit cost for a remediation run.
+
+    Returns the new balance.  Raises HTTPException(402) if the user is out
+    of credits, HTTPException(401) if the user_id is missing/unknown.
+    """
+    if not user_id:
+        raise HTTPException(status_code=401, detail="missing_account")
+    fmt = (doc_format or "").lstrip(".").lower()
+    cost = DOC_FORMAT_COSTS.get(fmt)
+    if cost is None:
+        # Unknown format - default to a small charge.
+        cost = 5
+    try:
+        return spend_credits_for_user(
+            user_id=user_id,
+            amount=cost,
+            description=f"remediate_{fmt}",
+            related_doc_id=doc_id,
+        )
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=402, detail="Insufficient credits")
+
 @router.post("/remediate")
 async def remediate(
+    request: Request,
     file: UploadFile = File(...),
     approved_violations: str = Form(""),
     rejected_violations: str = Form(""),
+    x_account_id: str | None = Header(default=None, alias="X-Account-Id"),
 ):
     """Apply only user-approved fixes and stream back the remediated file.
 
@@ -252,18 +317,33 @@ async def remediate(
     except Exception:
         raise HTTPException(status_code=400, detail="rejected_violations must be a JSON array of strings.")
 
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    # Charge credits up front - analyze stays free, remediate costs.
+    fmt = suffix.lstrip(".")
+    _charge_credits(user_id=x_account_id or "", doc_format=fmt)
 
     settings = get_settings()
+    upload_result = await stream_to_tempfile(
+        file,
+        max_bytes=settings.max_upload_bytes,
+        expected_suffix=suffix,
+    )
+
     job_id = uuid.uuid4().hex[:12]
     job_dir = settings.materialized_root / "pipeline" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = Path(file.filename or "document").name
     source_path = job_dir / safe_name
-    source_path.write_bytes(payload)
+    # Move the streamed temp file into place (avoids re-reading bytes).
+    try:
+        shutil.move(str(upload_result.path), str(source_path))
+    except Exception:
+        # Fall back to copy + unlink if cross-device.
+        shutil.copyfile(str(upload_result.path), str(source_path))
+        try:
+            upload_result.path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     try:
         result = parse_to_tree(str(source_path))
@@ -341,10 +421,24 @@ async def remediate(
     output_path = job_dir / output_name
     write_result = write_remediated(source_path, tree, output_path, source_format=result.format)
 
+    # Owner email comes from the CF Access middleware (when enabled).  We
+    # persist it on the job manifest so /pipeline/files can compare against
+    # the requesting user later.  In dev mode it'll just be ``None``.
+    owner_email = None
+    try:
+        user = getattr(request.state, "user", None)
+        if isinstance(user, dict):
+            owner_email = user.get("email")
+    except Exception:
+        owner_email = None
+
+    signed_url = sign_file_url(job_id, output_name, ttl=settings.pipeline_artifact_ttl_seconds)
+
     response_meta = {
         "jobId": job_id,
         "filename": output_name,
-        "downloadUrl": f"/pipeline/files/{job_id}/{output_name}",
+        "downloadUrl": signed_url,
+        "ownerEmail": owner_email,
         "approved": sorted(approved_ids),
         "rejected": sorted(rejected_ids),
         "executions": [
@@ -361,9 +455,37 @@ async def remediate(
     }
 
     # Drop a side-by-side metadata file so subsequent /pipeline/files calls
-    # can echo the run summary.
+    # can echo the run summary AND enforce per-user authz on download.
     try:
         (job_dir / "meta.json").write_text(json.dumps(response_meta, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    # Audit log: record the remediate.  Bucket the writer counts so the
+    # admin screen has something useful without leaking content.
+    try:
+        applied_writer = write_result.get("applied") if isinstance(write_result, dict) else []
+        skipped_writer = write_result.get("skipped") if isinstance(write_result, dict) else []
+        applied_count = len(applied_writer) if isinstance(applied_writer, list) else 0
+        skipped_count = len(skipped_writer) if isinstance(skipped_writer, list) else 0
+        ctx = _audit.context_from_request(request)
+        _audit.record_event(
+            event="remediate",
+            request_id=ctx.get("request_id"),
+            actor_email=ctx.get("actor_email"),
+            actor_sub=ctx.get("actor_sub"),
+            ip=ctx.get("ip"),
+            doc_id=result.document_id,
+            job_id=job_id,
+            details={
+                "approvedCount": len(approved_ids),
+                "rejectedCount": len(rejected_ids),
+                "appliedCount": applied_count,
+                "skippedCount": skipped_count,
+                "manualReviewItemsCreated": manual_items_created,
+                "sourceFormat": result.format,
+            },
+        )
     except Exception:
         pass
 
@@ -371,17 +493,70 @@ async def remediate(
 
 
 @router.get("/files/{job_id}/{filename}")
-async def download_remediated_file(job_id: str, filename: str):
-    """Download an artifact previously produced by /pipeline/remediate."""
+async def download_remediated_file(
+    job_id: str,
+    filename: str,
+    request: Request,
+    exp: int | None = None,
+    sig: str | None = None,
+):
+    """Download an artifact previously produced by /pipeline/remediate.
+
+    Requires both the HMAC signature and (when CF Access is enabled) that
+    ``request.state.user.email`` matches the owner email recorded on the
+    job's ``meta.json``.
+    """
 
     settings = get_settings()
     safe_id = "".join(c for c in job_id if c.isalnum() or c in "-_")[:64]
     safe_name = Path(filename).name
     if not safe_id or not safe_name:
         raise HTTPException(status_code=400, detail="invalid_job_or_filename")
-    target = settings.materialized_root / "pipeline" / safe_id / safe_name
+
+    # Signature check.
+    ok, reason = verify_file_signature(safe_id, safe_name, exp or 0, sig or "")
+    if not ok:
+        # 410 for expired URLs feels truer than 403 — same behavior as our
+        # share-link sweep above.
+        status = 410 if reason == "url_expired" else 403
+        raise HTTPException(status_code=status, detail=reason)
+
+    job_dir = settings.materialized_root / "pipeline" / safe_id
+    target = job_dir / safe_name
     if not target.exists():
         raise HTTPException(status_code=404, detail="file_not_found")
+
+    # Per-resource authz: when an owner email was recorded, ensure the
+    # requester (as identified by CF Access) matches it.  Skipped when the
+    # job didn't capture an owner (dev mode).
+    meta_path = job_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        owner_email = (meta or {}).get("ownerEmail")
+        if owner_email:
+            user = getattr(request.state, "user", None) or {}
+            requester_email = user.get("email") if isinstance(user, dict) else None
+            if not requester_email or requester_email.lower() != str(owner_email).lower():
+                raise HTTPException(status_code=403, detail="not_owner")
+
+    # Audit log: record the download.
+    try:
+        ctx = _audit.context_from_request(request)
+        _audit.record_event(
+            event="download",
+            request_id=ctx.get("request_id"),
+            actor_email=ctx.get("actor_email"),
+            actor_sub=ctx.get("actor_sub"),
+            ip=ctx.get("ip"),
+            job_id=safe_id,
+            details={"mediaType": _media_type_for(safe_name)},
+        )
+    except Exception:
+        pass
+
     return FileResponse(
         path=str(target),
         filename=safe_name,
@@ -424,7 +599,7 @@ def _build_score(*, violations, executions) -> PipelineScore:
     warning_weight = sum(1 for v in violations if v.severity == Severity.WARNING.value)
     total_weight = max(error_weight + warning_weight, 1)
     fixed_weight = 0
-    for execution, _ in zip(executions, range(len(executions))):  # 1:1 with violations
+    for execution, _ in zip(executions, range(len(executions))):
         if execution.status.value == "success":
             fixed_weight += 2
     score = max(0.0, 100.0 * (fixed_weight / (total_weight * 2 + 0.01)))

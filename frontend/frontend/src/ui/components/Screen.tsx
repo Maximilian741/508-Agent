@@ -73,11 +73,13 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
     },
     content: {
       flex: 1,
-      padding: theme.spacing.xl,
-      gap: theme.spacing.lg,
+      paddingHorizontal: theme.spacing.xl,
+      paddingVertical: theme.spacing.lg,
+      gap: theme.spacing.md,
     },
     scrollContent: {
-      padding: theme.spacing.xl,
-      gap: theme.spacing.lg,
+      paddingHorizontal: theme.spacing.xl,
+      paddingVertical: theme.spacing.lg,
+      gap: theme.spacing.md,
     },
   });

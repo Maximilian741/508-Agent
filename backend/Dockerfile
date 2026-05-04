@@ -1,15 +1,54 @@
-FROM python:3.13-slim
+# syntax=docker/dockerfile:1.6
+# Multi-stage backend image.
+#
+# Stage 1 (builder) installs the Python deps into a virtualenv so the
+# runtime stage stays slim.  Stage 2 copies the venv + source, drops
+# privileges, exposes 8000, and adds a healthcheck against /healthz.
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+FROM python:3.13-slim AS builder
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY backend/requirements.txt /build/requirements.txt
+RUN pip install --no-cache-dir -r /build/requirements.txt
+
+
+FROM python:3.13-slim AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+# curl is used for the healthcheck below.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 1001 app \
+ && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
+
+COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
+COPY --chown=app:app backend /app
 
-COPY backend/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Persist runtime artifacts (sqlite, pipeline outputs, materialized cache)
+# under a known path that compose mounts as a volume.
+RUN mkdir -p /app/.runtime \
+ && chown -R app:app /app/.runtime
 
-COPY backend /app
-
+USER app
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://localhost:8000/healthz || exit 1
 
 CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head || true; uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -1,0 +1,272 @@
+"""Credits router.
+
+Balance, ledger history, mock purchases, and spend.
+
+# TODO: integrate Stripe Checkout for real purchases.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import List, Literal, Optional
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import desc, select
+
+from app.api.auth import get_current_user_row
+from app.db.models import CreditLedgerRow, UserRow
+from app.db.session_sqlalchemy import session_scope
+from app.persistence import audit_log as _audit
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/credits")
+
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+
+class LedgerEntryDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    at: str
+    kind: str
+    amount: int
+    description: str
+    relatedDocId: Optional[str] = None
+
+
+class BalanceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    balance: int
+    history: List[LedgerEntryDTO] = Field(default_factory=list)
+
+
+class PurchaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tier: Literal["starter", "pro", "studio"]
+
+
+class PurchaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    newBalance: int
+    purchased: int
+    tier: str
+
+
+class SpendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount: int = Field(gt=0)
+    description: str = Field(min_length=1, max_length=500)
+    relatedDocId: Optional[str] = Field(default=None, max_length=128)
+
+
+class SpendResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    newBalance: int
+    spent: int
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+
+_TIER_AMOUNTS = {
+    "starter": 50,
+    "pro": 250,
+    "studio": 1300,
+}
+
+
+# Per-format spend amounts for /pipeline/remediate.
+DOC_FORMAT_COSTS = {
+    "pdf": 5,
+    "docx": 3,
+    "pptx": 4,
+}
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _ledger_to_dto(row: CreditLedgerRow) -> LedgerEntryDTO:
+    return LedgerEntryDTO(
+        id=int(row.id),
+        at=(row.at.isoformat() if row.at else ""),
+        kind=row.kind,
+        amount=int(row.amount),
+        description=row.description,
+        relatedDocId=row.related_doc_id,
+    )
+
+
+class InsufficientCreditsError(Exception):
+    pass
+
+
+def spend_credits_for_user(
+    user_id: str,
+    amount: int,
+    description: str,
+    related_doc_id: Optional[str] = None,
+) -> int:
+    """Atomic spend.  Returns the new balance.
+
+    Raises InsufficientCreditsError if the user doesn't have enough.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+
+    with session_scope() as session:
+        row = session.execute(
+            select(UserRow).where(UserRow.id == user_id).with_for_update()
+            if session.bind.dialect.name != "sqlite"
+            else select(UserRow).where(UserRow.id == user_id)
+        ).scalar_one_or_none()
+        if row is None:
+            raise InsufficientCreditsError("unknown_user")
+
+        current = int(row.credits_balance or 0)
+        if current < amount:
+            raise InsufficientCreditsError("insufficient_credits")
+
+        row.credits_balance = current - amount
+        session.add(
+            CreditLedgerRow(
+                user_id=user_id,
+                at=datetime.utcnow(),
+                kind="spend",
+                amount=-amount,
+                description=description,
+                related_doc_id=related_doc_id,
+            )
+        )
+        session.flush()
+        return int(row.credits_balance or 0)
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/balance", response_model=BalanceResponse)
+async def balance(
+    request: Request,
+    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
+) -> BalanceResponse:
+    with session_scope() as session:
+        row = get_current_user_row(session, account_id=x_account_id)
+        ledger_rows = session.execute(
+            select(CreditLedgerRow)
+            .where(CreditLedgerRow.user_id == row.id)
+            .order_by(desc(CreditLedgerRow.at), desc(CreditLedgerRow.id))
+            .limit(50)
+        ).scalars().all()
+        history = [_ledger_to_dto(r) for r in ledger_rows]
+        return BalanceResponse(balance=int(row.credits_balance or 0), history=history)
+
+
+@router.post("/purchase", response_model=PurchaseResponse)
+async def purchase(
+    payload: PurchaseRequest,
+    request: Request,
+    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
+) -> PurchaseResponse:
+    amount = _TIER_AMOUNTS.get(payload.tier)
+    if amount is None:
+        raise HTTPException(status_code=400, detail="invalid_tier")
+
+    with session_scope() as session:
+        row = get_current_user_row(session, account_id=x_account_id)
+        row.credits_balance = int(row.credits_balance or 0) + amount
+        session.add(
+            CreditLedgerRow(
+                user_id=row.id,
+                at=datetime.utcnow(),
+                kind="purchase",
+                amount=amount,
+                description=f"purchase_{payload.tier}",
+                related_doc_id=None,
+            )
+        )
+        session.flush()
+        new_balance = int(row.credits_balance or 0)
+        actor_email = row.email
+
+    try:
+        ctx = _audit.context_from_request(request)
+    except Exception:
+        ctx = {}
+    try:
+        _audit.record_event(
+            event="purchase_credits",
+            actor_email=actor_email,
+            details={"tier": payload.tier, "amount": amount},
+            **{k: v for k, v in ctx.items() if k in {"request_id", "ip"}},
+        )
+    except Exception:
+        pass
+
+    return PurchaseResponse(newBalance=new_balance, purchased=amount, tier=payload.tier)
+
+
+@router.post("/spend", response_model=SpendResponse)
+async def spend(
+    payload: SpendRequest,
+    request: Request,
+    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
+) -> SpendResponse:
+    if not x_account_id:
+        raise HTTPException(status_code=401, detail="missing_account")
+
+    # Look up email for the audit log before spending (so we don't lose it
+    # in the locked transaction).
+    actor_email: Optional[str] = None
+    try:
+        with session_scope() as session:
+            row = get_current_user_row(session, account_id=x_account_id)
+            actor_email = row.email
+    except HTTPException:
+        raise
+
+    try:
+        new_balance = spend_credits_for_user(
+            user_id=x_account_id,
+            amount=payload.amount,
+            description=payload.description,
+            related_doc_id=payload.relatedDocId,
+        )
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=402, detail="insufficient_credits")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        ctx = _audit.context_from_request(request)
+    except Exception:
+        ctx = {}
+    try:
+        _audit.record_event(
+            event="spend_credits",
+            actor_email=actor_email,
+            doc_id=payload.relatedDocId,
+            details={"amount": payload.amount, "description": payload.description},
+            **{k: v for k, v in ctx.items() if k in {"request_id", "ip"}},
+        )
+    except Exception:
+        pass
+
+    return SpendResponse(newBalance=new_balance, spent=payload.amount)

@@ -72,19 +72,19 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       borderColor: theme.colors.border,
     },
     tone_success: {
-      backgroundColor: "rgba(34, 197, 94, 0.16)",
+      backgroundColor: theme.colors.successSoft,
       borderColor: theme.colors.success,
     },
     tone_warning: {
-      backgroundColor: "rgba(245, 158, 11, 0.16)",
+      backgroundColor: theme.colors.warningSoft,
       borderColor: theme.colors.warning,
     },
     tone_danger: {
-      backgroundColor: "rgba(220, 38, 38, 0.16)",
+      backgroundColor: theme.colors.dangerSoft,
       borderColor: theme.colors.danger,
     },
     tone_info: {
-      backgroundColor: "rgba(14, 165, 233, 0.16)",
+      backgroundColor: theme.colors.infoSoft,
       borderColor: theme.colors.info,
     },
     text_default: {

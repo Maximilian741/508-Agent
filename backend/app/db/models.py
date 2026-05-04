@@ -138,3 +138,30 @@ class EvidenceBundleRow(Base):
     options_json: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class UserRow(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    credits_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class CreditLedgerRow(Base):
+    __tablename__ = "credit_ledger"
+    __table_args__ = (
+        Index("idx_ledger_user_at", "user_id", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    related_doc_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

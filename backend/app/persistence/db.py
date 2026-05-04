@@ -289,6 +289,53 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_doc_id ON evidence_bundles(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_job_id ON evidence_bundles(job_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+              id TEXT PRIMARY KEY,
+              at TEXT NOT NULL,
+              request_id TEXT,
+              actor_email TEXT,
+              actor_sub TEXT,
+              ip TEXT,
+              event TEXT NOT NULL,
+              doc_id TEXT,
+              job_id TEXT,
+              details_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_actor_email ON audit_log(actor_email)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              id TEXT PRIMARY KEY,
+              email TEXT NOT NULL UNIQUE,
+              display_name TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              last_seen_at TEXT,
+              role TEXT NOT NULL DEFAULT 'user',
+              credits_balance INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_users_email ON users(email)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS credit_ledger (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id TEXT NOT NULL,
+              at TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              amount INTEGER NOT NULL,
+              description TEXT NOT NULL,
+              related_doc_id TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_user_at ON credit_ledger(user_id, at)")
         now = _utc_now()
         for pack in _DEFAULT_POLICY_PACKS:
             conn.execute(
@@ -1376,7 +1423,7 @@ class SqliteRepo:
                     str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None,
                     str(item.get("aiModel")) if item.get("aiModel") is not None else None,
                     str(item.get("aiUpdatedAt")) if item.get("aiUpdatedAt") is not None else None,
-                    item_id,
+                        item_id,
                 ),
             )
             conn.commit()

@@ -2606,7 +2606,7 @@ const styles = StyleSheet.create({
     left: 12,
     top: 12,
     right: 12,
-    backgroundColor: "rgba(15, 23, 42, 0.7)",
+    backgroundColor: "rgba(31, 20, 10, 0.7)",
     borderRadius: 10,
     padding: 10,
   },

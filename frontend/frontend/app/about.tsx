@@ -2,11 +2,13 @@
  * About / Privacy screen.
  *
  * Concise statement of how the app handles documents, data, and AI usage.
- * Compliance and security reviewers ask for this constantly; making it
- * available in-app saves an email thread.
+ * Updated to reflect two operational modes — self-hosted (your machine) and
+ * the managed 508-agent.app deployment — so reviewers know exactly which
+ * surface they're looking at.
  */
 
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { useRouter } from "expo-router";
 
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
@@ -16,38 +18,72 @@ import { useTheme } from "../src/ui/useTheme";
 
 export default function AboutScreen() {
   const theme = useTheme();
+  const router = useRouter();
 
   return (
     <Screen scroll title="About">
       <Hero
+        shader="aurora"
+        shaderOpacity={0.7}
         eyebrow="About 508 Agent"
         title="Built for remediators, not bureaucrats"
-        subtitle="An open-source accessibility auditor that runs on your machine. We don't collect telemetry, we don't ship your documents anywhere, and every fix the agent applies is recorded in an audit log you can export."
+        subtitle="An accessibility auditor that ships in two flavors: a self-hosted package you run on your own machine, and 508-agent.app - a managed deployment locked behind Cloudflare Access. Both run the same code; they differ in where your files live."
       />
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>How your data is handled</Text>
-        <View style={styles.list}>
-          <Bullet
-            label="Local-first"
-            body="Documents are parsed and analyzed on the same machine running the backend. No third-party uploads happen unless you've explicitly opted into an AI provider (and even then only the parts of the document needed for the request)."
-          />
-          <Bullet
-            label="No telemetry"
-            body="The frontend doesn't phone home. The backend doesn't either. If you see a network request go anywhere other than your own analyzer URL, that's a bug — please report it."
-          />
-          <Bullet
-            label="Storage is yours"
-            body="Default storage is a SQLite file in backend/.runtime/. S3 storage is opt-in and configured by you via STORAGE_PROVIDER=s3. Original and remediated artifacts never leave your environment."
-          />
-          <Bullet
-            label="AI is opt-in"
-            body="Without ANTHROPIC_API_KEY or OPENAI_API_KEY set in the backend's environment, the app uses local heuristics only. With a key set, alt-text and link-text suggestions are sent to that provider — but only the relevant snippet, never the full document."
-          />
-          <Bullet
-            label="Audit log is exportable"
-            body="Every approve / reject / edit decision is recorded with a timestamp. The HTML report you export at the end of an audit is the canonical record — keep a copy with your compliance documentation."
-          />
+
+        <View style={styles.modeRow}>
+          <View style={[styles.modeCol, { borderColor: theme.colors.success }]}>
+            <Chip label="Self-hosted (your machine)" tone="success" />
+            <Bullet
+              label="Local-first"
+              body="Documents are parsed and analyzed on the same machine running the backend. Nothing leaves your network unless you've explicitly opted into an AI provider."
+            />
+            <Bullet
+              label="Storage is yours"
+              body="Default storage is a SQLite file in backend/.runtime/. S3 / R2 storage is opt-in and configured by you."
+            />
+            <Bullet
+              label="No telemetry"
+              body="The frontend doesn't phone home. The backend doesn't either. If you see a network request go anywhere other than your own analyzer URL, that's a bug."
+            />
+          </View>
+
+          <View style={[styles.modeCol, { borderColor: theme.colors.info }]}>
+            <Chip label="508-agent.app (managed)" tone="info" />
+            <Bullet
+              label="Documents on our infrastructure"
+              body="When using 508-agent.app, your documents land on Cloudflare R2, encrypted at rest with SSE."
+            />
+            <Bullet
+              label="24-hour retention"
+              body="Documents are deleted after 24 hours. Remediated artifacts and analysis metadata may be retained longer for your audit history; the source document goes away."
+            />
+            <Bullet
+              label="Cloudflare Access auth"
+              body="Authentication is enforced via Cloudflare Access. We never see your password — Cloudflare hands us a signed JWT on every request."
+            />
+            <Bullet
+              label="Append-only audit log"
+              body="Every analyze, remediate, share, view, and download is recorded against your account. You can request a copy at any time, and admins can browse it from the in-app Admin screen."
+            />
+            <Bullet
+              label="AI is opt-in and minimal"
+              body="When AI is enabled, the provider only receives the snippet needed for the request — never the full document."
+            />
+          </View>
+        </View>
+      </Card>
+
+      <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Trust posture</Text>
+        <View style={styles.trustGrid}>
+          <TrustClaim label="TLS 1.3 everywhere" body="All managed-mode traffic is TLS 1.3, terminated at Cloudflare's edge in front of the backend." />
+          <TrustClaim label="HMAC-signed download URLs" body="Remediated-file URLs are signed with a 1-hour TTL. Tampering or expiry returns 403/410." />
+          <TrustClaim label="Strict CSP / HSTS / X-Frame-Options DENY" body="Set on every response by SecurityHeadersMiddleware. No inline scripts; no third-party origins." />
+          <TrustClaim label="No third-party analytics" body="Zero pixel trackers. Zero ad networks. Zero feature-flag SDKs phoning home." />
+          <TrustClaim label="Source-available" body="Read the code that handles your documents in the GitHub repository." />
         </View>
       </Card>
 
@@ -104,6 +140,24 @@ export default function AboutScreen() {
       </Card>
 
       <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Data subject rights</Text>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8 }]}>
+          {"You can request a copy of your audit log, request deletion of your account's data, or ask a question about how your documents are handled."}
+        </Text>
+        <View style={[styles.standardsRow, { marginTop: 8 }]}>
+          <Pressable onPress={() => router.push("/admin" as any)}>
+            <Chip label="Admins: open Admin screen" tone="info" />
+          </Pressable>
+          <Pressable onPress={() => Linking.openURL("mailto:privacy@508-agent.app")}>
+            <Chip label="Email privacy@508-agent.app" tone="default" />
+          </Pressable>
+          <Pressable onPress={() => router.push("/security" as any)}>
+            <Chip label="Read the Security page" tone="default" />
+          </Pressable>
+        </View>
+      </Card>
+
+      <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Reporting issues</Text>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Found a bug, a false-positive, or a missing standard? Open an issue in the project
@@ -132,11 +186,34 @@ function Bullet({ label, body }: { label: string; body: string }) {
   );
 }
 
+function TrustClaim({ label, body }: { label: string; body: string }) {
+  const theme = useTheme();
+  return (
+    <View style={[styles.trustCard, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+      <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 14 }]}>{label}</Text>
+      <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4, fontSize: 13 }]}>
+        {body}
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   list: { gap: 14, marginTop: 12 },
   bullet: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
   bulletDot: { width: 8, height: 8, borderRadius: 4, marginTop: 8 },
   twoCol: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 12 },
   col: { flex: 1, minWidth: 240, borderWidth: 1, borderRadius: 12, padding: 12, gap: 6 },
+  modeRow: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 12 },
+  modeCol: { flex: 1, minWidth: 280, borderWidth: 1, borderRadius: 12, padding: 12, gap: 10 },
+  trustGrid: { flexDirection: "row", gap: 10, flexWrap: "wrap", marginTop: 12 },
+  trustCard: {
+    flexBasis: "48%",
+    flexGrow: 1,
+    minWidth: 220,
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+  },
   standardsRow: { flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 8 },
 });

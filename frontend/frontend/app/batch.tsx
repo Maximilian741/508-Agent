@@ -473,11 +473,15 @@ export default function BatchScreen() {
         </View>
       ) : null}
 
-      <Hero
-        eyebrow="Batch mode"
-        title="Batch audit — drop multiple documents and we'll analyze them in parallel."
-        subtitle={`Up to ${MAX_CONCURRENCY} files run at once. Each completed audit is added to your history so you can dive into any one of them.`}
-      />
+      <View style={{ marginBottom: 12 }}>
+        <Hero
+          shader="pumpkin"
+          shaderOpacity={0.55}
+          eyebrow="Batch mode"
+          title="Batch audit — drop multiple documents and we'll analyze them in parallel."
+          subtitle={`Up to ${MAX_CONCURRENCY} files run at once. Each completed audit is added to your history so you can dive into any one of them.`}
+        />
+      </View>
 
       {/* === File picker / drop zone ====================================== */}
       <Card>

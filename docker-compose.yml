@@ -1,8 +1,86 @@
 version: "3.9"
 
+# Single-VPS deployment topology:
+#   * backend   — FastAPI app, exposed only inside the compose network
+#   * frontend  — nginx serving the Expo web bundle, exposed only inside the network
+#   * cloudflared — Cloudflare Tunnel daemon that routes public traffic to the
+#                   above services after Cloudflare Access has authenticated
+#                   the user.  No public ports are bound on the host.
+#
+# Local-dev extras (postgres + minio) are gated behind the ``dev`` profile so
+# that ``docker compose up -d`` on a production VPS doesn't drag them in.
+# Run ``docker compose --profile dev up -d`` to get the full local stack.
+
 services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_VERSION: ${APP_VERSION:-0.1.0}
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required - see deploy/.env.example}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/.runtime/508_agent.db}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      STORAGE_LOCAL_ROOT: /app/.runtime/storage
+      MATERIALIZED_ROOT: /app/.runtime/materialized
+      AWS_REGION: ${AWS_REGION:-auto}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PREFIX: ${S3_PREFIX:-508-agent}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      S3_FORCE_PATH_STYLE: "true"
+      PRESIGN_EXPIRES_SECONDS: 3600
+      ENABLE_DEV_STORAGE_ENDPOINT: "false"
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-https://app.example.com}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CLOUDFLARE_ACCESS_TEAM_DOMAIN: ${CLOUDFLARE_ACCESS_TEAM_DOMAIN:-}
+      CLOUDFLARE_ACCESS_AUD: ${CLOUDFLARE_ACCESS_AUD:-}
+      PIPELINE_ARTIFACT_TTL_SECONDS: ${PIPELINE_ARTIFACT_TTL_SECONDS:-86400}
+    volumes:
+      - backend_runtime:/app/.runtime
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/frontend/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    environment:
+      TUNNEL_METRICS: "0.0.0.0:2000"
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+  # ---- Local development extras (profile: dev) -----------------------------
   postgres:
     image: postgres:16
+    profiles: ["dev"]
     environment:
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent
@@ -17,42 +95,9 @@ services:
       timeout: 5s
       retries: 20
 
-  backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    environment:
-      APP_ENV: development
-      APP_VERSION: 0.1.0
-      DATABASE_URL: postgresql+psycopg://agent:agent@postgres:5432/agentdb
-      STORAGE_PROVIDER: s3
-      STORAGE_LOCAL_ROOT: /app/.runtime/storage
-      MATERIALIZED_ROOT: /app/.runtime/materialized
-      AWS_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      S3_BUCKET: 508-agent-dev
-      S3_PREFIX: 508-agent
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_FORCE_PATH_STYLE: "true"
-      PRESIGN_EXPIRES_SECONDS: 3600
-      ENABLE_DEV_STORAGE_ENDPOINT: "true"
-      CORS_ALLOW_ORIGINS: http://localhost:8081,http://127.0.0.1:8081,http://localhost:3000,http://127.0.0.1:3000
-      MAX_UPLOAD_MB: 25
-    ports:
-      - "8000:8000"
-    volumes:
-      - backend_runtime:/app/.runtime
-    depends_on:
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
-
   minio:
     image: minio/minio:latest
+    profiles: ["dev"]
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -70,6 +115,7 @@ services:
 
   minio-init:
     image: minio/mc:latest
+    profiles: ["dev"]
     depends_on:
       minio:
         condition: service_healthy

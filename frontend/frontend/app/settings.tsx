@@ -10,6 +10,12 @@ import { useState } from "react";
 import { Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 
 import { clearHistory } from "../src/domain/auditHistory";
+import {
+  clearDemoData,
+  hasDemoData,
+  loadDemoData,
+  nukeDemoData,
+} from "../src/domain/demoSeed";
 import { DEFAULT_WEIGHTS, loadWeights, resetWeights, saveWeights } from "../src/domain/scoreWeights";
 import {
   notificationsAvailable,
@@ -20,9 +26,11 @@ import {
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
+import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
+import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -44,21 +52,27 @@ export default function SettingsScreen() {
 
   return (
     <Screen scroll>
-      <View style={styles.header}>
-        <View>
-          <Text style={[theme.typography.title, { color: theme.colors.text }]}>Settings</Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-            Where the analyzer lives, and whether you're working with real or fake data.
-          </Text>
+      <View style={{ position: "relative", borderRadius: 18, overflow: "hidden", marginBottom: 16, minHeight: 160, backgroundColor: "#0B1020", padding: 24, justifyContent: "center" }}>
+        <ShaderCanvas variant="ember" opacity={0.45} />
+        <View style={[styles.header, { position: "relative", zIndex: 1 }]}>
+          <View>
+            <Text style={[theme.typography.title, { color: "#FFFFFF" }]}>Settings</Text>
+            <Text style={[theme.typography.body, { color: "rgba(255,255,255,0.85)" }]}>
+              Where the analyzer lives, and whether you're working with real or fake data.
+            </Text>
+          </View>
+          <Chip
+            label={mockMode ? "Demo data" : "Live data"}
+            tone={mockMode ? "warning" : "success"}
+          />
         </View>
-        <Chip
-          label={mockMode ? "Demo data" : "Live data"}
-          tone={mockMode ? "warning" : "success"}
-        />
       </View>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo Mode</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="play" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo Mode</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           When Demo Mode is on, the app shows pre-baked sample data instead of calling the
           analyzer service. It's useful for exploring the UI without setting up the backend, but
@@ -74,7 +88,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Analyzer service URL</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Analyzer service URL</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           The Python backend writes its own URL to{" "}
           <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
@@ -121,7 +138,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Appearance</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="star" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Appearance</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Light / Dark / Match system. Affects the entire app.
         </Text>
@@ -156,7 +176,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Notifications</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Notifications</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Get a browser notification and a soft chime when an audit finishes — useful when you've
           switched tabs while a long document is being analyzed.
@@ -205,7 +228,59 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Audit history</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="coin" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo data</Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          Populate the dashboard, history, and achievements with a realistic
+          set of fixture audits so you can poke around without uploading any
+          documents. Seeded rows live in localStorage and can be removed with
+          one click.
+        </Text>
+        <View style={[styles.buttonRow, { marginTop: 8 }]}>
+          <Button
+            title="Load demo data"
+            onPress={() => {
+              const r = loadDemoData({ mode: "merge" });
+              toast.success(
+                `Loaded ${r.historyAdded} audits, ${r.achievementsUnlocked} new badges, ${r.workspacesCreated} workspaces.`,
+              );
+            }}
+          />
+          <Button
+            title={hasDemoData() ? "Clear demo data" : "Clear demo (none)"}
+            variant="ghost"
+            disabled={!hasDemoData()}
+            onPress={() => {
+              const r = clearDemoData();
+              toast.info(`Removed ${r.removed} demo audits.`);
+            }}
+          />
+          <Button
+            title="Reset everything"
+            variant="ghost"
+            onPress={() => {
+              if (
+                typeof window !== "undefined" &&
+                !window.confirm(
+                  "Reset all demo data, achievements, and seeded workspaces? Real audits and your own workspaces are kept.",
+                )
+              ) {
+                return;
+              }
+              nukeDemoData();
+              toast.info("Demo data, achievements, and seeded workspaces reset.");
+            }}
+          />
+        </View>
+      </Card>
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="doc" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Audit history</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           A list of every audit you've run is kept locally so the home page can show recent work.
           Nothing is sent off-device. Clear it any time.
@@ -215,6 +290,12 @@ export default function SettingsScreen() {
             title="Clear audit history"
             variant="ghost"
             onPress={() => {
+              if (
+                typeof window !== "undefined" &&
+                !window.confirm("Clear all locally-stored audit history?")
+              ) {
+                return;
+              }
               clearHistory();
               toast.info("Audit history cleared");
             }}
@@ -223,7 +304,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Diagnostics</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="gear" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Diagnostics</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Run a quick health check to confirm the analyzer is reachable and what AI provider is
           active. The result appears below.
@@ -232,7 +316,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Alt-text and link-text suggestions can be powered by an AI vision model. The backend
           picks one based on environment variables when it starts:

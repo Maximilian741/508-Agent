@@ -8,7 +8,7 @@
  */
 
 import { ReactNode, useEffect, useRef } from "react";
-import { Animated, StyleProp, StyleSheet, ViewStyle } from "react-native";
+import { Animated, Platform, StyleProp, StyleSheet, ViewStyle } from "react-native";
 
 import { useTheme } from "../useTheme";
 
@@ -42,15 +42,21 @@ export function Card({ children, style, animate = true }: CardProps) {
 const createStyles = (theme: ReturnType<typeof useTheme>) =>
   StyleSheet.create({
     card: {
-      backgroundColor: theme.colors.surface,
+      backgroundColor:
+        Platform.OS === "web" ? theme.colors.surface + "EE" : theme.colors.surface,
       borderRadius: theme.radius.lg,
       borderWidth: 1,
       borderColor: theme.colors.border,
-      padding: theme.spacing.lg,
-      shadowColor: theme.colors.shadow,
-      shadowOffset: theme.shadows.subtle.shadowOffset,
-      shadowOpacity: theme.shadows.subtle.shadowOpacity,
-      shadowRadius: theme.shadows.subtle.shadowRadius,
-      elevation: theme.shadows.subtle.elevation,
+      paddingHorizontal: 20,
+      paddingVertical: 18,
+      // Hairline border carries the structure; shadow is ink-soft on dark only.
+      ...(Platform.OS === "web"
+        ? ({
+            boxShadow:
+              theme.colors.bg === "#150E08"
+                ? "inset 0 1px 0 rgba(245, 239, 227, 0.04)"
+                : "none",
+          } as any)
+        : {}),
     },
   });

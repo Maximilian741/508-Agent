@@ -16,6 +16,7 @@ import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { evaluate, parseHex } from "../../src/domain/contrast";
 import { Card } from "../../src/ui/components/Card";
 import { Chip } from "../../src/ui/components/Chip";
+import { Hero } from "../../src/ui/components/Hero";
 import { Screen } from "../../src/ui/components/Screen";
 import { useTheme } from "../../src/ui/useTheme";
 
@@ -35,14 +36,13 @@ export default function ContrastChecker() {
 
   return (
     <Screen scroll title="Contrast checker">
-      <View style={styles.header}>
-        <Text style={[theme.typography.title, { color: theme.colors.text }]}>Contrast checker</Text>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Paste any two hex colors (foreground over background) and instantly see whether they meet
-          WCAG 2.1 AA/AAA contrast minimums. Useful for design review and when remediating PDFs
-          with hard-to-read body text.
-        </Text>
-      </View>
+      <Hero
+        shader="aurora"
+        shaderOpacity={0.55}
+        eyebrow="Color tool"
+        title="Contrast checker"
+        subtitle="Paste any two hex colors (foreground over background) and instantly see whether they meet WCAG 2.1 AA/AAA contrast minimums. Useful for design review and when remediating PDFs with hard-to-read body text."
+      />
 
       <Card>
         <View style={styles.inputRow}>
@@ -217,7 +217,6 @@ function _safe(value: string): string {
 }
 
 const styles = StyleSheet.create({
-  header: { gap: 6, marginBottom: 8 },
   inputRow: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
   colorBlock: { flex: 1, minWidth: 220, gap: 6 },
   colorPickerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
