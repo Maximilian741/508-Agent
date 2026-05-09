@@ -32,18 +32,22 @@ import {
   PipelineViolation,
   createApiClient,
 } from "../src/api/client";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { clearDraft, loadDraft, saveDraft } from "../src/domain/auditDraft";
 import { appendHistory, findHistoryEntry } from "../src/domain/auditHistory";
 import { loadWeights } from "../src/domain/scoreWeights";
 import { lookupIssue } from "../src/domain/issueCatalog";
+import { loadAccount, loadToken, refreshAccount } from "../src/domain/account";
+import { costFor, formatForFile } from "../src/domain/creditCosts";
+import { SignInModal } from "../src/ui/components/SignInModal";
 import { notify, playChime } from "../src/domain/notifications";
 import { SAMPLE_DOCUMENTS, SampleDocument } from "../src/domain/sampleDocuments";
 import { useFileDrop } from "../src/hooks/useFileDrop";
 import { useKeyboardShortcuts } from "../src/hooks/useKeyboardShortcuts";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
+import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Dialog } from "../src/ui/components/Dialog";
@@ -57,6 +61,9 @@ import { SeverityHeatmap } from "../src/ui/components/SeverityHeatmap";
 import { IssueNavigator } from "../src/ui/components/IssueNavigator";
 import { PdfPreview } from "../src/ui/components/PdfPreview";
 import { Skeleton, SkeletonBlock } from "../src/ui/components/Skeleton";
+import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { Hero } from "../src/ui/components/Hero";
+import { LetterFromCurb } from "../src/ui/components/LetterFromCurb";
 import { UncertaintyChip } from "../src/ui/components/UncertaintyChip";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
@@ -102,11 +109,20 @@ interface DecisionLogItem {
 export default function AuditScreen() {
   const theme = useTheme();
   const toast = useToast();
+  const router = useRouter();
+  const [signInOpen, setSignInOpen] = useState(false);
+  const [signInReason, setSignInReason] = useState<string | null>(null);
+  const [confirmRemediateOpen, setConfirmRemediateOpen] = useState(false);
 
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
   const backendHealth = useAppStore((state) => state.backendHealth);
   const setMockMode = useAppStore((state) => state.setMockMode);
+  const autoFixPolicy = useAppStore((state) => state.autoFixPolicy);
+  const setAutoFixPolicy = useAppStore((state) => state.setAutoFixPolicy);
+  const freeScansUsed = useAppStore((state) => state.freeScansUsed);
+  const setFreeScansUsed = useAppStore((state) => state.setFreeScansUsed);
+  const bypassFreeScanGate = useAppStore((state) => state.bypassFreeScanGate);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
@@ -134,10 +150,31 @@ export default function AuditScreen() {
   const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
   const [showHelp, setShowHelp] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [showMoreOptions, setShowMoreOptions] = useState(false);
 
   const client = useMemo(
     () => createApiClient({ baseUrl: apiBaseUrl, mockMode }),
     [apiBaseUrl, mockMode],
+  );
+
+  /**
+   * Returns true when the caller should halt and show the sign-in modal.
+   * Fires when the user has already burned their free scan, has no token,
+   * and has not flipped the dev bypass. Centralised so Apply/Download and
+   * the second upload share one branch.
+   */
+  const gateFreeScan = useCallback(
+    (reason: string): boolean => {
+      if (bypassFreeScanGate) return false;
+      if (freeScansUsed < 1) return false;
+      const token = loadToken();
+      if (token) return false;
+      setSignInReason(reason);
+      setSignInOpen(true);
+      return true;
+    },
+    [bypassFreeScanGate, freeScansUsed],
   );
 
   /* ---- Filtered queue ---------------------------------------------------- */
@@ -195,14 +232,6 @@ export default function AuditScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyId]);
 
-  // Track the previously-displayed score so the count-up animation has
-  // a real "from" value when the user makes a decision.
-  useEffect(() => {
-    if (liveScore) {
-      lastScoreRef.current = liveScore.score;
-    }
-  }, [liveScore?.score]);
-
   // Auto-save draft whenever the audit state changes meaningfully.
   useEffect(() => {
     if (!report || !filename) return;
@@ -215,32 +244,6 @@ export default function AuditScreen() {
       savedAt: new Date().toISOString(),
     });
   }, [report, filename, decisions, decisionLog, reviewIndex]);
-
-  // Periodically refresh the history entry's decision counts + snapshot so a
-  // user who closes the tab and re-opens the home page sees an accurate view.
-  useEffect(() => {
-    if (!report || !filename || !liveScore) return;
-    const handle = window.setTimeout(() => {
-      try {
-        appendHistory({
-          id: `${filename}-${reviewIndex < 0 ? "new" : "live"}`,
-          filename,
-          ranAt: new Date().toISOString(),
-          score: liveScore.score,
-          grade: liveScore.grade,
-          totalIssues: report.violations.length,
-          sourceFormat: report.summary.sourceFormat,
-          approved: decisionCounts.approved,
-          rejected: decisionCounts.rejected,
-          pending: decisionCounts.pending,
-          snapshot: { report, decisions, decisionLog: decisionLog.slice(0, 10) },
-        });
-      } catch {
-        // ignore
-      }
-    }, 600);
-    return () => window.clearTimeout(handle);
-  }, [report, filename, liveScore, decisionCounts, decisions, decisionLog, reviewIndex]);
 
   const currentViolation: PipelineViolation | null = filteredViolations[reviewIndex] ?? null;
   const totalIssues = report?.violations.length ?? 0;
@@ -325,6 +328,41 @@ export default function AuditScreen() {
     };
   }, [report, decisions]);
 
+  // Track the previously-displayed score so the count-up animation has
+  // a real "from" value when the user makes a decision.
+  useEffect(() => {
+    if (liveScore) {
+      lastScoreRef.current = liveScore.score;
+    }
+  }, [liveScore?.score]);
+
+  // Periodically refresh the history entry's decision counts + snapshot so a
+  // user who closes the tab and re-opens the home page sees an accurate view.
+  useEffect(() => {
+    if (!report || !filename || !liveScore) return;
+    const handle = window.setTimeout(() => {
+      try {
+        appendHistory({
+          id: `${filename}-${reviewIndex < 0 ? "new" : "live"}`,
+          filename,
+          ranAt: new Date().toISOString(),
+          score: liveScore.score,
+          grade: liveScore.grade,
+          totalIssues: report.violations.length,
+          sourceFormat: report.summary.sourceFormat,
+          approved: decisionCounts.approved,
+          rejected: decisionCounts.rejected,
+          pending: decisionCounts.pending,
+          snapshot: { report, decisions, decisionLog: decisionLog.slice(0, 10) },
+        });
+      } catch {
+        // ignore
+      }
+    }, 600);
+    return () => window.clearTimeout(handle);
+  }, [report, filename, liveScore, decisionCounts, decisions, decisionLog, reviewIndex]);
+
+
   /* ---- Pick file --------------------------------------------------------- */
   const handlePick = useCallback(() => {
     if (Platform.OS === "web" && inputRef.current) {
@@ -344,15 +382,24 @@ export default function AuditScreen() {
       const response = sample.buildResponse();
       setPreviousScore(report?.score.score ?? 0);
       setReport(response);
+      // Apply the user's auto-fix policy to the fresh report.
+      const preDecided = _preDecideFromPolicy(response, autoFixPolicy);
+      if (Object.keys(preDecided).length > 0) {
+        setDecisions(preDecided);
+      }
       toast.info(`Loaded sample: ${sample.title}`, {
-        description: "Findings are pre-baked — no analyzer call. Try the keyboard shortcuts!",
+        description: "Findings are pre-baked - no analyzer call. Try the keyboard shortcuts.",
       });
     },
-    [report, toast],
+    [report, toast, autoFixPolicy],
   );
 
   const handleFile = useCallback(
     async (file: File) => {
+      // Free-scan gate: a second upload requires sign-in unless bypassed.
+      if (gateFreeScan("Sign in to keep auditing - your first scan was free.")) {
+        return;
+      }
       setBusy(true);
       setError(null);
       setFilename(file.name);
@@ -368,6 +415,15 @@ export default function AuditScreen() {
         const response = await client.runPipeline(file, true);
         setPreviousScore(report?.score.score ?? 0);
         setReport(response);
+        // Apply the user's auto-fix policy to the fresh report.
+        const preDecided = _preDecideFromPolicy(response, autoFixPolicy);
+        if (Object.keys(preDecided).length > 0) {
+          setDecisions(preDecided);
+        }
+        // Burn one free scan only on a successful analyze. If they are
+        // already signed in this still increments harmlessly; the gate
+        // checks the token first, so signed-in users never get blocked.
+        setFreeScansUsed(freeScansUsed + 1);
         appendHistory({
           id: `${file.name}-${Date.now()}`,
           filename: file.name,
@@ -395,7 +451,7 @@ export default function AuditScreen() {
         setBusy(false);
       }
     },
-    [client, report, toast],
+    [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy],
   );
 
   /* ---- Decisions / undo --------------------------------------------------- */
@@ -521,25 +577,14 @@ export default function AuditScreen() {
     setReviewIndex((i) => Math.max(i - 1, 0));
   }, []);
 
-  const downloadRemediated = useCallback(async () => {
-    if (mockMode) {
-      toast.warning("Demo mode", {
-        description: "Switch off Demo Mode in Settings, then re-run the audit on a real file to get a fixed download.",
-      });
-      return;
-    }
-    if (!sourceFile) {
-      toast.warning("No source file", {
-        description: "Pick a real document above before requesting a remediated file.",
-      });
-      return;
-    }
-    if (!report) {
-      toast.warning("No audit yet", {
-        description: "Run an audit first so we know which fixes to apply.",
-      });
-      return;
-    }
+  /**
+   * Run the remediate pipeline for real (after the credit-cost confirm has
+   * been satisfied or skipped on demo mode). Surfaces 402 with a "buy more
+   * credits" toast that routes to /billing, and refreshes the account chip
+   * on success so the new balance is visible immediately.
+   */
+  const _runRemediateNow = useCallback(async () => {
+    if (!sourceFile || !report) return;
     setDownloadingFixed(true);
     try {
       const approvedIds = Object.entries(decisions)
@@ -548,7 +593,15 @@ export default function AuditScreen() {
       const rejectedIds = Object.entries(decisions)
         .filter(([, s]) => s.decision === "rejected")
         .map(([id]) => id);
-      const result = await client.runPipelineRemediate(sourceFile, approvedIds, rejectedIds);
+      const token = loadToken() ?? undefined;
+      const accountId = loadAccount()?.id;
+      const result = await client.runPipelineRemediate(
+        sourceFile,
+        approvedIds,
+        rejectedIds,
+        token,
+        accountId,
+      );
       const fullUrl = client.getPipelineFileUrl(result.jobId, result.filename);
       setFixedDownloadUrl(fullUrl);
       setLastRemediation(result.writer);
@@ -559,16 +612,83 @@ export default function AuditScreen() {
             : ""
         }`,
       });
+      // New balance shows on the AppNav chip on the next render.
+      if (!mockMode) void refreshAccount();
       if (Platform.OS === "web") {
         window.open(fullUrl, "_blank");
       }
     } catch (e) {
-      const msg = (e as Error).message ?? "Download failed";
-      toast.error("Couldn't produce remediated file", { description: msg });
+      const err = e as Error & { status?: number };
+      if (err.status === 402) {
+        toast.error("Out of credits. Buy more?", {
+          description: "Tap to open the billing page and top up.",
+          dedupeKey: "low-credits",
+        });
+        // Give the user a beat to see the toast, then route.
+        setTimeout(() => {
+          try {
+            router.push("/billing" as any);
+          } catch {
+            // ignore - native may not have a billing route mounted
+          }
+        }, 600);
+      } else {
+        const msg = err.message ?? "Download failed";
+        toast.error("Couldn't produce remediated file", { description: msg });
+      }
     } finally {
       setDownloadingFixed(false);
     }
-  }, [client, decisions, mockMode, report, sourceFile, toast]);
+  }, [client, decisions, mockMode, report, router, sourceFile, toast]);
+
+  const downloadRemediated = useCallback(async () => {
+    // Free-scan gate fires before any of the existing branches so the user
+    // sees the welcoming sign-in modal rather than the credit-cost dialog.
+    if (gateFreeScan("Sign in to keep auditing - your first scan was free.")) {
+      return;
+    }
+    if (mockMode) {
+      // Demo mode skips charging entirely; preserve the v1 behaviour of
+      // letting the user click through without a confirm.
+      toast.warning("Demo mode", {
+        description: "Switch off Demo Mode in Settings, then re-run the audit on a real file to get a fixed download.",
+        dedupeKey: "demo-mode",
+      });
+      return;
+    }
+    if (!sourceFile) {
+      // Common case: the audit was restored from a draft (the JSON report
+      // persists across reloads, but the actual File object cannot). Rather
+      // than telling the user to "pick a file above" - which is easy to
+      // miss - just re-open the file picker for them.
+      toast.info("Re-attach your document", {
+        description: "We kept your review state, but the original file was not stored locally. Pick it again to apply the fixes.",
+        dedupeKey: "no-source-file",
+      });
+      handlePick();
+      return;
+    }
+    if (!report) {
+      toast.warning("No audit yet", {
+        description: "Run an audit first so we know which fixes to apply.",
+        dedupeKey: "no-audit-yet",
+      });
+      return;
+    }
+    // Account gate: must be signed in to spend credits server-side.
+    const account = loadAccount();
+    const token = loadToken();
+    if (!account || !token) {
+      toast.warning("Sign in to remediate", {
+        description: "Remediation costs credits. Sign in to continue.",
+        dedupeKey: "sign-in-to-remediate",
+      });
+      setSignInOpen(true);
+      return;
+    }
+    // Show the cost-confirm dialog. The dialog drives _runRemediateNow.
+    setConfirmRemediateOpen(true);
+  }, [gateFreeScan, handlePick, mockMode, report, sourceFile, toast]);
 
   /* ---- Keyboard shortcuts ------------------------------------------------- */
   useKeyboardShortcuts(
@@ -662,60 +782,116 @@ export default function AuditScreen() {
         }}
         onCancel={() => setResetDialogOpen(false)}
       />
+      {(() => {
+        const fmt = formatForFile(sourceFile) ?? (report?.summary.sourceFormat?.toLowerCase() as any);
+        const cost = costFor(fmt);
+        const acct = loadAccount();
+        const balance = acct?.credits ?? 0;
+        return (
+          <Dialog
+            open={confirmRemediateOpen}
+            title={"This will charge " + cost + " credit" + (cost === 1 ? "" : "s") + ". Continue?"}
+            message={
+              "You currently have " +
+              balance +
+              " credit" +
+              (balance === 1 ? "" : "s") +
+              ". Approving downloads a remediated copy of your document and spends " +
+              cost +
+              " credit" +
+              (cost === 1 ? "" : "s") +
+              " from your balance."
+            }
+            confirmLabel={balance >= cost ? "Charge " + cost + " & remediate" : "Continue (low balance)"}
+            cancelLabel="Cancel"
+            onConfirm={() => {
+              setConfirmRemediateOpen(false);
+              void _runRemediateNow();
+            }}
+            onCancel={() => setConfirmRemediateOpen(false)}
+          />
+        );
+      })()}
+      <SignInModal
+        open={signInOpen}
+        reason={signInReason ?? undefined}
+        onCancel={() => {
+          setSignInOpen(false);
+          setSignInReason(null);
+        }}
+        onMaybeLater={() => {
+          // Soft dismiss: keep them on the results page and let them keep
+          // poking around. Apply / second upload will re-prompt.
+          setSignInOpen(false);
+          setSignInReason(null);
+          toast.info("No worries - take a look around.", {
+            description: "Sign in any time to download or run a new scan.",
+            dedupeKey: "free-scan-soft-dismiss",
+          });
+        }}
+      />
       {restoredFromDraft && report ? (
         <InlineNotice
-          tone="info"
-          title="Restored your previous audit"
-          message="You picked up where you left off — decisions, log, and review position are preserved. Drop a new file (or click Choose) to start fresh."
+          tone={!sourceFile ? "warning" : "info"}
+          title={
+            !sourceFile
+              ? "Re-attach your file to apply fixes"
+              : "Restored your previous audit"
+          }
+          message={
+            !sourceFile
+              ? "We kept your review state across reloads, but the original document was not stored locally. Drop the same file again (or click \"Choose a different file\" above) and you can apply the approved fixes."
+              : "You picked up where you left off — decisions, log, and review position are preserved. Drop a new file (or click Choose) to start fresh."
+          }
+          actionLabel={!sourceFile ? "Re-attach file" : undefined}
+          onAction={!sourceFile ? handlePick : undefined}
         />
       ) : null}
 
       {/* === Header ============================================================ */}
-      <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={[theme.typography.title, { color: theme.colors.text }]}>
-            508 Agent · Audit
-          </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-            Drop a document, walk through every finding, approve only the fixes you want.
-          </Text>
-        </View>
-        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-          {mockMode ? (
-            <UncertaintyChip
-              label="DEMO MODE"
-              hint="You're seeing fake data. Turn off Demo Mode in Settings to analyze a real document."
-            />
-          ) : (
-            <Chip
-              label={
-                backendHealth === "ok"
-                  ? "Live"
-                  : backendHealth === "error"
-                  ? "No backend"
-                  : "Checking…"
-              }
-              tone={
-                backendHealth === "ok"
-                  ? "success"
-                  : backendHealth === "error"
-                  ? "danger"
-                  : "default"
-              }
-            />
-          )}
-          <Pressable
-            onPress={() => setShowHelp(true)}
-            accessibilityLabel="Show keyboard shortcuts"
-            style={[
-              styles.helpButton,
-              { borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
-            ]}
-          >
-            <Text style={[styles.helpButtonText, { color: theme.colors.textMuted }]}>?</Text>
-          </Pressable>
-        </View>
-      </View>
+      <Hero
+        shader="aurora"
+        eyebrow="AUDIT"
+        title="508 Agent Audit"
+        subtitle="Drop a document, walk through every finding, approve only the fixes you want."
+        rightSlot={
+          <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+            {mockMode ? (
+              <UncertaintyChip
+                label="DEMO MODE"
+                hint="You're seeing fake data. Turn off Demo Mode in Settings to analyze a real document."
+              />
+            ) : (
+              <Chip
+                label={
+                  backendHealth === "ok"
+                    ? "Live"
+                    : backendHealth === "error"
+                    ? "No backend"
+                    : "Checking…"
+                }
+                tone={
+                  backendHealth === "ok"
+                    ? "success"
+                    : backendHealth === "error"
+                    ? "danger"
+                    : "default"
+                }
+              />
+            )}
+            <Pressable accessibilityRole="button"
+              onPress={() => setShowHelp(true)}
+              accessibilityLabel="Show keyboard shortcuts"
+              style={[
+                styles.helpButton,
+                { borderColor: theme.colors.border, backgroundColor: "rgba(255,255,255,0.12)" },
+              ]}
+            >
+              <Text style={[styles.helpButtonText, { color: "rgba(255,255,255,0.85)" }]}>?</Text>
+            </Pressable>
+          </View>
+        }
+      />
 
       {/* === Backend onboarding ================================================= */}
       {noBackend && !report ? (
@@ -753,20 +929,52 @@ export default function AuditScreen() {
             <Text style={styles.stepNumberText}>1</Text>
           </View>
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
-            Pick the document you want to audit
+            Upload a document
           </Text>
         </View>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Supported: PDF, Microsoft Word (.docx), Microsoft PowerPoint (.pptx). Files are processed
-          locally.
-        </Text>
-        <View style={styles.row}>
-          <Button
-            title={busy ? "Analyzing…" : filename ? "Choose a different file" : "Choose file"}
+
+        {/* Large drop zone - always visible, click or drag-and-drop */}
+        {Platform.OS === "web" && !filename && !busy ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Upload a document - click to choose, or drag a file onto this area"
             onPress={handlePick}
-          />
-          {filename ? <Chip label={filename} tone="default" /> : null}
-        </View>
+            style={({ hovered, pressed }: any) => [
+              styles.dropZone,
+              {
+                borderColor: pressed || hovered ? theme.colors.accent : theme.colors.border,
+                backgroundColor: pressed
+                  ? theme.colors.accent + "11"
+                  : hovered
+                  ? theme.colors.surface2
+                  : theme.colors.surface,
+              },
+            ]}
+          >
+            <PixelIcon name="doc" size={5} color={theme.colors.accent} />
+            <Text style={[theme.typography.h2, { color: theme.colors.text, marginTop: 10, textAlign: "center" }]}>
+              Drop a PDF, Word, or PowerPoint file here
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4, textAlign: "center" }]}>
+              Or click anywhere in this box to choose one from your computer
+            </Text>
+            <View style={[styles.dropZoneCta, { backgroundColor: theme.colors.accent }]}>
+              <Text style={styles.dropZoneCtaText}>Choose file</Text>
+            </View>
+            <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 10 }]}>
+              .pdf · .docx · .pptx
+            </Text>
+          </Pressable>
+        ) : (
+          <View style={styles.row}>
+            <Button
+              title={busy ? "Analyzing..." : "Choose a different file"}
+              onPress={handlePick}
+              disabled={busy}
+            />
+            {filename ? <Chip label={filename} tone="default" /> : null}
+          </View>
+        )}
         {Platform.OS === "web" ? (
           // @ts-ignore — RN-Web supports a hidden file input
           <input
@@ -795,6 +1003,79 @@ export default function AuditScreen() {
           <InlineNotice title="Couldn't analyze that file" message={error} tone="danger" />
         ) : null}
 
+        {/* Auto-fix policy selector */}
+        <View style={styles.policyBlock}>
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginBottom: 6 },
+            ]}
+          >
+            Auto-fix policy
+          </Text>
+          <View style={styles.policyRow}>
+            {(
+              [
+                {
+                  key: "conservative" as const,
+                  label: "Conservative",
+                  desc: "Only fix things I am 95%+ certain about.",
+                },
+                {
+                  key: "balanced" as const,
+                  label: "Balanced",
+                  desc: "Fix common issues, leave judgment calls for me.",
+                },
+                {
+                  key: "aggressive" as const,
+                  label: "Aggressive",
+                  desc: "Fix everything you can - I will review the output.",
+                },
+              ]
+            ).map((opt) => {
+              const selected = autoFixPolicy === opt.key;
+              return (
+                <Pressable
+                  key={opt.key}
+                  accessibilityRole="radio"
+                  accessibilityLabel={`${opt.label}: ${opt.desc}`}
+                  accessibilityState={{ selected }}
+                  onPress={() => setAutoFixPolicy(opt.key)}
+                  style={[
+                    styles.policyOption,
+                    {
+                      borderColor: selected ? theme.colors.accent : theme.colors.border,
+                      backgroundColor: selected
+                        ? theme.colors.accent + "14"
+                        : theme.colors.surface,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      theme.typography.body,
+                      {
+                        color: selected ? theme.colors.accent : theme.colors.text,
+                        fontWeight: "700",
+                      },
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                  <Text
+                    style={[
+                      theme.typography.caption,
+                      { color: theme.colors.textMuted, marginTop: 2 },
+                    ]}
+                  >
+                    {opt.desc}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
         {!report && !busy ? (
           <View style={styles.sampleBlock}>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
@@ -802,7 +1083,7 @@ export default function AuditScreen() {
             </Text>
             <View style={styles.sampleRow}>
               {SAMPLE_DOCUMENTS.map((sample) => (
-                <Pressable
+                <Pressable accessibilityRole="button"
                   key={sample.id}
                   onPress={() => loadSample(sample)}
                   accessibilityLabel={`Load sample document: ${sample.title}`}
@@ -899,6 +1180,21 @@ export default function AuditScreen() {
                     : "AI-generated suggestions are present. Always review before approving."
                 }
               />
+              {!fixedDownloadUrl && !mockMode ? (
+                <View style={{ marginTop: 6, flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                  <Chip
+                    label={
+                      "This audit will cost " +
+                      costFor(formatForFile(sourceFile) ?? report.summary.sourceFormat) +
+                      " credits"
+                    }
+                    tone="info"
+                  />
+                  <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+                    Charged when you click Apply &amp; download.
+                  </Text>
+                </View>
+              ) : null}
             </View>
           </View>
 
@@ -907,6 +1203,9 @@ export default function AuditScreen() {
           <SeverityHeatmap errors={buckets.errors} warnings={buckets.warnings} infos={buckets.infos} />
         </Card>
       ) : null}
+
+      {/* === Letter from Curb: warm prose summary ============================= */}
+      {report ? <LetterFromCurb report={report} /> : null}
 
       {/* === Step 3: Sequential review ========================================= */}
       {report && totalIssues > 0 ? (
@@ -926,7 +1225,7 @@ export default function AuditScreen() {
           <View style={styles.filterRow}>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Severity:</Text>
             {(["all", "error", "warning", "info"] as SeverityFilter[]).map((s) => (
-              <Pressable key={s} onPress={() => setSeverityFilter(s)}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Filter by severity" key={s} onPress={() => setSeverityFilter(s)}>
                 <Chip
                   label={
                     s === "all"
@@ -952,24 +1251,26 @@ export default function AuditScreen() {
               </Pressable>
             ))}
           </View>
-          <View style={styles.filterRow}>
-            <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Status:</Text>
-            {(
-              [
-                { key: "all" as DecisionFilter, label: `All` },
-                { key: "pending" as DecisionFilter, label: `Pending (${decisionCounts.pending})` },
-                { key: "approved" as DecisionFilter, label: `Approved (${decisionCounts.approved})` },
-                { key: "rejected" as DecisionFilter, label: `Rejected (${decisionCounts.rejected})` },
-              ] as { key: DecisionFilter; label: string }[]
-            ).map((opt) => (
-              <Pressable key={opt.key} onPress={() => setDecisionFilter(opt.key)}>
-                <Chip
-                  label={opt.label}
-                  tone={decisionFilter === opt.key ? "info" : "default"}
-                />
-              </Pressable>
-            ))}
-          </View>
+          {totalIssues > 1 ? (
+            <View style={styles.filterRow}>
+              <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Status:</Text>
+              {(
+                [
+                  { key: "all" as DecisionFilter, label: `All` },
+                  { key: "pending" as DecisionFilter, label: `Pending (${decisionCounts.pending})` },
+                  { key: "approved" as DecisionFilter, label: `Approved (${decisionCounts.approved})` },
+                  { key: "rejected" as DecisionFilter, label: `Rejected (${decisionCounts.rejected})` },
+                ] as { key: DecisionFilter; label: string }[]
+              ).map((opt) => (
+                <Pressable accessibilityRole="button" accessibilityLabel="Filter by decision" key={opt.key} onPress={() => setDecisionFilter(opt.key)}>
+                  <Chip
+                    label={opt.label}
+                    tone={decisionFilter === opt.key ? "info" : "default"}
+                  />
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
 
           {totalIssues > 0 && reviewedCount === totalIssues ? (
             <View
@@ -994,9 +1295,10 @@ export default function AuditScreen() {
             </View>
           ) : null}
 
+          {totalIssues > 3 ? (
           <View style={styles.bulkRow}>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Bulk:</Text>
-            <Pressable
+            <Pressable accessibilityRole="button"
               onPress={() =>
                 bulkDecide(
                   "approved",
@@ -1011,7 +1313,7 @@ export default function AuditScreen() {
                 Approve all errors
               </Text>
             </Pressable>
-            <Pressable
+            <Pressable accessibilityRole="button"
               onPress={() =>
                 bulkDecide(
                   "approved",
@@ -1029,7 +1331,7 @@ export default function AuditScreen() {
                 Approve safe auto-fixes
               </Text>
             </Pressable>
-            <Pressable
+            <Pressable accessibilityRole="button"
               onPress={() =>
                 bulkDecide(
                   "rejected",
@@ -1046,7 +1348,7 @@ export default function AuditScreen() {
                 Reject heuristic suggestions
               </Text>
             </Pressable>
-            <Pressable
+            <Pressable accessibilityRole="button"
               onPress={() => setResetDialogOpen(true)}
               accessibilityLabel="Reset all decisions"
               style={[styles.bulkButton, { borderColor: theme.colors.border }]}
@@ -1056,6 +1358,7 @@ export default function AuditScreen() {
               </Text>
             </Pressable>
           </View>
+          ) : null}
 
           <ProgressBar
             current={reviewIndex}
@@ -1089,6 +1392,8 @@ export default function AuditScreen() {
                   customText={decisions[currentViolation.id]?.customText}
                   note={decisions[currentViolation.id]?.note}
                   isEditing={editing}
+                  showDetails={showDetails}
+                  onToggleDetails={() => setShowDetails((p) => !p)}
                   onSetEditing={setEditing}
                   onDecide={(d, t) => {
                     decide(currentViolation, d, t);
@@ -1152,40 +1457,6 @@ export default function AuditScreen() {
             />
           </View>
 
-          <Divider />
-
-          {/* Decision log */}
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Decision log {decisionLog.length > 0 ? `· press u or Ctrl+Z to undo` : ""}
-          </Text>
-          {decisionLog.length === 0 ? (
-            <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-              No decisions yet — approve, reject, or edit an issue to see entries here.
-            </Text>
-          ) : (
-            <View style={styles.logList}>
-              {decisionLog.slice(0, 5).map((entry) => (
-                <View key={`${entry.violationId}-${entry.at}`} style={styles.logRow}>
-                  <Chip
-                    label={entry.decision}
-                    tone={
-                      entry.decision === "approved"
-                        ? "success"
-                        : entry.decision === "rejected"
-                        ? "warning"
-                        : "default"
-                    }
-                  />
-                  <Text style={[theme.typography.body, { color: theme.colors.text, flex: 1 }]}>
-                    {entry.title}
-                  </Text>
-                  <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-                    {_relativeTime(entry.at)}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          )}
         </Card>
       ) : null}
 
@@ -1200,53 +1471,29 @@ export default function AuditScreen() {
               Apply approved fixes
             </Text>
           </View>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-            We've already run the deterministic analyzer and proposed fixes. Hitting Apply commits
-            the {decisionCounts.approved} fix(es) you approved into the document. Rejected items
-            get queued for manual review instead.
-          </Text>
+
           <View style={styles.row}>
             <Button
               title={
                 downloadingFixed
-                  ? "Applying & downloading…"
-                  : `Apply ${decisionCounts.approved} approved · download remediated file`
+                  ? "Applying..."
+                  : `Apply ${decisionCounts.approved} fix${decisionCounts.approved === 1 ? "" : "es"} - Download`
               }
               onPress={downloadRemediated}
               loading={downloadingFixed}
               disabled={decisionCounts.approved === 0 && !mockMode}
-              accessibilityHint="Sends only your approved fixes to the analyzer, bakes them into a remediated copy of the document, and opens that copy in a new tab."
-            />
-            <Button
-              title={`Open audit report (${reviewedCount} reviewed)`}
-              onPress={() =>
-                _openReport(report, decisions, decisionLog, filename ?? "document")
-              }
-              variant="secondary"
-            />
-            <Button
-              title="Export JSON"
-              onPress={() =>
-                _downloadJson(report, decisions, decisionLog, filename ?? "document")
-              }
-              variant="ghost"
-              accessibilityHint="Download the raw audit data including decisions and log."
-            />
-            <Button
-              title="Export CSV"
-              onPress={() => _downloadCsv(report, decisions, filename ?? "document")}
-              variant="ghost"
-              accessibilityHint="Download the issue table as a spreadsheet-compatible CSV."
+              accessibilityHint="Bakes your approved fixes into a remediated copy of the document and opens it in a new tab."
             />
           </View>
-          {fixedDownloadUrl ? (
-            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
-              Direct download URL:{" "}
-              <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
-                {fixedDownloadUrl}
-              </Text>
-            </Text>
+
+          {decisionCounts.approved === 0 ? (
+            <InlineNotice
+              tone="info"
+              title="No fixes approved yet"
+              message="Approve at least one issue above before downloading a remediated file."
+            />
           ) : null}
+
           {lastRemediation ? (
             <View style={{ marginTop: 12, gap: 8 }}>
               <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>
@@ -1258,23 +1505,51 @@ export default function AuditScreen() {
               />
             </View>
           ) : null}
-          {decisionCounts.approved === 0 ? (
-            <InlineNotice
-              tone="info"
-              title="No fixes approved yet"
-              message="Approve at least one fix above (or use the bulk Approve buttons) before downloading a remediated file. Without approvals, the remediated file would be identical to the original."
-            />
-          ) : (
-            <InlineNotice
-              tone="info"
-              title="What gets applied"
-              message={`Only the ${decisionCounts.approved} fix${
-                decisionCounts.approved === 1 ? "" : "es"
-              } you approved are baked into the remediated file. The ${
-                decisionCounts.rejected
-              } rejected and ${decisionCounts.pending} pending items are recorded in the audit report so a teammate can handle them.`}
-            />
-          )}
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={showMoreOptions ? "Hide more options" : "More options"}
+            onPress={() => setShowMoreOptions((p) => !p)}
+            style={[styles.detailsToggle, { borderColor: theme.colors.border, marginTop: 8 }]}
+          >
+            <Text style={[theme.typography.caption, { color: theme.colors.accent, fontWeight: "700" }]}>
+              {showMoreOptions ? "Hide more options" : "More options"}
+            </Text>
+          </Pressable>
+
+          {showMoreOptions ? (
+            <View style={[styles.row, { marginTop: 8 }]}>
+              <Button
+                title={`Open audit report (${reviewedCount} reviewed)`}
+                onPress={() =>
+                  _openReport(report, decisions, decisionLog, filename ?? "document")
+                }
+                variant="secondary"
+              />
+              <Button
+                title="Export JSON"
+                onPress={() =>
+                  _downloadJson(report, decisions, decisionLog, filename ?? "document")
+                }
+                variant="ghost"
+                accessibilityHint="Download the raw audit data including decisions and log."
+              />
+              <Button
+                title="Export CSV"
+                onPress={() => _downloadCsv(report, decisions, filename ?? "document")}
+                variant="ghost"
+                accessibilityHint="Download the issue table as a spreadsheet-compatible CSV."
+              />
+              {fixedDownloadUrl ? (
+                <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+                  Direct download URL:{" "}
+                  <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
+                    {fixedDownloadUrl}
+                  </Text>
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </Card>
       ) : null}
 
@@ -1296,14 +1571,17 @@ export default function AuditScreen() {
               ))}
             </View>
           </View>
-          <Text
-            style={[
-              theme.typography.body,
-              { color: theme.colors.textMuted, marginTop: 16, textAlign: "center" },
-            ]}
-          >
-            Running parser → analyzers → planner → executors…
-          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 12, marginTop: 16 }}>
+            <PixelSpinner />
+            <Text
+              style={[
+                theme.typography.body,
+                { color: theme.colors.textMuted, textAlign: "center" },
+              ]}
+            >
+              Running parser → analyzers → planner → executors…
+            </Text>
+          </View>
         </Card>
       ) : null}
 
@@ -1329,27 +1607,38 @@ function ProgressBar(props: {
   onJump: (index: number) => void;
 }) {
   const theme = useTheme();
+  // Thin ribbon - 3px tall accent stripe split into one segment per finding.
+  // Decided segments fill in tone-coloured; current pulses brighter.
   return (
-    <View style={styles.progressRow}>
+    <View
+      style={[
+        styles.progressRibbon,
+        { backgroundColor: theme.colors.surface2 },
+      ]}
+    >
       {props.violations.map((v, i) => {
         const decision = props.decisions[v.id]?.decision ?? "pending";
-        let bg = theme.colors.surface2;
-        if (decision === "approved") bg = theme.colors.success;
-        else if (decision === "rejected") bg = theme.colors.danger;
-        else if (i === props.current) bg = theme.colors.accent;
+        let bg = "transparent";
+        let opacity = 0.0;
+        if (decision === "approved") {
+          bg = theme.colors.success;
+          opacity = 0.85;
+        } else if (decision === "rejected") {
+          bg = theme.colors.danger;
+          opacity = 0.7;
+        } else if (i === props.current) {
+          bg = theme.colors.accent;
+          opacity = 1;
+        } else {
+          bg = theme.colors.accent;
+          opacity = 0.18;
+        }
         return (
-          <Pressable
+          <Pressable accessibilityRole="button"
             key={v.id}
             onPress={() => props.onJump(i)}
             accessibilityLabel={`Jump to issue ${i + 1}`}
-            style={[
-              styles.progressCell,
-              {
-                backgroundColor: bg,
-                borderColor:
-                  i === props.current ? theme.colors.text : "transparent",
-              },
-            ]}
+            style={[styles.progressSegment, { backgroundColor: bg, opacity }]}
           />
         );
       })}
@@ -1364,6 +1653,8 @@ function IssueCard(props: {
   customText?: string;
   note?: string;
   isEditing: boolean;
+  showDetails: boolean;
+  onToggleDetails: () => void;
   onSetEditing: (b: boolean) => void;
   onDecide: (decision: Decision, customText?: string) => void;
   onUpdateNote: (note: string) => void;
@@ -1385,86 +1676,106 @@ function IssueCard(props: {
   }, [props.violation.id, props.customText]);
 
   return (
-    <View style={[styles.issueCard, { borderColor: theme.colors.border }]}>
+    <View style={[styles.issueCard, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}>
+      {/* Workshop note - thin coloured rule on the left, serif heading. */}
+      <View style={[styles.issueRule, { backgroundColor: tone }]} />
       <View style={styles.issueTop}>
-        <View style={[styles.severityDot, { backgroundColor: tone }]} />
         <View style={{ flex: 1 }}>
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>{catalog.title}</Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginBottom: 4 },
+            ]}
+          >
+            {v.severity.toUpperCase()}   .   {v.ruleId}
+          </Text>
+          <Text
+            style={[
+              theme.typography.displaySmall as any,
+              { color: theme.colors.text, fontSize: 24, lineHeight: 30 },
+            ]}
+          >
+            {catalog.title}
+          </Text>
+          <Text
+            style={[
+              theme.typography.body,
+              { color: theme.colors.textMuted, marginTop: 8, lineHeight: 22 },
+            ]}
+          >
             {catalog.summary}
           </Text>
         </View>
-        <Chip
-          label={v.severity}
-          tone={
-            v.severity === "error"
-              ? "danger"
-              : v.severity === "warning"
-              ? "warning"
-              : "info"
-          }
-        />
       </View>
 
-      <Section title="Why this matters" body={catalog.why} />
-      <Section
-        title="Where in the document"
-        body={
-          v.page
-            ? `Page ${v.page}, node ${v.nodeId}`
-            : `Node ${v.nodeId} (no page available — likely document-level metadata)`
-        }
-      />
-      <Section title="What the auto-fix will do" body={catalog.autoFix} />
-      {catalog.manualJudgment ? (
-        <Section title="What needs your judgment" body={catalog.manualJudgment} tone="warning" />
-      ) : null}
+      <Section title="What we will do" body={catalog.autoFix} tone="info" />
 
-      {props.execution ? (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={props.showDetails ? "Hide details" : "Show details"}
+        onPress={() => props.onToggleDetails()}
+        style={[styles.detailsToggle, { borderColor: theme.colors.border }]}
+      >
+        <Text style={[theme.typography.caption, { color: theme.colors.accent, fontWeight: "700" }]}>
+          {props.showDetails ? "Hide details" : "Show details"}
+        </Text>
+      </Pressable>
+
+      {props.showDetails ? (
         <>
+          <Section title="Why this matters" body={catalog.why} />
           <Section
-            title="What we did this run"
-            body={`${labelStatus(props.execution.status)} — ${props.execution.notes}`}
-            tone={props.execution.status === "success" ? "success" : "info"}
+            title="Where in the document"
+            body={
+              v.page
+                ? `Page ${v.page}, node ${v.nodeId}`
+                : `Node ${v.nodeId} (no page available - likely document-level metadata)`
+            }
           />
-          {(() => {
-            const provenance = _extractProvenance(props.execution.notes);
-            if (!provenance) return null;
-            return (
-              <View style={styles.standards}>
-                <UncertaintyChip
-                  label={`${provenance.provider}`}
-                  confidence={provenance.confidence}
-                  hint={
-                    provenance.provider === "heuristic"
-                      ? "Suggestion came from a local rule, not an AI model. Lower confidence than vision-AI."
-                      : "Suggestion came from an AI provider. Always verify before approving."
-                  }
-                />
-              </View>
-            );
-          })()}
+          {catalog.manualJudgment ? (
+            <Section title="What needs your judgment" body={catalog.manualJudgment} tone="warning" />
+          ) : null}
+
+          {props.execution ? (
+            (() => {
+              const provenance = _extractProvenance(props.execution.notes);
+              if (!provenance) return null;
+              return (
+                <View style={styles.standards}>
+                  <UncertaintyChip
+                    label={`${provenance.provider}`}
+                    confidence={provenance.confidence}
+                    hint={
+                      provenance.provider === "heuristic"
+                        ? "Suggestion came from a local rule, not an AI model. Lower confidence than vision-AI."
+                        : "Suggestion came from an AI provider. Always verify before approving."
+                    }
+                  />
+                </View>
+              );
+            })()
+          ) : null}
+
+          <View style={styles.standards}>
+            {catalog.standards.wcag.map((id) => (
+              <Chip key={`wcag-${id}`} label={`WCAG ${id}`} tone="default" />
+            ))}
+            {catalog.standards.section508.map((id) => (
+              <Chip key={`508-${id}`} label={`Section 508 ${id}`} tone="default" />
+            ))}
+            {catalog.standards.pdfUa.map((id) => (
+              <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
+            ))}
+            {catalog.learnMoreUrl ? (
+              <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(catalog.learnMoreUrl)}>
+                <Chip label="Learn more" tone="info" />
+              </Pressable>
+            ) : null}
+          </View>
+
+          <ReviewerNote value={props.note ?? ""} onChange={props.onUpdateNote} />
         </>
       ) : null}
-
-      <View style={styles.standards}>
-        {catalog.standards.wcag.map((id) => (
-          <Chip key={`wcag-${id}`} label={`WCAG ${id}`} tone="default" />
-        ))}
-        {catalog.standards.section508.map((id) => (
-          <Chip key={`508-${id}`} label={`§508 ${id}`} tone="default" />
-        ))}
-        {catalog.standards.pdfUa.map((id) => (
-          <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
-        ))}
-        {catalog.learnMoreUrl ? (
-          <Pressable onPress={() => Linking.openURL(catalog.learnMoreUrl)}>
-            <Chip label="Learn more ↗" tone="info" />
-          </Pressable>
-        ) : null}
-      </View>
-
-      <ReviewerNote value={props.note ?? ""} onChange={props.onUpdateNote} />
 
       {props.isEditing ? (
         <View style={[styles.editor, { borderColor: theme.colors.border }]}>
@@ -1496,15 +1807,17 @@ function IssueCard(props: {
       ) : (
         <View style={styles.decisionRow}>
           <Button
-            title={props.decision === "approved" ? "✓ Approved (a)" : "Approve (a)"}
+            title={props.decision === "approved" ? "Approved (a)" : "Approve (a)"}
             onPress={() => props.onDecide("approved", props.customText)}
             variant={props.decision === "approved" ? "primary" : "secondary"}
+            icon={<PixelIcon name="check" size={3} color={props.decision === "approved" ? "#FFFFFF" : "#1F140A"} />}
           />
           <Button title="Edit & approve (e)" onPress={() => props.onSetEditing(true)} variant="ghost" />
           <Button
-            title={props.decision === "rejected" ? "✗ Rejected (r)" : "Reject (r)"}
+            title={props.decision === "rejected" ? "Rejected (r)" : "Reject (r)"}
             onPress={() => props.onDecide("rejected")}
             variant={props.decision === "rejected" ? "primary" : "ghost"}
+            icon={<PixelIcon name="x" size={3} color={props.decision === "rejected" ? "#FFFFFF" : "#B43A2E"} />}
           />
         </View>
       )}
@@ -1527,7 +1840,7 @@ function ReviewerNote({ value, onChange }: { value: string; onChange: (v: string
           Reviewer note (optional, exported with the audit report)
         </Text>
         {dirty ? (
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={() => onChange(draft.trim())}
             accessibilityLabel="Save reviewer note"
           >
@@ -1586,7 +1899,7 @@ function Section(props: {
 function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <Pressable accessibilityRole="button"
       onPress={onClose}
       accessibilityLabel="Close keyboard shortcuts overlay"
       style={[styles.overlay, { backgroundColor: theme.colors.shadow }]}
@@ -1635,6 +1948,55 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Pre-mark decisions based on the auto-fix policy. Returns a fresh
+ * decisions map; callers replace state with this before the user starts
+ * reviewing.
+ *
+ *   - conservative: pre-marks nothing (caller gets {} back).
+ *   - balanced: pre-approves deterministic auto-fixable rules from
+ *     heuristic providers (high-confidence pattern matches), leaving
+ *     judgment calls (alt text, link rewrite) for the user.
+ *   - aggressive: pre-approves every violation that has at least one
+ *     non-manual-review recommended action.
+ */
+function _preDecideFromPolicy(
+  report: PipelineResponse,
+  policy: "conservative" | "balanced" | "aggressive",
+): Record<string, IssueState> {
+  if (policy === "conservative") return {};
+  const at = new Date().toISOString();
+  const out: Record<string, IssueState> = {};
+  const judgmentActions = new Set([
+    "FLAG_FOR_MANUAL_REVIEW",
+    "GENERATE_ALT_TEXT",
+    "IMPROVE_LINK_TEXT",
+  ]);
+  const aiProvider = (report.aiProvider || "").toLowerCase();
+  for (const v of report.violations) {
+    const actions = v.recommendedActions ?? [];
+    if (actions.length === 0) continue;
+    if (actions.includes("FLAG_FOR_MANUAL_REVIEW") && actions.length === 1) {
+      // Pure manual-review items are never pre-approved by policy.
+      continue;
+    }
+    const hasDeterministic = actions.some((a) => !judgmentActions.has(a));
+    if (policy === "aggressive") {
+      // Approve anything that has a fix at all. AI-suggested or heuristic
+      // both count - the user opted in to "review the output".
+      out[v.id] = { decision: "approved", decidedAt: at };
+      continue;
+    }
+    // Balanced: pre-approve heuristic high-confidence patterns that have
+    // a deterministic action. Non-heuristic AI providers still defer to
+    // the user under balanced.
+    if (hasDeterministic && (aiProvider === "heuristic" || aiProvider === "")) {
+      out[v.id] = { decision: "approved", decidedAt: at };
+    }
+  }
+  return out;
+}
+
 function _extractProvenance(notes: string): { provider: string; confidence?: number } | null {
   // Executor notes look like:
   //   "Generated alt text via heuristic (confidence 0.40). Pending human review. Text='...'"
@@ -1670,7 +2032,7 @@ function _gradeFor(score: number): string {
   return "F";
 }
 
-function labelStatus(status: string): string {
+function _labelStatus(status: string): string {
   if (status === "success") return "Successfully applied";
   if (status === "skipped") return "Skipped";
   if (status === "ready") return "Ready to apply";
@@ -2071,12 +2433,49 @@ const styles = StyleSheet.create({
   filterRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 8 },
   progressRow: { flexDirection: "row", gap: 4, marginVertical: 12, flexWrap: "wrap" },
   progressCell: { width: 14, height: 14, borderRadius: 3, borderWidth: 2 },
-  issueCard: { borderWidth: 1, borderRadius: 12, padding: 14, gap: 12, marginTop: 8 },
-  issueTop: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
+  progressRibbon: {
+    flexDirection: "row",
+    height: 3,
+    borderRadius: 2,
+    overflow: "hidden",
+    marginVertical: 16,
+    gap: 1,
+  },
+  progressSegment: {
+    flex: 1,
+    height: "100%",
+    minWidth: 4,
+  },
+  issueCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+    gap: 14,
+    marginTop: 8,
+    position: "relative",
+  },
+  issueRule: {
+    position: "absolute",
+    top: 24,
+    bottom: 24,
+    left: 0,
+    width: 3,
+    borderTopRightRadius: 2,
+    borderBottomRightRadius: 2,
+  },
+  issueTop: { flexDirection: "row", gap: 12, alignItems: "flex-start", paddingLeft: 14 },
   severityDot: { width: 10, height: 10, borderRadius: 5, marginTop: 6 },
   section: { flexDirection: "row", gap: 10 },
   sectionRule: { width: 3, borderRadius: 2, alignSelf: "stretch" },
   standards: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  detailsToggle: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
   decisionRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   navRow: { flexDirection: "row", alignItems: "center", marginTop: 12, gap: 8 },
   editor: { borderWidth: 1, borderRadius: 10, padding: 10, gap: 8 },
@@ -2111,6 +2510,16 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     alignItems: "center",
+  },
+  policyBlock: { gap: 6, marginTop: 12 },
+  policyRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  policyOption: {
+    flex: 1,
+    minWidth: 200,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   sampleBlock: { gap: 8, marginTop: 16 },
   sampleRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
@@ -2155,6 +2564,29 @@ const styles = StyleSheet.create({
   // Preview column wraps below on narrow viewports thanks to workspaceRow.flexWrap.
   // Width matches the PdfPreview internal max so it doesn't stretch awkwardly.
   previewColumn: { width: 360, flexShrink: 0, flexGrow: 0, minWidth: 320 },
+  dropZone: {
+    marginTop: 12,
+    paddingVertical: 32,
+    paddingHorizontal: 20,
+    borderWidth: 2,
+    borderStyle: Platform.OS === "web" ? ("dashed" as any) : "solid",
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 220,
+  },
+  dropZoneCta: {
+    marginTop: 16,
+    paddingHorizontal: 22,
+    paddingVertical: 11,
+    borderRadius: 10,
+  },
+  dropZoneCtaText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "700",
+    letterSpacing: 0.3,
+  },
   dropOverlay: {
     position: Platform.OS === "web" ? ("fixed" as any) : "absolute",
     top: 0,
@@ -2203,4 +2635,101 @@ const styles = StyleSheet.create({
     minHeight: 48,
     fontSize: 13,
   },
+  overlay: {
+    position: Platform.OS === "web" ? ("fixed" as any) : "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 10000,
+  },
+  overlayCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 24,
+    width: "100%",
+    maxWidth: 460,
+    gap: 12,
+  },
+  overlayList: { gap: 8, marginTop: 6 },
+  overlayRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  kbd: {
+    minWidth: 80,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    alignItems: "center",
+  },
+  policyBlock: { gap: 6, marginTop: 12 },
+  policyRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  policyOption: {
+    flex: 1,
+    minWidth: 200,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  sampleBlock: { gap: 8, marginTop: 16 },
+  sampleRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  sampleCard: {
+    flex: 1,
+    minWidth: 220,
+    maxWidth: 320,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+  },
+  sampleBadge: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+  sampleBadgeText: { color: "#FFFFFF", fontWeight: "800", fontSize: 10, letterSpacing: 0.5 },
+  bulkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 8,
+  },
+  bulkButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  workspaceRow: {
+    flexDirection: "row",
+    gap: 12,
+    flexWrap: "wrap",
+    alignItems: "flex-start",
+    marginTop: 12,
+  },
+  navColumn: { width: 280, flexShrink: 0, flexGrow: 0 },
+  detailColumn: { flex: 1, minWidth: 320 },
+  previewColumn: { width: 360, flexShrink: 0, flexGrow: 0, minWidth: 320 },
+  dropOverlay: {
+    position: Platform.OS === "web" ? ("fixed" as any) : "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 9999,
+    gap: 8,
+  },
+  dropOverlayText: {
+    color: "#FFFFFF",
+    fontSize: 36,
+    fontWeight: "800",
+    letterSpacing: -0.5,
+  },
+  dropOverlaySub: { color: "#FFFFFF", opacity: 0.85, fontSize: 14, fontWeight: "600" },
 });

@@ -28,7 +28,7 @@ export function HistoryList({ entries, onSelect, onClear, emptyHint }: HistoryLi
   return (
     <View>
       {entries.slice(0, 8).map((entry) => (
-        <Pressable
+        <Pressable accessibilityRole="button"
           key={entry.id}
           onPress={() => onSelect?.(entry)}
           style={[styles.row, { borderColor: theme.colors.border }]}
@@ -61,7 +61,7 @@ export function HistoryList({ entries, onSelect, onClear, emptyHint }: HistoryLi
         </Pressable>
       ))}
       {onClear ? (
-        <Pressable onPress={onClear} style={styles.clear}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Clear history" onPress={onClear} style={styles.clear}>
           <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
             Clear history
           </Text>

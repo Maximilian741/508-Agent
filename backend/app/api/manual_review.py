@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from app.api import state
+from app.persistence import audit_log as _audit
 from app.persistence.db import get_repo
 
 router = APIRouter()
@@ -73,16 +74,20 @@ async def clear_manual_review() -> ManualReviewClearResponse:
 
 
 @router.patch("/manual-review/{item_id}", response_model=ManualReviewItem)
-async def update_manual_review(item_id: str, request: ManualReviewUpdateRequest) -> ManualReviewItem:
+async def update_manual_review(
+    item_id: str,
+    body: ManualReviewUpdateRequest,
+    request: Request,
+) -> ManualReviewItem:
     current = REPO.get_manual_review_item(item_id)
     if not current:
         raise HTTPException(status_code=404, detail="Manual review item not found")
-    status = request.status.strip().lower()
+    status = body.status.strip().lower()
     if status not in {"pending", "approved", "rejected"}:
         raise HTTPException(status_code=400, detail="status must be pending|approved|rejected")
     current["status"] = status
-    if request.approvedText is not None:
-        current["approvedText"] = request.approvedText
+    if body.approvedText is not None:
+        current["approvedText"] = body.approvedText
     resolved = status in {"approved", "rejected"}
     ok = REPO.update_manual_review_item(item_id, current, resolved=resolved)
     if not ok:
@@ -92,4 +97,25 @@ async def update_manual_review(item_id: str, request: ManualReviewUpdateRequest)
         pending = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
         all_items = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=True)
         current["readyToFinalize"] = len(all_items) > 0 and len(pending) == 0
+
+    # Audit log: record the resolution.  Never write the suggested or approved
+    # text — just the metadata.
+    try:
+        ctx = _audit.context_from_request(request)
+        _audit.record_event(
+            event="manual_review_resolve",
+            request_id=ctx.get("request_id"),
+            actor_email=ctx.get("actor_email"),
+            actor_sub=ctx.get("actor_sub"),
+            ip=ctx.get("ip"),
+            doc_id=doc_id or None,
+            details={
+                "itemId": item_id,
+                "status": status,
+                "resolved": bool(resolved),
+            },
+        )
+    except Exception:
+        pass
+
     return ManualReviewItem(**current)

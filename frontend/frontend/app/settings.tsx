@@ -7,9 +7,15 @@
  */
 
 import { useState } from "react";
-import { Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Pressable, StyleSheet, Switch, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { clearHistory } from "../src/domain/auditHistory";
+import {
+  clearDemoData,
+  hasDemoData,
+  loadDemoData,
+  nukeDemoData,
+} from "../src/domain/demoSeed";
 import { DEFAULT_WEIGHTS, loadWeights, resetWeights, saveWeights } from "../src/domain/scoreWeights";
 import {
   notificationsAvailable,
@@ -20,9 +26,11 @@ import {
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
+import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
+import { Hero } from "../src/ui/components/Hero";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -31,6 +39,10 @@ export default function SettingsScreen() {
   const toast = useToast();
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
+  const freeScansUsed = useAppStore((state) => state.freeScansUsed);
+  const setFreeScansUsed = useAppStore((state) => state.setFreeScansUsed);
+  const bypassFreeScanGate = useAppStore((state) => state.bypassFreeScanGate);
+  const setBypassFreeScanGate = useAppStore((state) => state.setBypassFreeScanGate);
   const backendUrlWarning = useAppStore((state) => state.backendUrlWarning);
   const backendHealth = useAppStore((state) => state.backendHealth);
   const backendHealthMessage = useAppStore((state) => state.backendHealthMessage);
@@ -41,24 +53,28 @@ export default function SettingsScreen() {
   const setMockMode = useAppStore((state) => state.setMockMode);
   const [draftUrl, setDraftUrl] = useState(apiBaseUrl);
   const [notifyOn, setNotifyOn] = useState(notificationsEnabled());
+  const systemScheme = useColorScheme();
 
   return (
-    <Screen scroll>
-      <View style={styles.header}>
-        <View>
-          <Text style={[theme.typography.title, { color: theme.colors.text }]}>Settings</Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-            Where the analyzer lives, and whether you're working with real or fake data.
-          </Text>
-        </View>
-        <Chip
-          label={mockMode ? "Demo data" : "Live data"}
-          tone={mockMode ? "warning" : "success"}
-        />
-      </View>
+    <Screen scroll title="Settings">
+      <Hero
+        shader="ember"
+        eyebrow="SETTINGS"
+        title="Settings"
+        subtitle="Where the analyzer lives, and whether you're working with real or fake data."
+        rightSlot={
+          <Chip
+            label={mockMode ? "Demo data" : "Live data"}
+            tone={mockMode ? "warning" : "success"}
+          />
+        }
+      />
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo Mode</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="play" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo Mode</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           When Demo Mode is on, the app shows pre-baked sample data instead of calling the
           analyzer service. It's useful for exploring the UI without setting up the backend, but
@@ -74,7 +90,49 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Analyzer service URL</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="key" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Free-scan gate (testing)</Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          New visitors get one free scan, then the app prompts them to sign in
+          before the second upload or any download. Flip the bypass below to
+          test the full flow without burning your free scan every time.
+        </Text>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+          Free scans used so far: {freeScansUsed}
+        </Text>
+        <View style={styles.toggleRow}>
+          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+            {bypassFreeScanGate ? "Bypass is ON (gate skipped)" : "Bypass is OFF (gate active)"}
+          </Text>
+          <Switch value={bypassFreeScanGate} onValueChange={setBypassFreeScanGate} />
+        </View>
+        <View style={[styles.buttonRow, { marginTop: 8 }]}>
+          <Button
+            title="Reset free-scan counter"
+            variant="ghost"
+            disabled={freeScansUsed === 0}
+            onPress={() => {
+              setFreeScansUsed(0);
+              toast.info("Free-scan counter reset");
+            }}
+          />
+        </View>
+        {bypassFreeScanGate ? (
+          <InlineNotice
+            tone="warning"
+            title="Bypass is on"
+            message="The sign-in gate is disabled. Turn this off before shipping to real users."
+          />
+        ) : null}
+      </Card>
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Analyzer service URL</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           The Python backend writes its own URL to{" "}
           <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
@@ -121,16 +179,19 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Appearance</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="star" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Appearance</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Light / Dark / Match system. Affects the entire app.
+          Three distinct looks: dusky Twilight (default), warm Light parchment, or deep Dark walnut.
         </Text>
         <View style={styles.themeRow}>
           {(["system", "light", "dark"] as const).map((mode) => (
-            <Pressable
+            <Pressable accessibilityRole="button"
               key={mode}
               onPress={() => setThemeMode(mode)}
-              accessibilityLabel={`Set theme to ${mode}`}
+              accessibilityLabel={`Set theme to ${mode === "system" ? "twilight" : mode}`}
               style={[
                 styles.themeChoice,
                 {
@@ -148,15 +209,21 @@ export default function SettingsScreen() {
                   },
                 ]}
               >
-                {mode === "system" ? "Match system" : mode === "light" ? "Light" : "Dark"}
+                {mode === "system" ? "Twilight" : mode === "light" ? "Light" : "Dark"}
               </Text>
             </Pressable>
           ))}
         </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8, fontSize: 12 }]}>
+          Twilight is a dusky violet/peach palette - the default. Pick Light for cream parchment, Dark for deep walnut. (Your OS is currently {systemScheme === "dark" ? "Dark" : "Light"}; Twilight ignores it on purpose so all three options look different.)
+        </Text>
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Notifications</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Notifications</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Get a browser notification and a soft chime when an audit finishes — useful when you've
           switched tabs while a long document is being analyzed.
@@ -205,7 +272,59 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Audit history</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="coin" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo data</Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          Populate the dashboard, history, and achievements with a realistic
+          set of fixture audits so you can poke around without uploading any
+          documents. Seeded rows live in localStorage and can be removed with
+          one click.
+        </Text>
+        <View style={[styles.buttonRow, { marginTop: 8 }]}>
+          <Button
+            title="Load demo data"
+            onPress={() => {
+              const r = loadDemoData({ mode: "merge" });
+              toast.success(
+                `Loaded ${r.historyAdded} audits, ${r.achievementsUnlocked} new badges, ${r.workspacesCreated} workspaces.`,
+              );
+            }}
+          />
+          <Button
+            title={hasDemoData() ? "Clear demo data" : "Clear demo (none)"}
+            variant="ghost"
+            disabled={!hasDemoData()}
+            onPress={() => {
+              const r = clearDemoData();
+              toast.info(`Removed ${r.removed} demo audits.`);
+            }}
+          />
+          <Button
+            title="Reset everything"
+            variant="ghost"
+            onPress={() => {
+              if (
+                typeof window !== "undefined" &&
+                !window.confirm(
+                  "Reset all demo data, achievements, and seeded workspaces? Real audits and your own workspaces are kept.",
+                )
+              ) {
+                return;
+              }
+              nukeDemoData();
+              toast.info("Demo data, achievements, and seeded workspaces reset.");
+            }}
+          />
+        </View>
+      </Card>
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="doc" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Audit history</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           A list of every audit you've run is kept locally so the home page can show recent work.
           Nothing is sent off-device. Clear it any time.
@@ -215,6 +334,12 @@ export default function SettingsScreen() {
             title="Clear audit history"
             variant="ghost"
             onPress={() => {
+              if (
+                typeof window !== "undefined" &&
+                !window.confirm("Clear all locally-stored audit history?")
+              ) {
+                return;
+              }
               clearHistory();
               toast.info("Audit history cleared");
             }}
@@ -223,7 +348,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Diagnostics</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="gear" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Diagnostics</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Run a quick health check to confirm the analyzer is reachable and what AI provider is
           active. The result appears below.
@@ -232,7 +360,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
+        </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           Alt-text and link-text suggestions can be powered by an AI vision model. The backend
           picks one based on environment variables when it starts:
@@ -324,7 +455,7 @@ function ScoreWeightControls() {
           <Text style={[theme.typography.body, { color: theme.colors.text, flex: 1, fontWeight: "600" }]}>
             {key === "error" ? "Error" : key === "warning" ? "Warning" : "Info"}
           </Text>
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={() => setWeight(key, -1)}
             accessibilityLabel={`Decrease ${key} weight`}
             style={{
@@ -347,7 +478,7 @@ function ScoreWeightControls() {
           >
             {weights[key]}
           </Text>
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={() => setWeight(key, 1)}
             accessibilityLabel={`Increase ${key} weight`}
             style={{

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
+import secrets as _secrets
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+
+_log = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -50,10 +54,23 @@ class Settings:
     cors_allow_origins: List[str]
     max_upload_mb: int
     require_strict_cors: bool
+    app_secret: str
+    pipeline_artifact_ttl_seconds: int
+    cloudflare_access_team_domain: str
+    cloudflare_access_aud: str
+    admin_emails: List[str]
 
     @property
     def max_upload_bytes(self) -> int:
         return max(1, int(self.max_upload_mb)) * 1024 * 1024
+
+    def is_admin(self, email: Optional[str]) -> bool:
+        if not email:
+            return False
+        normalized = email.strip().lower()
+        if not normalized:
+            return False
+        return any(normalized == admin.strip().lower() for admin in self.admin_emails)
 
 
 @lru_cache(maxsize=1)
@@ -64,6 +81,19 @@ def get_settings() -> Settings:
     default_materialized_root = backend_root / ".runtime" / "materialized"
 
     environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").strip().lower() or "development"
+
+    raw_secret = (os.getenv("APP_SECRET") or "").strip()
+    if not raw_secret:
+        if environment == "production":
+            raise RuntimeError(
+                "APP_SECRET is required in production. Set a strong random hex/urlsafe string."
+            )
+        raw_secret = _secrets.token_urlsafe(48)
+        _log.warning(
+            "[config] APP_SECRET not set — generated a per-process random secret for dev mode. "
+            "Signed URLs will become invalid on backend restart."
+        )
+
     settings = Settings(
         environment=environment,
         app_version=os.getenv("APP_VERSION", "0.1.0").strip() or "0.1.0",
@@ -93,6 +123,11 @@ def get_settings() -> Settings:
         ),
         max_upload_mb=_env_int("MAX_UPLOAD_MB", 25),
         require_strict_cors=_env_bool("REQUIRE_STRICT_CORS", True),
+        app_secret=raw_secret,
+        pipeline_artifact_ttl_seconds=max(60, _env_int("PIPELINE_ARTIFACT_TTL_SECONDS", 86400)),
+        cloudflare_access_team_domain=os.getenv("CLOUDFLARE_ACCESS_TEAM_DOMAIN", "").strip(),
+        cloudflare_access_aud=os.getenv("CLOUDFLARE_ACCESS_AUD", "").strip(),
+        admin_emails=_env_list("ADMIN_EMAILS", []),
     )
 
     if settings.storage_provider not in {"local", "s3"}:
@@ -103,3 +138,4 @@ def get_settings() -> Settings:
         if "*" in settings.cors_allow_origins:
             raise RuntimeError("CORS_ALLOW_ORIGINS cannot include '*' in production.")
     return settings
+  

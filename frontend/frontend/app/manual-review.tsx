@@ -153,13 +153,13 @@ export default function ManualReviewScreen() {
               ? "Try applying fixes first, or switch to All unresolved to review previous queued items."
               : "No blocked remediation items are waiting for review."
           }
-          icon="assignment-turned-in"
+          icon="spark"
           actionLabel={mockMode ? undefined : "Refresh"}
           onAction={mockMode ? undefined : () => fetchManualReview(scopedDocId)}
         />
         {currentDocId && (
           <View style={styles.scopeRow}>
-            <Pressable onPress={() => setScope("current")}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Set scope to current" onPress={() => setScope("current")}>
               <Chip
                 label="Current Document"
                 tone="default"
@@ -167,7 +167,7 @@ export default function ManualReviewScreen() {
                 textStyle={scope === "current" ? styles.filterActiveText : undefined}
               />
             </Pressable>
-            <Pressable onPress={() => setScope("all")}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Set scope to all" onPress={() => setScope("all")}>
               <Chip
                 label="All Unresolved"
                 tone="default"
@@ -219,7 +219,7 @@ export default function ManualReviewScreen() {
 
       {currentDocId && (
         <View style={styles.scopeRow}>
-          <Pressable onPress={() => setScope("current")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set scope to current" onPress={() => setScope("current")}>
             <Chip
               label={`Current Document (${currentDocId})`}
               tone="default"
@@ -227,7 +227,7 @@ export default function ManualReviewScreen() {
               textStyle={scope === "current" ? styles.filterActiveText : undefined}
             />
           </Pressable>
-          <Pressable onPress={() => setScope("all")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set scope to all" onPress={() => setScope("all")}>
             <Chip
               label="All Unresolved"
               tone="default"
@@ -252,7 +252,7 @@ export default function ManualReviewScreen() {
         </View>
         <Text style={{ color: theme.colors.textMuted }}>Resolved items are not applied until Finalize runs.</Text>
         <View style={styles.scopeRow}>
-          <Pressable onPress={() => setReviewFilter("pending")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set review filter to pending" onPress={() => setReviewFilter("pending")}>
             <Chip
               label={`Pending (${pendingCount})`}
               tone="warning"
@@ -260,7 +260,7 @@ export default function ManualReviewScreen() {
               textStyle={reviewFilter === "pending" ? styles.filterActiveText : undefined}
             />
           </Pressable>
-          <Pressable onPress={() => setReviewFilter("resolved")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set review filter to resolved" onPress={() => setReviewFilter("resolved")}>
             <Chip
               label={`Resolved (${resolvedCount})`}
               tone="default"
@@ -268,7 +268,7 @@ export default function ManualReviewScreen() {
               textStyle={reviewFilter === "resolved" ? styles.filterActiveText : undefined}
             />
           </Pressable>
-          <Pressable onPress={() => setReviewFilter("all")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set review filter to all" onPress={() => setReviewFilter("all")}>
             <Chip
               label={`All (${manualReviewQueue.length})`}
               tone="info"
@@ -308,11 +308,11 @@ export default function ManualReviewScreen() {
             tone="warning"
           />
           <View style={styles.linkRow}>
-            <Pressable onPress={() => originalUrl && Linking.openURL(originalUrl)}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => originalUrl && Linking.openURL(originalUrl)}>
               <Text style={[styles.link, { color: theme.colors.accent }]}>Open original document</Text>
             </Pressable>
             {fixedUrl && (
-              <Pressable onPress={() => Linking.openURL(fixedUrl)}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(fixedUrl)}>
                 <Text style={[styles.link, { color: theme.colors.accent }]}>Open fixed document</Text>
               </Pressable>
             )}

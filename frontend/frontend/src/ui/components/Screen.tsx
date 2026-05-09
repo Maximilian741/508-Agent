@@ -42,6 +42,8 @@ export function Screen({ children, scroll = false, contentStyle, title }: Screen
     return (
       <SafeAreaView style={styles.safe}>
         <ScrollView
+          // @ts-ignore — RN-Web maps nativeID to DOM id
+          nativeID="content"
           contentContainerStyle={[styles.scrollContent, contentStyle]}
           // @ts-ignore — RN-Web supports a11y landmark
           accessibilityRole={Platform.OS === "web" ? ("main" as any) : undefined}
@@ -55,6 +57,8 @@ export function Screen({ children, scroll = false, contentStyle, title }: Screen
   return (
     <SafeAreaView style={styles.safe}>
       <View
+        // @ts-ignore — RN-Web maps nativeID to DOM id
+        nativeID="content"
         style={[styles.content, contentStyle]}
         // @ts-ignore
         accessibilityRole={Platform.OS === "web" ? ("main" as any) : undefined}
@@ -73,11 +77,13 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
     },
     content: {
       flex: 1,
-      padding: theme.spacing.xl,
-      gap: theme.spacing.lg,
+      paddingHorizontal: theme.spacing.xl,
+      paddingVertical: theme.spacing.lg,
+      gap: theme.spacing.md,
     },
     scrollContent: {
-      padding: theme.spacing.xl,
-      gap: theme.spacing.lg,
+      paddingHorizontal: theme.spacing.xl,
+      paddingVertical: theme.spacing.lg,
+      gap: theme.spacing.md,
     },
   });

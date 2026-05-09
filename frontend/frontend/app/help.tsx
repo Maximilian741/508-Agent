@@ -1,25 +1,20 @@
 /**
- * Help & WCAG Glossary screen.
+ * Help & WCAG Glossary - structured as a reference document.
  *
- * Searchable index of every flag this tool can detect, plus a quick primer on
- * the underlying WCAG 2.1 / Section 508 / PDF-UA criteria each flag cites.
- *
- * Why this matters: remediators new to a particular criterion need a fast
- * reference to back up their judgement when approving / rejecting fixes.
- * Bundling the glossary in-app saves them tab-juggling and gives the product
- * a real "we know this domain" feel.
+ * Page is a real reference: serif display title, left-rail sticky TOC on web,
+ * flowing prose with horizontal rules between rule entries. No card-of-everything.
  */
 
 import { useMemo, useState } from "react";
-import { Linking, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
 import {
   CATALOG_ENTRIES,
   IssueCatalogEntry,
 } from "../src/domain/issueCatalog";
-import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { EmptyState } from "../src/ui/components/EmptyState";
+import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -29,32 +24,32 @@ const FAQ: { question: string; answer: string }[] = [
   {
     question: "What is the difference between WCAG, Section 508, and PDF/UA?",
     answer:
-      "WCAG (Web Content Accessibility Guidelines) is the international standard published by the W3C — it covers web pages and digital documents.  Section 508 is the U.S. federal procurement law that adopts WCAG 2.0 (Level AA) by reference.  PDF/UA is the accessibility specification specific to PDF files — it complements WCAG with PDF-specific structural requirements like proper tag trees and reading order.",
+      "WCAG (Web Content Accessibility Guidelines) is the international standard published by the W3C - it covers web pages and digital documents. Section 508 is the U.S. federal procurement law that adopts WCAG 2.0 (Level AA) by reference. PDF/UA is the accessibility specification specific to PDF files - it complements WCAG with PDF-specific structural requirements like proper tag trees and reading order.",
   },
   {
     question: "What are conformance levels A, AA, and AAA?",
     answer:
-      "WCAG ranks success criteria by impact.  Level A is the floor — failures will block significant numbers of users.  Level AA is the practical target most regulations require.  Level AAA is aspirational; some criteria are technically incompatible with certain content (for example, sign language interpretation for live audio).  This tool's score weighting reflects the AA target.",
+      "WCAG ranks success criteria by impact. Level A is the floor - failures will block significant numbers of users. Level AA is the practical target most regulations require. Level AAA is aspirational; some criteria are technically incompatible with certain content (for example, sign language interpretation for live audio). This tool's score weighting reflects the AA target.",
   },
   {
     question: "Why does the auto-fix flag so many things for human review?",
     answer:
-      "Several remediations require human judgement — the meaning of an image, the right phrasing for a link, whether a heading hierarchy break is intentional.  The agent makes a starting suggestion (heuristic or AI) and queues it for you to approve, edit, or reject.  Anything we apply silently is deterministic and reversible (e.g. removing alt text from a marked-decorative image).",
+      "Several remediations require human judgement - the meaning of an image, the right phrasing for a link, whether a heading hierarchy break is intentional. The agent makes a starting suggestion (heuristic or AI) and queues it for you to approve, edit, or reject. Anything we apply silently is deterministic and reversible (e.g. removing alt text from a marked-decorative image).",
   },
   {
     question: "How accurate is the AI alt-text suggestion?",
     answer:
-      "It depends on the provider.  With ANTHROPIC_API_KEY or OPENAI_API_KEY set, you get vision-AI alt-text generation that's usually serviceable.  Without a key, the heuristic provider produces filename- / context-derived phrases that should always be reviewed.  Every suggestion is tagged with a confidence score and a provider label so you know what you're approving.",
+      "It depends on the provider. With ANTHROPIC_API_KEY or OPENAI_API_KEY set, you get vision-AI alt-text generation that is usually serviceable. Without a key, the heuristic provider produces filename- / context-derived phrases that should always be reviewed. Every suggestion is tagged with a confidence score and a provider label so you know what you are approving.",
   },
   {
     question: "What does the remediated file actually contain?",
     answer:
-      "When you click Download remediated file, the backend re-runs the executors against the original file and produces a copy with deterministic fixes applied — set alt text, heading-level normalization, header-cell scope, document-language, and so on.  Items that need your judgement (link rewrites, AI alt-text) are queued for manual review and not silently overwritten.",
+      "When you click Download remediated file, the backend re-runs the executors against the original file and produces a copy with deterministic fixes applied - set alt text, heading-level normalization, header-cell scope, document-language, and so on. Items that need your judgement (link rewrites, AI alt-text) are queued for manual review and not silently overwritten.",
   },
   {
     question: "Can I configure custom rules or severities?",
     answer:
-      "Policy packs let teams override which actions are allowed (auto-applicable, AI-required, manual-review-required) per rule.  See the Settings screen and the docs/POLICIES.md file for the schema.",
+      "Policy packs let teams override which actions are allowed (auto-applicable, AI-required, manual-review-required) per rule. See the Settings screen and the docs/POLICIES.md file for the schema.",
   },
 ];
 
@@ -81,129 +76,333 @@ export default function HelpScreen() {
     return out;
   }, [filteredEntries]);
 
+  const isWeb = Platform.OS === "web";
+
   return (
     <Screen scroll title="Help & Glossary">
-      <View style={styles.header}>
-        <Text style={[theme.typography.title, { color: theme.colors.text }]}>Help & Glossary</Text>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Reference for every accessibility check this tool runs, plus answers to common questions
-          remediators ask.
-        </Text>
-      </View>
+      <Hero
+        shader="aurora"
+        eyebrow="HELP"
+        title="Help & glossary"
+        subtitle="Every accessibility check this tool runs, in plain English, with the underlying WCAG 2.1, Section 508, and PDF/UA citations. Use it as a reference when deciding whether to approve or reject a fix."
+      />
 
-      <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Quick search</Text>
-        <TextInput
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search rules — try 'alt text', 'heading', 'language'…"
-          placeholderTextColor={theme.colors.textMuted}
-          accessibilityLabel="Search help articles"
-          style={[
-            styles.searchInput,
-            {
-              borderColor: theme.colors.border,
-              color: theme.colors.text,
-              backgroundColor: theme.colors.surface,
-            },
-          ]}
-        />
-        <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-          {filteredEntries.length} of {CATALOG_ENTRIES.length} rules
-        </Text>
-      </Card>
-
-      {filteredEntries.length === 0 ? (
-        <EmptyState
-          title="No matches"
-          message={`Nothing in the catalog matches "${query}". Try a broader term.`}
-        />
-      ) : (
-        SEVERITY_ORDER.map((severity) =>
-          grouped[severity] ? (
-            <Card key={severity}>
-              <View style={styles.sectionHeader}>
-                <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
-                  {severity === "error"
-                    ? "Errors"
-                    : severity === "warning"
-                    ? "Warnings"
-                    : "Informational"}
-                </Text>
-                <Chip
-                  label={`${grouped[severity].length}`}
-                  tone={
-                    severity === "error"
-                      ? "danger"
-                      : severity === "warning"
-                      ? "warning"
-                      : "info"
-                  }
-                />
-              </View>
-              {grouped[severity].map((entry) => (
-                <EntryView key={entry.ruleId} entry={entry} />
-              ))}
-            </Card>
-          ) : null,
-        )
-      )}
-
-      <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Frequently asked</Text>
-        {FAQ.map((item, i) => (
+      <View style={styles.layout}>
+        {/* Left rail: sticky TOC on web. */}
+        {isWeb ? (
           <View
-            key={i}
+            // @ts-ignore - position: sticky is web-only
+            style={[styles.toc, { borderRightColor: theme.colors.border, position: "sticky" as any, top: 24 }]}
+          >
+            <Text
+              style={[
+                theme.typography.caption,
+                { color: theme.colors.textMuted, marginBottom: 14 },
+              ]}
+            >
+              ON THIS PAGE
+            </Text>
+            <TocLink href="errors" label={`Errors (${grouped.error?.length ?? 0})`} />
+            <TocLink href="warnings" label={`Warnings (${grouped.warning?.length ?? 0})`} />
+            <TocLink href="info" label={`Informational (${grouped.info?.length ?? 0})`} />
+            <View style={{ height: 16 }} />
+            <TocLink href="faq" label="Frequently asked" />
+            <TocLink href="standards" label="Standards primer" />
+          </View>
+        ) : null}
+
+        <View style={styles.body}>
+          {/* Search */}
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Filter rules - try 'alt text', 'heading', 'language'..."
+            placeholderTextColor={theme.colors.textMuted}
+            accessibilityLabel="Search help articles"
             style={[
-              styles.faq,
-              { borderColor: theme.colors.border },
-              i === 0 ? { borderTopWidth: 0, paddingTop: 0 } : null,
+              styles.search,
+              {
+                borderColor: theme.colors.border,
+                color: theme.colors.text,
+              },
+            ]}
+          />
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginTop: 8 },
             ]}
           >
-            <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 15 }]}>
-              {item.question}
+            Showing {filteredEntries.length} of {CATALOG_ENTRIES.length} rules
+          </Text>
+
+          {filteredEntries.length === 0 ? (
+            <View style={{ marginTop: 32 }}>
+              <EmptyState
+                title="No matches"
+                message={`Nothing in the catalog matches "${query}". Try a broader term.`}
+              />
+            </View>
+          ) : (
+            SEVERITY_ORDER.map((severity) => {
+              const entries = grouped[severity];
+              if (!entries) return null;
+              const anchor =
+                severity === "error" ? "errors" : severity === "warning" ? "warnings" : "info";
+              return (
+                <View
+                  key={severity}
+                  // @ts-ignore - id used as scroll target on web
+                  nativeID={anchor}
+                  style={styles.sectionBlock}
+                >
+                  <Text
+                    style={[
+                      theme.typography.displaySmall as any,
+                      {
+                        color: theme.colors.text,
+                        fontSize: 26,
+                        marginBottom: 4,
+                      },
+                    ]}
+                  >
+                    {severity === "error"
+                      ? "Errors"
+                      : severity === "warning"
+                      ? "Warnings"
+                      : "Informational"}
+                  </Text>
+                  <Text
+                    style={[
+                      theme.typography.body,
+                      { color: theme.colors.textMuted, marginBottom: 8 },
+                    ]}
+                  >
+                    {severity === "error"
+                      ? "Failures that block users with disabilities. Fix these first."
+                      : severity === "warning"
+                      ? "Concerns that should be addressed but are not strictly blocking."
+                      : "Notices and best-practice nudges - useful, not required."}
+                  </Text>
+                  {entries.map((entry, i) => (
+                    <EntryView
+                      key={entry.ruleId}
+                      entry={entry}
+                      first={i === 0}
+                    />
+                  ))}
+                </View>
+              );
+            })
+          )}
+
+          {/* FAQ section - flowing prose */}
+          <View
+            // @ts-ignore
+            nativeID="faq"
+            style={styles.sectionBlock}
+          >
+            <Text
+              style={[
+                theme.typography.displaySmall as any,
+                {
+                  color: theme.colors.text,
+                  fontSize: 26,
+                  marginBottom: 12,
+                },
+              ]}
+            >
+              Frequently asked
             </Text>
-            <Text style={[theme.typography.body, { color: theme.colors.text, marginTop: 6 }]}>
-              {item.answer}
+            {FAQ.map((item, i) => (
+              <View
+                key={i}
+                style={[
+                  styles.faqEntry,
+                  i === 0
+                    ? null
+                    : { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.colors.border },
+                ]}
+              >
+                <Text
+                  style={[
+                    theme.typography.h2,
+                    { color: theme.colors.text, fontSize: 17 },
+                  ]}
+                >
+                  {item.question}
+                </Text>
+                <Text
+                  style={[
+                    theme.typography.body,
+                    {
+                      color: theme.colors.text,
+                      marginTop: 8,
+                      lineHeight: 24,
+                      fontSize: 15,
+                    },
+                  ]}
+                >
+                  {item.answer}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <View
+            // @ts-ignore
+            nativeID="standards"
+            style={styles.sectionBlock}
+          >
+            <Text
+              style={[
+                theme.typography.displaySmall as any,
+                {
+                  color: theme.colors.text,
+                  fontSize: 26,
+                  marginBottom: 12,
+                },
+              ]}
+            >
+              Standards primer
+            </Text>
+            <Text
+              style={[
+                theme.typography.body,
+                { color: theme.colors.text, marginTop: 4, lineHeight: 24, fontSize: 15 },
+              ]}
+            >
+              The three standards this tool cites cover overlapping ground.
+              WCAG 2.1 is the underlying success-criteria document; everything
+              else either adopts it (Section 508) or specialises it for a
+              particular file format (PDF/UA). When a finding cites more than
+              one, fixing it once satisfies all of them.
             </Text>
           </View>
-        ))}
-      </Card>
+        </View>
+      </View>
     </Screen>
   );
 }
 
-function EntryView({ entry }: { entry: IssueCatalogEntry }) {
+function TocLink({ href, label }: { href: string; label: string }) {
+  const theme = useTheme();
+  const onPress = () => {
+    if (Platform.OS !== "web") return;
+    if (typeof document === "undefined") return;
+    const el = document.getElementById(href);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel="Activate link"
+      onPress={onPress}
+      style={({ hovered }: any) => [
+        styles.tocLink,
+        hovered ? { opacity: 0.7 } : null,
+      ]}
+    >
+      <Text
+        style={[
+          theme.typography.body,
+          { color: theme.colors.text, fontSize: 14, fontWeight: "500" },
+        ]}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean }) {
   const theme = useTheme();
   return (
-    <View style={[styles.entry, { borderColor: theme.colors.border }]}>
+    <View
+      style={[
+        styles.entry,
+        first
+          ? null
+          : { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.colors.border },
+      ]}
+    >
       <View style={styles.entryHead}>
-        <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 15 }]}>
+        <Text
+          style={[
+            theme.typography.h2,
+            { color: theme.colors.text, fontSize: 18, flex: 1 },
+          ]}
+        >
           {entry.title}
         </Text>
-        <Chip
-          label={entry.ruleId}
-          tone="default"
-          textStyle={{ fontFamily: "monospace" as any, fontSize: 10 }}
-        />
+        <Text
+          style={[
+            theme.typography.mono as any,
+            { color: theme.colors.textMuted, fontSize: 11 },
+          ]}
+        >
+          {entry.ruleId}
+        </Text>
       </View>
-      <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+      <Text
+        style={[
+          theme.typography.body,
+          {
+            color: theme.colors.text,
+            marginTop: 8,
+            lineHeight: 24,
+            fontSize: 15,
+          },
+        ]}
+      >
         {entry.summary}
       </Text>
-      <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 8 }]}>
-        Why it matters
+      <Text
+        style={[
+          theme.typography.caption,
+          { color: theme.colors.textMuted, marginTop: 14 },
+        ]}
+      >
+        WHY IT MATTERS
       </Text>
-      <Text style={[theme.typography.body, { color: theme.colors.text }]}>{entry.why}</Text>
-      <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 8 }]}>
-        How we fix it
+      <Text
+        style={[
+          theme.typography.body,
+          { color: theme.colors.text, marginTop: 4, lineHeight: 23 },
+        ]}
+      >
+        {entry.why}
       </Text>
-      <Text style={[theme.typography.body, { color: theme.colors.text }]}>{entry.autoFix}</Text>
+      <Text
+        style={[
+          theme.typography.caption,
+          { color: theme.colors.textMuted, marginTop: 14 },
+        ]}
+      >
+        HOW WE FIX IT
+      </Text>
+      <Text
+        style={[
+          theme.typography.body,
+          { color: theme.colors.text, marginTop: 4, lineHeight: 23 },
+        ]}
+      >
+        {entry.autoFix}
+      </Text>
       {entry.manualJudgment ? (
         <>
-          <Text style={[theme.typography.caption, { color: theme.colors.warning, marginTop: 8 }]}>
-            Needs human judgement
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.warning, marginTop: 14 },
+            ]}
+          >
+            NEEDS HUMAN JUDGEMENT
           </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+          <Text
+            style={[
+              theme.typography.body,
+              { color: theme.colors.text, marginTop: 4, lineHeight: 23 },
+            ]}
+          >
             {entry.manualJudgment}
           </Text>
         </>
@@ -213,14 +412,14 @@ function EntryView({ entry }: { entry: IssueCatalogEntry }) {
           <Chip key={`wcag-${id}`} label={`WCAG ${id}`} tone="default" />
         ))}
         {entry.standards.section508.map((id) => (
-          <Chip key={`508-${id}`} label={`§508 ${id}`} tone="default" />
+          <Chip key={`508-${id}`} label={`s.508 ${id}`} tone="default" />
         ))}
         {entry.standards.pdfUa.map((id) => (
           <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
         ))}
         {entry.learnMoreUrl ? (
-          <Pressable onPress={() => Linking.openURL(entry.learnMoreUrl)}>
-            <Chip label="Read W3C ↗" tone="info" />
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(entry.learnMoreUrl)}>
+            <Chip label="Read W3C" tone="info" />
           </Pressable>
         ) : null}
       </View>
@@ -229,33 +428,54 @@ function EntryView({ entry }: { entry: IssueCatalogEntry }) {
 }
 
 const styles = StyleSheet.create({
-  header: { gap: 6, marginBottom: 8 },
-  searchInput: {
-    borderWidth: 1,
-    borderRadius: 10,
-    padding: 12,
-    marginTop: 10,
-    fontSize: 16,
-  },
-  sectionHeader: {
+  layout: {
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    gap: 48,
+    alignItems: "flex-start",
+    flexWrap: "wrap",
+  },
+  toc: {
+    width: 200,
+    paddingRight: 24,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 8,
+  },
+  tocLink: {
+    paddingVertical: 6,
+  },
+  body: {
+    flex: 1,
+    minWidth: 320,
+    maxWidth: 720,
+  },
+  search: {
+    borderBottomWidth: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 0,
+    fontSize: 15,
+  },
+  sectionBlock: {
+    marginTop: 48,
   },
   entry: {
-    borderTopWidth: 1,
-    paddingTop: 14,
-    paddingBottom: 6,
-    marginTop: 14,
-    gap: 4,
+    paddingTop: 28,
+    paddingBottom: 4,
+    marginTop: 0,
   },
   entryHead: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 8,
-    flexWrap: "wrap",
+    alignItems: "baseline",
+    gap: 12,
   },
-  standardsRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12 },
-  faq: { borderTopWidth: 1, paddingTop: 12, marginTop: 12, gap: 4 },
+  standardsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 16,
+  },
+  faqEntry: {
+    paddingTop: 22,
+    paddingBottom: 6,
+    marginTop: 0,
+  },
 });

@@ -1,6 +1,6 @@
 import { Platform } from "react-native";
 
-export type BackendUrlSource = "runtime" | "default" | "unavailable";
+export type BackendUrlSource = "runtime" | "default" | "unavailable" | "env";
 
 export type BackendUrlInfo = {
   url: string;
@@ -10,7 +10,22 @@ export type BackendUrlInfo = {
 
 const fallback = "http://localhost:8000";
 
+function readEnvUrl(): string | null {
+  // Build-time env var injected by Expo for production static export.
+  const value = (typeof process !== "undefined" && process.env && process.env.EXPO_PUBLIC_API_URL) || "";
+  const trimmed = String(value).trim();
+  if (trimmed && /^https?:\/\/.+/i.test(trimmed)) {
+    return trimmed.replace(/\/$/, "");
+  }
+  return null;
+}
+
 export function getBackendUrlInfo(): BackendUrlInfo {
+  const envUrl = readEnvUrl();
+  if (envUrl) {
+    return { url: envUrl, source: "env" };
+  }
+
   if (Platform.OS !== "web") {
     return {
       url: fallback,
@@ -25,6 +40,11 @@ export function getBackendUrlInfo(): BackendUrlInfo {
 }
 
 export async function fetchBackendUrlInfo(): Promise<BackendUrlInfo> {
+  const envUrl = readEnvUrl();
+  if (envUrl) {
+    return { url: envUrl, source: "env" };
+  }
+
   if (Platform.OS !== "web") {
     return { url: fallback, source: "unavailable" };
   }

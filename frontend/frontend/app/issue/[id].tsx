@@ -95,7 +95,7 @@ export default function IssueDetailScreen() {
         <EmptyState
           title="Issue not found"
           message="Run a scan and select an issue to view details."
-          icon="search"
+          materialIcon="search"
         />
       </Screen>
     );
@@ -139,10 +139,10 @@ export default function IssueDetailScreen() {
 
       <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Recommended Actions</Text>
       {issue.recommendedActions.length === 0 && (
-        <EmptyState title="No actions available" message="This issue requires manual review." icon="info" />
+        <EmptyState title="No actions available" message="This issue requires manual review." materialIcon="info" />
       )}
       {issue.recommendedActions.map((action) => (
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel="Select remediation action"
           key={action.actionCode}
           onPress={() => setSelectedAction(action)}
           style={({ pressed }) => [styles.actionPress, pressed && styles.actionPressed]}

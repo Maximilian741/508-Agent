@@ -4,7 +4,8 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+UTC = timezone.utc
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib import request as urlrequest

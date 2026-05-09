@@ -347,6 +347,8 @@ export interface ApiClient {
         file: File,
         approvedViolationIds: string[],
         rejectedViolationIds: string[],
+        token?: string,
+        accountId?: string,
     ) => Promise<PipelineRemediateResult>;
     getPipelineFileUrl: (jobId: string, filename: string) => string;
     manualReview: (docId?: string) => Promise<ManualReviewItem[]>;
@@ -492,6 +494,8 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         file: File,
         approvedIds: string[],
         rejectedIds: string[],
+        token?: string,
+        accountId?: string,
     ): Promise<PipelineRemediateResult> => {
         if (mockMode) {
             return {
@@ -514,13 +518,19 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         form.append("file", file);
         form.append("approved_violations", JSON.stringify(approvedIds));
         form.append("rejected_violations", JSON.stringify(rejectedIds));
+        const headers: Record<string, string> = {};
+        if (token) headers["Authorization"] = "Bearer " + token;
+        if (accountId) headers["X-Account-Id"] = accountId;
         const response = await fetch(`${baseUrl}/pipeline/remediate`, {
             method: "POST",
             body: form,
+            headers,
         });
         if (!response.ok) {
             const message = await response.text();
-            throw new Error(message || "Remediate failed");
+            const err = new Error(message || "Remediate failed") as Error & { status?: number };
+            err.status = response.status;
+            throw err;
         }
         return (await response.json()) as PipelineRemediateResult;
     };

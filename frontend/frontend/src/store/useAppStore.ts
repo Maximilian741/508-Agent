@@ -71,6 +71,30 @@ interface AppState {
     isFinalizing: boolean;
     isScanning: boolean;
     isUploading: boolean;
+    /**
+     * Number of free scans the visitor has used in this browser. Stored in
+     * localStorage so the gate is sticky across reloads. The first scan is
+     * free; subsequent gated actions (apply, download, second upload) prompt
+     * sign-in unless a token exists or the bypass flag is on.
+     */
+    freeScansUsed: number;
+    /**
+     * Dev/test escape hatch. When true, all "1 free scan" gating is skipped
+     * regardless of freeScansUsed. Persisted in localStorage so refreshes
+     * keep the bypass on across a testing session.
+     */
+    bypassFreeScanGate: boolean;
+    /**
+     * Auto-fix policy for new audits. Determines which AI-suggested fixes
+     * are pre-approved when scan completes:
+     *   - "conservative": pre-approves nothing
+     *   - "balanced": pre-approves heuristic high-confidence + deterministic
+     *   - "aggressive": pre-approves all AI / heuristic suggestions
+     */
+    autoFixPolicy: "conservative" | "balanced" | "aggressive";
+    setFreeScansUsed: (value: number) => void;
+    setBypassFreeScanGate: (value: boolean) => void;
+    setAutoFixPolicy: (value: "conservative" | "balanced" | "aggressive") => void;
     setApiBaseUrl: (value: string) => void;
     saveApiBaseUrl: (value: string) => Promise<void>;
     setBackendUrlInfo: (url: string, source: BackendUrlSource, warning?: string) => void;
@@ -116,6 +140,9 @@ const resolved = getBackendUrlInfo();
 const defaultBaseUrl = resolved.url;
 const baseUrlKey = "apiBaseUrl";
 const selectedPolicyKey = "selectedPolicyId";
+const freeScansUsedKey = "freeScansUsed";
+const bypassFreeScanGateKey = "bypassFreeScanGate";
+const autoFixPolicyKey = "autoFixPolicy";
 
 const emptyTagTree: TagTreeResponse = {
     tagged: false,
@@ -166,6 +193,67 @@ function storeSelectedPolicyId(value: string | null) {
             return;
         }
         window.localStorage.setItem(selectedPolicyKey, value);
+    } catch (error) {
+        return;
+    }
+}
+
+function readStoredFreeScansUsed(): number {
+    if (Platform.OS !== "web") return 0;
+    try {
+        const raw = window.localStorage.getItem(freeScansUsedKey);
+        if (!raw) return 0;
+        const parsed = parseInt(raw, 10);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+    } catch (error) {
+        return 0;
+    }
+}
+
+function storeFreeScansUsed(value: number) {
+    if (Platform.OS !== "web") return;
+    try {
+        window.localStorage.setItem(freeScansUsedKey, String(value));
+    } catch (error) {
+        return;
+    }
+}
+
+function readStoredBypassFreeScanGate(): boolean {
+    if (Platform.OS !== "web") return false;
+    try {
+        return window.localStorage.getItem(bypassFreeScanGateKey) === "true";
+    } catch (error) {
+        return false;
+    }
+}
+
+function storeBypassFreeScanGate(value: boolean) {
+    if (Platform.OS !== "web") return;
+    try {
+        window.localStorage.setItem(bypassFreeScanGateKey, value ? "true" : "false");
+    } catch (error) {
+        return;
+    }
+}
+
+function readStoredAutoFixPolicy(): "conservative" | "balanced" | "aggressive" {
+    if (Platform.OS !== "web") return "balanced";
+    try {
+        const raw = window.localStorage.getItem(autoFixPolicyKey);
+        if (raw === "conservative" || raw === "balanced" || raw === "aggressive") {
+            return raw;
+        }
+        return "balanced";
+    } catch (error) {
+        return "balanced";
+    }
+}
+
+function storeAutoFixPolicy(value: "conservative" | "balanced" | "aggressive") {
+    if (Platform.OS !== "web") return;
+    try {
+        window.localStorage.setItem(autoFixPolicyKey, value);
     } catch (error) {
         return;
     }
@@ -233,6 +321,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     isFinalizing: false,
     isScanning: false,
     isUploading: false,
+    freeScansUsed: readStoredFreeScansUsed(),
+    bypassFreeScanGate: readStoredBypassFreeScanGate(),
+    autoFixPolicy: readStoredAutoFixPolicy(),
+    setFreeScansUsed: (value) => {
+        const safe = Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+        storeFreeScansUsed(safe);
+        set({ freeScansUsed: safe });
+    },
+    setBypassFreeScanGate: (value) => {
+        storeBypassFreeScanGate(value);
+        set({ bypassFreeScanGate: value });
+    },
+    setAutoFixPolicy: (value) => {
+        storeAutoFixPolicy(value);
+        set({ autoFixPolicy: value });
+    },
     setApiBaseUrl: (value) => {
         storeBaseUrl(value);
         set({ apiBaseUrl: value });

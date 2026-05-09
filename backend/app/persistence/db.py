@@ -4,7 +4,8 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+UTC = timezone.utc
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -289,6 +290,30 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_doc_id ON evidence_bundles(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_bundles_job_id ON evidence_bundles(job_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+              id TEXT PRIMARY KEY,
+              at TEXT NOT NULL,
+              request_id TEXT,
+              actor_email TEXT,
+              actor_sub TEXT,
+              ip TEXT,
+              event TEXT NOT NULL,
+              doc_id TEXT,
+              job_id TEXT,
+              details_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_actor_email ON audit_log(actor_email)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event)")
+        # NOTE: users and credit_ledger are NOT created here. They are owned
+        # by the SQLAlchemy ORM (app/db/models.py) and created in main.py via
+        # Base.metadata.create_all. Hand-creating them here used to leave a
+        # stale schema (missing password_hash, email_verified_at) that blocked
+        # sign-in on fresh installs.
         now = _utc_now()
         for pack in _DEFAULT_POLICY_PACKS:
             conn.execute(
@@ -1376,7 +1401,7 @@ class SqliteRepo:
                     str(item.get("validatorStatus")) if item.get("validatorStatus") is not None else None,
                     str(item.get("aiModel")) if item.get("aiModel") is not None else None,
                     str(item.get("aiUpdatedAt")) if item.get("aiUpdatedAt") is not None else None,
-                    item_id,
+                        item_id,
                 ),
             )
             conn.commit()

@@ -138,3 +138,46 @@ class EvidenceBundleRow(Base):
     options_json: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class UserRow(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    credits_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Optional password hash in "salt:hash" hex format (scrypt). NULL means
+    # legacy/passwordless user; sign-in still works for them by email alone.
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set when the user has clicked the verify-email link.
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CreditLedgerRow(Base):
+    __tablename__ = "credit_ledger"
+    __table_args__ = (
+        Index("idx_ledger_user_at", "user_id", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    related_doc_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class EmailVerifyTokenRow(Base):
+    __tablename__ = "email_verify_tokens"
+    __table_args__ = (
+        Index("idx_email_verify_user", "user_id"),
+    )
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

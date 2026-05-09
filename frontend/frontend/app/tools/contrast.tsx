@@ -11,13 +11,41 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { evaluate, parseHex } from "../../src/domain/contrast";
 import { Card } from "../../src/ui/components/Card";
 import { Chip } from "../../src/ui/components/Chip";
+import { Hero } from "../../src/ui/components/Hero";
 import { Screen } from "../../src/ui/components/Screen";
 import { useTheme } from "../../src/ui/useTheme";
+
+/**
+ * Native eyedropper. Returns true if the current browser supports
+ * `window.EyeDropper` — Chromium 95+ (Chrome, Edge, Brave, Opera). Safari
+ * and Firefox do not support it as of writing.
+ */
+function _hasEyeDropper(): boolean {
+  if (Platform.OS !== "web" || typeof window === "undefined") return false;
+  return typeof (window as any).EyeDropper === "function";
+}
+
+/**
+ * Open the native screen-color picker. Returns the picked hex (e.g.
+ * "#A1B2C3") or null if the user cancelled or the API errored.
+ */
+async function _pickColorWithEyeDropper(): Promise<string | null> {
+  try {
+    const Ctor = (window as any).EyeDropper;
+    if (typeof Ctor !== "function") return null;
+    const result = await new Ctor().open();
+    const hex = (result && (result.sRGBHex || result.srgbHex)) as string | undefined;
+    return hex && /^#[0-9A-Fa-f]{6}$/.test(hex) ? hex.toUpperCase() : null;
+  } catch (e) {
+    // User pressed Escape, or EyeDropper rejected. Treat as cancel.
+    return null;
+  }
+}
 
 const PRESETS: Array<[string, string, string]> = [
   ["Light text on accent", "#FFFFFF", "#2D5BFF"],
@@ -35,14 +63,12 @@ export default function ContrastChecker() {
 
   return (
     <Screen scroll title="Contrast checker">
-      <View style={styles.header}>
-        <Text style={[theme.typography.title, { color: theme.colors.text }]}>Contrast checker</Text>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Paste any two hex colors (foreground over background) and instantly see whether they meet
-          WCAG 2.1 AA/AAA contrast minimums. Useful for design review and when remediating PDFs
-          with hard-to-read body text.
-        </Text>
-      </View>
+      <Hero
+        shader="aurora"
+        eyebrow="CONTRAST"
+        title="Contrast checker"
+        subtitle="Paste any two hex colors (foreground over background) and instantly see whether they meet WCAG 2.1 AA/AAA contrast minimums. Useful for design review and when remediating PDFs with hard-to-read body text."
+      />
 
       <Card>
         <View style={styles.inputRow}>
@@ -127,6 +153,19 @@ function ColorInput({
 }) {
   const theme = useTheme();
   const valid = !!parseHex(value);
+  const [picking, setPicking] = useState(false);
+  const eyedropperAvailable = _hasEyeDropper();
+
+  const grabColor = async () => {
+    if (!eyedropperAvailable || picking) return;
+    setPicking(true);
+    try {
+      const hex = await _pickColorWithEyeDropper();
+      if (hex) onChange(hex);
+    } finally {
+      setPicking(false);
+    }
+  };
 
   return (
     <View style={styles.colorBlock}>
@@ -159,7 +198,7 @@ function ColorInput({
           ]}
         />
         {Platform.OS === "web" ? (
-          // @ts-ignore — native HTML color picker
+          // @ts-ignore - native HTML color picker
           <input
             type="color"
             value={valid ? value : "#000000"}
@@ -167,7 +206,39 @@ function ColorInput({
             style={{ width: 36, height: 36, padding: 0, border: "none", background: "transparent" }}
           />
         ) : null}
+        {eyedropperAvailable ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              "Grab a color from anywhere on screen for the " + label.toLowerCase()
+            }
+            accessibilityHint="Opens an eyedropper. Click anything on the screen to capture its hex color."
+            onPress={grabColor}
+            disabled={picking}
+            style={({ hovered, pressed }: any) => [
+              styles.grabBtn,
+              {
+                borderColor: picking ? theme.colors.accent : theme.colors.border,
+                backgroundColor: pressed
+                  ? theme.colors.accent + "33"
+                  : hovered
+                  ? theme.colors.surface2
+                  : theme.colors.surface,
+              },
+            ]}
+          >
+            <Text style={[styles.grabBtnIcon, { color: theme.colors.accent }]}>{picking ? "..." : "+"}</Text>
+            <Text style={[styles.grabBtnLabel, { color: theme.colors.text }]}>
+              {picking ? "Pick..." : "Grab"}
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
+      {!eyedropperAvailable && Platform.OS === "web" ? (
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 4 }]}>
+          Tip: a screen eyedropper would appear here if your browser supported it. Try Chrome, Edge, or Brave.
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -198,14 +269,14 @@ function PassPill({
           { color: pass ? theme.colors.success : theme.colors.danger },
         ]}
       >
-        {pass ? "✓" : "✗"}
+        {pass ? "PASS" : "FAIL"}
       </Text>
       <View style={{ flex: 1 }}>
         <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13 }]}>
           {label}
         </Text>
         <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-          requires ≥ {minRatio}:1
+          requires at least {minRatio}:1
         </Text>
       </View>
     </View>
@@ -217,12 +288,22 @@ function _safe(value: string): string {
 }
 
 const styles = StyleSheet.create({
-  header: { gap: 6, marginBottom: 8 },
   inputRow: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
   colorBlock: { flex: 1, minWidth: 220, gap: 6 },
   colorPickerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   swatch: { width: 36, height: 36, borderRadius: 8, borderWidth: 1 },
   input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10, minWidth: 120 },
+  grabBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  grabBtnIcon: { fontSize: 16, fontWeight: "800", lineHeight: 18 },
+  grabBtnLabel: { fontSize: 13, fontWeight: "600" },
   presetRow: { flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 16 },
   preview: {
     marginTop: 12,
