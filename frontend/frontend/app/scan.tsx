@@ -365,7 +365,7 @@ export default function ScanScreen() {
         <EmptyState
           title="No scan results"
           message="Run a scan from the Documents screen to see accessibility issues."
-          icon="search"
+          materialIcon="search"
         />
       </Screen>
     );
@@ -930,7 +930,7 @@ export default function ScanScreen() {
             {counts.total} issues detected for {displayDocumentId}
           </Text>
         </View>
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel="Toggle theme"
           onPress={() => setThemeMode(themeMode === "light" ? "dark" : "light")}
           style={styles.headerAction}
         >
@@ -966,7 +966,7 @@ export default function ScanScreen() {
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Documents</Text>
         <View style={styles.documentsTabRow}>
-          <Pressable onPress={() => setDocumentsTab("tree")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set documents tab to tree" onPress={() => setDocumentsTab("tree")}>
             <Chip
               label="Document Tree"
               tone="default"
@@ -974,7 +974,7 @@ export default function ScanScreen() {
               textStyle={documentsTab === "tree" ? styles.filterActiveText : undefined}
             />
           </Pressable>
-          <Pressable onPress={() => setDocumentsTab("completed")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Set documents tab to completed" onPress={() => setDocumentsTab("completed")}>
             <Chip
               label="History & Status"
               tone="default"
@@ -1045,10 +1045,10 @@ export default function ScanScreen() {
                               </Text>
                             </View>
                             <View style={styles.summaryRow}>
-                              <Pressable onPress={() => void handleOpenPersistedDocument(doc)}>
+                              <Pressable accessibilityRole="button" accessibilityLabel="Open document" onPress={() => void handleOpenPersistedDocument(doc)}>
                                 <Chip label="Open" tone="default" />
                               </Pressable>
-                              <Pressable onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
+                              <Pressable accessibilityRole="button" accessibilityLabel="Go to exports?docId=${doc.docId}" onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
                                 <Chip label="Exports" tone="info" />
                               </Pressable>
                               <Chip label={section.label} tone={section.tone} />
@@ -1083,7 +1083,7 @@ export default function ScanScreen() {
             loading={isExportingBundle}
             disabled={!scanJob?.jobId || !uploadedDocument?.docId || isExportingBundle}
           />
-          <Pressable onPress={() => router.push(uploadedDocument?.docId ? `/exports?docId=${uploadedDocument.docId}` : "/exports")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open exports workspace" onPress={() => router.push(uploadedDocument?.docId ? `/exports?docId=${uploadedDocument.docId}` : "/exports")}>
             <Chip label="Open exports workspace" tone="info" />
           </Pressable>
         </View>
@@ -1121,7 +1121,7 @@ export default function ScanScreen() {
           </View>
           <View style={styles.filterRow}>
             {(["all", "error", "warning", "info"] as const).map((value) => (
-              <Pressable key={value} onPress={() => setSeverityFilter(value)}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Filter by severity" key={value} onPress={() => setSeverityFilter(value)}>
                 {({ pressed }: PressableStateCallbackType) => (
                   <Chip
                     label={value === "all" ? "All" : value === "error" ? "Issue" : value === "warning" ? "Warning" : "Info"}
@@ -1157,7 +1157,7 @@ export default function ScanScreen() {
           </View>
           <View style={styles.issueControlsRow}>
             <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>Sort by severity</Text>
-            <Pressable onPress={() => setSortDescending((prev) => !prev)}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Toggle sort descending" onPress={() => setSortDescending((prev) => !prev)}>
               <Chip label={sortDescending ? "High to low" : "Low to high"} tone="info" />
             </Pressable>
           </View>
@@ -1178,13 +1178,13 @@ export default function ScanScreen() {
             }}
           />
           <View style={[styles.issueActionsRow, !isWide && styles.issueActionsColumn]}>
-            <Pressable
+            <Pressable accessibilityRole="button" accessibilityLabel="Apply document fixes"
               onPress={() => uploadedDocument && applyDocumentFixes(uploadedDocument.docId)}
               style={styles.applyFixes}
             >
               <Chip label={fixedDocId ? "Fixes applied" : "Apply Fixes"} tone={fixedDocId ? "success" : "info"} />
             </Pressable>
-            <Pressable onPress={openManualReview} style={styles.applyFixes}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open manual review" onPress={openManualReview} style={styles.applyFixes}>
               <Chip
                 label={pendingManualCount > 0 ? `Review Manual Items (${pendingManualCount})` : "Open Manual Review"}
                 tone="warning"
@@ -1277,11 +1277,11 @@ export default function ScanScreen() {
           )}
           {originalUrl && (
             <View style={styles.downloadRow}>
-              <Pressable onPress={() => openUrl(originalUrl)}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Open original document" onPress={() => openUrl(originalUrl)}>
                 <Text style={[styles.link, { color: theme.colors.accent }]}>Download original</Text>
               </Pressable>
               {fixedUrl && (
-                <Pressable onPress={() => openUrl(fixedUrl)}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Open fixed document" onPress={() => openUrl(fixedUrl)}>
                   <Text style={[styles.link, { color: theme.colors.accent }]}>Download fixed</Text>
                 </Pressable>
               )}
@@ -1294,7 +1294,7 @@ export default function ScanScreen() {
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                   {beforeIssues.length} issues detected before fixes
                 </Text>
-                <Pressable onPress={() => setShowBeforeIssues((prev) => !prev)}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Toggle show before issues" onPress={() => setShowBeforeIssues((prev) => !prev)}>
                   <Text style={[styles.link, { color: theme.colors.accent }]}>
                     {showBeforeIssues ? "Hide issues" : "Show issues"}
                   </Text>
@@ -1324,7 +1324,7 @@ export default function ScanScreen() {
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                   {afterIssues.length} issues remaining/introduced after fixes
                 </Text>
-                <Pressable onPress={() => setShowAfterIssues((prev) => !prev)}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Toggle show after issues" onPress={() => setShowAfterIssues((prev) => !prev)}>
                   <Text style={[styles.link, { color: theme.colors.accent }]}>
                     {showAfterIssues ? "Hide issues" : "Show issues"}
                   </Text>
@@ -1364,7 +1364,7 @@ export default function ScanScreen() {
                 <Chip label={`After: ${fixReport.after.issueCount}`} tone="default" />
               </View>
               <View style={styles.summaryRow}>
-                <Pressable onPress={() => setFixReportFilter("all")}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Set fix report filter to all" onPress={() => setFixReportFilter("all")}>
                   <Chip
                     label={`All (${(fixReport.delta?.fixed?.length ?? 0) + (fixReport.delta?.remaining?.length ?? 0) + (fixReport.delta?.introduced?.length ?? 0) + manualReviewItemCount})`}
                     tone="default"
@@ -1372,7 +1372,7 @@ export default function ScanScreen() {
                     textStyle={fixReportFilter === "all" ? styles.filterActiveText : undefined}
                   />
                 </Pressable>
-                <Pressable onPress={() => setFixReportFilter("fixed")}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Set fix report filter to fixed" onPress={() => setFixReportFilter("fixed")}>
                   <Chip
                     label={`Fixed (${fixReport.delta?.fixed?.length ?? 0})`}
                     tone="success"
@@ -1380,7 +1380,7 @@ export default function ScanScreen() {
                     textStyle={fixReportFilter === "fixed" ? styles.filterActiveText : undefined}
                   />
                 </Pressable>
-                <Pressable onPress={() => setFixReportFilter("remaining")}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Set fix report filter to remaining" onPress={() => setFixReportFilter("remaining")}>
                   <Chip
                     label={`Remaining (${fixReport.delta?.remaining?.length ?? 0})`}
                     tone="warning"
@@ -1388,7 +1388,7 @@ export default function ScanScreen() {
                     textStyle={fixReportFilter === "remaining" ? styles.filterActiveText : undefined}
                   />
                 </Pressable>
-                <Pressable onPress={() => setFixReportFilter("manual")}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Set fix report filter to manual" onPress={() => setFixReportFilter("manual")}>
                   <Chip
                     label={`Manual review (${manualReviewItemCount})`}
                     tone="info"
@@ -1400,7 +1400,7 @@ export default function ScanScreen() {
               <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                 Deterministic: {fixReport.deterministic ? "yes" : "no"} • Mode: {fixReport.mode}
               </Text>
-              <Pressable onPress={() => setShowFixedSection((prev) => !prev)} style={styles.fixSectionHeader}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Toggle show fixed section" onPress={() => setShowFixedSection((prev) => !prev)} style={styles.fixSectionHeader}>
                 <Chip label={showFixedSection ? "Hide" : "Show"} tone="default" />
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                   Fixed issues ({filteredFixReport.fixed.length})
@@ -1412,7 +1412,7 @@ export default function ScanScreen() {
                     <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No fixed issues in this filter.</Text>
                   ) : (
                     filteredFixReport.fixed.map((issue) => (
-                      <Pressable
+                      <Pressable accessibilityRole="button" accessibilityLabel="Focus issue"
                         key={issue.id}
                         onPress={() => {
                           setFocusedIssue(issue);
@@ -1437,7 +1437,7 @@ export default function ScanScreen() {
                   )}
                 </View>
               )}
-              <Pressable onPress={() => setShowRemainingSection((prev) => !prev)} style={styles.fixSectionHeader}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Toggle show remaining section" onPress={() => setShowRemainingSection((prev) => !prev)} style={styles.fixSectionHeader}>
                 <Chip label={showRemainingSection ? "Hide" : "Show"} tone="default" />
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                   Remaining issues ({filteredFixReport.remaining.length})
@@ -1446,7 +1446,8 @@ export default function ScanScreen() {
               {showRemainingSection && filteredFixReport.remaining.length > 0 && (
                 <View style={styles.fixList}>
                   {filteredFixReport.remaining.map((item) => (
-                    <Pressable
+                    <Pressable accessibilityRole="button"
+                      accessibilityLabel="Jump to remaining issue page"
                       key={item.id}
                       onPress={() => {
                         const page = getIssuePage(item);
@@ -1468,7 +1469,7 @@ export default function ScanScreen() {
               {showRemainingSection && filteredFixReport.remaining.length === 0 && (
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No remaining issues in this filter.</Text>
               )}
-              <Pressable onPress={() => setShowIntroducedSection((prev) => !prev)} style={styles.fixSectionHeader}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Toggle show introduced section" onPress={() => setShowIntroducedSection((prev) => !prev)} style={styles.fixSectionHeader}>
                 <Chip label={showIntroducedSection ? "Hide" : "Show"} tone="default" />
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                   Introduced issues ({filteredFixReport.introduced.length})
@@ -1477,7 +1478,7 @@ export default function ScanScreen() {
               {showIntroducedSection && filteredFixReport.introduced.length > 0 && (
                 <View style={styles.fixList}>
                   {filteredFixReport.introduced.map((item) => (
-                    <Pressable
+                    <Pressable accessibilityRole="button" accessibilityLabel="Focus issue"
                       key={item.id}
                       onPress={() => {
                         const page = getIssuePage(item);
@@ -1500,7 +1501,7 @@ export default function ScanScreen() {
               {showIntroducedSection && filteredFixReport.introduced.length === 0 && (
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>No introduced issues in this filter.</Text>
               )}
-              <Pressable onPress={() => setShowManualSection((prev) => !prev)} style={styles.fixSectionHeader}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Toggle show manual section" onPress={() => setShowManualSection((prev) => !prev)} style={styles.fixSectionHeader}>
                 <Chip label={showManualSection ? "Hide" : "Show"} tone="default" />
                 <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                   Manual review items ({filteredFixReport.manual.length})
@@ -1509,7 +1510,8 @@ export default function ScanScreen() {
               {showManualSection && filteredFixReport.manual.length > 0 && (
                 <View style={styles.fixList}>
                   {filteredFixReport.manual.map((item) => (
-                    <Pressable
+                    <Pressable accessibilityRole="button"
+                      accessibilityLabel="Jump to manual review issue page"
                       key={item.id}
                       onPress={() => {
                         const page = item.pages?.[0];
@@ -1555,7 +1557,7 @@ export default function ScanScreen() {
           )}
           {rebuiltAvailable && (
             <View style={styles.summaryRow}>
-              <Pressable onPress={() => setAfterVariant("fixed")}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Set after variant to fixed" onPress={() => setAfterVariant("fixed")}>
                 <Chip
                   label="After: Fixed"
                   tone="default"
@@ -1563,7 +1565,7 @@ export default function ScanScreen() {
                   textStyle={afterVariant === "fixed" ? styles.filterActiveText : undefined}
                 />
               </Pressable>
-              <Pressable onPress={() => setAfterVariant("rebuilt")}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Set after variant to rebuilt" onPress={() => setAfterVariant("rebuilt")}>
                 <Chip
                   label="After: Rebuilt"
                   tone="default"
@@ -1601,21 +1603,21 @@ export default function ScanScreen() {
             {Platform.OS === "web" && !pdfError && isPdfDoc && (
               <View style={styles.visualDiffGrid}>
                 <View style={styles.summaryRow}>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle open severity"
                     onPress={() => {
                       setOpenSeverity((prev) => (prev === "error" ? null : "error"));
                     }}
                   >
                     <Chip label={`Errors: ${docIssueCounts.error}`} tone="danger" />
                   </Pressable>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle open severity"
                     onPress={() => {
                       setOpenSeverity((prev) => (prev === "warning" ? null : "warning"));
                     }}
                   >
                     <Chip label={`Warnings: ${docIssueCounts.warning}`} tone="warning" />
                   </Pressable>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle open severity"
                     onPress={() => {
                       setOpenSeverity((prev) => (prev === "info" ? null : "info"));
                     }}
@@ -1623,7 +1625,7 @@ export default function ScanScreen() {
                     <Chip label={`Info: ${docIssueCounts.info}`} tone="info" />
                   </Pressable>
                 </View>
-                <Pressable onPress={() => setShowIssueHighlight((prev) => !prev)}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Toggle show issue highlight" onPress={() => setShowIssueHighlight((prev) => !prev)}>
                   <Chip label={showIssueHighlight ? "Issue highlight: On" : "Issue highlight: Off"} tone="info" />
                 </Pressable>
                 {openSeverity && (
@@ -1636,7 +1638,7 @@ export default function ScanScreen() {
                         data={severityGroups[openSeverity]}
                         keyExtractor={(item) => item.issue.ruleId}
                         renderItem={({ item }) => (
-                          <Pressable
+                          <Pressable accessibilityRole="button" accessibilityLabel="Focus issue"
                             onPress={() => {
                               setFocusedIssue(item.issue);
                               const page = getIssuePage(item.issue);
@@ -1660,7 +1662,7 @@ export default function ScanScreen() {
                   </View>
                 )}
                 <View style={styles.pageControls}>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle current page"
                     onPress={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
                     disabled={currentPage <= 1}
                   >
@@ -1669,7 +1671,7 @@ export default function ScanScreen() {
                   <Text style={[styles.nodeId, { color: theme.colors.textMuted }]}>
                     Page {currentPage} of {pageCount || 1}
                   </Text>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle current page"
                     onPress={() => setCurrentPage((prev) => Math.min(pageCount || 1, prev + 1))}
                     disabled={pageCount > 0 && currentPage >= pageCount}
                   >
@@ -1677,7 +1679,7 @@ export default function ScanScreen() {
                   </Pressable>
                 </View>
                 <View style={styles.visualDiffRow}>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle pdf hover"
                     style={styles.visualPanel}
                     onHoverIn={() => setShowPdfHover(true)}
                     onHoverOut={() => setShowPdfHover(false)}
@@ -1710,7 +1712,7 @@ export default function ScanScreen() {
                       )}
                     </View>
                   </Pressable>
-                  <Pressable
+                  <Pressable accessibilityRole="button" accessibilityLabel="Toggle pdf hover"
                     style={styles.visualPanel}
                     onHoverIn={() => setShowPdfHover(true)}
                     onHoverOut={() => setShowPdfHover(false)}
@@ -1760,7 +1762,7 @@ export default function ScanScreen() {
               <EmptyState
                 title="Issues will appear here"
                 message="Scan is running or has not produced results yet."
-                icon="hourglass-empty"
+                materialIcon="hourglass-empty"
                 tone="info"
               />
             )}
@@ -1769,10 +1771,10 @@ export default function ScanScreen() {
       ) : (
         <View style={styles.mobileTabs}>
           <View style={styles.tabRow}>
-            <Pressable onPress={() => setActiveTab("issues")}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Set active tab to issues" onPress={() => setActiveTab("issues")}>
               <Chip label="Issues" tone={activeTab === "issues" ? "info" : "default"} />
             </Pressable>
-            <Pressable onPress={() => setActiveTab("tree")}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Set active tab to tree" onPress={() => setActiveTab("tree")}>
               <Chip label="Document Tree" tone={activeTab === "tree" ? "info" : "default"} />
             </Pressable>
           </View>
@@ -2014,7 +2016,7 @@ function IssuesList({
       <EmptyState
         title="No matching issues"
         message="Try adjusting filters or run another scan."
-        icon="check-circle"
+        materialIcon="check-circle"
         tone="info"
       />
     );
@@ -2051,7 +2053,7 @@ function DocumentIssueRow({
   const fixLabel = hasDeterministicFix ? "Deterministic fix available" : "Needs manual review";
   const fixTone = hasDeterministicFix ? "success" : "warning";
   return (
-    <Pressable onPress={() => onSelectIssue?.(issue)}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Select issue" onPress={() => onSelectIssue?.(issue)}>
       <Card style={styles.rowCard}>
         <View style={styles.rowHeader}>
           <Chip label={issue.severity.toUpperCase()} tone={severityTone} />
@@ -2151,7 +2153,7 @@ function TagTreeViewer({
         }}
       />
       {canShowMore && (
-        <Pressable onPress={onShowMore} style={styles.showMore}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Show more" onPress={onShowMore} style={styles.showMore}>
           <Text style={[styles.link, { color: theme.colors.accent }]}>Show more</Text>
         </Pressable>
       )}

@@ -525,6 +525,7 @@ export function ShaderCanvas({ variant = "nebula", opacity = 0.22 }: ShaderCanva
     window.addEventListener("touchend", onTouchEnd);
 
     let raf = 0;
+    let visible = true;
     const tick = () => {
       const t = (performance.now() - start) / 1000;
       mouseSmooth[0] += (mouse[0] - mouseSmooth[0]) * 0.08;
@@ -543,8 +544,33 @@ export function ShaderCanvas({ variant = "nebula", opacity = 0.22 }: ShaderCanva
     };
     raf = requestAnimationFrame(tick);
 
+    // Pause animation when canvas scrolls off-screen to save GPU/CPU.
+    let io: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== "undefined") {
+      io = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            const nowVisible = e.isIntersecting;
+            if (nowVisible && !visible) {
+              visible = true;
+              if (raf === 0) raf = requestAnimationFrame(tick);
+            } else if (!nowVisible && visible) {
+              visible = false;
+              if (raf !== 0) {
+                cancelAnimationFrame(raf);
+                raf = 0;
+              }
+            }
+          }
+        },
+        { threshold: 0 },
+      );
+      io.observe(canvas);
+    }
+
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf !== 0) cancelAnimationFrame(raf);
+      if (io) io.disconnect();
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
       window.removeEventListener("mousemove", onMove);

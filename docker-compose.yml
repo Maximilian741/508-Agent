@@ -1,28 +1,52 @@
 version: "3.9"
 
-# Single-VPS deployment topology:
-#   * backend   — FastAPI app, exposed only inside the compose network
-#   * frontend  — nginx serving the Expo web bundle, exposed only inside the network
-#   * cloudflared — Cloudflare Tunnel daemon that routes public traffic to the
-#                   above services after Cloudflare Access has authenticated
-#                   the user.  No public ports are bound on the host.
+# ============================================================================
+# 508 Agent - production-style single-VPS topology
+# ============================================================================
+#   * db         - postgres:16-alpine, persisted to a named volume
+#   * backend    - FastAPI (uvicorn, 2 workers), depends on db, reads .env
+#   * frontend   - nginx serving the Expo Router web bundle on :8080
+#   * cloudflared - OPTIONAL Cloudflare Tunnel daemon (commented out by
+#                   default; uncomment + supply CF_TUNNEL_TOKEN in .env to
+#                   route public traffic without binding host ports).
 #
-# Local-dev extras (postgres + minio) are gated behind the ``dev`` profile so
-# that ``docker compose up -d`` on a production VPS doesn't drag them in.
-# Run ``docker compose --profile dev up -d`` to get the full local stack.
+# The legacy "dev" profile (postgres-on-host-port + minio + minio-init) is
+# preserved at the bottom so existing `docker compose --profile dev up` flows
+# keep working for local development against an S3-compatible bucket.
+# ============================================================================
 
 services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent}
+      POSTGRES_DB: ${POSTGRES_DB:-agentdb}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d ${POSTGRES_DB:-agentdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-production}
       APP_VERSION: ${APP_VERSION:-0.1.0}
-      APP_SECRET: ${APP_SECRET:?APP_SECRET is required - see deploy/.env.example}
-      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/.runtime/508_agent.db}
-      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required - see .env.example}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://agent:agent@db:5432/agentdb}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
       STORAGE_LOCAL_ROOT: /app/.runtime/storage
       MATERIALIZED_ROOT: /app/.runtime/materialized
       AWS_REGION: ${AWS_REGION:-auto}
@@ -34,7 +58,7 @@ services:
       S3_FORCE_PATH_STYLE: "true"
       PRESIGN_EXPIRES_SECONDS: 3600
       ENABLE_DEV_STORAGE_ENDPOINT: "false"
-      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-https://app.example.com}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:8080}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -54,28 +78,47 @@ services:
     build:
       context: .
       dockerfile: frontend/frontend/Dockerfile
+      args:
+        EXPO_PUBLIC_API_URL: ${EXPO_PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 10s
-    depends_on:
-      backend:
-        condition: service_healthy
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
-    environment:
-      TUNNEL_METRICS: "0.0.0.0:2000"
-    depends_on:
-      backend:
-        condition: service_healthy
-      frontend:
-        condition: service_healthy
+  # --------------------------------------------------------------------------
+  # Cloudflare Tunnel (OPTIONAL)
+  # --------------------------------------------------------------------------
+  # Uncomment the block below to route public traffic to backend/frontend
+  # through a Cloudflare Tunnel (no host ports needed, integrates with
+  # Cloudflare Access for SSO).
+  #
+  #   1. Create a tunnel in the Cloudflare dashboard (Zero Trust > Networks >
+  #      Tunnels) and copy the tunnel token.
+  #   2. Put it in `.env` as CF_TUNNEL_TOKEN=eyJh...
+  #   3. Add public hostnames in the dashboard pointing at:
+  #        - https://api.example.com  -> http://backend:8000
+  #        - https://app.example.com  -> http://frontend:8080
+  #   4. Uncomment the service and `docker compose up -d cloudflared`.
+  # --------------------------------------------------------------------------
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+  #   environment:
+  #     TUNNEL_METRICS: "0.0.0.0:2000"
+  #   depends_on:
+  #     backend:
+  #       condition: service_healthy
+  #     frontend:
+  #       condition: service_healthy
 
   # ---- Local development extras (profile: dev) -----------------------------
   postgres:
@@ -127,6 +170,7 @@ services:
       "
 
 volumes:
+  db_data:
   pg_data:
   backend_runtime:
   minio_data:

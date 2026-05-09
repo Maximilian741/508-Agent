@@ -98,7 +98,7 @@ export function IssueNavigator({
           const stats = _groupStats(group, decisions);
           return (
             <View key={group.ruleId} style={{ marginBottom: 4 }}>
-              <Pressable
+              <Pressable accessibilityRole="button"
                 onPress={() =>
                   setExpandedRules((prev) => {
                     const next = new Set(prev);
@@ -143,7 +143,7 @@ export function IssueNavigator({
                     const decision = decisions[violation.id]?.decision ?? "pending";
                     const isActive = violation.id === currentId;
                     return (
-                      <Pressable
+                      <Pressable accessibilityRole="button"
                         key={violation.id}
                         onPress={() => onSelect(index)}
                         accessibilityLabel={`Open issue ${index + 1}`}

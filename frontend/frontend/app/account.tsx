@@ -7,15 +7,21 @@
  * If the user is signed out, a centered empty state offers Sign in.
  */
 
-import React, { useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
 
 import {
   Account,
   HistoryEntry,
+  deleteAccount,
+  exportData,
   loadAccount,
+  refreshAccount,
+  requestEmailVerification,
+  setPassword as setAccountPassword,
   signOut,
+  updateProfile,
 } from "../src/domain/account";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
@@ -23,21 +29,79 @@ import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { PixelIcon, PixelGlyph } from "../src/ui/components/PixelIcon";
 import { Screen } from "../src/ui/components/Screen";
+import { PixelSpinner } from "../src/ui/components/PixelSpinner";
 import { SignInModal } from "../src/ui/components/SignInModal";
+import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
 export default function AccountScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const toast = useToast();
   const [account, setAccount] = useState<Account | null>(() => loadAccount());
   const [signInOpen, setSignInOpen] = useState(false);
+
+  const [editOpen, setEditOpen] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  const [exporting, setExporting] = useState(false);
+
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwValue, setPwValue] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
+
+  const [verifyRequesting, setVerifyRequesting] = useState(false);
+  const [verifyHint, setVerifyHint] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState<boolean>(() => loadAccount() !== null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const fresh = await refreshAccount();
+        if (cancelled) return;
+        if (fresh) setAccount(fresh);
+      } catch (e: any) {
+        if (cancelled) return;
+        console.warn("[account] refresh failed", e);
+        toast.error("Account refresh failed", {
+          description: e?.message ?? "Could not reach the account service.",
+        });
+      } finally {
+        if (!cancelled) setRefreshing(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [toast]);
+
+  if (!account && refreshing) {
+    return (
+      <Screen scroll title="Account">
+        <View style={styles.emptyWrap}>
+          <PixelSpinner />
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 12 }]}>
+            Looking you up...
+          </Text>
+        </View>
+      </Screen>
+    );
+  }
 
   if (!account) {
     return (
       <Screen scroll title="Account">
         <View style={styles.emptyWrap}>
           <EmptyState
-            icon="account-circle"
+            icon="user"
             title="Not signed in"
             message="Sign in to track audits, manage credits, and resume work across sessions."
             actionLabel="Sign in"
@@ -63,9 +127,8 @@ export default function AccountScreen() {
   return (
     <Screen scroll title="Account">
       <Hero
-        shader="maple"
-        shaderOpacity={0.45}
-        eyebrow="Your account"
+        shader="ember"
+        eyebrow="ACCOUNT"
         title={account.displayName}
         subtitle={account.email + "  -  Member since " + memberSince}
       />
@@ -120,6 +183,408 @@ export default function AccountScreen() {
             ))}
           </View>
         )}
+      </Card>
+
+      <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text, marginBottom: 4 }]}>
+          Manage account
+        </Text>
+        <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginBottom: 14 }}>
+          Edit your profile, export your data, or delete your account.
+        </Text>
+
+        {!editOpen ? (
+          <View style={styles.manageRow}>
+            <Button
+              title="Edit profile"
+              variant="secondary"
+              onPress={() => {
+                setEditName(account.displayName);
+                setEditEmail(account.email);
+                setEditOpen(true);
+              }}
+            />
+            <Button
+              title={exporting ? "Exporting..." : "Export my data"}
+              variant="secondary"
+              disabled={exporting}
+              onPress={async () => {
+                if (exporting) return;
+                setExporting(true);
+                try {
+                  const blob = await exportData();
+                  if (Platform.OS === "web" && typeof window !== "undefined") {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = "508-account-export-" + Date.now() + ".json";
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                  }
+                  toast.success("Export ready", { description: "Your data download is starting." });
+                } catch (err: any) {
+                  toast.error("Export failed", {
+                    description: err?.message || "Could not export your data.",
+                  });
+                } finally {
+                  setExporting(false);
+                }
+              }}
+            />
+            <Button
+              title="Delete account"
+              variant="danger"
+              onPress={() => {
+                if (Platform.OS === "web" && typeof window !== "undefined") {
+                  const ok = window.confirm(
+                    "Delete your account?\n\nThis permanently removes your profile and credit history. This cannot be undone.",
+                  );
+                  if (!ok) return;
+                }
+                setDeleteConfirm("");
+                setDeleteOpen(true);
+              }}
+            />
+          </View>
+        ) : (
+          <View style={styles.editForm}>
+            <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginBottom: 4 }}>
+              Display name
+            </Text>
+            <TextInput
+              value={editName}
+              onChangeText={setEditName}
+              placeholder="Your name"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.input,
+                {
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.surface,
+                },
+              ]}
+            />
+            <Text
+              style={{
+                color: theme.colors.textMuted,
+                fontSize: 12,
+                marginTop: 12,
+                marginBottom: 4,
+              }}
+            >
+              Email
+            </Text>
+            <TextInput
+              value={editEmail}
+              onChangeText={setEditEmail}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="you@example.com"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.input,
+                {
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.surface,
+                },
+              ]}
+            />
+            <View style={styles.editButtonsRow}>
+              <Button
+                title={savingProfile ? "Saving..." : "Save"}
+                variant="primary"
+                disabled={savingProfile}
+                onPress={async () => {
+                  if (savingProfile) return;
+                  const nameTrim = editName.trim();
+                  const emailTrim = editEmail.trim();
+                  if (!nameTrim && !emailTrim) {
+                    toast.warning("Nothing to save", { description: "Pick a name or email." });
+                    return;
+                  }
+                  setSavingProfile(true);
+                  try {
+                    const patch: { displayName?: string; email?: string } = {};
+                    if (nameTrim && nameTrim !== account.displayName) patch.displayName = nameTrim;
+                    if (emailTrim && emailTrim !== account.email) patch.email = emailTrim;
+                    if (!patch.displayName && !patch.email) {
+                      toast.info("No changes", { description: "Profile is already up to date." });
+                      setEditOpen(false);
+                      setSavingProfile(false);
+                      return;
+                    }
+                    await updateProfile(patch);
+                    const fresh = await refreshAccount();
+                    if (fresh) setAccount(fresh);
+                    toast.success("Profile updated");
+                    setEditOpen(false);
+                  } catch (err: any) {
+                    toast.error("Update failed", {
+                      description: err?.message || "Could not save your changes.",
+                    });
+                  } finally {
+                    setSavingProfile(false);
+                  }
+                }}
+              />
+              <Button
+                title="Cancel"
+                variant="ghost"
+                disabled={savingProfile}
+                onPress={() => setEditOpen(false)}
+              />
+            </View>
+          </View>
+        )}
+
+        {deleteOpen && (
+          <View
+            style={[
+              styles.deleteBox,
+              { borderColor: theme.colors.danger ?? theme.colors.warning },
+            ]}
+          >
+            <Text style={{ color: theme.colors.text, fontWeight: "700", marginBottom: 6 }}>
+              Type DELETE to continue
+            </Text>
+            <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginBottom: 10 }}>
+              This permanently removes your profile, credits, and history.
+            </Text>
+            <TextInput
+              value={deleteConfirm}
+              onChangeText={setDeleteConfirm}
+              autoCapitalize="characters"
+              placeholder="DELETE"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.input,
+                {
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.surface,
+                },
+              ]}
+            />
+            <View style={styles.editButtonsRow}>
+              <Button
+                title={deleting ? "Deleting..." : "Permanently delete"}
+                variant="danger"
+                disabled={deleting || deleteConfirm.trim().toUpperCase() !== "DELETE"}
+                onPress={async () => {
+                  if (deleting) return;
+                  if (deleteConfirm.trim().toUpperCase() !== "DELETE") {
+                    toast.warning("Confirmation required", {
+                      description: "Type DELETE to continue.",
+                    });
+                    return;
+                  }
+                  setDeleting(true);
+                  try {
+                    await deleteAccount();
+                    toast.success("Account deleted");
+                    // deleteAccount() reloads on web; native fallback:
+                    setAccount(null);
+                  } catch (err: any) {
+                    toast.error("Delete failed", {
+                      description: err?.message || "Could not delete your account.",
+                    });
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+              />
+              <Button
+                title="Cancel"
+                variant="ghost"
+                disabled={deleting}
+                onPress={() => {
+                  setDeleteOpen(false);
+                  setDeleteConfirm("");
+                }}
+              />
+            </View>
+          </View>
+        )}
+      </Card>
+
+      <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text, marginBottom: 4 }]}>
+          Security
+        </Text>
+        <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginBottom: 14 }}>
+          Add an optional password and verify your email. Both are scaffolds
+          for now - email verification logs the magic link to the server
+          console instead of sending real mail.
+        </Text>
+
+        {!pwOpen ? (
+          <View style={styles.manageRow}>
+            <Button
+              title={account.hasPassword ? "Change password" : "Set or change password"}
+              variant="secondary"
+              onPress={() => {
+                setPwValue("");
+                setPwConfirm("");
+                setPwOpen(true);
+              }}
+            />
+            {!account.emailVerifiedAt ? (
+              <Button
+                title={verifyRequesting ? "Sending..." : "Verify email"}
+                variant="secondary"
+                disabled={verifyRequesting}
+                onPress={async () => {
+                  if (verifyRequesting) return;
+                  setVerifyRequesting(true);
+                  setVerifyHint(null);
+                  try {
+                    const queued = await requestEmailVerification();
+                    if (queued) {
+                      setVerifyHint(
+                        "Check your server logs for the link (look for '[email] verify link: ...').",
+                      );
+                      toast.success("Verification queued", {
+                        description: "Magic link logged to the server console.",
+                      });
+                    } else {
+                      toast.error("Could not request verification");
+                    }
+                  } catch (err: any) {
+                    toast.error("Verification failed", {
+                      description: err?.message || "Try again.",
+                    });
+                  } finally {
+                    setVerifyRequesting(false);
+                  }
+                }}
+              />
+            ) : (
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 6,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <PixelIcon name="check" size={3} color={theme.colors.success} />
+                <Text style={{ color: theme.colors.success, fontSize: 13, fontWeight: "600" }}>
+                  Email verified
+                </Text>
+              </View>
+            )}
+          </View>
+        ) : (
+          <View style={styles.editForm}>
+            <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginBottom: 4 }}>
+              New password
+            </Text>
+            <TextInput
+              value={pwValue}
+              onChangeText={setPwValue}
+              secureTextEntry
+              autoCapitalize="none"
+              placeholder="At least 4 characters"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.input,
+                {
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.surface,
+                },
+              ]}
+            />
+            <Text
+              style={{
+                color: theme.colors.textMuted,
+                fontSize: 12,
+                marginTop: 12,
+                marginBottom: 4,
+              }}
+            >
+              Confirm password
+            </Text>
+            <TextInput
+              value={pwConfirm}
+              onChangeText={setPwConfirm}
+              secureTextEntry
+              autoCapitalize="none"
+              placeholder="Repeat new password"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.input,
+                {
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.surface,
+                },
+              ]}
+            />
+            <View style={styles.editButtonsRow}>
+              <Button
+                title={pwSaving ? "Saving..." : "Save password"}
+                variant="primary"
+                disabled={pwSaving}
+                onPress={async () => {
+                  if (pwSaving) return;
+                  if (!pwValue || pwValue.length < 4) {
+                    toast.warning("Password too short", {
+                      description: "Use at least 4 characters.",
+                    });
+                    return;
+                  }
+                  if (pwValue !== pwConfirm) {
+                    toast.warning("Passwords don't match");
+                    return;
+                  }
+                  setPwSaving(true);
+                  try {
+                    const next = await setAccountPassword(pwValue);
+                    setAccount(next);
+                    toast.success("Password updated");
+                    setPwOpen(false);
+                    setPwValue("");
+                    setPwConfirm("");
+                  } catch (err: any) {
+                    toast.error("Could not save password", {
+                      description: err?.message || "Try again.",
+                    });
+                  } finally {
+                    setPwSaving(false);
+                  }
+                }}
+              />
+              <Button
+                title="Cancel"
+                variant="ghost"
+                disabled={pwSaving}
+                onPress={() => {
+                  setPwOpen(false);
+                  setPwValue("");
+                  setPwConfirm("");
+                }}
+              />
+            </View>
+          </View>
+        )}
+
+        {verifyHint ? (
+          <Text
+            style={{
+              color: theme.colors.textMuted,
+              fontSize: 12,
+              marginTop: 12,
+            }}
+          >
+            {verifyHint}
+          </Text>
+        ) : null}
       </Card>
 
       <View style={styles.signOutWrap}>
@@ -262,5 +727,29 @@ const styles = StyleSheet.create({
   signOutWrap: {
     marginTop: 24,
     alignItems: "center",
+  },
+  manageRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  editForm: {
+    gap: 0,
+  },
+  editButtonsRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 14,
+  },
+  input: {
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  deleteBox: {
+    marginTop: 16,
+    borderWidth: 1,
+    padding: 14,
   },
 });

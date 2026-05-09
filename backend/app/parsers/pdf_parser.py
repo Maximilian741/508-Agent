@@ -451,3 +451,6 @@ class _IdCounter:
         if count == 0:
             return cleaned
         return f"{cleaned}-{count}"
+
+# alias for the public `parse_to_tree` convention used elsewhere
+PDFParser.parse_to_tree = PDFParser.parse  # type: ignore[attr-defined]

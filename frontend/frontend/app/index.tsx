@@ -20,8 +20,8 @@ import { Button } from "../src/ui/components/Button";
 import { Chip } from "../src/ui/components/Chip";
 import { ScoreBadge } from "../src/ui/components/ScoreBadge";
 import { Screen } from "../src/ui/components/Screen";
-import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
-import { PixelFrame } from "../src/ui/components/PixelFrame";
+import { Hero } from "../src/ui/components/Hero";
+import { EmptyState } from "../src/ui/components/EmptyState";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -99,42 +99,23 @@ export default function HomeScreen() {
 
   return (
     <Screen scroll title="Home">
-      {/* === 1. Welcome strip - prose on the page, no card =============== */}
-      <View style={[styles.welcomeStrip, { position: "relative", overflow: "hidden", borderRadius: 18, paddingHorizontal: 24, paddingVertical: 28, marginBottom: 28 }]}>
-        <ShaderCanvas variant="nebula" opacity={0.4} />
-        <PixelFrame size={18} thickness={3} color="#F59E4A" />
+      {/* === 1. Welcome hero ============================================== */}
+      <Hero
+        shader="nebula"
+        eyebrow="HOME"
+        title={greeting}
+        subtitle={resumeLine}
+      />
+      {!ready ? (
         <Text
           style={[
-            theme.typography.display as any,
-            { color: theme.colors.text, position: "relative", zIndex: 2 },
+            theme.typography.caption,
+            { color: theme.colors.warning },
           ]}
         >
-          {greeting}
+          Analyzer offline. Demo mode will use sample data.
         </Text>
-        <Text
-          style={[
-            theme.typography.body,
-            { color: theme.colors.textMuted, marginTop: 6, fontSize: 16, lineHeight: 24, position: "relative", zIndex: 2 },
-          ]}
-        >
-          {resumeLine}
-        </Text>
-        <Text
-          style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 14, position: "relative", zIndex: 2, opacity: 0.55 }]}
-        >
-          Tip: move your cursor or click the smoke to stir it.
-        </Text>
-        {!ready ? (
-          <Text
-            style={[
-              theme.typography.caption,
-              { color: theme.colors.warning, marginTop: 10 },
-            ]}
-          >
-            Analyzer offline. Demo mode will use sample data.
-          </Text>
-        ) : null}
-      </View>
+      ) : null}
 
       {/* === 2. Workshop bench - the primary action ====================== */}
       <Pressable
@@ -203,7 +184,7 @@ export default function HomeScreen() {
 
       {/* Quiet row of side tools - secondary to the bench */}
       <View style={styles.toolRow}>
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to batch"
           onPress={() => router.push("/batch")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -214,7 +195,7 @@ export default function HomeScreen() {
             A folder at a time
           </Text>
         </Pressable>
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to tools contrast"
           onPress={() => router.push("/tools/contrast")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -225,7 +206,7 @@ export default function HomeScreen() {
             WCAG ratios, side-by-side
           </Text>
         </Pressable>
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
           onPress={() => router.push("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -245,7 +226,7 @@ export default function HomeScreen() {
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
               Recent work
             </Text>
-            <Pressable
+            <Pressable accessibilityRole="button" accessibilityLabel="Clear history"
               onPress={() => {
                 clearHistory();
                 setHistory([]);
@@ -300,7 +281,20 @@ export default function HomeScreen() {
             ))}
           </View>
         </View>
-      ) : null}
+      ) : (
+        <View style={styles.recent}>
+          <View style={styles.recentHead}>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+              Recent work
+            </Text>
+          </View>
+          <EmptyState
+            icon="doc"
+            title="Nothing here yet"
+            body="Drop a document above and your finished audits will live here so you can pick up where you left off."
+          />
+        </View>
+      )}
 
       {/* Footer - stays quiet at the bottom */}
       <View style={styles.footer}>
@@ -390,10 +384,13 @@ function FooterLink({ label, path }: { label: string; path: string }) {
   const theme = useTheme();
   const router = useRouter();
   return (
-    <Pressable
+    <Pressable accessibilityRole="button"
       onPress={() => router.push(path as any)}
       accessibilityLabel={label}
-      style={({ hovered }: any) => [hovered ? { opacity: 0.7 } : null]}
+      style={({ hovered, focused }: any) => [
+        hovered ? { opacity: 0.7 } : null,
+        focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
+      ]}
     >
       <Text
         style={[
@@ -415,12 +412,6 @@ function FooterDot() {
 }
 
 const styles = StyleSheet.create({
-  // 1. Welcome strip - lots of vertical breathing room above the bench
-  welcomeStrip: {
-    paddingTop: 24,
-    paddingBottom: 48,
-    paddingHorizontal: 4,
-  },
   // 2. Bench - the workshop. Tall, considered, a single object.
   bench: {
     borderWidth: 1,

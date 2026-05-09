@@ -123,7 +123,7 @@ export function ActivityDashboard({
           </Text>
         </View>
         {mostRecent && onResume ? (
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={() => onResume(mostRecent)}
             accessibilityLabel={`Resume audit ${mostRecent.filename}`}
             style={[
@@ -136,7 +136,7 @@ export function ActivityDashboard({
             </Text>
           </Pressable>
         ) : onStartAudit ? (
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={onStartAudit}
             accessibilityLabel="Start an audit"
             style={[

@@ -5,6 +5,7 @@ import { AppNav } from "../src/ui/components/AppNav";
 import { ErrorBoundary } from "../src/ui/components/ErrorBoundary";
 import { OnboardingTour } from "../src/ui/components/OnboardingTour";
 import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
+import { SkipToContent } from "../src/ui/components/SkipToContent";
 import { ToastHost } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -41,6 +42,7 @@ export default function RootLayout() {
           <ShaderCanvas variant="maple" opacity={0.45} />
         </View>
         <View style={{ flex: 1, zIndex: 1 }}>
+          <SkipToContent />
           <AppNav />
           <Stack screenOptions={{ headerShown: false }} />
           <OnboardingTour />

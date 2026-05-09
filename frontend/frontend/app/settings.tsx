@@ -7,7 +7,7 @@
  */
 
 import { useState } from "react";
-import { Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Pressable, StyleSheet, Switch, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { clearHistory } from "../src/domain/auditHistory";
 import {
@@ -30,7 +30,7 @@ import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
-import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
+import { Hero } from "../src/ui/components/Hero";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -39,6 +39,10 @@ export default function SettingsScreen() {
   const toast = useToast();
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
+  const freeScansUsed = useAppStore((state) => state.freeScansUsed);
+  const setFreeScansUsed = useAppStore((state) => state.setFreeScansUsed);
+  const bypassFreeScanGate = useAppStore((state) => state.bypassFreeScanGate);
+  const setBypassFreeScanGate = useAppStore((state) => state.setBypassFreeScanGate);
   const backendUrlWarning = useAppStore((state) => state.backendUrlWarning);
   const backendHealth = useAppStore((state) => state.backendHealth);
   const backendHealthMessage = useAppStore((state) => state.backendHealthMessage);
@@ -49,24 +53,22 @@ export default function SettingsScreen() {
   const setMockMode = useAppStore((state) => state.setMockMode);
   const [draftUrl, setDraftUrl] = useState(apiBaseUrl);
   const [notifyOn, setNotifyOn] = useState(notificationsEnabled());
+  const systemScheme = useColorScheme();
 
   return (
-    <Screen scroll>
-      <View style={{ position: "relative", borderRadius: 18, overflow: "hidden", marginBottom: 16, minHeight: 160, backgroundColor: "#0B1020", padding: 24, justifyContent: "center" }}>
-        <ShaderCanvas variant="ember" opacity={0.45} />
-        <View style={[styles.header, { position: "relative", zIndex: 1 }]}>
-          <View>
-            <Text style={[theme.typography.title, { color: "#FFFFFF" }]}>Settings</Text>
-            <Text style={[theme.typography.body, { color: "rgba(255,255,255,0.85)" }]}>
-              Where the analyzer lives, and whether you're working with real or fake data.
-            </Text>
-          </View>
+    <Screen scroll title="Settings">
+      <Hero
+        shader="ember"
+        eyebrow="SETTINGS"
+        title="Settings"
+        subtitle="Where the analyzer lives, and whether you're working with real or fake data."
+        rightSlot={
           <Chip
             label={mockMode ? "Demo data" : "Live data"}
             tone={mockMode ? "warning" : "success"}
           />
-        </View>
-      </View>
+        }
+      />
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -85,6 +87,45 @@ export default function SettingsScreen() {
           </Text>
           <Switch value={mockMode} onValueChange={setMockMode} />
         </View>
+      </Card>
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="key" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Free-scan gate (testing)</Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          New visitors get one free scan, then the app prompts them to sign in
+          before the second upload or any download. Flip the bypass below to
+          test the full flow without burning your free scan every time.
+        </Text>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+          Free scans used so far: {freeScansUsed}
+        </Text>
+        <View style={styles.toggleRow}>
+          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+            {bypassFreeScanGate ? "Bypass is ON (gate skipped)" : "Bypass is OFF (gate active)"}
+          </Text>
+          <Switch value={bypassFreeScanGate} onValueChange={setBypassFreeScanGate} />
+        </View>
+        <View style={[styles.buttonRow, { marginTop: 8 }]}>
+          <Button
+            title="Reset free-scan counter"
+            variant="ghost"
+            disabled={freeScansUsed === 0}
+            onPress={() => {
+              setFreeScansUsed(0);
+              toast.info("Free-scan counter reset");
+            }}
+          />
+        </View>
+        {bypassFreeScanGate ? (
+          <InlineNotice
+            tone="warning"
+            title="Bypass is on"
+            message="The sign-in gate is disabled. Turn this off before shipping to real users."
+          />
+        ) : null}
       </Card>
 
       <Card>
@@ -143,14 +184,14 @@ export default function SettingsScreen() {
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Appearance</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Light / Dark / Match system. Affects the entire app.
+          Three distinct looks: dusky Twilight (default), warm Light parchment, or deep Dark walnut.
         </Text>
         <View style={styles.themeRow}>
           {(["system", "light", "dark"] as const).map((mode) => (
-            <Pressable
+            <Pressable accessibilityRole="button"
               key={mode}
               onPress={() => setThemeMode(mode)}
-              accessibilityLabel={`Set theme to ${mode}`}
+              accessibilityLabel={`Set theme to ${mode === "system" ? "twilight" : mode}`}
               style={[
                 styles.themeChoice,
                 {
@@ -168,11 +209,14 @@ export default function SettingsScreen() {
                   },
                 ]}
               >
-                {mode === "system" ? "Match system" : mode === "light" ? "Light" : "Dark"}
+                {mode === "system" ? "Twilight" : mode === "light" ? "Light" : "Dark"}
               </Text>
             </Pressable>
           ))}
         </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8, fontSize: 12 }]}>
+          Twilight is a dusky violet/peach palette - the default. Pick Light for cream parchment, Dark for deep walnut. (Your OS is currently {systemScheme === "dark" ? "Dark" : "Light"}; Twilight ignores it on purpose so all three options look different.)
+        </Text>
       </Card>
 
       <Card>
@@ -411,7 +455,7 @@ function ScoreWeightControls() {
           <Text style={[theme.typography.body, { color: theme.colors.text, flex: 1, fontWeight: "600" }]}>
             {key === "error" ? "Error" : key === "warning" ? "Warning" : "Info"}
           </Text>
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={() => setWeight(key, -1)}
             accessibilityLabel={`Decrease ${key} weight`}
             style={{
@@ -434,7 +478,7 @@ function ScoreWeightControls() {
           >
             {weights[key]}
           </Text>
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={() => setWeight(key, 1)}
             accessibilityLabel={`Increase ${key} weight`}
             style={{

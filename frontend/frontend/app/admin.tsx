@@ -12,8 +12,11 @@ import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
+import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { EmptyState } from "../src/ui/components/EmptyState";
+import { useToast } from "../src/ui/toast";
 import { useAppStore } from "../src/store/useAppStore";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -28,6 +31,7 @@ interface LogEntry {
 
 export default function AdminScreen() {
   const theme = useTheme();
+  const toast = useToast();
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl);
   const mockMode = useAppStore((s) => s.mockMode);
   const [entries, setEntries] = useState<LogEntry[]>([]);
@@ -42,7 +46,9 @@ export default function AdminScreen() {
       const data = await (client as any).getAuditLog?.();
       setEntries(Array.isArray(data) ? data : []);
     } catch (e: any) {
-      setError(e?.message ?? "Could not load audit log.");
+      const msg = e?.message ?? "Could not load audit log.";
+      setError(msg);
+      toast.error("Could not load audit log", { description: msg });
     } finally {
       setLoading(false);
     }
@@ -54,20 +60,13 @@ export default function AdminScreen() {
 
   return (
     <Screen scroll>
-      <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text
-            accessibilityRole="header"
-            style={[theme.typography.title, { color: theme.colors.text }]}
-          >
-            Admin
-          </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>
-            Audit-log entries from every analyze, remediate, share, and download.
-          </Text>
-        </View>
-        <Chip label="Audit log" tone="info" />
-      </View>
+      <Hero
+        shader="nebula"
+        eyebrow="ADMIN"
+        title="Admin"
+        subtitle="Audit-log entries from every analyze, remediate, share, and download."
+        rightSlot={<Chip label="Audit log" tone="info" />}
+      />
 
       <Card>
         <View style={styles.row}>
@@ -89,11 +88,11 @@ export default function AdminScreen() {
         ) : error ? (
           <InlineNotice title="Could not load audit log" message={error} tone="danger" />
         ) : entries.length === 0 ? (
-          <Text
-            style={[theme.typography.body, { color: theme.colors.textMuted, paddingVertical: 8 }]}
-          >
-            No entries yet. Run an audit and the log will populate.
-          </Text>
+          <EmptyState
+            icon="doc"
+            title="No log entries yet"
+            body="Run an audit, share a report, or download a remediated file - every action will surface here for review."
+          />
         ) : (
           <View style={styles.list}>
             {entries.map((e) => (

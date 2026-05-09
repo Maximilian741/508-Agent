@@ -15,7 +15,6 @@ import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
-import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
 import { useTheme } from "../src/ui/useTheme";
 
 export default function SecurityScreen() {
@@ -23,16 +22,12 @@ export default function SecurityScreen() {
 
   return (
     <Screen scroll title="Security">
-      <View style={{ position: "relative", borderRadius: 16, overflow: "hidden", marginBottom: 12 }}>
-        <ShaderCanvas variant="nebula" opacity={0.18} />
-        <View style={{ position: "relative", zIndex: 1 }}>
-          <Hero
-            eyebrow="Security"
-            title="How 508-agent.app keeps your documents safe"
-            subtitle="Plain-language summary of the controls behind the managed deployment. Every claim below corresponds to code in the open repository or to a configuration item you can ask us to share."
-          />
-        </View>
-      </View>
+      <Hero
+        shader="nebula"
+        eyebrow="SECURITY"
+        title="How 508-agent.app keeps your documents safe"
+        subtitle="Plain-language summary of the controls behind the managed deployment. Every claim below corresponds to code in the open repository or to a configuration item you can ask us to share."
+      />
 
       <Card>
         <Section title="1. Authentication">
@@ -94,7 +89,7 @@ export default function SecurityScreen() {
           <Para text="On confirmed incidents, we (a) revoke and rotate any keys that may have been exposed, (b) draft a public timeline of what happened and what we did about it, (c) notify affected accounts within 72 hours, and (d) file a follow-up audit log purge if user data may have leaked." />
           <Para text="The public timeline lives in the GitHub repository under SECURITY.md so the history of disclosures is permanent and reviewable." />
         </Section>
-        <Pressable onPress={() => Linking.openURL("mailto:security@508-agent.app")}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Email security@508-agent.app" onPress={() => Linking.openURL("mailto:security@508-agent.app")}>
           <Chip label="Email security@508-agent.app" tone="info" />
         </Pressable>
       </Card>

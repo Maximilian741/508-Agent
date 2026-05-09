@@ -24,8 +24,7 @@ export default function AboutScreen() {
     <Screen scroll title="About">
       <Hero
         shader="aurora"
-        shaderOpacity={0.7}
-        eyebrow="About 508 Agent"
+        eyebrow="ABOUT"
         title="Built for remediators, not bureaucrats"
         subtitle="An accessibility auditor that ships in two flavors: a self-hosted package you run on your own machine, and 508-agent.app - a managed deployment locked behind Cloudflare Access. Both run the same code; they differ in where your files live."
       />
@@ -123,13 +122,13 @@ export default function AboutScreen() {
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards we evaluate</Text>
         <View style={styles.standardsRow}>
-          <Pressable onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
             <Chip label="WCAG 2.1 ↗" tone="info" />
           </Pressable>
-          <Pressable onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.access-board.gov" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508 ↗" tone="info" />
           </Pressable>
-          <Pressable onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA ↗" tone="info" />
           </Pressable>
         </View>
@@ -145,13 +144,13 @@ export default function AboutScreen() {
           {"You can request a copy of your audit log, request deletion of your account's data, or ask a question about how your documents are handled."}
         </Text>
         <View style={[styles.standardsRow, { marginTop: 8 }]}>
-          <Pressable onPress={() => router.push("/admin" as any)}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Go to admin" onPress={() => router.push("/admin" as any)}>
             <Chip label="Admins: open Admin screen" tone="info" />
           </Pressable>
-          <Pressable onPress={() => Linking.openURL("mailto:privacy@508-agent.app")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Email privacy@508-agent.app" onPress={() => Linking.openURL("mailto:privacy@508-agent.app")}>
             <Chip label="Email privacy@508-agent.app" tone="default" />
           </Pressable>
-          <Pressable onPress={() => router.push("/security" as any)}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Go to security" onPress={() => router.push("/security" as any)}>
             <Chip label="Read the Security page" tone="default" />
           </Pressable>
         </View>

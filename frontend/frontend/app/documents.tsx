@@ -153,7 +153,7 @@ export default function DocumentsScreen() {
           </View>
           <Button title="Upload" onPress={handleUploadPress} variant="secondary" disabled={isUploading} />
         </View>
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel="Upload document"
           onPress={handleUploadPress}
           disabled={isUploading}
           style={[

@@ -4,7 +4,8 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+UTC = timezone.utc
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -308,34 +309,11 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_actor_email ON audit_log(actor_email)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event)")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-              id TEXT PRIMARY KEY,
-              email TEXT NOT NULL UNIQUE,
-              display_name TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              last_seen_at TEXT,
-              role TEXT NOT NULL DEFAULT 'user',
-              credits_balance INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_users_email ON users(email)")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS credit_ledger (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              user_id TEXT NOT NULL,
-              at TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              amount INTEGER NOT NULL,
-              description TEXT NOT NULL,
-              related_doc_id TEXT
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_user_at ON credit_ledger(user_id, at)")
+        # NOTE: users and credit_ledger are NOT created here. They are owned
+        # by the SQLAlchemy ORM (app/db/models.py) and created in main.py via
+        # Base.metadata.create_all. Hand-creating them here used to leave a
+        # stale schema (missing password_hash, email_verified_at) that blocked
+        # sign-in on fresh installs.
         now = _utc_now()
         for pack in _DEFAULT_POLICY_PACKS:
             conn.execute(

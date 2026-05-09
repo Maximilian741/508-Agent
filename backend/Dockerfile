@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential \
+ && apt-get install -y --no-install-recommends build-essential libxml2-dev libxslt1-dev \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv
@@ -30,7 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # curl is used for the healthcheck below.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
+ && apt-get install -y --no-install-recommends curl poppler-utils libgl1 libxml2 libxslt1.1 \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 app \
  && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
@@ -51,4 +51,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://localhost:8000/healthz || exit 1
 
-CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head || true; uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head || true; uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]

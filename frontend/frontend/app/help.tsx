@@ -14,6 +14,7 @@ import {
 } from "../src/domain/issueCatalog";
 import { Chip } from "../src/ui/components/Chip";
 import { EmptyState } from "../src/ui/components/EmptyState";
+import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -79,43 +80,12 @@ export default function HelpScreen() {
 
   return (
     <Screen scroll title="Help & Glossary">
-      {/* Title block - prose on the page, no card. */}
-      <View style={styles.titleBlock}>
-        <Text
-          style={[
-            theme.typography.caption,
-            { color: theme.colors.accent, marginBottom: 12 },
-          ]}
-        >
-          REFERENCE
-        </Text>
-        <Text
-          style={[
-            theme.typography.display as any,
-            { color: theme.colors.text },
-          ]}
-        >
-          Help & glossary.
-        </Text>
-        <Text
-          style={[
-            theme.typography.body,
-            {
-              color: theme.colors.textMuted,
-              marginTop: 12,
-              fontSize: 16,
-              lineHeight: 24,
-              maxWidth: 620,
-            },
-          ]}
-        >
-          Every accessibility check this tool runs, in plain English, with the
-          underlying WCAG 2.1, Section 508, and PDF/UA citations. Use it as a
-          reference when you are deciding whether to approve or reject a fix.
-        </Text>
-      </View>
-
-      <View style={[styles.divider, { backgroundColor: theme.colors.border }]} />
+      <Hero
+        shader="aurora"
+        eyebrow="HELP"
+        title="Help & glossary"
+        subtitle="Every accessibility check this tool runs, in plain English, with the underlying WCAG 2.1, Section 508, and PDF/UA citations. Use it as a reference when deciding whether to approve or reject a fix."
+      />
 
       <View style={styles.layout}>
         {/* Left rail: sticky TOC on web. */}
@@ -324,7 +294,7 @@ function TocLink({ href, label }: { href: string; label: string }) {
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
   return (
-    <Pressable
+    <Pressable accessibilityRole="button" accessibilityLabel="Activate link"
       onPress={onPress}
       style={({ hovered }: any) => [
         styles.tocLink,
@@ -448,7 +418,7 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
           <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
         ))}
         {entry.learnMoreUrl ? (
-          <Pressable onPress={() => Linking.openURL(entry.learnMoreUrl)}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(entry.learnMoreUrl)}>
             <Chip label="Read W3C" tone="info" />
           </Pressable>
         ) : null}
@@ -458,15 +428,6 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
 }
 
 const styles = StyleSheet.create({
-  titleBlock: {
-    paddingTop: 24,
-    paddingBottom: 32,
-    paddingHorizontal: 4,
-  },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    marginBottom: 24,
-  },
   layout: {
     flexDirection: "row",
     gap: 48,

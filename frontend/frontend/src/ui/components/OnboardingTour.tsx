@@ -100,7 +100,7 @@ export function OnboardingTour() {
           <Text style={{ color: theme.colors.textMuted, fontSize: 11, fontWeight: "700" }}>
             {"STEP " + (step + 1) + " OF " + STEPS.length}
           </Text>
-          <Pressable onPress={skip} accessibilityLabel="Skip tour">
+          <Pressable accessibilityRole="button" onPress={skip} accessibilityLabel="Skip tour">
             <Text style={{ color: theme.colors.textMuted, fontSize: 12 }}>Skip</Text>
           </Pressable>
         </View>
@@ -114,7 +114,7 @@ export function OnboardingTour() {
           {current.body}
         </Text>
         <View style={styles.actions}>
-          <Pressable
+          <Pressable accessibilityRole="button"
             onPress={advance}
             accessibilityLabel={step >= STEPS.length - 1 ? "Finish tour" : "Next step"}
             style={({ hovered }: any) => [

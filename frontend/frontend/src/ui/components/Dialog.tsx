@@ -63,7 +63,7 @@ export function Dialog({
       accessibilityLabel={title}
       style={[styles.backdrop, { backgroundColor: theme.colors.shadow }]}
     >
-      <Pressable
+      <Pressable accessibilityRole="button" accessibilityLabel="Dialog content"
         onPress={(e) => {
           // @ts-ignore — RN-Web supports stopPropagation via nativeEvent
           if (e?.stopPropagation) e.stopPropagation();

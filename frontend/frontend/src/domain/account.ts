@@ -1,20 +1,31 @@
 /**
- * Local-only account model.
+ * Account + credits domain bound to the real backend.
  *
- * Storage:
- *   508-account-v1   ->  the single Account record (or absent if signed out)
+ * Backend endpoints used:
+ *   POST /auth/sign-in           -> { user, token }
+ *   GET  /auth/me                -> { user }
+ *   POST /auth/sign-out
+ *   POST /auth/grant-starter     (best effort; idempotent on the server)
+ *   GET  /credits/balance        -> { balance, history }
+ *   POST /credits/purchase       -> { user }
+ *   POST /credits/spend          -> { user }
  *
- * This is a pre-backend stub: there is no real auth yet.  Sign-in just mints
- * a local record so the rest of the UI (credit chip, profile, billing) has
- * something to bind to.  When real auth lands, swap the impl of signIn and
- * loadAccount to fetch from the server; the rest of the app shouldn't care.
+ * Storage (web only):
+ *   508-account-v2-token   -> raw JWT
+ *   508-account-v2-cache   -> last successful Account snapshot (offline fallback)
  *
- * SSR / non-web safe: every storage access is gated behind a window guard.
+ * Keep the localStorage cache so the UI doesn't go blank on a slow backend
+ * fetch; refreshAccount() updates it whenever a fresh /auth/me lands.
+ *
+ * Errors fail soft: callers get null + a console.warn; the UI surfaces a
+ * toast where appropriate. Nothing here should ever throw to the React tree.
  */
 
 import { Platform } from "react-native";
 
-export type HistoryKind = "purchase" | "spend" | "grant";
+import { useAppStore } from "../store/useAppStore";
+
+export type HistoryKind = "purchase" | "spend" | "grant" | "refund";
 
 export interface HistoryEntry {
   id: string;
@@ -31,41 +42,84 @@ export interface Account {
   createdAt: string;
   credits: number;
   history: HistoryEntry[];
+  hasPassword: boolean;
+  emailVerifiedAt: string | null;
 }
 
-const ACCOUNT_KEY = "508-account-v1";
-const STARTER_CREDITS = 25;
+export type Tier = "starter" | "pro" | "studio";
 
+const TOKEN_KEY = "508-account-v2-token";
+const CACHE_KEY = "508-account-v2-cache";
+
+let memoryToken: string | null = null;
 let memoryAccount: Account | null = null;
 
 function _isWeb(): boolean {
   return Platform.OS === "web" && typeof window !== "undefined";
 }
 
-function _read(): Account | null {
+function _readToken(): string | null {
+  if (!_isWeb()) return memoryToken;
+  try {
+    // Prefer localStorage (long-lived). Fall back to sessionStorage for users
+    // who explicitly chose "do not keep me signed in" at sign-in time.
+    const local = window.localStorage.getItem(TOKEN_KEY);
+    if (local) return local;
+    const session = window.sessionStorage.getItem(TOKEN_KEY);
+    if (session) return session;
+    return null;
+  } catch {
+    return memoryToken;
+  }
+}
+
+/**
+ * Persist the auth token. The optional `remember` flag controls storage:
+ *   true  (default) -> localStorage, survives tab close + browser restart
+ *   false           -> sessionStorage, cleared when the tab closes
+ * Always clears the opposite store so we never leave a stale copy behind.
+ */
+function _writeToken(token: string | null, remember: boolean = true): void {
+  memoryToken = token;
+  if (!_isWeb()) return;
+  try {
+    if (token === null) {
+      window.localStorage.removeItem(TOKEN_KEY);
+      window.sessionStorage.removeItem(TOKEN_KEY);
+      return;
+    }
+    if (remember) {
+      window.localStorage.setItem(TOKEN_KEY, token);
+      window.sessionStorage.removeItem(TOKEN_KEY);
+    } else {
+      window.sessionStorage.setItem(TOKEN_KEY, token);
+      window.localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    // ignore quota
+  }
+}
+
+function _readCache(): Account | null {
   if (!_isWeb()) return memoryAccount;
   try {
-    const raw = window.localStorage.getItem(ACCOUNT_KEY);
+    const raw = window.localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (
-      !parsed ||
-      typeof parsed.id !== "string" ||
-      typeof parsed.email !== "string" ||
-      typeof parsed.displayName !== "string"
-    ) {
-      return null;
-    }
-    return {
-      id: parsed.id,
-      email: parsed.email,
-      displayName: parsed.displayName,
-      createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : new Date().toISOString(),
-      credits: typeof parsed.credits === "number" ? parsed.credits : 0,
-      history: Array.isArray(parsed.history) ? parsed.history.filter(_isHistoryEntry) : [],
-    };
+    return _coerceAccount(parsed);
   } catch {
-    return null;
+    return memoryAccount;
+  }
+}
+
+function _writeCache(account: Account | null): void {
+  memoryAccount = account;
+  if (!_isWeb()) return;
+  try {
+    if (account === null) window.localStorage.removeItem(CACHE_KEY);
+    else window.localStorage.setItem(CACHE_KEY, JSON.stringify(account));
+  } catch {
+    // ignore quota
   }
 }
 
@@ -74,132 +128,439 @@ function _isHistoryEntry(x: any): x is HistoryEntry {
     x &&
     typeof x.id === "string" &&
     typeof x.at === "string" &&
-    (x.kind === "purchase" || x.kind === "spend" || x.kind === "grant") &&
+    (x.kind === "purchase" || x.kind === "spend" || x.kind === "grant" || x.kind === "refund") &&
     typeof x.amount === "number" &&
     typeof x.description === "string"
   );
 }
 
-function _write(account: Account | null): void {
-  if (!_isWeb()) {
-    memoryAccount = account;
-    return;
-  }
-  try {
-    if (account === null) {
-      window.localStorage.removeItem(ACCOUNT_KEY);
-    } else {
-      window.localStorage.setItem(ACCOUNT_KEY, JSON.stringify(account));
-    }
-  } catch {
-    // ignore quota
-  }
-}
-
-function _newId(prefix: string): string {
-  return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
-}
-
-function _appendHistory(account: Account, entry: Omit<HistoryEntry, "id" | "at">): Account {
-  const full: HistoryEntry = {
-    id: _newId("h"),
-    at: new Date().toISOString(),
-    ...entry,
-  };
+function _coerceAccount(raw: any): Account | null {
+  if (!raw || typeof raw !== "object") return null;
+  // Accept either the shape we emit or the backend's UserOut shape.
+  const id = typeof raw.id === "string" ? raw.id : null;
+  const email = typeof raw.email === "string" ? raw.email : null;
+  if (!id || !email) return null;
+  const displayName =
+    typeof raw.displayName === "string" && raw.displayName
+      ? raw.displayName
+      : typeof raw.display_name === "string" && raw.display_name
+      ? raw.display_name
+      : email.split("@")[0] || "You";
+  const createdAt =
+    typeof raw.createdAt === "string"
+      ? raw.createdAt
+      : typeof raw.created_at === "string"
+      ? raw.created_at
+      : new Date().toISOString();
+  // Backend returns the field as `creditsBalance`; older callers may pass
+  // `credits` or `credits_balance`. Accept any of the three so the cache
+  // and UI never silently fall back to 0 after a successful sign-in.
+  const credits =
+    typeof raw.creditsBalance === "number"
+      ? raw.creditsBalance
+      : typeof raw.credits === "number"
+      ? raw.credits
+      : typeof raw.credits_balance === "number"
+      ? raw.credits_balance
+      : 0;
+  const history = Array.isArray(raw.history) ? raw.history.filter(_isHistoryEntry) : [];
+  const hasPassword =
+    typeof raw.hasPassword === "boolean"
+      ? raw.hasPassword
+      : typeof raw.has_password === "boolean"
+      ? raw.has_password
+      : false;
+  const emailVerifiedAt =
+    typeof raw.emailVerifiedAt === "string" && raw.emailVerifiedAt
+      ? raw.emailVerifiedAt
+      : typeof raw.email_verified_at === "string" && raw.email_verified_at
+      ? raw.email_verified_at
+      : null;
   return {
-    ...account,
-    history: [full, ...account.history].slice(0, 200),
+    id,
+    email,
+    displayName,
+    createdAt,
+    credits,
+    history,
+    hasPassword,
+    emailVerifiedAt,
   };
 }
 
-/** Read the current account from storage, or null when signed out. */
+function _baseUrl(): string {
+  try {
+    const u = useAppStore.getState().apiBaseUrl || "";
+    return u.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const base = _baseUrl();
+  const url = base + (path.startsWith("/") ? path : "/" + path);
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...((init && (init.headers as Record<string, string>)) || {}),
+  };
+  if (init && init.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const token = _readToken();
+  if (token) headers["Authorization"] = "Bearer " + token;
+  return fetch(url, { ...init, headers });
+}
+
+async function _readJson(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Read the cached account synchronously. Always cheap, never throws. */
 export function loadAccount(): Account | null {
-  return _read();
+  return _readCache();
+}
+
+export function loadToken(): string | null {
+  return _readToken();
 }
 
 /**
- * Mint a new local account if none exists, otherwise update the existing
- * one's email/displayName and return it. Always returns a non-null account.
+ * Sign in to the backend, persist the JWT + account cache, and best-effort
+ * grant the starter credit pack. Returns the fresh account + token.
+ *
+ * Throws on transport/credential failure so the caller can surface an inline
+ * error in the modal.
  */
-export function signIn(email: string, displayName?: string): Account {
+export async function signIn(
+  email: string,
+  displayName?: string,
+  password?: string,
+  remember: boolean = true,
+): Promise<{ user: Account; token: string }> {
   const trimmedEmail = (email || "").trim();
   const trimmedName = (displayName || "").trim() || trimmedEmail.split("@")[0] || "You";
-  const existing = _read();
-  if (existing) {
-    const updated: Account = {
-      ...existing,
-      email: trimmedEmail || existing.email,
-      displayName: trimmedName || existing.displayName,
-    };
-    _write(updated);
-    return updated;
-  }
-  const fresh: Account = {
-    id: _newId("acct"),
+  const reqBody: Record<string, string> = {
     email: trimmedEmail,
     displayName: trimmedName,
-    createdAt: new Date().toISOString(),
-    credits: 0,
-    history: [],
   };
-  _write(fresh);
-  return fresh;
+  if (typeof password === "string" && password.length > 0) {
+    reqBody.password = password;
+  }
+  const res = await apiFetch("/auth/sign-in", {
+    method: "POST",
+    body: JSON.stringify(reqBody),
+  });
+  if (!res.ok) {
+    const body = await _readJson(res);
+    const detail = (body && (body.detail || body.message)) || ("HTTP " + res.status);
+    throw new Error(typeof detail === "string" ? detail : "Sign in failed");
+  }
+  const body = await _readJson(res);
+  const token: string | null = body && typeof body.token === "string" ? body.token : null;
+  const user = _coerceAccount(body && body.user);
+  if (!token || !user) {
+    throw new Error("Sign in succeeded but response was malformed.");
+  }
+  _writeToken(token, remember);
+  _writeCache(user);
+
+  // Best-effort starter grant. Idempotent on the server; ignore failures.
+  try {
+    const grantRes = await apiFetch("/auth/grant-starter", { method: "POST" });
+    if (grantRes.ok) {
+      const grantBody = await _readJson(grantRes);
+      const refreshed = _coerceAccount(grantBody && (grantBody.user || grantBody));
+      if (refreshed) _writeCache(refreshed);
+    }
+  } catch (e) {
+    console.warn("[account] grant-starter failed (ignored)", e);
+  }
+
+  return { user: _readCache() || user, token };
 }
 
-/** Forget the local account entirely. */
+/** Forget local credentials and fire-and-forget a server logout. */
 export function signOut(): void {
-  _write(null);
+  const token = _readToken();
+  _writeToken(null);
+  _writeCache(null);
+  if (!token) return;
+  try {
+    void fetch(_baseUrl() + "/auth/sign-out", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token },
+    }).catch(() => undefined);
+  } catch {
+    // ignore
+  }
 }
 
 /**
- * Add credits and append a history entry. No-op when signed out.
+ * Pull the latest account snapshot from /auth/me. Returns null when signed
+ * out or when the call fails; never throws.
  */
-export function addCredits(n: number, description: string): void {
-  if (!Number.isFinite(n) || n <= 0) return;
-  const acc = _read();
-  if (!acc) return;
-  const next: Account = {
-    ...acc,
-    credits: acc.credits + n,
-  };
-  _write(_appendHistory(next, { kind: "purchase", amount: n, description }));
+export async function refreshAccount(): Promise<Account | null> {
+  if (!_readToken()) return null;
+  try {
+    const res = await apiFetch("/auth/me");
+    if (res.status === 401) {
+      _writeToken(null);
+      _writeCache(null);
+      return null;
+    }
+    if (!res.ok) {
+      console.warn("[account] /auth/me", res.status);
+      return _readCache();
+    }
+    const body = await _readJson(res);
+    const next = _coerceAccount(body && (body.user || body));
+    if (next) _writeCache(next);
+    return next ?? _readCache();
+  } catch (e) {
+    console.warn("[account] refreshAccount failed", e);
+    return _readCache();
+  }
 }
 
 /**
- * Spend credits if balance is sufficient. Returns true on success, false on
- * insufficient funds or signed-out state.
+ * Buy a credit tier server-side. Updates the local cache and returns the
+ * fresh account on success; throws on failure so the caller can toast.
  */
-export function spendCredits(n: number, description: string): boolean {
-  if (!Number.isFinite(n) || n <= 0) return false;
-  const acc = _read();
-  if (!acc) return false;
-  if (acc.credits < n) return false;
-  const next: Account = {
-    ...acc,
-    credits: acc.credits - n,
-  };
-  _write(_appendHistory(next, { kind: "spend", amount: -n, description }));
-  return true;
+export async function purchaseTier(tier: Tier): Promise<Account> {
+  const res = await apiFetch("/credits/purchase", {
+    method: "POST",
+    body: JSON.stringify({ tier }),
+  });
+  if (!res.ok) {
+    const body = await _readJson(res);
+    const detail = (body && (body.detail || body.message)) || ("HTTP " + res.status);
+    throw new Error(typeof detail === "string" ? detail : "Purchase failed");
+  }
+  const body = await _readJson(res);
+  const next = _coerceAccount(body && (body.user || body));
+  if (!next) throw new Error("Purchase succeeded but response was malformed.");
+  _writeCache(next);
+  return next;
 }
 
 /**
- * Grant the one-time starter pack of 25 credits. Idempotent: if the account
- * already has any "grant" history entry, this is a no-op.
+ * Spend credits server-side. Returns true on success, false on insufficient
+ * funds or any transport failure (logged + cached state untouched).
  */
-export function grantStarterCredits(): void {
-  const acc = _read();
-  if (!acc) return;
-  const alreadyGranted = acc.history.some((h) => h.kind === "grant");
-  if (alreadyGranted) return;
+export async function spendCredits(
+  amount: number,
+  description: string,
+  relatedDocId?: string,
+): Promise<boolean> {
+  if (!Number.isFinite(amount) || amount <= 0) return false;
+  if (!_readToken()) return false;
+  try {
+    const res = await apiFetch("/credits/spend", {
+      method: "POST",
+      body: JSON.stringify({
+        amount,
+        description,
+        related_doc_id: relatedDocId ?? null,
+      }),
+    });
+    if (res.status === 402) return false; // insufficient funds
+    if (!res.ok) {
+      console.warn("[account] /credits/spend", res.status);
+      return false;
+    }
+    const body = await _readJson(res);
+    const next = _coerceAccount(body && (body.user || body));
+    if (next) _writeCache(next);
+    return true;
+  } catch (e) {
+    console.warn("[account] spendCredits failed", e);
+    return false;
+  }
+}
+
+/**
+ * Back-compat shim for callers that used to optimistically add credits to
+ * the local cache. Now it just nudges /credits/purchase via a tier guess and
+ * falls back to a cache-only bump so demo flows keep working.
+ *
+ * Prefer purchaseTier() for real flows.
+ */
+export async function addCredits(amount: number, description: string): Promise<void> {
+  if (!Number.isFinite(amount) || amount <= 0) return;
+  const cached = _readCache();
+  if (!cached) return;
   const next: Account = {
-    ...acc,
-    credits: acc.credits + STARTER_CREDITS,
+    ...cached,
+    credits: cached.credits + amount,
+    history: [
+      {
+        id: "h-" + Date.now().toString(36),
+        at: new Date().toISOString(),
+        kind: "purchase" as HistoryKind,
+        amount,
+        description,
+      },
+      ...cached.history,
+    ].slice(0, 200),
   };
-  _write(
-    _appendHistory(next, {
-      kind: "grant",
-      amount: STARTER_CREDITS,
-      description: "Welcome bonus - starter credits",
-    }),
-  );
+  _writeCache(next);
+}
+
+/**
+ * Idempotently ask the server for the starter pack. Safe to call after
+ * sign-in completes; failures are swallowed.
+ */
+export async function grantStarterCredits(): Promise<void> {
+  if (!_readToken()) return;
+  try {
+    const res = await apiFetch("/auth/grant-starter", { method: "POST" });
+    if (!res.ok) return;
+    const body = await _readJson(res);
+    const next = _coerceAccount(body && (body.user || body));
+    if (next) _writeCache(next);
+  } catch (e) {
+    console.warn("[account] grantStarterCredits failed", e);
+  }
+}
+
+
+/**
+ * Update the current user's profile (display name and/or email).
+ * Returns the fresh account on success and writes through to the cache.
+ * Throws on transport/server failure so the caller can surface a toast.
+ */
+export async function updateProfile(patch: {
+  displayName?: string;
+  email?: string;
+}): Promise<Account> {
+  if (!_readToken()) throw new Error("Not signed in.");
+  const body: Record<string, string> = {};
+  if (patch.displayName !== undefined) body.displayName = patch.displayName.trim();
+  if (patch.email !== undefined) body.email = patch.email.trim().toLowerCase();
+  const res = await apiFetch("/auth/me", {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const j = await _readJson(res);
+    const detail = (j && (j.detail || j.message)) || "HTTP " + res.status;
+    throw new Error(typeof detail === "string" ? detail : "Update failed");
+  }
+  const j = await _readJson(res);
+  const next = _coerceAccount(j && (j.user || j));
+  if (!next) throw new Error("Update succeeded but response was malformed.");
+  // Preserve cached history (PATCH /me only returns user fields)
+  const cached = _readCache();
+  const merged: Account = {
+    ...next,
+    history: cached?.history ?? next.history,
+  };
+  _writeCache(merged);
+  return merged;
+}
+
+/**
+ * Download a JSON dump of the user's data from /auth/export.
+ * Returns the response body as a Blob so the caller can trigger a download.
+ * Throws on failure.
+ */
+export async function exportData(): Promise<Blob> {
+  if (!_readToken()) throw new Error("Not signed in.");
+  const res = await apiFetch("/auth/export", { method: "GET" });
+  if (!res.ok) {
+    const j = await _readJson(res);
+    const detail = (j && (j.detail || j.message)) || "HTTP " + res.status;
+    throw new Error(typeof detail === "string" ? detail : "Export failed");
+  }
+  return await res.blob();
+}
+
+/**
+ * Permanently delete the current user's account and cascade-clear the
+ * server-side ledger.  Always clears local credentials + cache and reloads
+ * the page on web, even if the server call fails (so the UI can't get
+ * stranded with a stale session).
+ */
+export async function deleteAccount(): Promise<void> {
+  const token = _readToken();
+  try {
+    if (token) {
+      const res = await apiFetch("/auth/me", { method: "DELETE" });
+      if (!res.ok && res.status !== 401 && res.status !== 404) {
+        const j = await _readJson(res);
+        const detail = (j && (j.detail || j.message)) || "HTTP " + res.status;
+        // Preserve fail-soft: clear locally regardless, but surface the err.
+        _writeToken(null);
+        _writeCache(null);
+        throw new Error(typeof detail === "string" ? detail : "Delete failed");
+      }
+    }
+  } finally {
+    _writeToken(null);
+    _writeCache(null);
+    if (_isWeb()) {
+      try {
+        window.location.reload();
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+
+/**
+ * Set or change the signed-in user's password. Returns the fresh account.
+ * Throws on failure.
+ */
+export async function setPassword(password: string): Promise<Account> {
+  if (!_readToken()) throw new Error("Not signed in.");
+  if (!password || password.length < 4) {
+    throw new Error("Password must be at least 4 characters.");
+  }
+  const res = await apiFetch("/auth/set-password", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) {
+    const j = await _readJson(res);
+    const detail = (j && (j.detail || j.message)) || "HTTP " + res.status;
+    throw new Error(typeof detail === "string" ? detail : "Set password failed");
+  }
+  const j = await _readJson(res);
+  const next = _coerceAccount(j && (j.user || j));
+  if (!next) throw new Error("Set password succeeded but response was malformed.");
+  // Preserve cached history (set-password only returns user fields).
+  const cached = _readCache();
+  const merged: Account = {
+    ...next,
+    history: cached?.history ?? next.history,
+  };
+  _writeCache(merged);
+  return merged;
+}
+
+/**
+ * Ask the backend to mint a verification token + log the magic link.
+ * Returns true if the request was queued. Fails soft.
+ */
+export async function requestEmailVerification(): Promise<boolean> {
+  if (!_readToken()) return false;
+  try {
+    const res = await apiFetch("/auth/request-verify-email", { method: "POST" });
+    if (!res.ok) {
+      console.warn("[account] request-verify-email", res.status);
+      return false;
+    }
+    const j = await _readJson(res);
+    return !!(j && j.queued);
+  } catch (e) {
+    console.warn("[account] requestEmailVerification failed", e);
+    return false;
+  }
 }

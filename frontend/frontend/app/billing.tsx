@@ -16,8 +16,9 @@ import { useRouter } from "expo-router";
 
 import {
   Account,
-  addCredits,
   loadAccount,
+  purchaseTier,
+  refreshAccount,
 } from "../src/domain/account";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
@@ -91,23 +92,34 @@ export default function BillingScreen() {
 
   const stacked = width < 880;
 
-  const onChoose = (tier: Tier) => {
+  const onChoose = async (tier: Tier) => {
     if (!account) {
       setSignInOpen(true);
       return;
     }
     setBusy(tier.key);
     const total = tier.baseCredits + tier.bonusCredits;
-    const desc = "Purchased " + tier.name + " tier";
     try {
-      addCredits(total, desc);
+      const next = await purchaseTier(tier.key);
+      setAccount(next);
+      // Refresh from /auth/me so the local cache stays canonical even if
+      // the purchase response shape ever drifts.
+      void refreshAccount()
+        .then((fresh) => {
+          if (fresh) setAccount(fresh);
+        })
+        .catch((err) => {
+          console.warn("[billing] post-purchase refresh failed", err);
+        });
       toast.success("Credits added", {
         description: "+" + total + " credits from " + tier.name + " tier",
       });
-      setAccount(loadAccount());
       router.push("/account" as any);
     } catch (e: any) {
-      toast.error("Purchase failed", { description: e?.message || "Try again." });
+      console.warn("[billing] purchase failed", e);
+      toast.error("Purchase failed", {
+        description: e?.message || "Could not reach the billing service. Try again.",
+      });
     } finally {
       setBusy(null);
     }
@@ -117,8 +129,7 @@ export default function BillingScreen() {
     <Screen scroll title="Buy credits">
       <Hero
         shader="ember"
-        shaderOpacity={0.55}
-        eyebrow="Top up"
+        eyebrow="BILLING"
         title="Buy credits"
         subtitle="Credits power audits, batch runs, and AI remediation. Pick a tier - bigger packs include bonus credits."
       />

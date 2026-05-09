@@ -15,8 +15,9 @@ import { PixelIcon, PixelGlyph } from "../src/ui/components/PixelIcon";
 import { PixelProgress } from "../src/ui/components/PixelProgress";
 import { Chip } from "../src/ui/components/Chip";
 import { Confetti } from "../src/ui/components/Confetti";
+import { EmptyState } from "../src/ui/components/EmptyState";
 import { Screen } from "../src/ui/components/Screen";
-import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
+import { Hero } from "../src/ui/components/Hero";
 import { useTheme } from "../src/ui/useTheme";
 
 function pickGlyph(id: string): PixelGlyph {
@@ -40,31 +41,22 @@ export default function AchievementsScreen() {
   return (
     <Screen scroll>
       <Confetti trigger={burst} />
-      <View style={{ position: "relative", borderRadius: 18, overflow: "hidden", marginBottom: 16, minHeight: 160, backgroundColor: "#0B1020", padding: 24, justifyContent: "center" }}>
-        <ShaderCanvas variant="pumpkin" opacity={0.55} />
-        <View style={[styles.header, { position: "relative", zIndex: 1 }]}>
-          <View style={{ flex: 1 }}>
-            <Text
-              accessibilityRole="header"
-              style={[theme.typography.title, { color: "#FFFFFF" }]}
-            >
-              Achievements
-            </Text>
-            <Text style={[theme.typography.body, { color: "rgba(255,255,255,0.85)", marginTop: 4 }]}>
-              Stickers you have earned across all your audits.
-            </Text>
-          </View>
+      <Hero
+        shader="pumpkin"
+        eyebrow="ACHIEVEMENTS"
+        title="Achievements"
+        subtitle="Stickers you have earned across all your audits."
+        rightSlot={
           <Chip
             label={unlocked + " of " + total}
             tone={unlocked === total ? "success" : "info"}
           />
-        </View>
-      </View>
+        }
+      />
 
       <Card>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Stickers you have earned across all your audits. Most unlock the first
-          time you do something. Hit them all and you get the full board.
+          Most unlock the first time you do something. Hit them all and you get the full board.
         </Text>
         <View style={{ marginTop: 12 }}>
           <PixelProgress value={pct / 100} cells={20} cellSize={12} />
@@ -78,6 +70,14 @@ export default function AchievementsScreen() {
           {pct + "% complete"}
         </Text>
       </Card>
+
+      {unlocked === 0 ? (
+        <EmptyState
+          icon="trophy"
+          title="No stickers yet"
+          body="Run your first audit to start unlocking achievements. Most pop the very first time you do something."
+        />
+      ) : null}
 
       <View style={styles.grid}>
         {list.map((a) => {
@@ -126,7 +126,6 @@ export default function AchievementsScreen() {
 }
 
 const styles = StyleSheet.create({
-  header: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
   barTrack: { height: 8, borderRadius: 4, marginTop: 12, overflow: "hidden" },
   barFill: { height: 8, borderRadius: 4 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 12, marginTop: 4 },

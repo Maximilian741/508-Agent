@@ -11,7 +11,7 @@ import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Screen } from "../src/ui/components/Screen";
-import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
+import { Hero } from "../src/ui/components/Hero";
 import { useTheme } from "../src/ui/useTheme";
 
 const STEPS = [
@@ -37,32 +37,21 @@ export default function LandingScreen() {
   const router = useRouter();
   return (
     <Screen scroll>
-      <View style={styles.heroWrap}>
-        <ShaderCanvas variant="ember" opacity={0.18} />
-        <View style={[styles.hero, { borderColor: theme.colors.border }]}>
-          <Text style={[styles.eyebrow, { color: theme.colors.accent }]}>508 AGENT</Text>
-          <Text
-            accessibilityRole="header"
-            style={[theme.typography.title, { color: theme.colors.text }]}
-          >
-            Accessibility audits without the busywork.
-          </Text>
-          <Text
-            style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8 }]}
-          >
-            508 Agent walks every WCAG 2.1, Section 508, and PDF/UA finding in
-            your documents and proposes a fix you can approve, edit, or reject.
-          </Text>
-          <View style={styles.ctaRow}>
-            <Button title="Try it free" onPress={() => router.push("/" as any)} />
-            <Button
-              title="Run your first audit"
-              variant="ghost"
-              onPress={() => router.push("/audit" as any)}
-            />
-          </View>
+      <Hero
+        shader="ember"
+        eyebrow="508 AGENT"
+        title="Accessibility audits without the busywork"
+        subtitle="508 Agent walks every WCAG 2.1, Section 508, and PDF/UA finding in your documents and proposes a fix you can approve, edit, or reject."
+      >
+        <View style={styles.ctaRow}>
+          <Button title="Try it free" onPress={() => router.push("/" as any)} />
+          <Button
+            title="Run your first audit"
+            variant="ghost"
+            onPress={() => router.push("/audit" as any)}
+          />
         </View>
-      </View>
+      </Hero>
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Three steps.</Text>
@@ -96,13 +85,13 @@ export default function LandingScreen() {
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards covered</Text>
         <View style={styles.chipRow}>
-          <Pressable onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
             <Chip label="WCAG 2.1" tone="info" />
           </Pressable>
-          <Pressable onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.access-board.gov" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508" tone="info" />
           </Pressable>
-          <Pressable onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>
@@ -120,9 +109,12 @@ export default function LandingScreen() {
 function FooterLink({ label, onPress }: { label: string; onPress: () => void }) {
   const theme = useTheme();
   return (
-    <Pressable
+    <Pressable accessibilityRole="button"
       onPress={onPress}
-      style={({ hovered }: any) => [hovered ? { opacity: 0.7 } : null]}
+      style={({ hovered, focused }: any) => [
+        hovered ? { opacity: 0.7 } : null,
+        focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
+      ]}
       accessibilityLabel={label}
     >
       <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "600" }}>{label}</Text>
@@ -131,9 +123,6 @@ function FooterLink({ label, onPress }: { label: string; onPress: () => void }) 
 }
 
 const styles = StyleSheet.create({
-  heroWrap: { position: "relative", borderRadius: 16, overflow: "hidden" },
-  hero: { borderRadius: 16, borderWidth: 1, padding: 24 },
-  eyebrow: { fontSize: 11, fontWeight: "800", letterSpacing: 1.5, marginBottom: 6 },
   ctaRow: { flexDirection: "row", gap: 12, marginTop: 16, flexWrap: "wrap" },
   steps: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 12 },
   step: { flex: 1, minWidth: 220, borderWidth: 1, borderRadius: 12, padding: 14 },

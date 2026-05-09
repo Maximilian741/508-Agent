@@ -36,6 +36,7 @@ import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
+import { PixelSpinner } from "../src/ui/components/PixelSpinner";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -473,15 +474,12 @@ export default function BatchScreen() {
         </View>
       ) : null}
 
-      <View style={{ marginBottom: 12 }}>
-        <Hero
-          shader="pumpkin"
-          shaderOpacity={0.55}
-          eyebrow="Batch mode"
-          title="Batch audit — drop multiple documents and we'll analyze them in parallel."
-          subtitle={`Up to ${MAX_CONCURRENCY} files run at once. Each completed audit is added to your history so you can dive into any one of them.`}
-        />
-      </View>
+      <Hero
+        shader="pumpkin"
+        eyebrow="BATCH"
+        title="Batch audit"
+        subtitle={`Drop multiple documents and we'll analyze them in parallel - up to ${MAX_CONCURRENCY} at once. Each finished audit lands in your history.`}
+      />
 
       {/* === File picker / drop zone ====================================== */}
       <Card>
@@ -542,7 +540,7 @@ export default function BatchScreen() {
       {/* === Queue ======================================================== */}
       {items.length === 0 ? (
         <EmptyState
-          icon="folder-open"
+          icon="doc"
           title="No documents queued yet"
           message="Drop a folder of documents anywhere on this page, or click the button above to multi-select files."
           actionLabel="Choose files"
@@ -577,7 +575,10 @@ export default function BatchScreen() {
                 tone="default"
               />
               {inFlight > 0 ? (
-                <Chip label={`analyzing: ${inFlight}`} tone="info" />
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <PixelSpinner size={3} />
+                  <Chip label={`analyzing: ${inFlight}`} tone="info" />
+                </View>
               ) : null}
               {queued > 0 ? (
                 <Chip label={`queued: ${queued}`} tone="default" />

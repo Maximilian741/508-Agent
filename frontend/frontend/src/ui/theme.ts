@@ -162,6 +162,33 @@ export const lightColors: ThemeColors = {
 } as const;
 
 /**
+ * Twilight palette - dusky midpoint between cream parchment and warm umber.
+ * Used for the "Auto" / system theme so every theme option looks visibly
+ * distinct: this one reads like late dusk with a violet-rose undertone,
+ * mid-luminosity backgrounds, and accents that lean plum instead of ember.
+ */
+export const twilightColors: ThemeColors = {
+  bg: "#3A2A3F",          // dusky aubergine
+  surface: "#4A3550",     // raised dusk
+  surface2: "#574060",    // panel
+  surface3: "#664B70",    // nested card
+  text: "#FBEFE0",        // cream
+  textMuted: "#D4B8C8",   // dusty mauve
+  border: "#7A5C84",      // amethyst border
+  shadow: "rgba(20, 8, 24, 0.42)",
+  accent: "#FFB36B",      // warm peach (pops against violet bg)
+  accentSecondary: "#F472B6", // rose
+  success: "#86EFAC",
+  warning: "#FCD34D",
+  danger: "#FCA5A5",
+  info: "#A5B4FC",        // periwinkle
+  successSoft: "rgba(134, 239, 172, 0.16)",
+  warningSoft: "rgba(252, 211, 77, 0.16)",
+  dangerSoft: "rgba(252, 165, 165, 0.16)",
+  infoSoft: "rgba(165, 180, 252, 0.18)",
+} as const;
+
+/**
  * Dark palette - deep warm umber, NOT pure-black + navy.
  * Backgrounds carry a russet/walnut undertone so the maple-mist shader
  * reads as "warm fog drifting through a dim room" instead of "blue tint

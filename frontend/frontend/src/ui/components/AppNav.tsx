@@ -10,7 +10,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter, usePathname } from "expo-router";
 
-import { Account, loadAccount, signOut } from "../../domain/account";
+import { Account, loadAccount, refreshAccount, signOut } from "../../domain/account";
 import { useAppStore } from "../../store/useAppStore";
 import { useTheme } from "../useTheme";
 import { Chip } from "./Chip";
@@ -21,11 +21,11 @@ import { SignInModal } from "./SignInModal";
 const ITEMS: { label: string; href: string; key: string }[] = [
   { label: "Home", href: "/", key: "home" },
   { label: "Audit", href: "/audit", key: "audit" },
+  { label: "Dashboard", href: "/dashboard", key: "dashboard" },
   { label: "Batch", href: "/batch", key: "batch" },
   { label: "Contrast", href: "/tools/contrast", key: "contrast" },
   { label: "Help", href: "/help", key: "help" },
   { label: "Achievements", href: "/achievements", key: "achievements" },
-  { label: "Account", href: "/account", key: "account" },
   { label: "About", href: "/about", key: "about" },
   { label: "Settings", href: "/settings", key: "settings" },
 ];
@@ -49,10 +49,10 @@ export function AppNav() {
         },
       ]}
     >
-      <Pressable
+      <Pressable accessibilityRole="button"
         onPress={() => router.push("/" as any)}
         accessibilityLabel="Home"
-        style={styles.brand}
+        style={({ focused }: any) => [styles.brand, focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null]}
       >
         <View style={styles.logoFrame}>
           <PixelLogo size={3} color={theme.colors.accent} />
@@ -60,21 +60,29 @@ export function AppNav() {
         <Text style={[theme.typography.pixel, styles.brandText, { color: theme.colors.text }]}>508 · AGENT</Text>
       </Pressable>
 
+      <View
+        accessibilityRole={Platform.OS === "web" ? ("separator" as any) : undefined}
+        // @ts-ignore - aria-hidden on web
+        aria-hidden={true}
+        style={[styles.brandDivider, { backgroundColor: theme.colors.border }]}
+      />
+
       <View style={styles.links}>
         {ITEMS.map((item) => {
           const active = pathname === item.href || (item.href === "/" && pathname === "/index");
           return (
-            <Pressable
+            <Pressable accessibilityRole="button"
               key={item.key}
               onPress={() => router.push(item.href as any)}
               accessibilityLabel={"Go to " + item.label}
               accessibilityState={{ selected: active }}
-              style={[
+              style={({ focused }: any) => [
                 styles.link,
                 {
                   borderColor: active ? theme.colors.accent : "transparent",
                   backgroundColor: active ? theme.colors.accent + "1A" : "transparent",
                 },
+                focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
               ]}
             >
               <Text
@@ -147,6 +155,19 @@ function AccountChip() {
     setAccount(loadAccount());
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    refreshAccount()
+      .then((fresh) => {
+        if (cancelled) return;
+        if (fresh) setAccount(fresh);
+      })
+      .catch((e) => console.warn("[AccountChip] refresh failed", e));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const measureAnchor = () => {
     if (Platform.OS !== "web" || typeof window === "undefined") return;
     const el: any = chipRef.current;
@@ -184,11 +205,12 @@ function AccountChip() {
           onPress={() => setSignInOpen(true)}
           accessibilityLabel="Sign in"
           accessibilityRole="button"
-          style={[
+          style={({ focused }: any) => [
             styles.signInBtn,
             {
               backgroundColor: theme.colors.accent,
             },
+            focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
           ]}
         >
           <Text style={{ color: "#FFFFFF", fontWeight: "700", fontSize: 12 }}>Sign in</Text>
@@ -227,12 +249,13 @@ function AccountChip() {
         accessibilityLabel={"Account menu for " + account.displayName + ", " + account.credits + " credits"}
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        style={[
+        style={({ focused }: any) => [
           styles.acctChip,
           {
             backgroundColor: theme.colors.surface2,
             borderColor: open ? theme.colors.accent : theme.colors.border,
           },
+          focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
         ]}
       >
         <View style={[styles.avatar, { backgroundColor: theme.colors.accent }]}>
@@ -254,7 +277,7 @@ function AccountChip() {
 
       {open ? (
         <>
-          <Pressable
+          <Pressable accessibilityRole="button"
             accessibilityLabel="Close account menu"
             onPress={() => setOpen(false)}
             style={styles.acctBackdrop}
@@ -312,9 +335,10 @@ function MenuItem({
       onPress={onPress}
       accessibilityLabel={label}
       accessibilityRole="button"
-      style={({ hovered }: any) => [
+      style={({ hovered, focused }: any) => [
         styles.acctMenuItem,
         hovered ? { backgroundColor: theme.colors.surface2 } : null,
+        focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
       ]}
     >
       <Text style={{ color, fontWeight: "600", fontSize: 13 }}>{label}</Text>
@@ -333,6 +357,7 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   brand: { flexDirection: "row", alignItems: "center", gap: 10 },
+  brandDivider: { width: 1, height: 22, marginHorizontal: 12, opacity: 0.6 },
   logoFrame: { padding: 4, borderRadius: 4 },
   logo: {
     width: 28,

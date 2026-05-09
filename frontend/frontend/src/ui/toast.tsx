@@ -26,6 +26,12 @@ export interface ToastInput {
   description?: string;
   /** Override the default 3500ms autodismiss. Pass 0 to disable autodismiss. */
   durationMs?: number;
+  /**
+   * Optional collision key. When set, a new toast with the same dedupeKey
+   * replaces any visible toast with the same key (no stacking). When unset,
+   * toasts behave as before.
+   */
+  dedupeKey?: string;
 }
 
 interface ToastRecord extends ToastInput {
@@ -47,6 +53,10 @@ class ToastBus {
       tone: "info",
       ...input,
     };
+    if (record.dedupeKey) {
+      // Drop any visible toast with the same dedupeKey before pushing.
+      this.toasts = this.toasts.filter((t) => t.dedupeKey !== record.dedupeKey);
+    }
     this.toasts = [...this.toasts, record];
     this.emit();
     const ttl = record.durationMs ?? 3500;
