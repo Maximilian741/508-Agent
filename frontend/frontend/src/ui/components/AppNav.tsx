@@ -202,13 +202,21 @@ function AccountChip() {
     return (
       <>
         <Pressable
-          onPress={() => setSignInOpen(true)}
+          onPress={() => {
+            console.log("[AppNav] Sign in clicked - opening modal");
+            setSignInOpen(true);
+          }}
           accessibilityLabel="Sign in"
           accessibilityRole="button"
-          style={({ focused }: any) => [
+          style={({ focused, hovered, pressed }: any) => [
             styles.signInBtn,
             {
-              backgroundColor: theme.colors.accent,
+              backgroundColor: pressed
+                ? theme.colors.accentSecondary
+                : hovered
+                ? theme.colors.accent
+                : theme.colors.accent,
+              opacity: pressed ? 0.9 : 1,
             },
             focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
           ]}

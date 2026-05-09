@@ -25,6 +25,21 @@ import { useTheme } from "../useTheme";
 import { Button } from "./Button";
 import { PixelIcon } from "./PixelIcon";
 
+// Web-only portal: render the modal directly under document.body so it
+// escapes any ancestor that has a CSS transform (which would otherwise
+// break position: fixed and the modal would render off-screen relative
+// to the transformed ancestor instead of the viewport).
+function ModalPortal({ children }: { children: React.ReactNode }) {
+  if (Platform.OS !== "web" || typeof document === "undefined") {
+    return <>{children}</>;
+  }
+  const reactDom = require("react-dom");
+  if (typeof reactDom.createPortal !== "function") {
+    return <>{children}</>;
+  }
+  return reactDom.createPortal(children, document.body);
+}
+
 export interface SignInModalProps {
   open: boolean;
   onCancel: () => void;
@@ -203,6 +218,7 @@ export function SignInModal({
   const panelBg = theme.colors.surface2;
 
   return (
+    <ModalPortal>
     <View
       // @ts-ignore web-only role
       accessibilityRole={Platform.OS === "web" ? ("dialog" as any) : undefined}
@@ -280,6 +296,7 @@ export function SignInModal({
         ) : null}
       </View>
     </View>
+    </ModalPortal>
   );
 }
 
@@ -732,6 +749,11 @@ const styles = StyleSheet.create({
     bottom: 0,
   },
   panel: {
+    // position: relative + zIndex bumps the panel above the absolute
+    // backdrop. Without this, CSS paints positioned siblings (backdrop)
+    // in front of static ones (panel) and the modal contents disappear.
+    position: "relative",
+    zIndex: 1,
     width: "100%",
     maxWidth: 480,
     borderWidth: 1,

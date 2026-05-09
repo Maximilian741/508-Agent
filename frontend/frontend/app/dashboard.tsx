@@ -1,46 +1,34 @@
 /**
- * Dashboard - hand-drawn audit queue.
+ * Dashboard - signed-in users only.
  *
- * Notebook aesthetic: paper background, Caveat heading, three "stat strip"
- * cards with wobble borders, then a list of recent audits styled as table
- * rows. Each row links into the existing audit screen via the router.
+ * Shows the user's audit queue + a small stat strip. Visually consistent
+ * with the rest of the app (twilight Hero + Card + Chip primitives), not
+ * the wireframe paper aesthetic.
  *
- * Read history from the existing localStorage-backed loadHistory() so the
- * dashboard always reflects the same audits the home screen sees.
+ * Auth gate: if no account is loaded, render a sign-in CTA instead of the
+ * dashboard contents. The actual SignInModal is mounted in AppNav, so we
+ * just nudge the user toward the top-right Sign in button.
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
+import { Account, loadAccount, refreshAccount } from "../src/domain/account";
 import { AuditHistoryEntry, loadHistory } from "../src/domain/auditHistory";
+import { Button } from "../src/ui/components/Button";
+import { Card } from "../src/ui/components/Card";
+import { Chip } from "../src/ui/components/Chip";
+import { EmptyState } from "../src/ui/components/EmptyState";
+import { Hero } from "../src/ui/components/Hero";
+import { InlineNotice } from "../src/ui/components/InlineNotice";
+import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Screen } from "../src/ui/components/Screen";
-import {
-  SketchCard,
-  SketchHeading,
-  SketchChip,
-  SketchButton,
-  SketchSeverityDot,
-  SketchHighlight,
-  SketchHandNote,
-  Severity,
-  ensureSketchFontsInjected,
-  sketchPalette,
-  sketchFontFamily,
-} from "../src/ui/sketch";
+import { useTheme } from "../src/ui/useTheme";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const ONE_WEEK_MS = 7 * ONE_DAY_MS;
-// Rough estimate: each issue not having to be hand-fixed saves about 4 minutes
-// of reviewer time.
 const MINUTES_SAVED_PER_ISSUE = 4;
-
-function severityForScore(score: number): Severity {
-  if (score >= 90) return "low";
-  if (score >= 75) return "medium";
-  if (score >= 60) return "high";
-  return "critical";
-}
 
 function formatDate(iso: string): string {
   if (!iso) return "";
@@ -82,9 +70,7 @@ function computeStats(history: AuditHistoryEntry[]): DashboardStats {
   let issuesHandled = 0;
   for (const entry of history) {
     const t = new Date(entry.ranAt).getTime();
-    if (Number.isFinite(t) && t >= cutoff) {
-      scansThisWeek += 1;
-    }
+    if (Number.isFinite(t) && t >= cutoff) scansThisWeek += 1;
     if (typeof entry.score === "number" && Number.isFinite(entry.score)) {
       scoreSum += entry.score;
       scoreCount += 1;
@@ -98,73 +84,193 @@ function computeStats(history: AuditHistoryEntry[]): DashboardStats {
   };
 }
 
+function chipToneForScore(score: number): "success" | "info" | "warning" | "danger" {
+  if (score >= 90) return "success";
+  if (score >= 75) return "info";
+  if (score >= 60) return "warning";
+  return "danger";
+}
+
 export default function DashboardScreen() {
+  const theme = useTheme();
   const router = useRouter();
   const [history, setHistory] = useState<AuditHistoryEntry[]>([]);
+  const [account, setAccount] = useState<Account | null>(() => loadAccount());
+  const [authChecked, setAuthChecked] = useState(false);
 
+  // On mount: refresh the account from the backend (in case the token
+  // is stale or the user just signed in on another tab) and load the
+  // history. We always load history so the empty state still shows
+  // properly when an account exists but has no audits yet.
   useEffect(() => {
-    ensureSketchFontsInjected();
+    let cancelled = false;
     setHistory(loadHistory());
+    refreshAccount()
+      .then((fresh) => {
+        if (cancelled) return;
+        if (fresh) setAccount(fresh);
+        setAuthChecked(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAuthChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const stats = useMemo(() => computeStats(history), [history]);
   const recent = useMemo(() => history.slice(0, 12), [history]);
 
+  // Auth gate. While we're checking, render a quiet placeholder so the
+  // unauthenticated CTA does not flash for users who actually are signed in.
+  if (!account) {
+    return (
+      <Screen scroll title="Dashboard">
+        <Hero
+          shader="aurora"
+          eyebrow="DASHBOARD"
+          title="Your audit queue"
+          subtitle={
+            authChecked
+              ? "Sign in to see your saved audits, your time saved, and your remaining credits."
+              : "Loading your dashboard..."
+          }
+        />
+        {authChecked ? (
+          <Card>
+            <View style={styles.signInBlock}>
+              <PixelIcon name="key" size={4} color={theme.colors.accent} />
+              <View style={{ flex: 1, gap: 6 }}>
+                <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+                  Sign in to see your dashboard
+                </Text>
+                <Text
+                  style={[
+                    theme.typography.body,
+                    { color: theme.colors.textMuted },
+                  ]}
+                >
+                  Your dashboard is private. Once you sign in, this page shows
+                  every audit you have run, your weekly volume, the time you
+                  have saved, and your remaining credits. Use the
+                  {" "}
+                  <Text style={{ color: theme.colors.accent, fontWeight: "700" }}>
+                    Sign in
+                  </Text>
+                  {" "}
+                  button in the top right.
+                </Text>
+                <View style={styles.signInActions}>
+                  <Button
+                    title="Run a free audit instead"
+                    variant="ghost"
+                    onPress={() => router.push("/audit" as any)}
+                  />
+                </View>
+              </View>
+            </View>
+          </Card>
+        ) : null}
+      </Screen>
+    );
+  }
+
+  // Signed-in state.
+  const greetingName = account.displayName || account.email.split("@")[0] || "there";
+
   return (
-    <Screen scroll title="Dashboard" contentStyle={dashStyles.screen}>
-      <View style={dashStyles.headerRow}>
-        <SketchHeading size="display" eyebrow="DASHBOARD">
-          Your audit queue
-        </SketchHeading>
-        <SketchHandNote arrow="left" tilt={-0.4}>
-          recent work, top of pile
-        </SketchHandNote>
-      </View>
+    <Screen scroll title="Dashboard">
+      <Hero
+        shader="aurora"
+        eyebrow="DASHBOARD"
+        title={"Welcome back, " + greetingName}
+        subtitle={
+          history.length === 0
+            ? "Your dashboard is ready. Run your first audit to see stats and history here."
+            : "Your audit queue, at a glance. Recent work is at the top."
+        }
+        rightSlot={
+          <Chip
+            label={account.credits + " credits"}
+            tone={account.credits > 0 ? "success" : "warning"}
+          />
+        }
+      />
 
-      <View style={dashStyles.statStrip}>
+      <View style={styles.statStrip}>
+        <StatTile label="Scans this week" value={String(stats.scansThisWeek)} />
         <StatTile
-          label="Scans this week"
-          value={String(stats.scansThisWeek)}
-          highlighter="yellow"
-          tilt={-0.4}
-        />
-        <StatTile
-          label="Score average"
+          label="Average score"
           value={stats.averageScore == null ? "--" : String(stats.averageScore)}
-          highlighter="green"
           suffix={stats.averageScore == null ? "" : " / 100"}
-          tilt={0}
         />
         <StatTile
-          label="Time saved (estimate)"
+          label="Time saved"
           value={formatTimeSaved(stats.timeSavedMinutes)}
-          highlighter="blue"
-          tilt={0.4}
         />
       </View>
 
-      <SketchCard density="cozy" tilt={0}>
-        <View style={dashStyles.tableHeaderRow}>
-          <Text style={[dashStyles.colHeader, dashStyles.colFile]}>File</Text>
-          <Text style={[dashStyles.colHeader, dashStyles.colScore]}>Score</Text>
-          <Text style={[dashStyles.colHeader, dashStyles.colDate]}>When</Text>
-          <Text style={[dashStyles.colHeader, dashStyles.colStatus]}>Status</Text>
-          <Text style={[dashStyles.colHeader, dashStyles.colAction]}>Open</Text>
+      {account.credits === 0 ? (
+        <InlineNotice
+          tone="warning"
+          title="No credits left"
+          message="You can still run audits, but applying fixes and downloading remediated files needs credits. Top up to keep going."
+          actionLabel="Buy credits"
+          onAction={() => router.push("/billing" as any)}
+        />
+      ) : null}
+
+      <Card>
+        <View style={styles.cardHeaderRow}>
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+            Recent audits
+          </Text>
+          <Button
+            title="Run a new audit"
+            onPress={() => router.push("/audit" as any)}
+          />
         </View>
 
         {recent.length === 0 ? (
-          <EmptyQueue onStart={() => router.push("/" as any)} />
+          <EmptyState
+            icon="doc"
+            title="No audits yet"
+            body="Drop a document on the audit screen to run your first audit. Past scans show up here so you can pick one back up."
+          />
         ) : (
-          recent.map((entry, idx) => (
-            <AuditRow
-              key={entry.id}
-              entry={entry}
-              isLast={idx === recent.length - 1}
-              onOpen={() => router.push("/audit" as any)}
-            />
-          ))
+          <View style={styles.list}>
+            <View style={[styles.listHeaderRow, { borderColor: theme.colors.border }]}>
+              <Text style={[styles.colHeader, styles.colFile, { color: theme.colors.textMuted }]}>
+                File
+              </Text>
+              <Text style={[styles.colHeader, styles.colScore, { color: theme.colors.textMuted }]}>
+                Score
+              </Text>
+              <Text style={[styles.colHeader, styles.colDate, { color: theme.colors.textMuted }]}>
+                When
+              </Text>
+              <Text style={[styles.colHeader, styles.colStatus, { color: theme.colors.textMuted }]}>
+                Status
+              </Text>
+              <Text style={[styles.colHeader, styles.colAction, { color: theme.colors.textMuted }]}>
+                Open
+              </Text>
+            </View>
+            {recent.map((entry, idx) => (
+              <AuditRow
+                key={entry.id}
+                entry={entry}
+                isLast={idx === recent.length - 1}
+                onOpen={() =>
+                  router.push(("/audit?historyId=" + encodeURIComponent(entry.id)) as any)
+                }
+              />
+            ))}
+          </View>
         )}
-      </SketchCard>
+      </Card>
     </Screen>
   );
 }
@@ -173,21 +279,26 @@ interface StatTileProps {
   label: string;
   value: string;
   suffix?: string;
-  highlighter: "yellow" | "pink" | "green" | "blue" | "coral";
-  tilt: -0.4 | 0 | 0.4;
 }
 
-function StatTile({ label, value, suffix, highlighter, tilt }: StatTileProps) {
+function StatTile({ label, value, suffix }: StatTileProps) {
+  const theme = useTheme();
   return (
-    <SketchCard density="cozy" tilt={tilt} style={dashStyles.statTile}>
-      <Text style={dashStyles.statLabel}>{label}</Text>
-      <View style={dashStyles.statValueRow}>
-        <SketchHighlight tone={highlighter}>
-          <Text style={dashStyles.statValueInner}>{value}</Text>
-        </SketchHighlight>
-        {suffix ? <Text style={dashStyles.statSuffix}>{suffix}</Text> : null}
+    <Card style={styles.statTile}>
+      <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+        {label}
+      </Text>
+      <View style={styles.statValueRow}>
+        <Text style={[theme.typography.title, { color: theme.colors.text }]}>
+          {value}
+        </Text>
+        {suffix ? (
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+            {suffix}
+          </Text>
+        ) : null}
       </View>
-    </SketchCard>
+    </Card>
   );
 }
 
@@ -198,201 +309,140 @@ interface AuditRowProps {
 }
 
 function AuditRow({ entry, isLast, onOpen }: AuditRowProps) {
-  const sev = severityForScore(entry.score);
+  const theme = useTheme();
   const pending = entry.pending ?? 0;
   const status = pending > 0 ? "In review" : "Done";
+  const statusTone: "warning" | "success" = pending > 0 ? "warning" : "success";
+
   return (
-    <View
-      style={[
-        dashStyles.row,
-        !isLast ? dashStyles.rowDivider : null,
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={"Open audit for " + (entry.filename || "untitled")}
+      onPress={onOpen}
+      style={({ hovered, pressed }: any) => [
+        styles.row,
+        !isLast
+          ? { borderBottomWidth: 1, borderBottomColor: theme.colors.border }
+          : null,
+        hovered ? { backgroundColor: theme.colors.surface2 } : null,
+        pressed ? { opacity: 0.85 } : null,
       ]}
     >
-      <View style={[dashStyles.cell, dashStyles.colFile]}>
-        <Text style={dashStyles.fileName} numberOfLines={1}>
+      <View style={[styles.cell, styles.colFile]}>
+        <Text
+          style={[
+            theme.typography.body,
+            { color: theme.colors.text, fontWeight: "700" },
+          ]}
+          numberOfLines={1}
+        >
           {entry.filename || "(untitled)"}
         </Text>
-        <Text style={dashStyles.fileMeta} numberOfLines={1}>
+        <Text
+          style={[
+            theme.typography.body,
+            { color: theme.colors.textMuted, fontSize: 12, marginTop: 2 },
+          ]}
+          numberOfLines={1}
+        >
           {(entry.sourceFormat || "doc").toUpperCase()}
-          {"  -  "}
-          {entry.totalIssues} issues
+          {"  "}
+          {entry.totalIssues}
+          {" issues"}
         </Text>
       </View>
 
-      <View style={[dashStyles.cell, dashStyles.colScore, dashStyles.scoreCell]}>
-        <SketchSeverityDot severity={sev} />
-        <Text style={dashStyles.scoreText}>{entry.score}</Text>
-        <Text style={dashStyles.gradeText}>{entry.grade}</Text>
-      </View>
-
-      <View style={[dashStyles.cell, dashStyles.colDate]}>
-        <Text style={dashStyles.dateText}>{formatDate(entry.ranAt)}</Text>
-      </View>
-
-      <View style={[dashStyles.cell, dashStyles.colStatus]}>
-        <SketchChip
-          label={status}
-          highlighter={pending > 0 ? "yellow" : "green"}
+      <View style={[styles.cell, styles.colScore, styles.scoreCell]}>
+        <Chip
+          label={entry.score + " " + (entry.grade || "")}
+          tone={chipToneForScore(entry.score)}
         />
       </View>
 
-      <View style={[dashStyles.cell, dashStyles.colAction]}>
-        <SketchButton
-          title="Open"
-          variant="primary"
-          onPress={onOpen}
-          accessibilityLabel={"Open audit for " + (entry.filename || "untitled")}
-        />
+      <View style={[styles.cell, styles.colDate]}>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, fontSize: 13 }]}>
+          {formatDate(entry.ranAt)}
+        </Text>
       </View>
-    </View>
+
+      <View style={[styles.cell, styles.colStatus]}>
+        <Chip label={status} tone={statusTone} />
+      </View>
+
+      <View style={[styles.cell, styles.colAction]}>
+        <Button title="Open" variant="ghost" onPress={onOpen} />
+      </View>
+    </Pressable>
   );
 }
 
-function EmptyQueue({ onStart }: { onStart: () => void }) {
-  return (
-    <View style={dashStyles.empty}>
-      <SketchHeading size="subtitle">No audits yet</SketchHeading>
-      <Text style={dashStyles.emptyBody}>
-        Drop a document on the home screen to run your first audit. Past
-        scans show up here so you can pick one back up.
-      </Text>
-      <View style={{ marginTop: 12, alignSelf: "flex-start" }}>
-        <SketchButton title="Start an audit" onPress={onStart} />
-      </View>
-      <SketchHandNote arrow="left" tilt={-0.4}>
-        first one is the hardest
-      </SketchHandNote>
-    </View>
-  );
-}
-
-const dashStyles = StyleSheet.create({
-  screen: {
-    backgroundColor: sketchPalette.paper,
-  },
-  headerRow: {
+const styles = StyleSheet.create({
+  signInBlock: {
     flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 16,
+    paddingVertical: 8,
+  },
+  signInActions: {
+    flexDirection: "row",
+    gap: 8,
     flexWrap: "wrap",
-    gap: 12,
-    marginBottom: 4,
+    marginTop: 12,
   },
   statStrip: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 16,
-    marginBottom: 8,
+    gap: 12,
   },
   statTile: {
     flexBasis: 220,
     flexGrow: 1,
     minWidth: 200,
   },
-  statLabel: {
-    fontFamily: sketchFontFamily.label,
-    fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: 0.04 * 11,
-    color: sketchPalette.pencil,
-    marginBottom: 8,
-  },
   statValueRow: {
     flexDirection: "row",
     alignItems: "baseline",
     gap: 6,
+    marginTop: 6,
   },
-  statValueInner: {
-    fontFamily: sketchFontFamily.display,
-    fontSize: 30,
-    fontWeight: "600",
-    color: sketchPalette.ink,
-    lineHeight: 32,
+  cardHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    flexWrap: "wrap",
   },
-  statSuffix: {
-    fontFamily: sketchFontFamily.body,
-    fontSize: 14,
-    color: sketchPalette.pencil,
-  },
-  tableHeaderRow: {
+  list: { marginTop: 12 },
+  listHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     paddingBottom: 6,
     marginBottom: 4,
-    borderBottomWidth: 1.5,
-    borderBottomColor: sketchPalette.ink,
+    borderBottomWidth: 1,
   },
   colHeader: {
-    fontFamily: sketchFontFamily.label,
     fontSize: 11,
+    fontWeight: "600",
     textTransform: "uppercase",
-    letterSpacing: 0.04 * 11,
-    color: sketchPalette.pencil,
+    letterSpacing: 0.5,
   },
   colFile: { flexBasis: 240, flexGrow: 3 },
-  colScore: { flexBasis: 120, flexGrow: 1 },
+  colScore: { flexBasis: 110, flexGrow: 1 },
   colDate: { flexBasis: 90, flexGrow: 1 },
   colStatus: { flexBasis: 110, flexGrow: 1 },
-  colAction: { flexBasis: 90, flexGrow: 0, alignItems: "flex-end" as const },
+  colAction: { flexBasis: 90, flexGrow: 0, alignItems: "flex-end" },
   row: {
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: 10,
+    paddingHorizontal: 4,
     gap: 8,
+    borderRadius: 6,
   },
-  rowDivider: {
-    borderBottomWidth: 1,
-    borderBottomColor: sketchPalette.lineSoft,
-    borderStyle: "dashed",
-  },
-  cell: {
-    paddingRight: 8,
-  },
-  fileName: {
-    fontFamily: sketchFontFamily.body,
-    fontSize: 14,
-    fontWeight: "700",
-    color: sketchPalette.ink,
-  },
-  fileMeta: {
-    fontFamily: sketchFontFamily.body,
-    fontSize: 12,
-    color: sketchPalette.pencil,
-    marginTop: 2,
-  },
+  cell: { paddingRight: 8 },
   scoreCell: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-  },
-  scoreText: {
-    fontFamily: sketchFontFamily.display,
-    fontSize: 20,
-    fontWeight: "700",
-    color: sketchPalette.ink,
-  },
-  gradeText: {
-    fontFamily: sketchFontFamily.label,
-    fontSize: 11,
-    color: sketchPalette.pencil,
-    textTransform: "uppercase",
-    letterSpacing: 0.04 * 11,
-  },
-  dateText: {
-    fontFamily: sketchFontFamily.body,
-    fontSize: 13,
-    color: sketchPalette.ink2,
-  },
-  empty: {
-    alignItems: "flex-start",
-    paddingVertical: 16,
-    gap: 6,
-  },
-  emptyBody: {
-    fontFamily: sketchFontFamily.body,
-    fontSize: 14,
-    color: sketchPalette.pencil,
-    lineHeight: 19,
-    maxWidth: 480,
   },
 });
