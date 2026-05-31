@@ -43,9 +43,8 @@ async def create_evidence_bundle(
     user_id: str = Depends(require_user_id),
 ) -> Dict[str, object]:
     job = REPO.get_job(job_id)
-    _job_doc = (job or {}).get("docId")
-    if _job_doc:
-        _require_owned_doc(_job_doc, user_id)
+    # Fail closed: an unresolvable/owner-less job is denied (404).
+    _require_owned_doc((job or {}).get("docId"), user_id)
     payload = options.model_dump() if options is not None else dict(DEFAULT_BUNDLE_OPTIONS)
     try:
         bundle_id, bundle_hash, meta = build_evidence_bundle(job_id=job_id, options=payload)
@@ -96,9 +95,7 @@ async def download_evidence_bundle(
     bundle = REPO.get_evidence_bundle(bundle_id)
     if not bundle:
         raise HTTPException(status_code=404, detail="Evidence bundle not found")
-    _bundle_doc = bundle.get("docId")
-    if _bundle_doc:
-        _require_owned_doc(_bundle_doc, user_id)
+    _require_owned_doc(bundle.get("docId"), user_id)
     if str(bundle.get("status") or "") != "created":
         raise HTTPException(status_code=404, detail="Evidence bundle not available")
 

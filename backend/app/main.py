@@ -42,11 +42,11 @@ app = FastAPI(title="508-Agent", version=settings.app_version)
 # creates the raw tables and seeds default policy packs; in production
 # (Postgres) it runs Alembic migrations and seeds policy packs.
 init_db()
-# create_all is DEV-ONLY. In dev (sqlite) it adds the ORM-only tables
-# (users, credit_ledger, email_verify_tokens) that init_db's raw path does not
-# create. In production Alembic owns the schema, so auto-creating here would
-# mask drift between the models and the migrations.
-if settings.environment != "production":
+# create_all is DEV-ONLY (sqlite). It adds the ORM-only tables (users,
+# credit_ledger, email_verify_tokens) that init_db's raw path does not create.
+# Anywhere else (staging/prod on Postgres) Alembic owns the schema — auto-
+# creating would mask drift between the models and the migrations.
+if settings.environment == "development":
     Base.metadata.create_all(bind=ENGINE)
 
 app.add_middleware(RequestIdLoggingMiddleware)
@@ -72,9 +72,19 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     internal exception text never reaches the client."""
     request_id = getattr(request.state, "request_id", None)
     _log.exception("[error] unhandled exception id=%s path=%s", request_id, request.url.path)
+    # This handler runs in Starlette's ServerErrorMiddleware, OUTSIDE the
+    # BaseHTTPMiddleware stack, so set the baseline security headers here too.
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+    }
+    if request_id:
+        headers["X-Request-Id"] = str(request_id)
     return JSONResponse(
         status_code=500,
         content={"detail": "internal_error", "requestId": request_id},
+        headers=headers,
     )
 
 
