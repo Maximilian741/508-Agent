@@ -44,14 +44,17 @@ def main() -> int:
     email = "smoke-tester@example.com"
 
     print("[1] POST /auth/sign-in")
-    r = client.post("/auth/sign-in", json={"email": email, "displayName": "Smoke"})
+    r = client.post(
+        "/auth/sign-in",
+        json={"email": email, "displayName": "Smoke", "password": "smokepass123"},
+    )
     assert r.status_code == 200, r.text
     data = r.json()
     token = data["token"]
     user_id = data["user"]["id"]
     print("    token=", token[:8], "user_id=", user_id[:8], "balance=", data["user"]["creditsBalance"])
 
-    headers = {"X-Account-Id": user_id}
+    headers = {"Authorization": f"Bearer {token}"}
 
     print("[2] POST /auth/grant-starter")
     r = client.post("/auth/grant-starter", headers=headers)

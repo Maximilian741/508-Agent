@@ -58,7 +58,7 @@ export interface SignInModalProps {
   onMaybeLater?: () => void;
 }
 
-type Step = "welcome" | "password" | "success";
+type Step = "welcome" | "success";
 
 // Pragmatic email regex. Not RFC-perfect, but rejects the common
 // fat-finger cases (missing "@", missing TLD, trailing space).
@@ -176,7 +176,7 @@ export function SignInModal({
     }, 800);
   };
 
-  const submit = async (withPassword: boolean) => {
+  const submit = async () => {
     const trimmed = email.trim();
     setEmailTouched(true);
     if (!isValidEmail(trimmed)) {
@@ -184,8 +184,8 @@ export function SignInModal({
       setError(null);
       return;
     }
-    if (withPassword && password.length === 0) {
-      setError("Enter a password or skip this step.");
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
       return;
     }
     setSubmitting(true);
@@ -194,7 +194,7 @@ export function SignInModal({
       const result = await signIn(
         trimmed,
         displayName.trim(),
-        withPassword ? password : undefined,
+        password,
         remember,
       );
       const niceName =
@@ -260,34 +260,14 @@ export function SignInModal({
             error={error}
             submitting={submitting}
             emailRef={emailRef}
-            onCancel={onCancel}
-            onMaybeLater={onMaybeLater}
-            onSubmit={() => submit(false)}
-            onWantPassword={() => {
-              setEmailTouched(true);
-              if (!isValidEmail(email)) return;
-              setError(null);
-              setStep("password");
-            }}
-          />
-        ) : null}
-
-        {step === "password" ? (
-          <PasswordStep
-            theme={theme}
             password={password}
             setPassword={(v) => {
               setPassword(v);
               if (error) setError(null);
             }}
-            error={error}
-            submitting={submitting}
-            onBack={() => {
-              setError(null);
-              setStep("welcome");
-            }}
-            onSubmit={() => submit(true)}
-            onSkip={() => submit(false)}
+            onCancel={onCancel}
+            onMaybeLater={onMaybeLater}
+            onSubmit={() => submit()}
           />
         ) : null}
 
@@ -309,6 +289,8 @@ interface WelcomeStepProps {
   inlineEmailError: string | null;
   displayName: string;
   setDisplayName: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
   remember: boolean;
   setRemember: (v: boolean) => void;
   error: string | null;
@@ -317,7 +299,6 @@ interface WelcomeStepProps {
   onCancel: () => void;
   onMaybeLater?: () => void;
   onSubmit: () => void;
-  onWantPassword: () => void;
 }
 
 function WelcomeStep(props: WelcomeStepProps) {
@@ -330,6 +311,8 @@ function WelcomeStep(props: WelcomeStepProps) {
     inlineEmailError,
     displayName,
     setDisplayName,
+    password,
+    setPassword,
     remember,
     setRemember,
     error,
@@ -338,7 +321,6 @@ function WelcomeStep(props: WelcomeStepProps) {
     onCancel,
     onMaybeLater,
     onSubmit,
-    onWantPassword,
   } = props;
 
   return (
@@ -465,6 +447,34 @@ function WelcomeStep(props: WelcomeStepProps) {
             color: theme.colors.text,
           },
         ]}
+        returnKeyType="next"
+      />
+
+      <Text
+        style={[
+          styles.label,
+          { color: theme.colors.text, marginTop: 14 },
+        ]}
+      >
+        Choose a password
+      </Text>
+      <TextInput
+        value={password}
+        onChangeText={setPassword}
+        placeholder="At least 8 characters"
+        placeholderTextColor={theme.colors.textMuted}
+        secureTextEntry
+        autoCapitalize="none"
+        autoCorrect={false}
+        accessibilityLabel="Password"
+        style={[
+          styles.input,
+          {
+            borderColor: theme.colors.border,
+            backgroundColor: theme.colors.surface,
+            color: theme.colors.text,
+          },
+        ]}
         onSubmitEditing={onSubmit}
         returnKeyType="go"
       />
@@ -474,23 +484,6 @@ function WelcomeStep(props: WelcomeStepProps) {
         checked={remember}
         onToggle={() => setRemember(!remember)}
       />
-
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="I want to lock my account with a password"
-        onPress={onWantPassword}
-        style={{ marginTop: 14, alignSelf: "flex-start" }}
-      >
-        <Text
-          style={{
-            color: theme.colors.accent,
-            fontSize: 13,
-            fontWeight: "600",
-          }}
-        >
-          I want to lock my account with a password
-        </Text>
-      </Pressable>
 
       {error ? (
         <Text
@@ -518,119 +511,11 @@ function WelcomeStep(props: WelcomeStepProps) {
           variant="primary"
           loading={submitting}
           disabled={
-            submitting || !!inlineEmailError || email.trim().length === 0
+            submitting ||
+            !!inlineEmailError ||
+            email.trim().length === 0 ||
+            password.length < 8
           }
-        />
-      </View>
-    </View>
-  );
-}
-
-interface PasswordStepProps {
-  theme: ReturnType<typeof useTheme>;
-  password: string;
-  setPassword: (v: string) => void;
-  error: string | null;
-  submitting: boolean;
-  onBack: () => void;
-  onSubmit: () => void;
-  onSkip: () => void;
-}
-
-function PasswordStep(props: PasswordStepProps) {
-  const {
-    theme,
-    password,
-    setPassword,
-    error,
-    submitting,
-    onBack,
-    onSubmit,
-    onSkip,
-  } = props;
-  return (
-    <View>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Back to welcome step"
-        onPress={onBack}
-        disabled={submitting}
-        style={{ alignSelf: "flex-start", marginBottom: 6 }}
-      >
-        <Text style={{ color: theme.colors.textMuted, fontSize: 13 }}>
-          {"< Back"}
-        </Text>
-      </Pressable>
-      <Text
-        style={[
-          theme.typography.displaySmall,
-          { color: theme.colors.text },
-        ]}
-      >
-        Set a password (optional)
-      </Text>
-      <Text
-        style={{
-          color: theme.colors.textMuted,
-          fontSize: 14,
-          lineHeight: 20,
-          marginTop: 8,
-          marginBottom: 18,
-        }}
-      >
-        Adding a password locks your account so only someone with it can sign
-        in as you. You can always set one later from the account screen.
-      </Text>
-
-      <Text style={[styles.labelLarge, { color: theme.colors.text }]}>
-        Password
-      </Text>
-      <TextInput
-        value={password}
-        onChangeText={setPassword}
-        placeholder="At least 4 characters"
-        placeholderTextColor={theme.colors.textMuted}
-        secureTextEntry
-        autoCapitalize="none"
-        autoCorrect={false}
-        accessibilityLabel="Password"
-        style={[
-          styles.inputLarge,
-          {
-            borderColor: theme.colors.border,
-            backgroundColor: theme.colors.surface,
-            color: theme.colors.text,
-          },
-        ]}
-        onSubmitEditing={onSubmit}
-        returnKeyType="go"
-      />
-
-      {error ? (
-        <Text
-          style={{
-            color: theme.colors.danger,
-            fontSize: 13,
-            marginTop: 10,
-          }}
-        >
-          {error}
-        </Text>
-      ) : null}
-
-      <View style={styles.actions}>
-        <Button
-          title="Skip"
-          onPress={onSkip}
-          variant="ghost"
-          disabled={submitting}
-        />
-        <Button
-          title={submitting ? "Signing in..." : "Sign in"}
-          onPress={onSubmit}
-          variant="primary"
-          loading={submitting}
-          disabled={submitting || password.length === 0}
         />
       </View>
     </View>

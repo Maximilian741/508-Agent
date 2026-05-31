@@ -28,8 +28,13 @@ class RequestIdLoggingMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         response.headers["X-Request-Id"] = request_id
-        print(
-            f"[request] id={request_id} method={request.method} path={request.url.path} status={response.status_code} latency_ms={elapsed_ms:.2f}"
+        _log.info(
+            "[request] id=%s method=%s path=%s status=%s latency_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
         )
         return response
 

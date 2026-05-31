@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -35,6 +36,11 @@ _MAGIC_PREFIXES: dict[str, tuple[bytes, ...]] = {
 }
 
 _DEFAULT_CHUNK = 64 * 1024
+
+# Cap the total *uncompressed* size of an OOXML (docx/pptx) package to defend
+# against zip bombs — a tiny upload can otherwise expand to gigabytes when a
+# parser reads it.
+_MAX_OOXML_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MiB
 
 
 @dataclass(frozen=True)
@@ -119,8 +125,37 @@ async def stream_to_tempfile(
                     "magic bytes do not match"
                 ),
             )
+        # ZIP-based OOXML: confirm it is a real docx/pptx package and not a
+        # decompression bomb before any parser opens it.
+        if expected_suffix.lower() in {".docx", ".pptx"}:
+            try:
+                validate_ooxml_package(tmp_path)
+            except HTTPException:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
     return UploadResult(path=tmp_path, size=written, sniffed_kind=sniffed)
+
+
+def validate_ooxml_package(path: Path) -> None:
+    """Validate that ``path`` is a real OOXML (docx/pptx) ZIP package and not a
+    decompression bomb. Raises ``HTTPException`` (400/413) otherwise.
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            if "[Content_Types].xml" not in zf.namelist():
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid_ooxml: missing [Content_Types].xml",
+                )
+            total = sum(int(info.file_size) for info in zf.infolist())
+            if total > _MAX_OOXML_UNCOMPRESSED_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="upload_rejected: decompressed size exceeds limit",
+                )
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="invalid_ooxml: not a valid zip archive")
 
 
 def _sniff_kind(head: bytes) -> Optional[str]:
@@ -133,4 +168,4 @@ def _sniff_kind(head: bytes) -> Optional[str]:
     return None
 
 
-__all__ = ["stream_to_tempfile", "UploadResult"]
+__all__ = ["stream_to_tempfile", "UploadResult", "validate_ooxml_package"]

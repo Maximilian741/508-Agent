@@ -80,7 +80,10 @@ def main() -> int:
     print("[5] sign-in -> /auth/me with Bearer header")
     client = _bootstrap()
     email = "jwt-smoke@example.com"
-    r = client.post("/auth/sign-in", json={"email": email, "displayName": "JWT Smoke"})
+    r = client.post(
+        "/auth/sign-in",
+        json={"email": email, "displayName": "JWT Smoke", "password": "jwtpass1234"},
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     api_token = body["token"]
@@ -103,10 +106,9 @@ def main() -> int:
     assert me["email"] == email
     assert me["id"] == api_user["id"]
 
-    print("[7] /auth/me X-Account-Id (legacy fallback) still works")
+    print("[7] /auth/me with X-Account-Id only (no Bearer) -> 401 (header is NOT an auth source)")
     r = client.get("/auth/me", headers={"X-Account-Id": api_user["id"]})
-    assert r.status_code == 200, r.text
-    assert r.json()["id"] == api_user["id"]
+    assert r.status_code == 401, r.text
 
     print("[8] /auth/me with bogus Bearer -> 401")
     r = client.get("/auth/me", headers={"Authorization": "Bearer not.a.real.jwt"})

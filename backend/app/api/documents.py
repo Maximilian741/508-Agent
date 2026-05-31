@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 UTC = timezone.utc
 from enum import Enum
@@ -14,7 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from pypdf import PdfReader, PdfWriter
@@ -30,13 +32,12 @@ from app.parsers.pptx_parser import PPTXParser
 from app.ai.alt_text_suggester import build_alt_text_suggestions
 from app.ai.auto_review import apply_decision as ai_apply_decision
 from app.ai.auto_review import build_alt_context, is_alt_text_manual_item, propose_alt_text
+from app.api.deps import require_user_id
 from app.config import get_settings
 from app.persistence.db import get_repo
 from app.schemas.status import DocStatusListResponse, DocStatusSummary
 from app.storage import encode_storage_key, get_storage, parse_artifact_ref
 from app.storage.materialize import cleanup_materialized_scope, materialize_to_path
-
-router = APIRouter()
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = BASE_DIR / ".runtime"
@@ -52,6 +53,28 @@ MAX_DIFF_CHARS = 20000
 REPO = get_repo()
 SETTINGS = get_settings()
 STORAGE = get_storage()
+logger = logging.getLogger(__name__)
+
+
+def enforce_document_access(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+) -> str:
+    """Router-level guard for every document route.
+
+    Requires a valid session token, and for any ``/{doc_id}`` path confirms the
+    caller owns that document. Returns 404 (not 403) on a mismatch so document
+    ids cannot be enumerated by unauthorized callers.
+    """
+    doc_id = request.path_params.get("doc_id")
+    if doc_id:
+        doc = REPO.get_document(str(doc_id))
+        if doc is None or (doc.get("ownerId") or None) != user_id:
+            raise HTTPException(status_code=404, detail="not_found")
+    return user_id
+
+
+router = APIRouter(dependencies=[Depends(enforce_document_access)])
 
 
 class DocumentType(str, Enum):
@@ -223,6 +246,7 @@ def _save_doc(doc_id: str, doc: Dict[str, object]) -> None:
         DOCS[doc_id] = doc
     payload = {
         "id": doc_id,
+        "ownerId": doc.get("ownerId"),
         "filename": doc.get("filename"),
         "docType": doc.get("docType", "pdf"),
         "path": doc.get("path"),
@@ -1455,10 +1479,8 @@ def _queue_manual_review(
     suggested_fix: str,
     confidence: float,
 ) -> Dict[str, object]:
-    from app.api import state
-
     item = {
-        "id": f"mr-{int(time.time() * 1000)}-{len(state.manual_review_queue)}",
+        "id": f"mr-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
         "issueId": issue_id,
         "targetNodeId": target_node_id,
         "reason": reason,
@@ -1470,7 +1492,6 @@ def _queue_manual_review(
         "confidence": confidence,
         "requiresHuman": True,
     }
-    state.manual_review_queue.append(item)
     REPO.add_manual_review_items(doc_id, [item])
     return item
 
@@ -2450,9 +2471,12 @@ def _scan_worker(job_id: str, doc_id: str) -> None:
 
 
 @router.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)) -> dict:
+async def upload_document(
+    file: UploadFile = File(...),
+    user_id: str = Depends(require_user_id),
+) -> dict:
     _ensure_dirs()
-    doc_id = f"doc-{int(time.time())}"
+    doc_id = uuid.uuid4().hex
     doc_dir = UPLOADS_DIR / doc_id
     doc_dir.mkdir(parents=True, exist_ok=True)
     if not file.filename:
@@ -2468,6 +2492,14 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="Upload signature does not match expected file type.")
     dest = doc_dir / safe_name
     shutil.move(str(quarantine_path), str(dest))
+    if suffix in {".docx", ".pptx"}:
+        from app.security.uploads import validate_ooxml_package
+
+        try:
+            validate_ooxml_package(dest)
+        except HTTPException:
+            dest.unlink(missing_ok=True)
+            raise
     doc_type = _infer_doc_type(safe_name).value
     storage_key = f"documents/{doc_id}/original/{Path(safe_name).name}"
     try:
@@ -2475,7 +2507,8 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
         persisted_path = encode_storage_key(storage_key)
     except Exception as exc:
         if SETTINGS.storage_provider == "s3":
-            raise HTTPException(status_code=500, detail=f"Failed to store upload artifact: {exc}")
+            logger.warning("store upload artifact failed: %s", exc)
+            raise HTTPException(status_code=500, detail="storage_error")
         persisted_path = str(dest)
     with LOCK:
         DOCS[doc_id] = {
@@ -2483,22 +2516,29 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
             "path": persisted_path,
             "localPath": str(dest),
             "docType": doc_type,
+            "ownerId": user_id,
         }
     _save_doc(doc_id, DOCS[doc_id])
     return {"docId": doc_id, "filename": safe_name, "sizeBytes": size, "docType": doc_type}
 
 
 @router.get("/documents")
-async def list_documents() -> List[Dict[str, object]]:
-    return REPO.list_documents()
+async def list_documents(
+    user_id: str = Depends(require_user_id),
+) -> List[Dict[str, object]]:
+    return REPO.list_documents(owner_id=user_id)
 
 
 @router.get("/documents/status", response_model=DocStatusListResponse)
-async def list_documents_status(limit: int = 50, offset: int = 0) -> Dict[str, object]:
+async def list_documents_status(
+    limit: int = 50,
+    offset: int = 0,
+    user_id: str = Depends(require_user_id),
+) -> Dict[str, object]:
     safe_limit = max(1, min(1000, int(limit or 50)))
     safe_offset = max(0, int(offset or 0))
-    items = REPO.list_documents_with_status(limit=safe_limit, offset=safe_offset)
-    total = REPO.count_documents()
+    items = REPO.list_documents_with_status(limit=safe_limit, offset=safe_offset, owner_id=user_id)
+    total = REPO.count_documents(owner_id=user_id)
     return {
         "items": items,
         "total": total,
@@ -2815,7 +2855,8 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
             fixed_ref = encode_storage_key(fixed_key)
         except Exception as exc:
             if SETTINGS.storage_provider == "s3":
-                raise HTTPException(status_code=500, detail=f"Failed to store fixed artifact: {exc}")
+                logger.warning("store fixed artifact failed: %s", exc)
+                raise HTTPException(status_code=500, detail="storage_error")
             fixed_ref = str(fixed_dest)
     if rebuilt_exists:
         rebuilt_key = f"documents/{doc_id}/rebuilt/{rebuild_dest.name}"
@@ -2824,7 +2865,8 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
             rebuilt_ref = encode_storage_key(rebuilt_key)
         except Exception as exc:
             if SETTINGS.storage_provider == "s3":
-                raise HTTPException(status_code=500, detail=f"Failed to store rebuilt artifact: {exc}")
+                logger.warning("store rebuilt artifact failed: %s", exc)
+                raise HTTPException(status_code=500, detail="storage_error")
             rebuilt_ref = str(rebuild_dest)
     if rebuilt and rebuilt_ref:
         scan_target_ref = rebuilt_ref
@@ -2971,7 +3013,8 @@ async def finalize_document(doc_id: str) -> Dict[str, object]:
         final_ref = encode_storage_key(final_key)
     except Exception as exc:
         if SETTINGS.storage_provider == "s3":
-            raise HTTPException(status_code=500, detail=f"Failed to store finalized artifact: {exc}")
+            logger.warning("store finalized artifact failed: %s", exc)
+            raise HTTPException(status_code=500, detail="storage_error")
         final_ref = str(final_dest)
 
     manual_items_all = REPO.list_manual_review_items_for_doc(doc_id, include_resolved=True)

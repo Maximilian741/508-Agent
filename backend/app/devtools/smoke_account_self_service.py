@@ -45,14 +45,16 @@ def main() -> int:
     email = "self-service@example.com"
 
     print("[1] POST /auth/sign-in")
-    r = client.post("/auth/sign-in", json={"email": email, "displayName": "Selfie"})
+    r = client.post(
+        "/auth/sign-in",
+        json={"email": email, "displayName": "Selfie", "password": "selfiepass1"},
+    )
     assert r.status_code == 200, r.text
     data = r.json()
     token = data["token"]
     user_id = data["user"]["id"]
     headers = {"Authorization": f"Bearer {token}"}
-    # grant-starter uses the legacy X-Account-Id header; mix both so it's happy.
-    grant_headers = {**headers, "X-Account-Id": user_id}
+    grant_headers = headers
     print("    user_id=", user_id[:8], "displayName=", data["user"]["displayName"])
 
     print("[2] POST /auth/grant-starter (populate ledger)")

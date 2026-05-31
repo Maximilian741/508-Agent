@@ -65,14 +65,18 @@ def main() -> int:
         assert t["priceConfigured"] is False, t
     print("    enabled=false, all three tiers reported, no price ids configured")
 
-    print("[2] sign in to get a user id for the next call")
+    print("[2] sign in to get a session token for the next call")
     r = client.post(
         "/auth/sign-in",
-        json={"email": "billing-smoke@example.com", "displayName": "Billing"},
+        json={
+            "email": "billing-smoke@example.com",
+            "displayName": "Billing",
+            "password": "billingpass1",
+        },
     )
     assert r.status_code == 200, r.text
-    user_id = r.json()["user"]["id"]
-    headers = {"X-Account-Id": user_id}
+    token = r.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
 
     print("[3] POST /billing/create-checkout-session (no key) -> 503")
     r = client.post(

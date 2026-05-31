@@ -60,6 +60,7 @@ class SqlAlchemyRepository(Repository):
             if row is None:
                 row = DocumentRow(
                     id=str(doc["id"]),
+                    owner_id=(str(doc.get("ownerId")) if doc.get("ownerId") else None),
                     filename=str(doc.get("filename", "")),
                     doc_type=str(doc.get("docType", "pdf")),
                     original_path=str(doc.get("path", "")),
@@ -95,6 +96,7 @@ class SqlAlchemyRepository(Repository):
                 extras = {}
             result: Dict[str, object] = {
                 "id": row.id,
+                "ownerId": row.owner_id,
                 "filename": row.filename,
                 "docType": row.doc_type,
                 "path": row.original_path,
@@ -132,14 +134,18 @@ class SqlAlchemyRepository(Repository):
         merged["id"] = doc_id
         self.save_document(merged)
 
-    def list_documents(self) -> List[Dict[str, object]]:
+    def list_documents(self, owner_id: Optional[str] = None) -> List[Dict[str, object]]:
         with SessionLocal() as db:
-            rows = db.execute(select(DocumentRow).order_by(DocumentRow.created_at.desc())).scalars().all()
+            stmt = select(DocumentRow).order_by(DocumentRow.created_at.desc())
+            if owner_id:
+                stmt = stmt.where(DocumentRow.owner_id == owner_id)
+            rows = db.execute(stmt).scalars().all()
             out: List[Dict[str, object]] = []
             for row in rows:
                 out.append(
                     {
                         "docId": row.id,
+                        "ownerId": row.owner_id,
                         "filename": row.filename,
                         "docType": row.doc_type,
                         "createdAt": row.created_at.isoformat() + "Z",
@@ -371,9 +377,12 @@ class SqlAlchemyRepository(Repository):
                     out.append(parsed)
             return out
 
-    def count_documents(self) -> int:
+    def count_documents(self, owner_id: Optional[str] = None) -> int:
         with SessionLocal() as db:
-            return len(db.execute(select(DocumentRow.id)).all())
+            stmt = select(DocumentRow.id)
+            if owner_id:
+                stmt = stmt.where(DocumentRow.owner_id == owner_id)
+            return len(db.execute(stmt).all())
 
     def get_latest_job_for_doc(self, doc_id: str) -> Optional[Dict[str, object]]:
         with SessionLocal() as db:
@@ -611,13 +620,13 @@ class SqlAlchemyRepository(Repository):
                 )
             return summaries
 
-    def list_documents_with_status(self, limit: int = 50, offset: int = 0) -> List[Dict[str, object]]:
+    def list_documents_with_status(self, limit: int = 50, offset: int = 0, owner_id: Optional[str] = None) -> List[Dict[str, object]]:
         with SessionLocal() as db:
+            stmt = select(DocumentRow).order_by(DocumentRow.created_at.desc())
+            if owner_id:
+                stmt = stmt.where(DocumentRow.owner_id == owner_id)
             rows = db.execute(
-                select(DocumentRow)
-                .order_by(DocumentRow.created_at.desc())
-                .limit(max(1, int(limit or 50)))
-                .offset(max(0, int(offset or 0)))
+                stmt.limit(max(1, int(limit or 50))).offset(max(0, int(offset or 0)))
             ).scalars().all()
         return self._build_document_status_summaries(rows)
 

@@ -31,6 +31,13 @@ class JobPolicySnapshotTests(unittest.TestCase):
         self.main_module = importlib.reload(main_module)
         self.client = TestClient(self.main_module.app)
 
+        # Routes now require a session JWT — auto-authenticate as a fixed test
+        # user. Uploaded/seeded documents are owned by this id.
+        from app.api.deps import require_user_id
+
+        self.user_id = "pytest-user"
+        self.main_module.app.dependency_overrides[require_user_id] = lambda: self.user_id
+
     def tearDown(self) -> None:
         from app.persistence import db as persistence_db
 

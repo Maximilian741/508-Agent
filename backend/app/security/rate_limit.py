@@ -1,8 +1,8 @@
 """Per-IP rate limiter middleware.
 
 Currently in-memory; sufficient for single-instance deployments behind
-Cloudflare. Per-IP rolling window of 60 requests per 60 seconds, applied
-only to sensitive paths (/auth/*, /credits/*).
+Cloudflare. Per-IP rolling window of 60 requests per 60 seconds, applied to
+sensitive/expensive paths (/auth/*, /credits/*, /pipeline/*, /documents/upload).
 
 # TODO: swap for Redis in multi-instance deploys. The in-memory dict
 # below will allow N x limit total requests across N replicas, which
@@ -22,13 +22,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 
-_RATE_LIMITED_PREFIXES: Tuple[str, ...] = ("/auth/", "/credits/", "/auth", "/credits")
+_RATE_LIMITED_PREFIXES: Tuple[str, ...] = ("/auth", "/credits", "/pipeline")
+_RATE_LIMITED_EXACT: frozenset = frozenset({"/documents/upload"})
 _DEFAULT_LIMIT = 60
 _DEFAULT_WINDOW_SECONDS = 60.0
 
 
 def _is_rate_limited_path(path: str) -> bool:
-    for prefix in ("/auth", "/credits"):
+    if path in _RATE_LIMITED_EXACT:
+        return True
+    for prefix in _RATE_LIMITED_PREFIXES:
         if path == prefix or path.startswith(prefix + "/"):
             return True
     return False
@@ -43,22 +46,26 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         *,
         limit: int = _DEFAULT_LIMIT,
         window_seconds: float = _DEFAULT_WINDOW_SECONDS,
+        trust_proxy_headers: bool = True,
     ) -> None:
         super().__init__(app)
         self._limit = int(limit)
         self._window = float(window_seconds)
+        self._trust_proxy = bool(trust_proxy_headers)
         self._buckets: Dict[str, Deque[float]] = {}
         self._lock = threading.Lock()
 
     def _client_ip(self, request: Request) -> str:
-        # Cloudflare-friendly: prefer CF-Connecting-IP, then X-Forwarded-For,
-        # then the direct peer.
-        cf_ip = request.headers.get("cf-connecting-ip")
-        if cf_ip:
-            return cf_ip.strip()
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
+        # Only trust forwarded-IP headers when configured to sit behind a
+        # trusted proxy (Cloudflare); otherwise they are client-spoofable and
+        # an attacker can rotate them to defeat the per-IP limit.
+        if self._trust_proxy:
+            cf_ip = request.headers.get("cf-connecting-ip")
+            if cf_ip:
+                return cf_ip.strip()
+            xff = request.headers.get("x-forwarded-for")
+            if xff:
+                return xff.split(",")[0].strip()
         client = getattr(request, "client", None)
         return getattr(client, "host", "") or "unknown"
 

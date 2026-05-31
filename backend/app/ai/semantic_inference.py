@@ -541,6 +541,67 @@ def _language_prompt(payload: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+_MODEL_PRICES_USD_PER_M_TOKENS: Dict[str, tuple[float, float]] = {
+    # (input price per million, output price per million). Values are
+    # rough catalog rates as of mid-2025; update when providers shift.
+    # Anthropic.
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-3-5-sonnet-20241022": (3.0, 15.0),
+    "claude-3-5-sonnet-20240620": (3.0, 15.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+    "claude-3-5-haiku-20241022": (1.0, 5.0),
+    "claude-3-haiku-20240307": (0.25, 1.25),
+    "claude-opus-4-6": (15.0, 75.0),
+    # OpenAI.
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.0),
+    "gpt-4.1-mini": (0.40, 1.60),
+}
+
+# Conservative fallback for unknown models so a typo or new release does
+# not silently bypass the cap. Picked to roughly match Sonnet pricing.
+_UNKNOWN_MODEL_PRICE_USD_PER_M_TOKENS = (3.0, 15.0)
+
+
+def _estimate_call_cost_usd(raw: Optional[Dict[str, Any]]) -> float:
+    """Best-effort cost estimate from a provider response.
+
+    Reads token usage out of the raw response and applies the per-model
+    price table. Returns 0 for heuristic results, missing usage, or
+    anything we cannot parse - we never want to over-charge.
+    """
+    if not isinstance(raw, dict):
+        return 0.0
+    usage = raw.get("usage")
+    if not isinstance(usage, dict):
+        return 0.0
+    # Anthropic uses input_tokens / output_tokens, OpenAI uses
+    # prompt_tokens / completion_tokens. Accept either.
+    input_tokens = (
+        usage.get("input_tokens")
+        or usage.get("prompt_tokens")
+        or 0
+    )
+    output_tokens = (
+        usage.get("output_tokens")
+        or usage.get("completion_tokens")
+        or 0
+    )
+    try:
+        input_tokens = int(input_tokens)
+        output_tokens = int(output_tokens)
+    except (TypeError, ValueError):
+        return 0.0
+    if input_tokens <= 0 and output_tokens <= 0:
+        return 0.0
+    model = str(raw.get("model") or "").strip()
+    in_rate, out_rate = _MODEL_PRICES_USD_PER_M_TOKENS.get(
+        model, _UNKNOWN_MODEL_PRICE_USD_PER_M_TOKENS
+    )
+    return (input_tokens / 1_000_000.0) * in_rate + (output_tokens / 1_000_000.0) * out_rate
+
+
 class SemanticInferenceClient:
     """Facade used by the rest of the backend.
 
@@ -549,15 +610,38 @@ class SemanticInferenceClient:
     the previous stub.
 
     The client caches results per (kind, cache_key) so repeated calls during a
-    single request — for example, the planner and the executor each asking for
-    alt text for the same image — only hit the provider once.
+    single request - for example, the planner and the executor each asking for
+    alt text for the same image - only hit the provider once.
+
+    Per-job cost cap: pass ``max_cost_usd > 0`` (or rely on the
+    ``MAX_AI_COST_PER_JOB_USD`` setting) to cap AI spend per client
+    instance. When the running tally exceeds the cap, the client switches
+    to a HeuristicProvider for the remaining calls so a runaway image-
+    heavy document cannot blow your margin.
     """
 
     _MAX_CACHE = 256
 
-    def __init__(self, provider: Optional[SemanticInferenceProvider] = None) -> None:
+    def __init__(
+        self,
+        provider: Optional[SemanticInferenceProvider] = None,
+        max_cost_usd: Optional[float] = None,
+    ) -> None:
         self.provider: SemanticInferenceProvider = provider or build_default_provider()
         self._cache: Dict[tuple[str, str], InferenceResult] = {}
+        # Resolve the cap. Explicit arg wins; otherwise fall back to the
+        # app config; otherwise no cap. We import lazily to avoid a hard
+        # dependency on app.config (helpful for unit tests).
+        if max_cost_usd is None:
+            try:
+                from app.config import get_settings  # local import to avoid cycles
+                max_cost_usd = float(get_settings().max_ai_cost_per_job_usd)
+            except Exception:
+                max_cost_usd = 0.0
+        self.max_cost_usd: float = max_cost_usd or 0.0
+        self.cost_so_far_usd: float = 0.0
+        self.cost_capped: bool = False
+        self._heuristic_fallback: SemanticInferenceProvider = HeuristicProvider()
 
     @property
     def provider_name(self) -> str:
@@ -596,14 +680,35 @@ class SemanticInferenceClient:
         cache_key = self._cache_key(kind, payload)
         if cache_key and cache_key in self._cache:
             return self._cache[cache_key]
+
+        # Pick the active provider. If we already blew the cap on a prior
+        # call within this job, route everything to heuristic for the
+        # rest of the request so the user still gets a result.
+        active = self.provider
+        if (
+            self.max_cost_usd > 0
+            and self.cost_so_far_usd >= self.max_cost_usd
+        ):
+            self.cost_capped = True
+            active = self._heuristic_fallback
+
         if kind == "link_text":
-            result = self.provider.link_text(payload)
+            result = active.link_text(payload)
         elif kind == "document_title":
-            result = self.provider.document_title(payload)
+            result = active.document_title(payload)
         elif kind == "document_language":
-            result = self.provider.document_language(payload)
+            result = active.document_language(payload)
         else:
-            result = self.provider.alt_text(payload)
+            result = active.alt_text(payload)
+
+        # Tally cost from the provider's raw response. Heuristic results
+        # have no usage and contribute zero, so the loop is safe to run
+        # unconditionally.
+        try:
+            self.cost_so_far_usd += _estimate_call_cost_usd(result.raw)
+        except Exception as exc:  # never fail user request because of accounting
+            logger.warning("ai cost accounting failed: %s", exc)
+
         if cache_key:
             if len(self._cache) >= self._MAX_CACHE:
                 # Drop the oldest insertion to keep memory bounded.

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
-from app.api import state
+from app.api.deps import require_admin, require_user_id
+from app.db.models import UserRow
 from app.persistence import audit_log as _audit
 from app.persistence.db import get_repo
 
@@ -45,9 +46,11 @@ class ManualReviewItem(BaseModel):
 
 
 @router.get("/manual-review", response_model=List[ManualReviewItem])
-async def manual_review() -> List[ManualReviewItem]:
+async def manual_review(_admin: UserRow = Depends(require_admin)) -> List[ManualReviewItem]:
+    # The cross-tenant global queue is an admin/maintenance view. Normal users
+    # read their own items via the owner-protected
+    # GET /documents/{doc_id}/manual-review route.
     items = REPO.list_manual_review_items()
-    state.manual_review_queue = list(items)
     print(f"[api] GET /manual-review count={len(items)}")
     return [ManualReviewItem(**item) for item in items]
 
@@ -66,9 +69,12 @@ class ManualReviewUpdateRequest(BaseModel):
 
 
 @router.delete("/manual-review", response_model=ManualReviewClearResponse)
-async def clear_manual_review() -> ManualReviewClearResponse:
+async def clear_manual_review(
+    _admin: UserRow = Depends(require_admin),
+) -> ManualReviewClearResponse:
+    # Clearing the entire global queue is a destructive cross-tenant action,
+    # so it is admin-only. Per-item resolution uses PATCH /manual-review/{id}.
     cleared = REPO.clear_manual_review_items()
-    state.manual_review_queue.clear()
     print(f"[api] DELETE /manual-review cleared={cleared}")
     return ManualReviewClearResponse(cleared=cleared)
 
@@ -78,9 +84,15 @@ async def update_manual_review(
     item_id: str,
     body: ManualReviewUpdateRequest,
     request: Request,
+    user_id: str = Depends(require_user_id),
 ) -> ManualReviewItem:
     current = REPO.get_manual_review_item(item_id)
     if not current:
+        raise HTTPException(status_code=404, detail="Manual review item not found")
+    # Tenant isolation: the item's document must belong to the caller.
+    _doc_id = str(current.get("docId") or "")
+    _doc = REPO.get_document(_doc_id) if _doc_id else None
+    if _doc is None or (_doc.get("ownerId") or None) != user_id:
         raise HTTPException(status_code=404, detail="Manual review item not found")
     status = body.status.strip().lower()
     if status not in {"pending", "approved", "rejected"}:
