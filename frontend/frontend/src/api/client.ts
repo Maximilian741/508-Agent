@@ -543,7 +543,15 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             err.status = response.status;
             throw err;
         }
-        return (await response.json()) as PipelineRemediateResult;
+        const data = (await response.json()) as PipelineRemediateResult;
+        // The backend returns a relative, HMAC-signed downloadUrl
+        // (/pipeline/files/<job>/<file>?exp=..&sig=..). Make it absolute so the
+        // browser can open it directly - and so the required signature is kept
+        // (do NOT rebuild this URL with getPipelineFileUrl, which is unsigned).
+        if (data.downloadUrl && !/^https?:\/\//.test(data.downloadUrl)) {
+            data.downloadUrl = `${baseUrl}${data.downloadUrl}`;
+        }
+        return data;
     };
 
     const getPipelineFileUrl = (jobId: string, filename: string) =>

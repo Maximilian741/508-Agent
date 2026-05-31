@@ -602,7 +602,9 @@ export default function AuditScreen() {
         token,
         accountId,
       );
-      const fullUrl = client.getPipelineFileUrl(result.jobId, result.filename);
+      // Use the signed downloadUrl from the response (the bare getPipelineFileUrl
+      // is unsigned and the backend rejects it with 403 missing_signature).
+      const fullUrl = result.downloadUrl || client.getPipelineFileUrl(result.jobId, result.filename);
       setFixedDownloadUrl(fullUrl);
       setLastRemediation(result.writer);
       toast.success("Remediated file ready", {
