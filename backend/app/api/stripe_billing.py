@@ -57,15 +57,52 @@ _TIER_PRICE_ENV: Dict[str, str] = {
 # "price_env". Users still spend credits per remediation, so a plan is an
 # allowance (and certificates are free for active subscribers).
 _SUB_PLANS: Dict[str, Dict[str, Any]] = {
-    "team": {"label": "Team", "interval": "month", "grant": 1000, "monthly": 1000, "price_env": "STRIPE_PRICE_TEAM"},
-    "team_annual": {"label": "Team", "interval": "year", "grant": 12000, "monthly": 1000, "price_env": "STRIPE_PRICE_TEAM_ANNUAL"},
-    "business": {"label": "Business", "interval": "month", "grant": 6000, "monthly": 6000, "price_env": "STRIPE_PRICE_BUSINESS"},
-    "business_annual": {"label": "Business", "interval": "year", "grant": 72000, "monthly": 6000, "price_env": "STRIPE_PRICE_BUSINESS_ANNUAL"},
+    "team": {"label": "Team", "interval": "month", "grant": 1000, "monthly": 1000, "seats": 3, "price_env": "STRIPE_PRICE_TEAM"},
+    "team_annual": {"label": "Team", "interval": "year", "grant": 12000, "monthly": 1000, "seats": 3, "price_env": "STRIPE_PRICE_TEAM_ANNUAL"},
+    "business": {"label": "Business", "interval": "month", "grant": 6000, "monthly": 6000, "seats": 10, "price_env": "STRIPE_PRICE_BUSINESS"},
+    "business_annual": {"label": "Business", "interval": "year", "grant": 72000, "monthly": 6000, "seats": 10, "price_env": "STRIPE_PRICE_BUSINESS_ANNUAL"},
+}
+
+# Display-only monthly list price (USD) per plan, used for the admin MRR
+# estimate. Override via STRIPE_PRICE_<PLAN>_USD if your real prices differ.
+_PLAN_PRICE_USD: Dict[str, int] = {
+    "team": 49,
+    "team_annual": 49,
+    "business": 299,
+    "business_annual": 299,
 }
 
 
 def _plan_grant(plan: str) -> int:
     return int(_SUB_PLANS.get(plan, {}).get("grant", 0))
+
+
+def plan_seats(plan: str) -> int:
+    """Seat limit (max members incl. owner) granted by a subscription plan."""
+    return int(_SUB_PLANS.get(plan, {}).get("seats", 1))
+
+
+def plan_price_usd(plan: str) -> int:
+    """Estimated monthly list price (USD) for a plan, for MRR reporting."""
+    meta = _SUB_PLANS.get(plan)
+    env_name = f"STRIPE_PRICE_{plan.upper()}_USD"
+    raw = os.environ.get(env_name, "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return int(_PLAN_PRICE_USD.get(plan, 0)) if meta else 0
+
+
+def active_subscription_for(user_id: str):
+    """Return the user's most-recent active SubscriptionRow, or None."""
+    with session_scope() as session:
+        row = session.execute(
+            select(SubscriptionRow)
+            .where(SubscriptionRow.user_id == user_id, SubscriptionRow.status == "active")
+            .order_by(SubscriptionRow.created_at.desc())
+        ).scalars().first()
+        if row is not None:
+            session.expunge(row)
+        return row
 
 
 def _plan_monthly(plan: str) -> Optional[int]:
@@ -591,12 +628,15 @@ async def issue_certificate(
     party can verify it at GET /billing/certificate/{id}.
     """
     from app.api.credits import InsufficientCreditsError, spend_credits_for_user
+    from app.api.teams import resolve_credit_user_id
 
+    # Team members inherit the owner's subscription benefit and shared wallet.
+    holder = resolve_credit_user_id(user_id)
     paid_with = "subscription"
-    if not _has_active_subscription(user_id):
+    if not _has_active_subscription(holder):
         try:
             spend_credits_for_user(
-                user_id=user_id,
+                user_id=holder,
                 amount=_CERTIFICATE_CREDIT_COST,
                 description="certificate_issued",
             )

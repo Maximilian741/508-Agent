@@ -211,6 +211,16 @@ export default function BillingScreen() {
                   Auto top-up if you run out: {subscription.overageEnabled ? "ON" : "OFF"} · tap to {subscription.overageEnabled ? "disable" : "enable"}
                 </Text>
               </Pressable>
+              <Pressable
+                onPress={() => router.push("/team" as any)}
+                accessibilityRole="button"
+                accessibilityLabel="Manage your team"
+                style={{ marginTop: 6, alignSelf: "flex-start" }}
+              >
+                <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "700" }}>
+                  Share your plan with your team · manage seats →
+                </Text>
+              </Pressable>
             </View>
             <Button title={busy === "manage" ? "Opening..." : "Manage subscription"} onPress={onManage} variant="secondary" loading={busy === "manage"} disabled={busy === "manage"} />
           </View>

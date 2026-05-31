@@ -170,16 +170,29 @@ async def balance(
     request: Request,
     user_id: str = Depends(require_user_id),
 ) -> BalanceResponse:
+    # A team member sees the shared (owner's) wallet; everyone else sees their own.
+    try:
+        from app.api.teams import resolve_credit_user_id
+
+        target_id = resolve_credit_user_id(user_id)
+    except Exception:
+        target_id = user_id
+
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=user_id)
+        # Ensure the caller's own row exists / is current.
+        get_current_user_row(session, account_id=user_id)
+        wallet = session.execute(
+            select(UserRow).where(UserRow.id == target_id)
+        ).scalar_one_or_none()
+        balance = int(wallet.credits_balance or 0) if wallet else 0
         ledger_rows = session.execute(
             select(CreditLedgerRow)
-            .where(CreditLedgerRow.user_id == row.id)
+            .where(CreditLedgerRow.user_id == target_id)
             .order_by(desc(CreditLedgerRow.at), desc(CreditLedgerRow.id))
             .limit(50)
         ).scalars().all()
         history = [_ledger_to_dto(r) for r in ledger_rows]
-        return BalanceResponse(balance=int(row.credits_balance or 0), history=history)
+        return BalanceResponse(balance=balance, history=history)
 
 
 @router.post("/purchase", response_model=PurchaseResponse)
@@ -249,16 +262,24 @@ async def spend(
         row = get_current_user_row(session, account_id=user_id)
         actor_email = row.email
 
+    # Team members draw on (and overage-charge) the team owner's shared wallet.
+    try:
+        from app.api.teams import resolve_credit_user_id
+
+        target_id = resolve_credit_user_id(user_id)
+    except Exception:
+        target_id = user_id
+
     # Subscribers with overage enabled get an automatic top-up instead of a 402.
     try:
         from app.api.stripe_billing import ensure_balance_for
 
-        ensure_balance_for(user_id, payload.amount)
+        ensure_balance_for(target_id, payload.amount)
     except Exception:
         pass
     try:
         new_balance = spend_credits_for_user(
-            user_id=user_id,
+            user_id=target_id,
             amount=payload.amount,
             description=payload.description,
             related_doc_id=payload.relatedDocId,

@@ -239,6 +239,10 @@ function AccountChip() {
     setOpen(false);
     router.push("/billing" as any);
   };
+  const onTeam = () => {
+    setOpen(false);
+    router.push("/team" as any);
+  };
   const onSignOut = () => {
     setOpen(false);
     signOut();
@@ -318,6 +322,7 @@ function AccountChip() {
             <View style={[styles.acctMenuDivider, { backgroundColor: theme.colors.border }]} />
             <MenuItem label="View profile" onPress={onProfile} />
             <MenuItem label="Buy credits" onPress={onBuy} />
+            <MenuItem label="Team" onPress={onTeam} />
             <View style={[styles.acctMenuDivider, { backgroundColor: theme.colors.border }]} />
             <MenuItem label="Sign out" onPress={onSignOut} tone="danger" />
           </View>

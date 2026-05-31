@@ -225,3 +225,63 @@ class CertificateRow(Base):
     remaining_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     paid_with: Mapped[str] = mapped_column(String(32), nullable=False, default="credits")
     issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class TeamRow(Base):
+    """A team that shares its owner's subscription benefit and credit wallet.
+
+    The team's shared credit pool *is* the owner's ``UserRow.credits_balance``:
+    a member's spends, overage top-ups, and free-certificate eligibility all
+    resolve to the owner (the payer). This keeps the per-user credit core
+    unchanged — only non-owner members are redirected to the owner's wallet.
+    """
+
+    __tablename__ = "teams"
+    __table_args__ = (
+        Index("idx_teams_owner", "owner_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    seat_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TeamMemberRow(Base):
+    """Membership of a user in a team. A user belongs to at most one team."""
+
+    __tablename__ = "team_members"
+    __table_args__ = (
+        # One team per user — makes credit-wallet resolution unambiguous.
+        UniqueConstraint("user_id", name="uq_team_members_user"),
+        Index("idx_team_members_team", "team_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class TeamInviteRow(Base):
+    """A pending invitation to join a team, redeemable by token."""
+
+    __tablename__ = "team_invites"
+    __table_args__ = (
+        Index("idx_team_invites_team", "team_id"),
+        Index("idx_team_invites_email", "email"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    token: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    invited_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    accepted_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
