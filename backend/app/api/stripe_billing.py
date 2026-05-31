@@ -233,10 +233,15 @@ async def create_checkout_session(
 async def stripe_webhook(request: Request) -> Dict[str, Any]:
     secret = _webhook_secret()
     raw = await request.body()
-    if secret:
-        sig_header = request.headers.get("stripe-signature", "")
-        if not _verify_signature(raw, sig_header, secret):
-            raise HTTPException(status_code=400, detail="invalid_signature")
+    # Fail closed: without a signing secret we cannot verify the event, and
+    # processing it anyway would let anyone forge a checkout.session.completed
+    # to self-credit. Require STRIPE_WEBHOOK_SECRET to be configured.
+    if not secret:
+        logger.warning("stripe webhook hit but STRIPE_WEBHOOK_SECRET is not configured")
+        raise HTTPException(status_code=503, detail="webhook_not_configured")
+    sig_header = request.headers.get("stripe-signature", "")
+    if not _verify_signature(raw, sig_header, secret):
+        raise HTTPException(status_code=400, detail="invalid_signature")
 
     try:
         event = json.loads(raw.decode("utf-8") or "{}")
