@@ -152,7 +152,7 @@ In the Stripe dashboard:
 
 1. **Developers** -> **Webhooks** -> **Add endpoint**.
 2. Endpoint URL: `https://api.yourdomain.com/billing/webhook`.
-3. Events to send: `checkout.session.completed`, `payment_intent.succeeded`, `payment_intent.payment_failed`.
+3. Events to send: `checkout.session.completed`, `invoice.payment_succeeded`, `customer.subscription.deleted`, `customer.subscription.updated` (the last three power subscription renewals + cancellations).
 4. Save. Stripe shows you a **Signing secret** (`whsec_...`) on the next page.
 5. Copy it into your `.env` as `STRIPE_WEBHOOK_SECRET=whsec_...`.
 6. Restart the backend so it picks up the new env var:

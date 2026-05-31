@@ -183,3 +183,22 @@ class EmailVerifyTokenRow(Base):
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class SubscriptionRow(Base):
+    """A recurring Stripe subscription that grants a monthly credit allowance."""
+
+    __tablename__ = "subscriptions"
+    __table_args__ = (
+        Index("idx_subscriptions_user", "user_id"),
+    )
+
+    # Stripe subscription id (sub_...).
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
