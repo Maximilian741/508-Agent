@@ -14,3 +14,17 @@ build/
 dist/
 frontend/frontend/.expo/
 frontend/frontend/web-build/
+
+# Secrets / local env (keep *.example tracked)
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Local artifacts that must never be committed
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.tmp
+*.log

@@ -28,22 +28,34 @@ from app.config import get_settings
 _log = logging.getLogger(__name__)
 
 _ALGO = "HS256"
-_DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
+# Issuer/audience bind a token to this application so a token minted for a
+# different service (sharing the secret by mistake) cannot be replayed here.
+_ISS = "508-agent"
+_AUD = "508-agent-session"
 
 
-def mint_session(user_id: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> str:
+def _default_ttl_seconds() -> int:
+    try:
+        return int(get_settings().session_ttl_seconds)
+    except Exception:
+        return 7 * 24 * 3600  # 7 days
+
+
+def mint_session(user_id: str, ttl_seconds: Optional[int] = None) -> str:
     """Mint an HS256-signed session JWT for ``user_id``.
 
-    ``ttl_seconds`` defaults to 30 days, matching the lifetime of the
-    cookie/header the frontend stores in localStorage.
+    ``ttl_seconds`` defaults to ``settings.session_ttl_seconds`` (7 days),
+    matching the lifetime of the token the frontend stores in localStorage.
     """
 
     if not user_id or not isinstance(user_id, str):
         raise ValueError("user_id must be a non-empty string")
-    ttl = max(60, int(ttl_seconds))
+    ttl = max(60, int(ttl_seconds if ttl_seconds is not None else _default_ttl_seconds()))
     now = datetime.now(tz=timezone.utc)
     claims = {
         "sub": user_id,
+        "iss": _ISS,
+        "aud": _AUD,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl)).timestamp()),
     }
@@ -59,7 +71,7 @@ def verify_session(token: str) -> Optional[dict]:
     """Verify an HS256 session JWT.  Returns the claim dict or ``None``.
 
     Returns ``None`` for any failure mode (bad signature, expired, malformed,
-    missing ``sub``).  Never raises.
+    wrong issuer/audience, missing ``sub``).  Never raises.
     """
 
     if not token or not isinstance(token, str):
@@ -70,6 +82,8 @@ def verify_session(token: str) -> Optional[dict]:
             token,
             secret,
             algorithms=[_ALGO],
+            audience=_AUD,
+            issuer=_ISS,
             options={"require": ["exp", "iat", "sub"]},
         )
     except jwt.ExpiredSignatureError:

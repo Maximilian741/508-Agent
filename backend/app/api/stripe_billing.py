@@ -25,10 +25,11 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.auth import get_current_user_row, resolve_account_id
+from app.api.auth import get_current_user_row
+from app.api.deps import require_user_id
 from app.db.models import CreditLedgerRow, UserRow
 from app.db.session_sqlalchemy import session_scope
 
@@ -150,6 +151,16 @@ def _verify_signature(payload: bytes, sig_header: str, secret: str) -> bool:
     if not timestamps or not sigs:
         return False
     timestamp = timestamps[0]
+    # Reject stale or replayed events outside Stripe's default 5-minute
+    # tolerance window — the HMAC alone does not prevent replay of a captured
+    # body+signature.
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    if abs(time.time() - ts) > 300:
+        logger.warning("stripe webhook timestamp outside tolerance window")
+        return False
     signed_payload = f"{timestamp}.".encode("utf-8") + payload
     expected = hmac.new(
         secret.encode("utf-8"),
@@ -185,8 +196,7 @@ async def billing_config() -> BillingConfigResponse:
 async def create_checkout_session(
     payload: CreateCheckoutRequest,
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> CreateCheckoutResponse:
     secret = _stripe_secret()
     if not secret:
@@ -196,13 +206,9 @@ async def create_checkout_session(
     if not price_id:
         raise HTTPException(status_code=503, detail="billing_not_configured")
 
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
-        user_id = row.id
+        # Confirm the authenticated user still exists before opening a checkout.
+        get_current_user_row(session, account_id=user_id)
 
     form = {
         "mode": "payment",
@@ -227,10 +233,15 @@ async def create_checkout_session(
 async def stripe_webhook(request: Request) -> Dict[str, Any]:
     secret = _webhook_secret()
     raw = await request.body()
-    if secret:
-        sig_header = request.headers.get("stripe-signature", "")
-        if not _verify_signature(raw, sig_header, secret):
-            raise HTTPException(status_code=400, detail="invalid_signature")
+    # Fail closed: without a signing secret we cannot verify the event, and
+    # processing it anyway would let anyone forge a checkout.session.completed
+    # to self-credit. Require STRIPE_WEBHOOK_SECRET to be configured.
+    if not secret:
+        logger.warning("stripe webhook hit but STRIPE_WEBHOOK_SECRET is not configured")
+        raise HTTPException(status_code=503, detail="webhook_not_configured")
+    sig_header = request.headers.get("stripe-signature", "")
+    if not _verify_signature(raw, sig_header, secret):
+        raise HTTPException(status_code=400, detail="invalid_signature")
 
     try:
         event = json.loads(raw.decode("utf-8") or "{}")

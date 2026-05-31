@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from typing import Any, Dict
+
+# Hermetic DB + an admin email, set before app import. The legacy global
+# /manual-review endpoints are admin-only now.
+_SMOKE_DB_DIR = tempfile.mkdtemp(prefix="508_smoke_contract_")
+os.environ["DATABASE_URL"] = f"sqlite:///{_SMOKE_DB_DIR}/smoke.db"
+os.environ["ADMIN_EMAILS"] = "contract-admin@example.com"
 
 from fastapi.testclient import TestClient
 
@@ -40,6 +48,21 @@ def _assert_issue_shape(issue: Dict[str, Any]) -> None:
 
 def main() -> int:
     client = TestClient(app)
+
+    # All scan/remediate/manual-review routes require an authenticated session;
+    # the global manual-review view requires admin.
+    signin = client.post(
+        "/auth/sign-in",
+        json={
+            "email": "contract-admin@example.com",
+            "displayName": "Contract",
+            "password": "contractpass1",
+        },
+    )
+    if signin.status_code != 200:
+        raise AssertionError(f"Sign-in failed: {signin.status_code} {signin.text}")
+    auth = {"Authorization": f"Bearer {signin.json()['token']}"}
+
     payload = {
         "documentId": "contract-doc",
         "sourceFormat": "pdf",
@@ -55,7 +78,7 @@ def main() -> int:
         ),
     }
 
-    scan_response = client.post("/scan", json=payload)
+    scan_response = client.post("/scan", json=payload, headers=auth)
     if scan_response.status_code != 200:
         raise AssertionError(f"Scan failed: {scan_response.status_code}")
     scan_data = scan_response.json()
@@ -80,7 +103,7 @@ def main() -> int:
         "targetNodeId": issue["nodeId"],
         "actionCode": action_code,
     }
-    remediate_response = client.post("/remediate", json=remediate_payload)
+    remediate_response = client.post("/remediate", json=remediate_payload, headers=auth)
     if remediate_response.status_code != 200:
         raise AssertionError(f"Remediate failed: {remediate_response.status_code}")
     remediate_data = remediate_response.json()
@@ -92,23 +115,25 @@ def main() -> int:
                 raise AssertionError(f"Remediate result missing key: {key}")
         _assert_single_line(result["notes"])
 
-    manual_review_response = client.get("/manual-review")
+    # The single-action remediate now auto-applies heuristic alt text and
+    # returns status="success", so this path does not always enqueue a manual
+    # review item. Assert the manual-review CONTRACT (auth + shapes), not a
+    # specific queue size.
+    manual_review_response = client.get("/manual-review", headers=auth)
     if manual_review_response.status_code != 200:
         raise AssertionError(f"Manual review failed: {manual_review_response.status_code}")
     manual_review = manual_review_response.json()
     if not isinstance(manual_review, list):
         raise AssertionError("Manual review response is not a list")
-    if len(manual_review) < 1:
-        raise AssertionError("Manual review queue is empty after non-success remediation")
 
-    clear_response = client.delete("/manual-review")
+    clear_response = client.delete("/manual-review", headers=auth)
     if clear_response.status_code != 200:
         raise AssertionError(f"Manual review clear failed: {clear_response.status_code}")
     clear_data = clear_response.json()
-    if "cleared" not in clear_data or clear_data["cleared"] < 1:
-        raise AssertionError("Manual review clear did not report expected count")
+    if "cleared" not in clear_data:
+        raise AssertionError("Manual review clear did not report a count")
 
-    manual_review_after = client.get("/manual-review").json()
+    manual_review_after = client.get("/manual-review", headers=auth).json()
     if manual_review_after:
         raise AssertionError("Manual review queue not cleared")
 

@@ -28,7 +28,7 @@ Screenshots live under `docs/screenshots/`:
 
 | Layer | Tech |
 |---|---|
-| Backend | FastAPI + SQLAlchemy, uvicorn, Python 3.11+ |
+| Backend | FastAPI + SQLAlchemy, uvicorn, Python 3.13 |
 | Frontend | Expo Router (React Native Web), TypeScript, Vite-style web build |
 | UI accents | Custom WebGL fragment shaders (smoke / pixel-art) |
 | AI fallback | Anthropic Claude (vision) primary, OpenAI GPT-4o-mini secondary, deterministic heuristics by default |
@@ -36,13 +36,13 @@ Screenshots live under `docs/screenshots/`:
 | Storage | Local filesystem in dev, S3-compatible in prod (configurable) |
 | Database | SQLite in dev, Postgres in prod |
 | Edge | Cloudflare Tunnel + Cloudflare Access in production |
-| Reverse proxy | nginx in front of uvicorn |
+| Reverse proxy | nginx serves the static web bundle; `api.*` tunnels straight to uvicorn |
 
 ---
 
 ## Quick start (dev)
 
-Four commands. Python 3.11+ and Node 18+ required.
+Four commands. Python 3.13 and Node 20+ required.
 
 ```bash
 cp .env.example .env
@@ -59,7 +59,7 @@ Open the URL Expo prints (typically `http://localhost:8081`). The backend writes
 
 ## Going to production
 
-Production runs behind Cloudflare: a named tunnel terminates at nginx on the host, nginx serves the static Expo web bundle and reverse-proxies `/api` to uvicorn, and uvicorn talks to Postgres over a local socket. Cloudflare Access gates the admin and billing surfaces; Stripe webhooks land on a public unauthenticated path. AI keys, Stripe keys, and the database URL are injected via environment variables -- there is no config baked into the build.
+Production runs behind Cloudflare: a named tunnel routes `app.*` to nginx (which serves the static Expo web bundle) and `api.*` directly to uvicorn (FastAPI); uvicorn talks to Postgres over the compose network. Every API route requires an authenticated session JWT, and documents are owner-scoped; Stripe webhooks land on a public path protected by signature + timestamp verification. AI keys, Stripe keys, `APP_SECRET`, and the database URL are injected via environment variables -- there is no config baked into the build.
 
 Full step-by-step deploy guide, env-var matrix, secret-rotation runbook, and a pre-flight checklist live in **[`deploy/SHIP-CHECKLIST.md`](./deploy/SHIP-CHECKLIST.md)**. Read it once top-to-bottom before your first deploy.
 

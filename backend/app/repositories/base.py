@@ -18,7 +18,7 @@ class Repository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_documents(self) -> List[Dict[str, object]]:
+    def list_documents(self, owner_id: Optional[str] = None) -> List[Dict[str, object]]:
         raise NotImplementedError
 
     @abstractmethod

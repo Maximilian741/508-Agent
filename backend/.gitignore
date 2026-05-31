@@ -3,3 +3,14 @@ __pycache__/
 *.py[cod]
 build/
 dist/
+
+# Local artifacts (never commit)
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.tmp
+*.log
