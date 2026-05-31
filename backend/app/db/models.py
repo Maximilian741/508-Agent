@@ -12,6 +12,8 @@ class DocumentRow(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # Owner (UserRow.id) for tenant isolation. Nullable for legacy rows.
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(Text, nullable=False)
     doc_type: Mapped[str] = mapped_column(String(32), nullable=False, default="pdf")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

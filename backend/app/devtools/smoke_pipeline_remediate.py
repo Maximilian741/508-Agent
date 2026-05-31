@@ -26,10 +26,16 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 from typing import List
+
+# Hermetic DB for this smoke (its own sqlite file), set before app.main is
+# imported inside main() so the engine binds here rather than the dev db.
+_SMOKE_DB_DIR = tempfile.mkdtemp(prefix="508_smoke_pipeline_")
+os.environ["DATABASE_URL"] = f"sqlite:///{_SMOKE_DB_DIR}/smoke.db"
 
 from fastapi.testclient import TestClient
 
@@ -99,6 +105,21 @@ def main() -> int:
 
     client = TestClient(app)
 
+    # All pipeline routes now require an authenticated session; remediate also
+    # charges credits, so sign up and grant the starter pack first.
+    signin = client.post(
+        "/auth/sign-in",
+        json={
+            "email": "pipeline-smoke@example.com",
+            "displayName": "Pipe",
+            "password": "pipelinepass1",
+        },
+    )
+    assert signin.status_code == 200, signin.text
+    auth_headers = {"Authorization": f"Bearer {signin.json()['token']}"}
+    grant = client.post("/auth/grant-starter", headers=auth_headers)
+    assert grant.status_code == 200, grant.text
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir) / "smoke.docx"
         fixture = _build_synthetic_docx(tmp_path)
@@ -109,6 +130,7 @@ def main() -> int:
             analyze_resp = client.post(
                 "/pipeline/analyze",
                 files={"file": ("smoke.docx", fh, _DOCX_MIME)},
+                headers=auth_headers,
             )
 
         assert analyze_resp.status_code == 200, (
@@ -164,6 +186,7 @@ def main() -> int:
                     "approved_violations": json.dumps(approved_ids),
                     "rejected_violations": json.dumps(rejected_ids),
                 },
+                headers=auth_headers,
             )
 
         assert remediate_resp.status_code == 200, (

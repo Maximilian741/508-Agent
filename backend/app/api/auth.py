@@ -1,14 +1,11 @@
-"""Auth router for the hackathon scaffold.
+"""Auth router.
 
-This is intentionally simple: clients sign in with an email + display name
-and we mint or fetch a UserRow keyed by that email.  Identity for subsequent
-requests is carried via either:
-
-- an ``Authorization: Bearer <jwt>`` header (preferred), or
-- the legacy ``X-Account-Id`` header (the user's uuid)
-
-# TODO: replace with Cloudflare Access JWT verification or OAuth before prod
-# (real JWT now in place; swap signing key + audience for prod)
+Self-serve email + password accounts. ``/sign-in`` registers a new user (a
+password is required) or authenticates an existing one, and returns an
+HS256-signed session JWT (see :mod:`app.security.sessions`). Identity for every
+subsequent request is carried via ``Authorization: Bearer <jwt>`` and resolved
+by the dependencies in :mod:`app.api.deps`. There is no passwordless path and
+no client-supplied account header.
 """
 
 from __future__ import annotations
@@ -19,18 +16,20 @@ import logging
 import os
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 
+from app.api.deps import require_user_id
 from app.db.models import CreditLedgerRow, EmailVerifyTokenRow, UserRow
 from app.db.session_sqlalchemy import session_scope
 from app.persistence import audit_log as _audit
-from app.security.sessions import mint_session, verify_session
+from app.security.sessions import mint_session
+from app.services.mailer import send_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth")
@@ -114,11 +113,20 @@ def _row_to_dto(row: UserRow) -> UserDTO:
 # Password hashing helpers (stdlib scrypt, no new deps)
 # ---------------------------------------------------------------------------
 
-# scrypt cost params -- fine for dev / hackathon. Bump for prod.
-_SCRYPT_N = 2 ** 14
+# scrypt cost params. N=2**15 (~32 MiB, tens of ms per hash) is a reasonable
+# interactive-login cost. The stored ``salt:hash`` format does not encode N, so
+# changing it invalidates existing hashes — acceptable on a fresh DB.
+_SCRYPT_N = 2 ** 15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
+# scrypt needs ~128*N*r bytes (~32 MiB here); OpenSSL's default maxmem (32 MiB)
+# is too tight, so set an explicit ceiling with headroom or it raises
+# "memory limit exceeded".
+_SCRYPT_MAXMEM = 128 * _SCRYPT_N * _SCRYPT_R * 2
+
+# Minimum password length for self-serve accounts.
+_MIN_PASSWORD_LEN = 8
 
 
 def _hash_password(password: str) -> str:
@@ -133,6 +141,7 @@ def _hash_password(password: str) -> str:
         r=_SCRYPT_R,
         p=_SCRYPT_P,
         dklen=_SCRYPT_DKLEN,
+        maxmem=_SCRYPT_MAXMEM,
     )
     return f"{salt.hex()}:{derived.hex()}"
 
@@ -154,6 +163,7 @@ def _verify_password(password: str, stored: str) -> bool:
         r=_SCRYPT_R,
         p=_SCRYPT_P,
         dklen=len(expected) or _SCRYPT_DKLEN,
+        maxmem=_SCRYPT_MAXMEM,
     )
     return hmac.compare_digest(derived, expected)
 
@@ -164,60 +174,20 @@ def get_current_user_row(
     *,
     account_id: Optional[str],
 ) -> UserRow:
-    """Resolve the calling user from the X-Account-Id header.
+    """Load a ``UserRow`` by its (already-verified) id within ``session``.
 
-    Raises HTTP 401 if the header is missing or the id does not match a user.
+    ``account_id`` must originate from a verified session token (see
+    ``app.api.deps.require_user_id``) — never from a client-supplied header.
+    Raises HTTP 401 if the id is missing or does not match a user.
     """
     if not account_id:
-        raise HTTPException(status_code=401, detail="missing_account")
+        raise HTTPException(status_code=401, detail="authentication_required")
     row = session.execute(
         select(UserRow).where(UserRow.id == account_id)
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=401, detail="unknown_account")
     return row
-
-
-def require_account(
-    request: Request,
-    x_account_id: Optional[str],
-) -> str:
-    """Light wrapper used by other routers to extract the account id."""
-    if not x_account_id:
-        raise HTTPException(status_code=401, detail="missing_account")
-    return x_account_id
-
-def resolve_account_id(
-    *,
-    authorization: Optional[str],
-    x_account_id: Optional[str],
-) -> Optional[str]:
-    """Pick an account id out of a request, preferring Bearer JWT.
-
-    1. If ``Authorization: Bearer <jwt>`` is present and verifies, use ``sub``.
-    2. Otherwise fall back to the legacy ``X-Account-Id`` header.
-
-    Returns ``None`` if neither yields a value; the caller is expected to
-    raise HTTP 401 in that case (see ``get_current_user_row``).
-    """
-
-    if authorization:
-        parts = authorization.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            raw_token = parts[1].strip()
-            if raw_token:
-                claims = verify_session(raw_token)
-                if claims is not None:
-                    sub = claims.get("sub")
-                    if isinstance(sub, str) and sub:
-                        return sub
-                # If the bearer token failed to verify, fall through to
-                # the X-Account-Id header rather than 401-ing here -
-                # /auth/me may want to return a clean 401 only when both
-                # paths are exhausted.
-    if x_account_id:
-        return x_account_id.strip() or None
-    return None
 
 
 
@@ -228,18 +198,22 @@ def resolve_account_id(
 
 @router.post("/sign-in", response_model=SignInResponse)
 async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
-    """Mint or fetch a UserRow keyed by email.
+    """Register-or-authenticate a user by email + password.
 
-    Password rules (back-compat):
-      - If the user has a ``password_hash`` set, ``password`` is required and
-        must verify; otherwise we 401.
-      - If the user has no ``password_hash``, sign-in still succeeds without
-        a password (existing pre-password users keep working).
+    - New email: a password (>= 8 chars) is REQUIRED; the account is created
+      with that password (self-serve sign-up).
+    - Existing email with a password on file: the password must verify.
+    - Existing email with no password (legacy/dev rows): the supplied password
+      is adopted as the account password (one-time migration), then sign-in
+      proceeds.
+
+    There is no passwordless path — identity must be provable.
     """
     email_norm = payload.email.strip().lower()
     display = (payload.displayName or email_norm.split("@")[0]).strip()
     if not display:
         display = email_norm
+    password = (payload.password or "").strip()
     now = datetime.utcnow()
 
     with session_scope() as session:
@@ -247,6 +221,9 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
             select(UserRow).where(UserRow.email == email_norm)
         ).scalar_one_or_none()
         if row is None:
+            # Sign-up: a password is mandatory.
+            if len(password) < _MIN_PASSWORD_LEN:
+                raise HTTPException(status_code=400, detail="password_required")
             row = UserRow(
                 id=uuid.uuid4().hex,
                 email=email_norm,
@@ -255,16 +232,19 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
                 last_seen_at=now,
                 role="user",
                 credits_balance=0,
+                password_hash=_hash_password(password),
             )
             session.add(row)
             session.flush()
         else:
-            # Existing user: enforce password if one is on file.
             if row.password_hash:
-                if not payload.password or not _verify_password(
-                    payload.password, row.password_hash
-                ):
+                if not password or not _verify_password(password, row.password_hash):
                     raise HTTPException(status_code=401, detail="invalid_credentials")
+            else:
+                # Legacy passwordless row: adopt the supplied password once.
+                if len(password) < _MIN_PASSWORD_LEN:
+                    raise HTTPException(status_code=400, detail="password_required")
+                row.password_hash = _hash_password(password)
             row.last_seen_at = now
             if payload.displayName and payload.displayName.strip():
                 row.display_name = payload.displayName.strip()[:120]
@@ -279,41 +259,30 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
 @router.get("/me", response_model=UserDTO)
 async def me(
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> UserDTO:
-    """Return the calling user.
-
-    Authentication precedence:
-
-    1. ``Authorization: Bearer <jwt>`` - verified against ``settings.app_secret``.
-    2. ``X-Account-Id`` - legacy direct-uuid header (kept for backward compat).
-    """
-
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
-
+    """Return the calling user (requires a valid session token)."""
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
         # Update last_seen on every /me hit so admin views can show activity.
         row.last_seen_at = datetime.utcnow()
         return _row_to_dto(row)
 
 
 @router.post("/sign-out")
-async def sign_out(
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-) -> Response:
-    """No server-side session to clear in this scaffold; just 204."""
+async def sign_out() -> Response:
+    """Stateless sessions — nothing to clear server-side; just 204.
+
+    The client discards its token. No auth required: signing out with an
+    already-expired token should still succeed.
+    """
     return Response(status_code=204)
 
 
 @router.post("/grant-starter", response_model=GrantStarterResponse)
 async def grant_starter(
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
+    user_id: str = Depends(require_user_id),
 ) -> GrantStarterResponse:
     """Grant 25 credits exactly once per user (idempotent)."""
     GRANT_AMOUNT = 25
@@ -321,7 +290,7 @@ async def grant_starter(
     GRANT_DESC = "starter_grant"
 
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=x_account_id)
+        row = get_current_user_row(session, account_id=user_id)
 
         existing = session.execute(
             select(CreditLedgerRow).where(
@@ -380,19 +349,14 @@ async def grant_starter(
 async def update_me(
     payload: UpdateProfileRequest,
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> UserDTO:
     """Update the current user's display name and/or email.
 
-    Requires Bearer token or X-Account-Id. Email collisions return 409.
+    Requires a valid session token. Email collisions return 409.
     """
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
 
         if payload.displayName is not None:
             new_name = payload.displayName.strip()
@@ -419,8 +383,7 @@ async def update_me(
 @router.get("/export")
 async def export_me(
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> StreamingResponse:
     """Stream a JSON dump of {user, credit_history, audit_log_entries_for_this_user}.
 
@@ -430,12 +393,8 @@ async def export_me(
     import io
     import json as _json
 
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
         user_dto = _row_to_dto(row).model_dump()
         ledger_rows = session.execute(
             select(CreditLedgerRow)
@@ -488,17 +447,11 @@ async def export_me(
 @router.delete("/me", status_code=204)
 async def delete_me(
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> Response:
     """Delete the current user's account and cascade-remove their ledger rows."""
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
-        user_id = row.id
+        row = get_current_user_row(session, account_id=user_id)
         # Cascade ledger first
         session.execute(
             delete(CreditLedgerRow).where(CreditLedgerRow.user_id == user_id)
@@ -517,7 +470,7 @@ async def delete_me(
 class SetPasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    password: str = Field(min_length=4, max_length=256)
+    password: str = Field(min_length=8, max_length=256)
 
 
 class SetPasswordResponse(BaseModel):
@@ -543,16 +496,11 @@ class VerifyResultResponse(BaseModel):
 async def set_password(
     payload: SetPasswordRequest,
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> SetPasswordResponse:
     """Set or change the caller's password (scrypt salt:hash, stdlib only)."""
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
         row.password_hash = _hash_password(payload.password)
         row.last_seen_at = datetime.utcnow()
         return SetPasswordResponse(user=_row_to_dto(row), updated=True)
@@ -561,20 +509,15 @@ async def set_password(
 @router.post("/request-verify-email", response_model=VerifyQueuedResponse)
 async def request_verify_email(
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> VerifyQueuedResponse:
     """Generate a verification token and log a debug "email" line.
 
     No real SMTP yet; the magic link is printed to the server logs so devs
     can copy/paste it. Old tokens for this user are cleared first.
     """
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
         # Drop any stale tokens for this user (one outstanding link is plenty).
         session.execute(
             delete(EmailVerifyTokenRow).where(
@@ -589,12 +532,18 @@ async def request_verify_email(
                 created_at=datetime.utcnow(),
             )
         )
-        # SMTP placeholder. Replace with a real mailer when ready.
-        logger.info(
-            "[email] verify link: /auth/verify-email?token=%s (to=%s)",
-            token,
-            row.email,
-        )
+        to_email = row.email
+
+    base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+    link = f"{base}/auth/verify-email?token={token}" if base else f"/auth/verify-email?token={token}"
+    send_email(
+        to=to_email,
+        subject="Verify your 508 Agent email",
+        body=(
+            "Confirm your email address by opening this link:\n\n"
+            f"{link}\n\nThis link expires in 24 hours."
+        ),
+    )
     return VerifyQueuedResponse(queued=True)
 
 
@@ -608,6 +557,12 @@ async def verify_email(token: str) -> VerifyResultResponse:
             select(EmailVerifyTokenRow).where(EmailVerifyTokenRow.token == token)
         ).scalar_one_or_none()
         if row is None:
+            raise HTTPException(status_code=410, detail="token_expired")
+        # Enforce a 24-hour expiry window.
+        if row.created_at is None or (datetime.utcnow() - row.created_at) > timedelta(hours=24):
+            session.execute(
+                delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.token == token)
+            )
             raise HTTPException(status_code=410, detail="token_expired")
         user = session.execute(
             select(UserRow).where(UserRow.id == row.user_id)

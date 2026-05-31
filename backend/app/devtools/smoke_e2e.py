@@ -2,7 +2,7 @@
 
 Exercises the happy path that a brand-new user would walk through:
 
-    1)  POST /auth/sign-in           (fake email, no password yet)
+    1)  POST /auth/sign-in           (email + password, fresh signup)
     2)  POST /auth/grant-starter     (idempotent +25 credits)
     3)  GET  /credits/balance        (asserts balance == 25)
     4)  POST /auth/set-password
@@ -66,10 +66,10 @@ def main() -> int:
     client = _bootstrap()
     email = "e2e-smoke@example.com"
 
-    print("[1] POST /auth/sign-in (no password, fresh user)")
+    print("[1] POST /auth/sign-in (email + password, fresh signup)")
     r = client.post(
         "/auth/sign-in",
-        json={"email": email, "displayName": "E2E Smoke"},
+        json={"email": email, "displayName": "E2E Smoke", "password": "starterpass1"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -77,7 +77,7 @@ def main() -> int:
     user = body["user"]
     user_id = user["id"]
     assert user["email"] == email, user
-    assert user["hasPassword"] is False, user
+    assert user["hasPassword"] is True, user
     assert user["creditsBalance"] == 0, user
     print(
         "    user_id=", user_id[:8],
@@ -87,8 +87,7 @@ def main() -> int:
     bearer = {"Authorization": f"Bearer {token}"}
 
     print("[2] POST /auth/grant-starter")
-    # grant-starter only reads X-Account-Id, not Bearer -- pass both for safety.
-    headers = {**bearer, "X-Account-Id": user_id}
+    headers = bearer
     r = client.post("/auth/grant-starter", headers=headers)
     assert r.status_code == 200, r.text
     grant = r.json()
@@ -138,7 +137,7 @@ def main() -> int:
     print("[6] PATCH /auth/me -> rename")
     r = client.patch(
         "/auth/me",
-        headers={**bearer2, "X-Account-Id": user_id},
+        headers=bearer2,
         json={"displayName": "E2E Renamed"},
     )
     assert r.status_code == 200, r.text
@@ -160,7 +159,7 @@ def main() -> int:
     print("    enabled=", cfg["enabled"], "tiers=", len(cfg.get("tiers", [])))
 
     print("[9] POST /auth/sign-out")
-    r = client.post("/auth/sign-out", headers={"X-Account-Id": user_id})
+    r = client.post("/auth/sign-out")
     assert r.status_code == 204, r.status_code
     print("    sign-out 204")
 

@@ -51,4 +51,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://localhost:8000/healthz || exit 1
 
-CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head || true; uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]
+# Run migrations before boot. A failed migration MUST abort startup (no
+# `|| true`) rather than silently serving against a stale/half-migrated schema.
+CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]

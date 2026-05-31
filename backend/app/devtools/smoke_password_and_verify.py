@@ -59,9 +59,11 @@ def _bootstrap() -> tuple[TestClient, _ListHandler]:
     handler = _ListHandler()
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter("%(message)s"))
-    auth_logger = logging.getLogger("app.api.auth")
-    auth_logger.addHandler(handler)
-    auth_logger.setLevel(logging.INFO)
+    # The verify link is now emitted by the mailer (app.services.mailer) via
+    # its console backend, so capture from the root logger.
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
     return TestClient(app), handler
 
 
@@ -69,16 +71,17 @@ def main() -> int:
     client, log_handler = _bootstrap()
     email = "pw-smoke@example.com"
 
-    print("[1] sign-in (no password yet, back-compat)")
+    print("[1] sign-up (email + initial password)")
     r = client.post(
-        "/auth/sign-in", json={"email": email, "displayName": "Pw Smoke"}
+        "/auth/sign-in",
+        json={"email": email, "displayName": "Pw Smoke", "password": "initpass12"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
     token = body["token"]
     user = body["user"]
     user_id = user["id"]
-    assert user["hasPassword"] is False, user
+    assert user["hasPassword"] is True, user
     assert user["emailVerifiedAt"] is None, user
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -116,7 +119,7 @@ def main() -> int:
     assert r.status_code == 200, r.text
     assert r.json() == {"queued": True}
     joined = "\n".join(log_handler.records)
-    m = re.search(r"verify link: /auth/verify-email\?token=([0-9a-f]{32})", joined)
+    m = re.search(r"/auth/verify-email\?token=([0-9a-f]{32})", joined)
     assert m, f"verify link not found in logs: {joined!r}"
     good_token = m.group(1)
     print("    captured token=", good_token[:8], "...")

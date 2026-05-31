@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
 from app.analyzers.registry import get_default_analyzers, run_analyzers
 from app.api import state
+from app.api.deps import require_user_id
 from app.models.accessibility import AccessibilityTree, ActionCode
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus
@@ -81,9 +82,13 @@ def _manual_review_item(
 
 
 @router.post("/remediate", response_model=RemediateResponse)
-async def remediate(request: RemediateRequest) -> RemediateResponse:
+async def remediate(
+    request: RemediateRequest,
+    user_id: str = Depends(require_user_id),
+) -> RemediateResponse:
     print(f"[api] POST /remediate targetNodeId={request.targetNodeId} actionCode={request.actionCode}")
-    if state.last_tree is None:
+    st = state.for_user(user_id)
+    if st.last_tree is None:
         return RemediateResponse(
             results=[
                 RemediateResult(
@@ -95,7 +100,7 @@ async def remediate(request: RemediateRequest) -> RemediateResponse:
             ]
         )
 
-    tree = state.last_tree
+    tree = st.last_tree
     run_analyzers(tree, get_default_analyzers())
 
     try:
@@ -162,7 +167,6 @@ async def remediate(request: RemediateRequest) -> RemediateResponse:
                 "Execution did not complete automatically.",
                 result.notes,
             )
-            state.manual_review_queue.append(item)
-            REPO.add_manual_review_items(state.last_document_id or "doc-1", [item])
+            REPO.add_manual_review_items(st.last_document_id or "doc-1", [item])
 
     return RemediateResponse(results=api_results)

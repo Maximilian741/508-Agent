@@ -2,8 +2,9 @@
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.audit_log import router as audit_log_router
 from app.api.auth import router as auth_router
@@ -37,15 +38,20 @@ _log = logging.getLogger(__name__)
 
 settings = get_settings()
 app = FastAPI(title="508-Agent", version=settings.app_version)
+# init_db is idempotent and safe in all environments: in dev (sqlite) it
+# creates the raw tables and seeds default policy packs; in production
+# (Postgres) it runs Alembic migrations and seeds policy packs.
 init_db()
-# Create the SQLAlchemy ORM tables (users, credit_ledger, etc).
-# init_db only creates raw-SQL tables; without this the /auth/sign-in
-# endpoint fails on a fresh install with "no such table: users".
-Base.metadata.create_all(bind=ENGINE)
+# create_all is DEV-ONLY (sqlite). It adds the ORM-only tables (users,
+# credit_ledger, email_verify_tokens) that init_db's raw path does not create.
+# Anywhere else (staging/prod on Postgres) Alembic owns the schema — auto-
+# creating would mask drift between the models and the migrations.
+if settings.environment == "development":
+    Base.metadata.create_all(bind=ENGINE)
 
 app.add_middleware(RequestIdLoggingMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RateLimitMiddleware, trust_proxy_headers=settings.trust_proxy_headers)
 app.add_middleware(
     CFAccessAuthMiddleware,
     expected_aud=settings.cloudflare_access_aud,
@@ -58,6 +64,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Return a generic 500 (plus request id) for any unhandled error so
+    internal exception text never reaches the client."""
+    request_id = getattr(request.state, "request_id", None)
+    _log.exception("[error] unhandled exception id=%s path=%s", request_id, request.url.path)
+    # This handler runs in Starlette's ServerErrorMiddleware, OUTSIDE the
+    # BaseHTTPMiddleware stack, so set the baseline security headers here too.
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+    }
+    if request_id:
+        headers["X-Request-Id"] = str(request_id)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "internal_error", "requestId": request_id},
+        headers=headers,
+    )
 
 
 @app.on_event("startup")

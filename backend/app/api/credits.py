@@ -12,11 +12,13 @@ import os
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, select
 
-from app.api.auth import get_current_user_row, resolve_account_id
+from app.api.auth import get_current_user_row
+from app.api.deps import require_user_id
+from app.config import get_settings
 from app.db.models import CreditLedgerRow, UserRow
 from app.db.session_sqlalchemy import session_scope
 from app.persistence import audit_log as _audit
@@ -166,15 +168,10 @@ def spend_credits_for_user(
 @router.get("/balance", response_model=BalanceResponse)
 async def balance(
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> BalanceResponse:
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
         ledger_rows = session.execute(
             select(CreditLedgerRow)
             .where(CreditLedgerRow.user_id == row.id)
@@ -189,8 +186,7 @@ async def balance(
 async def purchase(
     payload: PurchaseRequest,
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> PurchaseResponse:
     amount = _TIER_AMOUNTS.get(payload.tier)
     if amount is None:
@@ -201,12 +197,13 @@ async def purchase(
     if os.environ.get("STRIPE_SECRET_KEY", "").strip():
         raise HTTPException(status_code=409, detail="use_stripe_checkout")
 
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
+    # Never hand out free credits via the mock path in production. The mock
+    # path exists only for local/dev where Stripe is not wired up.
+    if get_settings().environment == "production":
+        raise HTTPException(status_code=503, detail="billing_not_configured")
+
     with session_scope() as session:
-        row = get_current_user_row(session, account_id=account_id)
+        row = get_current_user_row(session, account_id=user_id)
         row.credits_balance = int(row.credits_balance or 0) + amount
         session.add(
             CreditLedgerRow(
@@ -243,29 +240,18 @@ async def purchase(
 async def spend(
     payload: SpendRequest,
     request: Request,
-    x_account_id: Optional[str] = Header(default=None, alias="X-Account-Id"),
-    authorization: Optional[str] = Header(default=None),
+    user_id: str = Depends(require_user_id),
 ) -> SpendResponse:
-    account_id = resolve_account_id(
-        authorization=authorization,
-        x_account_id=x_account_id,
-    )
-    if not account_id:
-        raise HTTPException(status_code=401, detail="missing_account")
-
     # Look up email for the audit log before spending (so we don't lose it
     # in the locked transaction).
     actor_email: Optional[str] = None
-    try:
-        with session_scope() as session:
-            row = get_current_user_row(session, account_id=account_id)
-            actor_email = row.email
-    except HTTPException:
-        raise
+    with session_scope() as session:
+        row = get_current_user_row(session, account_id=user_id)
+        actor_email = row.email
 
     try:
         new_balance = spend_credits_for_user(
-            user_id=account_id,
+            user_id=user_id,
             amount=payload.amount,
             description=payload.description,
             related_doc_id=payload.relatedDocId,

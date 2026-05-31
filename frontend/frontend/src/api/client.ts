@@ -1,4 +1,6 @@
-﻿export type Severity = "error" | "warning" | "info";
+﻿import { loadToken } from "../domain/account";
+
+export type Severity = "error" | "warning" | "info";
 
 export interface ScanRequest {
     documentId: string;
@@ -404,13 +406,22 @@ const mockIssues: Issue[] = [
     },
 ];
 
+// Build request headers carrying the stored session JWT (if any). Every
+// authenticated backend route requires `Authorization: Bearer <jwt>`.
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = { ...(extra || {}) };
+    const token = loadToken();
+    if (token) headers["Authorization"] = "Bearer " + token;
+    return headers;
+}
+
 export function createApiClient(config: ApiClientConfig): ApiClient {
     const { baseUrl, mockMode } = config;
 
     const request = async <T>(path: string, payload: unknown): Promise<T> => {
         const response = await fetch(`${baseUrl}${path}`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
         });
         if (!response.ok) {
@@ -421,7 +432,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
     };
 
     const getJson = async <T>(path: string): Promise<T> => {
-        const response = await fetch(`${baseUrl}${path}`);
+        const response = await fetch(`${baseUrl}${path}`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Request failed");
@@ -482,7 +493,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         const form = new FormData();
         form.append("file", file);
         const url = `${baseUrl}/pipeline/analyze${execute ? "" : "?execute=false"}`;
-        const response = await fetch(url, { method: "POST", body: form });
+        const response = await fetch(url, { method: "POST", body: form, headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Pipeline analyze failed");
@@ -518,9 +529,9 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         form.append("file", file);
         form.append("approved_violations", JSON.stringify(approvedIds));
         form.append("rejected_violations", JSON.stringify(rejectedIds));
-        const headers: Record<string, string> = {};
+        const headers = authHeaders();
         if (token) headers["Authorization"] = "Bearer " + token;
-        if (accountId) headers["X-Account-Id"] = accountId;
+        void accountId; // legacy param; backend ignores X-Account-Id now
         const response = await fetch(`${baseUrl}/pipeline/remediate`, {
             method: "POST",
             body: form,
@@ -563,7 +574,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         }
         const path = docId ? `/documents/${docId}/manual-review` : "/manual-review";
         console.log(`[api] GET ${path}`);
-        const response = await fetch(`${baseUrl}${path}`);
+        const response = await fetch(`${baseUrl}${path}`, { headers: authHeaders() });
         if (!response.ok) {
             return [];
         }
@@ -575,7 +586,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             return { cleared: 0 };
         }
         console.log("[api] DELETE /manual-review");
-        const response = await fetch(`${baseUrl}/manual-review`, { method: "DELETE" });
+        const response = await fetch(`${baseUrl}/manual-review`, { method: "DELETE", headers: authHeaders() });
         if (!response.ok) {
             return { cleared: 0 };
         }
@@ -598,7 +609,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         }
         const response = await fetch(`${baseUrl}/manual-review/${itemId}`, {
             method: "PATCH",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
         });
         if (!response.ok) {
@@ -617,6 +628,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         const response = await fetch(`${baseUrl}/documents/upload`, {
             method: "POST",
             body: form,
+            headers: authHeaders(),
         });
         if (!response.ok) {
             const message = await response.text();
@@ -636,7 +648,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         if (mockMode) {
             return { jobId, status: "done", progress: 100 };
         }
-        const response = await fetch(`${baseUrl}/jobs/${jobId}`);
+        const response = await fetch(`${baseUrl}/jobs/${jobId}`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Job lookup failed");
@@ -648,7 +660,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         if (mockMode) {
             return [];
         }
-        const response = await fetch(`${baseUrl}/documents/${docId}/issues`);
+        const response = await fetch(`${baseUrl}/documents/${docId}/issues`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Issue fetch failed");
@@ -683,7 +695,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         if (mockMode) {
             return { beforeText: "", afterText: "", diffText: "" };
         }
-        const response = await fetch(`${baseUrl}/documents/${docId}/diff`);
+        const response = await fetch(`${baseUrl}/documents/${docId}/diff`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Diff fetch failed");
@@ -708,7 +720,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 unlabeledFields: 0,
             };
         }
-        const response = await fetch(`${baseUrl}/documents/${docId}/summary`);
+        const response = await fetch(`${baseUrl}/documents/${docId}/summary`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Summary fetch failed");
@@ -732,7 +744,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 tree: { rootId: "0", nodes: {} },
             };
         }
-        const response = await fetch(`${baseUrl}/documents/${docId}/tag-tree`);
+        const response = await fetch(`${baseUrl}/documents/${docId}/tag-tree`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Tag tree fetch failed");
@@ -756,7 +768,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 rebuilt: false,
             };
         }
-        const response = await fetch(`${baseUrl}/documents/${docId}/fix-report`);
+        const response = await fetch(`${baseUrl}/documents/${docId}/fix-report`, { headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
             throw new Error(message || "Fix report fetch failed");

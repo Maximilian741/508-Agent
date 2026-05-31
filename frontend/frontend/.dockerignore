@@ -1,0 +1,10 @@
+# Keep the Docker build context small and reproducible.
+node_modules
+.expo
+dist
+web-build
+.git
+*.log
+.DS_Store
+expo-env.d.ts
+*.tsbuildinfo

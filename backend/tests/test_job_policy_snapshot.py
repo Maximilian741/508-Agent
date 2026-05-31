@@ -31,6 +31,13 @@ class JobPolicySnapshotTests(unittest.TestCase):
         self.main_module = importlib.reload(main_module)
         self.client = TestClient(self.main_module.app)
 
+        # Routes now require a session JWT — auto-authenticate as a fixed test
+        # user. Uploaded/seeded documents are owned by this id.
+        from app.api.deps import require_user_id
+
+        self.user_id = "pytest-user"
+        self.main_module.app.dependency_overrides[require_user_id] = lambda: self.user_id
+
     def tearDown(self) -> None:
         from app.persistence import db as persistence_db
 
@@ -97,6 +104,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         from app.persistence.db import get_repo
 
         repo = get_repo()
+        repo.save_document({"id": "doc-test", "ownerId": self.user_id, "filename": "t.pdf", "docType": "pdf", "path": "/tmp/t.pdf"})
         job_id = "job-test-policy-queued"
         repo.save_job({"jobId": job_id, "docId": "doc-test", "status": "queued", "progress": 0, "message": "Queued"})
 
@@ -124,6 +132,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         repo.save_document(
             {
                 "id": doc_id,
+                "ownerId": self.user_id,
                 "filename": "score.pdf",
                 "docType": "pdf",
                 "path": str(Path(self.tmp_dir.name) / "score.pdf"),
@@ -184,6 +193,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         repo.save_document(
             {
                 "id": doc_id,
+                "ownerId": self.user_id,
                 "filename": "score-empty.pdf",
                 "docType": "pdf",
                 "path": str(doc_path),
@@ -201,6 +211,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         from app.persistence.db import get_repo
 
         repo = get_repo()
+        repo.save_document({"id": "doc-test", "ownerId": self.user_id, "filename": "t.pdf", "docType": "pdf", "path": "/tmp/t.pdf"})
         job_id = "job-test-policy-running"
         repo.save_job({"jobId": job_id, "docId": "doc-test", "status": "running", "progress": 50, "message": "Running"})
 

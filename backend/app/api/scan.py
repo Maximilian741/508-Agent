@@ -7,11 +7,12 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.analyzers.registry import get_default_analyzers, run_analyzers
 from app.api import state
+from app.api.deps import require_user_id
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -253,16 +254,20 @@ def _build_issues(tree: AccessibilityTree) -> List[Issue]:
 
 
 @router.post("/scan", response_model=ScanResponse)
-async def scan(request: ScanRequest) -> ScanResponse:
+async def scan(
+    request: ScanRequest,
+    user_id: str = Depends(require_user_id),
+) -> ScanResponse:
     print(f"[api] POST /scan documentId={request.documentId} sourceFormat={request.sourceFormat}")
     tree = _build_tree(request)
     run_analyzers(tree, get_default_analyzers())
     issues = _build_issues(tree)
     scan_id = f"scan-{uuid.uuid4().hex}"
 
-    state.last_tree = tree
-    state.last_scan_id = scan_id
-    state.last_document_id = request.documentId
-    state.last_issues = [issue.model_dump() for issue in issues]
+    st = state.for_user(user_id)
+    st.last_tree = tree
+    st.last_scan_id = scan_id
+    st.last_document_id = request.documentId
+    st.last_issues = [issue.model_dump() for issue in issues]
 
     return ScanResponse(scanId=scan_id, documentId=request.documentId, issues=issues)

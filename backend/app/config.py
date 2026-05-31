@@ -28,6 +28,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw.strip())
+    except Exception:
+        return default
+
+
 def _env_list(name: str, default: List[str]) -> List[str]:
     raw = os.getenv(name)
     if raw is None:
@@ -54,11 +64,21 @@ class Settings:
     cors_allow_origins: List[str]
     max_upload_mb: int
     require_strict_cors: bool
+    # Only trust client-supplied forwarded-IP headers (CF-Connecting-IP /
+    # X-Forwarded-For) when actually behind a trusted proxy, otherwise an
+    # attacker can spoof them to evade per-IP rate limiting.
+    trust_proxy_headers: bool
     app_secret: str
+    session_ttl_seconds: int
     pipeline_artifact_ttl_seconds: int
     cloudflare_access_team_domain: str
     cloudflare_access_aud: str
     admin_emails: List[str]
+    # Cap the AI spend per single remediation job, in USD. When the cap
+    # is hit mid-job the SemanticInferenceClient falls back to heuristics
+    # for the remaining calls so a runaway image-heavy document cannot
+    # blow your margin. Set to 0 to disable the cap.
+    max_ai_cost_per_job_usd: float
 
     @property
     def max_upload_bytes(self) -> int:
@@ -83,15 +103,26 @@ def get_settings() -> Settings:
     environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").strip().lower() or "development"
 
     raw_secret = (os.getenv("APP_SECRET") or "").strip()
+    is_dev = environment == "development"
     if not raw_secret:
-        if environment == "production":
+        if not is_dev:
+            # Any non-development deployment (production, staging, prod, ...)
+            # MUST pin a stable secret. A per-process random secret would give
+            # each uvicorn worker a different key, so session JWTs and signed
+            # download URLs would randomly fail to verify across workers/restarts.
             raise RuntimeError(
-                "APP_SECRET is required in production. Set a strong random hex/urlsafe string."
+                "APP_SECRET is required outside development "
+                f"(ENVIRONMENT={environment!r}). Generate one with: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
             )
         raw_secret = _secrets.token_urlsafe(48)
         _log.warning(
             "[config] APP_SECRET not set — generated a per-process random secret for dev mode. "
-            "Signed URLs will become invalid on backend restart."
+            "Signed URLs and sessions will become invalid on backend restart."
+        )
+    elif not is_dev and len(raw_secret) < 16:
+        raise RuntimeError(
+            "APP_SECRET is too short; use at least 32 random characters in non-development environments."
         )
 
     settings = Settings(
@@ -123,11 +154,14 @@ def get_settings() -> Settings:
         ),
         max_upload_mb=_env_int("MAX_UPLOAD_MB", 25),
         require_strict_cors=_env_bool("REQUIRE_STRICT_CORS", True),
+        trust_proxy_headers=_env_bool("TRUST_PROXY_HEADERS", True),
         app_secret=raw_secret,
+        session_ttl_seconds=max(300, _env_int("SESSION_TTL_SECONDS", 7 * 24 * 3600)),
         pipeline_artifact_ttl_seconds=max(60, _env_int("PIPELINE_ARTIFACT_TTL_SECONDS", 86400)),
         cloudflare_access_team_domain=os.getenv("CLOUDFLARE_ACCESS_TEAM_DOMAIN", "").strip(),
         cloudflare_access_aud=os.getenv("CLOUDFLARE_ACCESS_AUD", "").strip(),
         admin_emails=_env_list("ADMIN_EMAILS", []),
+        max_ai_cost_per_job_usd=_env_float("MAX_AI_COST_PER_JOB_USD", 0.50),
     )
 
     if settings.storage_provider not in {"local", "s3"}:

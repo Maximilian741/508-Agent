@@ -32,10 +32,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.deps import require_user_id
 from app.config import get_settings
 from app.security.signing import sign_file_url, verify_file_signature
 from app.security.uploads import stream_to_tempfile
@@ -135,6 +136,7 @@ async def analyze(
     request: Request,
     file: UploadFile = File(...),
     execute: bool = False,
+    user_id: str = Depends(require_user_id),
 ) -> PipelineResponse:
     """Analyze a document and return findings.
 
@@ -159,7 +161,7 @@ async def analyze(
         result = parse_to_tree(str(tmp_path))
     except Exception as exc:
         logger.exception("pipeline parse failed: %s", exc)
-        raise HTTPException(status_code=422, detail=f"Failed to parse document: {exc.__class__.__name__}: {exc}")
+        raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF/DOCX/PPTX.")
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -293,7 +295,7 @@ async def remediate(
     file: UploadFile = File(...),
     approved_violations: str = Form(""),
     rejected_violations: str = Form(""),
-    x_account_id: str | None = Header(default=None, alias="X-Account-Id"),
+    user_id: str = Depends(require_user_id),
 ):
     """Apply only user-approved fixes and stream back the remediated file.
 
@@ -319,7 +321,7 @@ async def remediate(
 
     # Charge credits up front - analyze stays free, remediate costs.
     fmt = suffix.lstrip(".")
-    _charge_credits(user_id=x_account_id or "", doc_format=fmt)
+    _charge_credits(user_id=user_id, doc_format=fmt)
 
     settings = get_settings()
     upload_result = await stream_to_tempfile(
@@ -351,7 +353,7 @@ async def remediate(
         logger.exception("remediate parse failed: %s", exc)
         raise HTTPException(
             status_code=422,
-            detail=f"Failed to parse document: {exc.__class__.__name__}: {exc}",
+            detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF/DOCX/PPTX.",
         )
 
     tree = result.tree

@@ -148,6 +148,7 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS documents (
               id TEXT PRIMARY KEY,
+              owner_id TEXT,
               filename TEXT,
               doc_type TEXT,
               created_at TEXT,
@@ -215,6 +216,14 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fix_reports_doc_id ON fix_reports(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_review_doc_id ON manual_review(doc_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_doc_phase ON issues(doc_id, phase)")
+        # Backfill owner_id on the documents table for pre-existing sqlite DBs.
+        _doc_cols = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "owner_id" not in _doc_cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN owner_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_id)")
         existing_cols = {
             str(row[1])
             for row in conn.execute("PRAGMA table_info(manual_review)").fetchall()
@@ -722,8 +731,8 @@ class SqliteRepo:
         with _LOCK:
             conn.execute(
                 """
-                INSERT INTO documents(id, filename, doc_type, created_at, status, original_path, fixed_path, rebuilt_path, tag_tree_path, extra_json)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO documents(id, owner_id, filename, doc_type, created_at, status, original_path, fixed_path, rebuilt_path, tag_tree_path, extra_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                   filename=excluded.filename,
                   doc_type=excluded.doc_type,
@@ -736,6 +745,7 @@ class SqliteRepo:
                 """,
                 (
                     doc_id,
+                    (str(doc.get("ownerId")) if doc.get("ownerId") else None),
                     str(doc.get("filename") or ""),
                     str(doc.get("docType") or doc.get("kind") or "pdf"),
                     now,
@@ -763,6 +773,7 @@ class SqliteRepo:
             extra = {}
         out: Dict[str, object] = {
             "id": row["id"],
+            "ownerId": (row["owner_id"] if "owner_id" in row.keys() else None),
             "filename": row["filename"],
             "docType": row["doc_type"] or "pdf",
             "path": row["original_path"],
@@ -788,14 +799,21 @@ class SqliteRepo:
         merged["id"] = doc_id
         self.save_document(merged)
 
-    def list_documents(self) -> List[Dict[str, object]]:
+    def list_documents(self, owner_id: Optional[str] = None) -> List[Dict[str, object]]:
         conn = get_connection()
-        rows = conn.execute(
-            "SELECT id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path FROM documents ORDER BY created_at DESC"
-        ).fetchall()
+        if owner_id:
+            rows = conn.execute(
+                "SELECT id, owner_id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path FROM documents WHERE owner_id=? ORDER BY created_at DESC",
+                (owner_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, owner_id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path FROM documents ORDER BY created_at DESC"
+            ).fetchall()
         return [
             {
                 "docId": row["id"],
+                "ownerId": row["owner_id"],
                 "filename": row["filename"],
                 "docType": row["doc_type"] or "pdf",
                 "createdAt": row["created_at"],
@@ -806,9 +824,14 @@ class SqliteRepo:
             for row in rows
         ]
 
-    def count_documents(self) -> int:
+    def count_documents(self, owner_id: Optional[str] = None) -> int:
         conn = get_connection()
-        row = conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()
+        if owner_id:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM documents WHERE owner_id=?", (owner_id,)
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()
         return int(row["c"] if row else 0)
 
     def _build_document_status_summaries(self, rows: List[sqlite3.Row]) -> List[Dict[str, object]]:
@@ -1087,17 +1110,29 @@ class SqliteRepo:
 
         return summaries
 
-    def list_documents_with_status(self, limit: int = 50, offset: int = 0) -> List[Dict[str, object]]:
+    def list_documents_with_status(self, limit: int = 50, offset: int = 0, owner_id: Optional[str] = None) -> List[Dict[str, object]]:
         conn = get_connection()
-        rows = conn.execute(
-            """
-            SELECT id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path
-            FROM documents
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (max(1, int(limit or 50)), max(0, int(offset or 0))),
-        ).fetchall()
+        if owner_id:
+            rows = conn.execute(
+                """
+                SELECT id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path
+                FROM documents
+                WHERE owner_id=?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (owner_id, max(1, int(limit or 50)), max(0, int(offset or 0))),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, filename, doc_type, created_at, original_path, fixed_path, rebuilt_path
+                FROM documents
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (max(1, int(limit or 50)), max(0, int(offset or 0))),
+            ).fetchall()
         return self._build_document_status_summaries(list(rows))
 
     def get_document_status(self, doc_id: str) -> Optional[Dict[str, object]]:
