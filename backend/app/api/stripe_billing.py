@@ -77,6 +77,11 @@ def _plan_monthly(plan: str) -> Optional[int]:
 # spend this many credits per issued certificate.
 _CERTIFICATE_CREDIT_COST = 2
 
+# Overage: when an active subscriber (with overage on) runs out of credits, we
+# auto-charge this pack off-session instead of blocking them.
+_OVERAGE_CREDITS = 200
+_OVERAGE_PRICE_CENTS = 1000  # $10
+
 
 def _stripe_secret() -> Optional[str]:
     val = os.environ.get("STRIPE_SECRET_KEY", "").strip()
@@ -203,12 +208,19 @@ class SubscriptionDTO(BaseModel):
     status: Optional[str] = None
     currentPeriodEnd: Optional[str] = None
     monthlyCredits: Optional[int] = None
+    overageEnabled: bool = False
 
 
 class PortalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     return_url: str = Field(min_length=1, max_length=2000)
+
+
+class OverageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 class PortalResponse(BaseModel):
@@ -330,8 +342,90 @@ def _has_active_subscription(user_id: str) -> bool:
 
 
 def _verify_url_for(cert_id: str) -> str:
+    # Human-friendly verification page (the frontend route), which in turn calls
+    # the public GET /billing/certificate/{id} API.
     base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
-    return f"{base}/billing/certificate/{cert_id}" if base else f"/billing/certificate/{cert_id}"
+    return f"{base}/verify?cert={cert_id}" if base else f"/verify?cert={cert_id}"
+
+
+def _overage_eligible(user_id: str) -> Optional[str]:
+    """Return the Stripe customer id if the user can auto-charge overage."""
+    with session_scope() as session:
+        row = session.execute(
+            select(SubscriptionRow)
+            .where(SubscriptionRow.user_id == user_id, SubscriptionRow.status == "active")
+            .order_by(SubscriptionRow.created_at.desc())
+        ).scalars().first()
+        if row is None or not row.overage_enabled or not row.stripe_customer_id:
+            return None
+        return row.stripe_customer_id
+
+
+def _charge_overage(customer_id: str, user_id: str) -> Optional[str]:
+    """Charge the overage pack off-session; returns a charge id on success.
+
+    Honours OVERAGE_TEST_MODE ("succeed"/"fail") so the flow is exercisable
+    without live Stripe; in production it creates a real off-session
+    PaymentIntent against the customer's default payment method.
+    """
+    test_mode = os.getenv("OVERAGE_TEST_MODE", "").strip().lower()
+    if test_mode == "succeed":
+        return "pi_test_" + secrets.token_hex(6)
+    if test_mode == "fail":
+        return None
+    secret = _stripe_secret()
+    if not secret:
+        return None
+    form = {
+        "amount": str(_OVERAGE_PRICE_CENTS),
+        "currency": "usd",
+        "customer": customer_id,
+        "confirm": "true",
+        "off_session": "true",
+        "description": "508 Agent credit overage",
+        "metadata[kind]": "overage",
+        "metadata[user_id]": user_id,
+    }
+    try:
+        data = _stripe_post("/v1/payment_intents", form, secret)
+    except HTTPException:
+        return None
+    if str(data.get("status")) == "succeeded":
+        pi_id = data.get("id")
+        return str(pi_id) if pi_id else None
+    return None
+
+
+def ensure_balance_for(user_id: str, needed: int) -> None:
+    """Best-effort overage top-up before a credit spend.
+
+    If the user is short on credits but is an overage-eligible subscriber,
+    auto-charge an overage pack and grant the credits. Never raises; if it
+    can't top up, the subsequent spend fails as usual (402).
+
+    Charges at most one pack per call. Real per-document spends are <= 5
+    credits and a pack is 200, so one pack always covers a single spend.
+    Grants are idempotent on the charge id. On a single worker the blocking
+    Stripe call serializes concurrent spends; a multi-instance deploy should
+    add a per-user lock here to close the concurrent-charge window.
+    """
+    if needed <= 0:
+        return
+    with session_scope() as session:
+        user = session.execute(select(UserRow).where(UserRow.id == user_id)).scalar_one_or_none()
+        balance = int(user.credits_balance or 0) if user else 0
+    if balance >= needed:
+        return
+    customer_id = _overage_eligible(user_id)
+    if not customer_id:
+        return
+    try:
+        charge_id = _charge_overage(customer_id, user_id)
+    except Exception as exc:  # never block the request on overage failure
+        logger.warning("overage charge failed for %s: %s", user_id, exc)
+        return
+    if charge_id:
+        _grant_credits_idempotent(user_id, _OVERAGE_CREDITS, "overage", f"overage_{charge_id}")
 
 
 @router.get("/config", response_model=BillingConfigResponse)
@@ -450,6 +544,7 @@ async def get_subscription(user_id: str = Depends(require_user_id)) -> Subscript
             status=row.status,
             currentPeriodEnd=(row.current_period_end.isoformat() if row.current_period_end else None),
             monthlyCredits=_plan_monthly(row.plan),
+            overageEnabled=bool(row.overage_enabled),
         )
 
 
@@ -566,6 +661,33 @@ async def verify_certificate(cert_id: str) -> CertificateDTO:
             remainingCount=int(row.remaining_count),
             paidWith=row.paid_with,
             verifyUrl=_verify_url_for(row.id),
+        )
+
+
+@router.post("/overage", response_model=SubscriptionDTO)
+async def set_overage(
+    payload: OverageRequest,
+    user_id: str = Depends(require_user_id),
+) -> SubscriptionDTO:
+    """Turn auto-overage on/off for the caller's active subscription."""
+    with session_scope() as session:
+        row = session.execute(
+            select(SubscriptionRow)
+            .where(SubscriptionRow.user_id == user_id, SubscriptionRow.status == "active")
+            .order_by(SubscriptionRow.created_at.desc())
+        ).scalars().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="no_subscription")
+        row.overage_enabled = bool(payload.enabled)
+        row.updated_at = datetime.utcnow()
+        session.flush()
+        return SubscriptionDTO(
+            active=row.status == "active",
+            plan=row.plan,
+            status=row.status,
+            currentPeriodEnd=(row.current_period_end.isoformat() if row.current_period_end else None),
+            monthlyCredits=_plan_monthly(row.plan),
+            overageEnabled=bool(row.overage_enabled),
         )
 
 

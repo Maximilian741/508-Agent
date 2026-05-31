@@ -376,6 +376,7 @@ export interface SubscriptionStatus {
   status?: string | null;
   currentPeriodEnd?: string | null;
   monthlyCredits?: number | null;
+  overageEnabled?: boolean;
 }
 
 function _origin(): string {
@@ -497,6 +498,28 @@ export async function issueCertificate(payload: {
     throw err;
   }
   return (await _readJson(res)) as IssuedCertificate;
+}
+
+/** Toggle auto-overage on the caller's active subscription. */
+export async function setOverage(enabled: boolean): Promise<SubscriptionStatus | null> {
+  try {
+    const res = await apiFetch("/billing/overage", { method: "POST", body: JSON.stringify({ enabled }) });
+    if (!res.ok) return null;
+    return (await _readJson(res)) as SubscriptionStatus;
+  } catch {
+    return null;
+  }
+}
+
+/** Public: verify a certificate by id (no auth required). Returns null if not found. */
+export async function verifyCertificate(certId: string): Promise<IssuedCertificate | null> {
+  try {
+    const res = await apiFetch(`/billing/certificate/${encodeURIComponent(certId)}`);
+    if (!res.ok) return null;
+    return (await _readJson(res)) as IssuedCertificate;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -57,7 +57,7 @@ def main() -> int:
     cert = r.json()
     check("paidWith=credits", cert.get("paidWith") == "credits")
     check("balance dropped by cost", bal(a_auth) == start - 2)
-    check("cert has id + verifyUrl", bool(cert.get("certificateId")) and "/billing/certificate/" in cert.get("verifyUrl", ""))
+    check("cert has id + verifyUrl", bool(cert.get("certificateId")) and "/verify?cert=" in cert.get("verifyUrl", ""))
 
     # Public verification.
     v = client.get(f"/billing/certificate/{cert['certificateId']}")

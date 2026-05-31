@@ -200,6 +200,9 @@ class SubscriptionRow(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When on, exceeding the monthly allowance auto-charges an overage pack
+    # instead of blocking the user.
+    overage_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

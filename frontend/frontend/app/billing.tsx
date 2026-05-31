@@ -22,6 +22,7 @@ import {
   openBillingPortal,
   purchaseTier,
   refreshAccount,
+  setOverage,
   startCreditCheckout,
   startSubscriptionCheckout,
 } from "../src/domain/account";
@@ -163,6 +164,21 @@ export default function BillingScreen() {
     }
   };
 
+  const onToggleOverage = async () => {
+    if (!subscription) return;
+    const next = await setOverage(!subscription.overageEnabled);
+    if (next) {
+      setSubscription(next);
+      toast.success(next.overageEnabled ? "Auto top-up enabled" : "Auto top-up disabled", {
+        description: next.overageEnabled
+          ? "If you run out mid-month we'll add a credit pack so you're never blocked."
+          : "You'll be asked to buy credits when you run out.",
+      });
+    } else {
+      toast.error("Couldn't update overage setting");
+    }
+  };
+
   return (
     <Screen scroll title="Plans & credits">
       <Hero
@@ -185,6 +201,16 @@ export default function BillingScreen() {
                   : "Your allowance refills automatically + free certificates."}
                 {subscription.currentPeriodEnd ? "  Renews " + new Date(subscription.currentPeriodEnd).toLocaleDateString() + "." : ""}
               </Text>
+              <Pressable
+                onPress={onToggleOverage}
+                accessibilityRole="button"
+                accessibilityLabel="Toggle automatic overage top-up"
+                style={{ marginTop: 8, alignSelf: "flex-start" }}
+              >
+                <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "700" }}>
+                  Auto top-up if you run out: {subscription.overageEnabled ? "ON" : "OFF"} · tap to {subscription.overageEnabled ? "disable" : "enable"}
+                </Text>
+              </Pressable>
             </View>
             <Button title={busy === "manage" ? "Opening..." : "Manage subscription"} onPress={onManage} variant="secondary" loading={busy === "manage"} disabled={busy === "manage"} />
           </View>

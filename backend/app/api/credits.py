@@ -249,6 +249,13 @@ async def spend(
         row = get_current_user_row(session, account_id=user_id)
         actor_email = row.email
 
+    # Subscribers with overage enabled get an automatic top-up instead of a 402.
+    try:
+        from app.api.stripe_billing import ensure_balance_for
+
+        ensure_balance_for(user_id, payload.amount)
+    except Exception:
+        pass
     try:
         new_balance = spend_credits_for_user(
             user_id=user_id,
