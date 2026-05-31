@@ -11,12 +11,14 @@ operators can verify the install is wired up correctly.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict
 
 from fastapi import APIRouter
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 @router.get("/health")
@@ -27,6 +29,26 @@ async def health() -> dict:
 @router.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True}
+
+
+@router.get("/readyz")
+async def readyz() -> dict:
+    """Readiness probe: confirms the database is reachable (503 if not).
+
+    Use this for orchestration readiness gates; /healthz is liveness only.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import text
+
+    from app.db.session_sqlalchemy import ENGINE
+
+    try:
+        with ENGINE.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("readiness check failed: %s", exc)
+        raise HTTPException(status_code=503, detail="not_ready")
+    return {"ready": True}
 
 
 @router.get("/diagnostics")

@@ -348,6 +348,180 @@ export async function purchaseTier(tier: Tier): Promise<Account> {
   return next;
 }
 
+// ---------------------------------------------------------------------------
+// Real Stripe billing: credit-pack checkout, subscriptions, billing portal.
+// ---------------------------------------------------------------------------
+
+export interface BillingTierInfo {
+  tier: string;
+  credits: number;
+  priceConfigured: boolean;
+}
+
+export interface SubscriptionPlanInfo {
+  plan: string;
+  monthlyCredits: number;
+  priceConfigured: boolean;
+}
+
+export interface BillingConfig {
+  enabled: boolean;
+  tiers: BillingTierInfo[];
+  subscriptionPlans: SubscriptionPlanInfo[];
+}
+
+export interface SubscriptionStatus {
+  active: boolean;
+  plan?: string | null;
+  status?: string | null;
+  currentPeriodEnd?: string | null;
+  monthlyCredits?: number | null;
+  overageEnabled?: boolean;
+}
+
+function _origin(): string {
+  if (typeof window !== "undefined" && window.location) return window.location.origin;
+  return "";
+}
+
+/** Report whether real Stripe billing is configured (and the available plans). */
+export async function getBillingConfig(): Promise<BillingConfig> {
+  try {
+    const res = await apiFetch("/billing/config");
+    if (!res.ok) return { enabled: false, tiers: [], subscriptionPlans: [] };
+    const body = await _readJson(res);
+    return {
+      enabled: !!(body && body.enabled),
+      tiers: (body && body.tiers) || [],
+      subscriptionPlans: (body && body.subscriptionPlans) || [],
+    };
+  } catch {
+    return { enabled: false, tiers: [], subscriptionPlans: [] };
+  }
+}
+
+/** Current user's active subscription (active=false when none). Never throws. */
+export async function getSubscription(): Promise<SubscriptionStatus> {
+  if (!_readToken()) return { active: false };
+  try {
+    const res = await apiFetch("/billing/subscription");
+    if (!res.ok) return { active: false };
+    const body = await _readJson(res);
+    return (body as SubscriptionStatus) || { active: false };
+  } catch {
+    return { active: false };
+  }
+}
+
+async function _checkoutUrl(path: string, payload: Record<string, unknown>): Promise<string> {
+  const origin = _origin();
+  const res = await apiFetch(path, {
+    method: "POST",
+    body: JSON.stringify({
+      ...payload,
+      success_url: `${origin}/account`,
+      cancel_url: `${origin}/billing`,
+    }),
+  });
+  if (!res.ok) {
+    const body = await _readJson(res);
+    const detail = (body && (body.detail || body.message)) || "HTTP " + res.status;
+    throw new Error(typeof detail === "string" ? detail : "Checkout failed");
+  }
+  const body = await _readJson(res);
+  const url = body && typeof body.url === "string" ? body.url : null;
+  if (!url) throw new Error("Checkout session did not return a URL.");
+  return url;
+}
+
+/** Start a one-time credit-pack Stripe Checkout; returns the redirect URL. */
+export function startCreditCheckout(tier: string): Promise<string> {
+  return _checkoutUrl("/billing/create-checkout-session", { tier });
+}
+
+/** Start a recurring subscription Stripe Checkout; returns the redirect URL. */
+export function startSubscriptionCheckout(plan: string): Promise<string> {
+  return _checkoutUrl("/billing/create-subscription-session", { plan });
+}
+
+/** Open the Stripe Billing Portal (manage/cancel); returns the redirect URL. */
+export async function openBillingPortal(): Promise<string> {
+  const res = await apiFetch("/billing/create-portal-session", {
+    method: "POST",
+    body: JSON.stringify({ return_url: `${_origin()}/account` }),
+  });
+  if (!res.ok) {
+    const body = await _readJson(res);
+    const detail = (body && (body.detail || body.message)) || "HTTP " + res.status;
+    throw new Error(typeof detail === "string" ? detail : "Could not open billing portal");
+  }
+  const body = await _readJson(res);
+  const url = body && typeof body.url === "string" ? body.url : null;
+  if (!url) throw new Error("Portal session did not return a URL.");
+  return url;
+}
+
+export interface IssuedCertificate {
+  certificateId: string;
+  issuedAt: string;
+  issuedTo?: string | null;
+  filename: string;
+  conformanceClaim: string;
+  score: number;
+  fixedCount: number;
+  remainingCount: number;
+  paidWith: string;
+  verifyUrl: string;
+}
+
+/**
+ * Issue a verifiable conformance certificate. Free for active subscribers,
+ * otherwise spends credits. Throws with `.status === 402` when the caller has
+ * neither, so the caller can route them to billing.
+ */
+export async function issueCertificate(payload: {
+  filename: string;
+  conformanceClaim: string;
+  score: number;
+  fixedCount: number;
+  remainingCount: number;
+}): Promise<IssuedCertificate> {
+  const res = await apiFetch("/billing/issue-certificate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await _readJson(res);
+    const detail = (body && (body.detail || body.message)) || "HTTP " + res.status;
+    const err = new Error(typeof detail === "string" ? detail : "Certificate failed") as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  return (await _readJson(res)) as IssuedCertificate;
+}
+
+/** Toggle auto-overage on the caller's active subscription. */
+export async function setOverage(enabled: boolean): Promise<SubscriptionStatus | null> {
+  try {
+    const res = await apiFetch("/billing/overage", { method: "POST", body: JSON.stringify({ enabled }) });
+    if (!res.ok) return null;
+    return (await _readJson(res)) as SubscriptionStatus;
+  } catch {
+    return null;
+  }
+}
+
+/** Public: verify a certificate by id (no auth required). Returns null if not found. */
+export async function verifyCertificate(certId: string): Promise<IssuedCertificate | null> {
+  try {
+    const res = await apiFetch(`/billing/certificate/${encodeURIComponent(certId)}`);
+    if (!res.ok) return null;
+    return (await _readJson(res)) as IssuedCertificate;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Spend credits server-side. Returns true on success, false on insufficient
  * funds or any transport failure (logged + cached state untouched).

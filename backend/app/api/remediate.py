@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 UTC = timezone.utc
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,7 @@ from app.persistence.db import get_repo
 
 router = APIRouter()
 REPO = get_repo()
+logger = logging.getLogger(__name__)
 
 
 class RemediateRequest(BaseModel):
@@ -86,7 +88,7 @@ async def remediate(
     request: RemediateRequest,
     user_id: str = Depends(require_user_id),
 ) -> RemediateResponse:
-    print(f"[api] POST /remediate targetNodeId={request.targetNodeId} actionCode={request.actionCode}")
+    logger.info("POST /remediate targetNodeId=%s actionCode=%s", request.targetNodeId, request.actionCode)
     st = state.for_user(user_id)
     if st.last_tree is None:
         return RemediateResponse(

@@ -2641,7 +2641,7 @@ async def get_job_score(job_id: str) -> Dict[str, object]:
         persisted_job = REPO.get_job(job_id) or {}
         doc_id = str(persisted_job.get("docId") or persisted_job.get("doc_id") or "")
     if not doc_id:
-        print(f"[score] job_id={job_id} passes=0 computed=false reason=no_doc_context")
+        logger.info("score job_id=%s passes=0 computed=false reason=no_doc_context", job_id)
         return {"jobId": job_id, "scores": []}
     doc = _get_doc(doc_id) or {}
     doc_type = str(doc.get("docType", "pdf")).lower()
@@ -2657,7 +2657,7 @@ async def get_job_score(job_id: str) -> Dict[str, object]:
             _compute_and_store_job_score(job_id=job_id, pass_type="post_fix", issues=after_issues, doc_type=doc_type)
             computed = True
         scores = REPO.get_job_scores(job_id)
-    print(f"[score] job_id={job_id} passes={len(scores)} computed={'true' if computed else 'false'}")
+    logger.info("score job_id=%s passes=%s computed=%s", job_id, len(scores), computed)
     return {"jobId": job_id, "scores": scores}
 
 
@@ -2884,8 +2884,8 @@ async def apply_fixes(doc_id: str, mode: Optional[str] = "patch") -> dict:
         scan_target_ref = fixed_ref
     else:
         scan_target_ref = str(scan_target)
-    print(f"[apply_fixes] fixed_path={fixed_dest} size={fixed_size}")
-    print(f"[apply_fixes] before={len(before_issues)} after={len(after_issues)}")
+    logger.info("apply_fixes fixed_path=%s size=%s", fixed_dest, fixed_size)
+    logger.info("apply_fixes before=%s after=%s", len(before_issues), len(after_issues))
     fixed_doc_id = doc_id
     rebuilt_doc_id = doc_id if rebuilt else None
     ai_suggestions = build_alt_text_suggestions(doc_id, doc_type, src, before_issues)

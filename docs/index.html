@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>508 Agent - accessibility audits without the busywork</title>
+<meta name="description" content="Self-serve document accessibility platform. Upload a PDF, Word, or PowerPoint document, walk every WCAG 2.1, Section 508, and PDF/UA finding, and download a remediated file. Pay-as-you-go credits, no subscription." />
+<meta property="og:title" content="508 Agent" />
+<meta property="og:description" content="Document accessibility audits and remediation. PDF, Word, PowerPoint. Pay per fix." />
+<meta property="og:type" content="website" />
+<meta name="theme-color" content="#3A2A3F" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Iowan+Old+Style&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet" />
+<style>
+:root {
+  --bg: #3A2A3F;
+  --bg-2: #4A3550;
+  --surface: #574060;
+  --surface-2: #664B70;
+  --text: #FBEFE0;
+  --text-muted: #D4B8C8;
+  --border: #7A5C84;
+  --accent: #FFB36B;
+  --accent-2: #F472B6;
+  --success: #86EFAC;
+  --info: #A5B4FC;
+  --shadow: 0 18px 48px rgba(20, 8, 24, 0.42);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+nav.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--border);
+}
+nav.top .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  color: var(--text);
+}
+nav.top .brand .glyph {
+  display: inline-block;
+  background: var(--accent);
+  color: #1F140A;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+nav.top .links a {
+  color: var(--text-muted);
+  margin-left: 24px;
+  font-weight: 500;
+  font-size: 14px;
+}
+nav.top .links a.cta {
+  color: #1F140A;
+  background: var(--accent);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+nav.top .links a.cta:hover { text-decoration: none; opacity: 0.9; }
+
+header.hero {
+  padding: 84px 0 64px;
+  text-align: left;
+}
+header.hero .eyebrow {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 18px;
+}
+header.hero h1 {
+  font-family: 'Iowan Old Style', Georgia, serif;
+  font-size: 56px;
+  line-height: 1.05;
+  letter-spacing: -1.2px;
+  margin: 0 0 20px;
+  font-weight: 700;
+  max-width: 720px;
+}
+header.hero p.lead {
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  margin: 0 0 32px;
+  max-width: 640px;
+}
+header.hero .cta-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.btn {
+  display: inline-block;
+  padding: 13px 22px;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 15px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.05s;
+}
+.btn-primary { background: var(--accent); color: #1F140A; }
+.btn-primary:hover { text-decoration: none; opacity: 0.9; }
+.btn-primary:active { transform: translateY(1px); }
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+}
+.btn-ghost:hover { background: var(--surface-2); text-decoration: none; }
+
+section {
+  padding: 56px 0;
+  border-top: 1px solid var(--border);
+}
+section h2 {
+  font-family: 'Iowan Old Style', Georgia, serif;
+  font-size: 34px;
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+  margin: 0 0 14px;
+  font-weight: 700;
+}
+section .lead {
+  color: var(--text-muted);
+  font-size: 17px;
+  max-width: 640px;
+  margin: 0 0 36px;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+}
+@media (max-width: 760px) {
+  .grid-3 { grid-template-columns: 1fr; }
+  header.hero h1 { font-size: 38px; }
+  header.hero { padding: 56px 0 40px; }
+  section h2 { font-size: 26px; }
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+}
+.card h3 {
+  font-size: 17px;
+  margin: 0 0 8px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+.card .step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #1F140A;
+  font-weight: 800;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+.card p {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.55;
+  margin: 0;
+}
+.chip-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(165, 180, 252, 0.18);
+  color: var(--info);
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid rgba(165, 180, 252, 0.28);
+}
+
+table.pricing {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 14px;
+}
+table.pricing th, table.pricing td {
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+table.pricing th {
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+table.pricing td .tier-name {
+  font-weight: 700;
+  font-size: 16px;
+}
+table.pricing td .tier-sub {
+  color: var(--text-muted);
+  font-size: 13px;
+  display: block;
+  margin-top: 2px;
+}
+.code {
+  font-family: 'JetBrains Mono', monospace;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 14px 0;
+}
+.standards-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+.standards-row a {
+  color: var(--info);
+}
+
+footer {
+  padding: 40px 0 60px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+footer .row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+footer a { color: var(--text-muted); }
+footer a:hover { color: var(--accent); }
+.muted { color: var(--text-muted); }
+.callout {
+  background: rgba(255, 179, 107, 0.08);
+  border: 1px solid rgba(255, 179, 107, 0.28);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 18px 0;
+  font-size: 14px;
+  color: var(--text);
+}
+.callout strong { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <nav class="top">
+    <div class="brand"><span class="glyph">508</span> AGENT</div>
+    <div class="links">
+      <a href="#how-it-works">How it works</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#getting-started">Self-host</a>
+      <a class="cta" href="https://github.com/Maximilian741/508-Agent">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <span class="eyebrow">Section 508 - WCAG 2.1 - PDF/UA</span>
+    <h1>Accessibility audits without the busywork.</h1>
+    <p class="lead">
+      Drop a PDF, Word, or PowerPoint file. 508 Agent walks every WCAG 2.1, Section 508, and PDF/UA finding in plain English, proposes a fix you can approve, edit, or reject, and gives you back a remediated copy plus a printable conformance certificate.
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/Maximilian741/508-Agent">View on GitHub</a>
+      <a class="btn btn-ghost" href="#getting-started">Self-host in 30 minutes</a>
+    </div>
+  </header>
+
+  <section id="how-it-works">
+    <h2>How it works.</h2>
+    <p class="lead">Three steps. Most documents go end-to-end in under five minutes, including the human review.</p>
+    <div class="grid-3">
+      <div class="card">
+        <span class="step-number">1</span>
+        <h3>Drop a document</h3>
+        <p>Click or drag a .pdf, .docx, or .pptx onto the audit page. The first scan is free without an account; sign in to remediate or run more.</p>
+      </div>
+      <div class="card">
+        <span class="step-number">2</span>
+        <h3>Review every finding</h3>
+        <p>Eight analyzers walk WCAG, 508, and PDF/UA rules. Each issue gets a plain-English explanation, an AI-suggested fix, and approve / edit / reject controls.</p>
+      </div>
+      <div class="card">
+        <span class="step-number">3</span>
+        <h3>Approve and download</h3>
+        <p>Approved fixes are baked into a remediated copy of the original file. Rejected items get queued for manual handling. Download the file plus a printable certificate.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Auto-fix policy:</strong> pick Conservative, Balanced, or Aggressive at intake to control how many AI suggestions are pre-approved on your behalf. You always have the final say.
+    </div>
+  </section>
+
+  <section id="standards">
+    <h2>Standards covered.</h2>
+    <p class="lead">Each finding cites the rule it's enforcing. No black-box "trust us" results.</p>
+    <div class="chip-row">
+      <span class="chip">WCAG 2.1 A &amp; AA</span>
+      <span class="chip">Section 508 (Revised)</span>
+      <span class="chip">PDF/UA-1</span>
+      <span class="chip">EN 301 549</span>
+    </div>
+    <div class="standards-row">
+      <a href="https://www.w3.org/TR/WCAG21/" target="_blank" rel="noreferrer">WCAG 2.1 reference</a>
+      <span class="muted">-</span>
+      <a href="https://www.access-board.gov/ict/" target="_blank" rel="noreferrer">Section 508 reference</a>
+      <span class="muted">-</span>
+      <a href="https://www.w3.org/TR/WCAG21-TECHS/pdf.html" target="_blank" rel="noreferrer">PDF/UA techniques</a>
+    </div>
+  </section>
+
+  <section id="pricing">
+    <h2>Pricing.</h2>
+    <p class="lead">Pay-as-you-go credits. No subscriptions, no expiry games. Credits stay on your account until you use them.</p>
+    <table class="pricing">
+      <thead>
+        <tr>
+          <th>Tier</th>
+          <th>Price</th>
+          <th>Credits</th>
+          <th>Effective rate</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <span class="tier-name">Starter</span>
+            <span class="tier-sub">For occasional remediation</span>
+          </td>
+          <td>$5</td>
+          <td>50 credits</td>
+          <td><span class="muted">$0.10/credit</span></td>
+        </tr>
+        <tr>
+          <td>
+            <span class="tier-name">Pro</span>
+            <span class="tier-sub">For regular doc producers</span>
+          </td>
+          <td>$15</td>
+          <td>250 credits</td>
+          <td><span class="muted">$0.06/credit</span></td>
+        </tr>
+        <tr>
+          <td>
+            <span class="tier-name">Studio</span>
+            <span class="tier-sub">For accessibility teams</span>
+          </td>
+          <td>$50</td>
+          <td>1300 credits</td>
+          <td><span class="muted">$0.038/credit</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <strong>Credit cost per remediation:</strong> PDF = 5 credits, DOCX = 3 credits, PPTX = 4 credits. <strong>Analysis is always free</strong> - credits are only spent when you click Apply approved fixes and a remediated file is produced.
+    </div>
+  </section>
+
+  <section id="getting-started">
+    <h2>Self-host it.</h2>
+    <p class="lead">The whole stack is open source. Run it locally for testing, or behind a Cloudflare Tunnel for production.</p>
+    <h3 style="margin-top: 12px; font-size: 17px;">Quick start (dev)</h3>
+    <div class="code">git clone https://github.com/Maximilian741/508-Agent
+cd 508-Agent
+cp .env.example .env
+
+cd backend
+pip install -r requirements.txt
+python dev_run.py
+
+# in another terminal:
+cd frontend/frontend
+npm install
+npx expo start --web</div>
+    <p class="muted" style="font-size: 14px;">
+      The backend writes its live URL to <code style="font-family: 'JetBrains Mono', monospace; background: var(--bg-2); padding: 2px 6px; border-radius: 4px;">backend/.runtime/backend_url.txt</code> on startup. The frontend reads this file on first load, so you usually don't need to configure ports manually. See <a href="https://github.com/Maximilian741/508-Agent/blob/main/deploy/SHIP-CHECKLIST.md">SHIP-CHECKLIST.md</a> for the production deploy runbook.
+    </p>
+  </section>
+
+  <section id="architecture">
+    <h2>Architecture.</h2>
+    <p class="lead">Boring on purpose. FastAPI backend, Expo Router frontend, SQLite in dev, Postgres in prod. Cloudflare Tunnel terminates TLS so you don't need to expose a public IP.</p>
+    <div class="grid-3">
+      <div class="card">
+        <h3>Backend</h3>
+        <p>FastAPI + SQLAlchemy on Python 3.11+. Eight analyzers, three writers (PDF / DOCX / PPTX), pluggable AI provider chain (Claude vision -&gt; OpenAI -&gt; heuristic fallback).</p>
+      </div>
+      <div class="card">
+        <h3>Frontend</h3>
+        <p>Expo Router (React Native Web), TypeScript. Single-page-app build, hosted as static files behind nginx. Custom WebGL shaders for hero accents.</p>
+      </div>
+      <div class="card">
+        <h3>Production edge</h3>
+        <p>Cloudflare Tunnel + Cloudflare Access for the admin and billing surfaces. nginx in front of uvicorn. Postgres for state, S3-compatible storage for files.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="limits">
+    <h2>What it does well, and what it doesn't.</h2>
+    <p class="lead">Honest about scope so you don't get surprised in production.</p>
+    <div class="grid-3">
+      <div class="card">
+        <h3>Handles well</h3>
+        <p>Business documents (reports, contracts, proposals), structured Word docs, slide decks with proper outline, tagged PDFs, alt-text generation, language tagging, heading hierarchy, table headers.</p>
+      </div>
+      <div class="card">
+        <h3>Needs review</h3>
+        <p>Documents the pipeline can't fix automatically land in a manual-review queue with the exact reason, so nothing breaks silently. You decide what to do with each item.</p>
+      </div>
+      <div class="card">
+        <h3>Not yet</h3>
+        <p>Scanned PDFs without OCR pre-processing, complex scientific papers with equations, multi-language mixed-script documents, heavily form-driven PDFs with custom tab order. Roadmap.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="row">
+      <div>
+        <div class="brand" style="display:inline-flex; gap:10px; align-items:center;">
+          <span style="background: var(--accent); color:#1F140A; padding:4px 8px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-weight:700; font-size:13px;">508</span>
+          <span class="muted">Agent</span>
+        </div>
+      </div>
+      <div>
+        <a href="https://github.com/Maximilian741/508-Agent">GitHub</a>
+        <span class="muted">  -  </span>
+        <a href="https://github.com/Maximilian741/508-Agent/blob/main/README.md">Docs</a>
+        <span class="muted">  -  </span>
+        <a href="https://github.com/Maximilian741/508-Agent/blob/main/deploy/SHIP-CHECKLIST.md">Deploy</a>
+        <span class="muted">  -  </span>
+        <a href="https://github.com/Maximilian741/508-Agent/blob/main/LICENSE">MIT License</a>
+      </div>
+    </div>
+  </footer>
+</div>
+
+</body>
+</html>

@@ -279,6 +279,13 @@ def _charge_credits(user_id: str, doc_format: str, doc_id: str | None = None) ->
     if cost is None:
         # Unknown format - default to a small charge.
         cost = 5
+    # Subscribers with overage enabled get an automatic top-up instead of a 402.
+    try:
+        from app.api.stripe_billing import ensure_balance_for
+
+        ensure_balance_for(user_id, cost)
+    except Exception:
+        pass
     try:
         return spend_credits_for_user(
             user_id=user_id,

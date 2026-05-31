@@ -183,3 +183,45 @@ class EmailVerifyTokenRow(Base):
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class SubscriptionRow(Base):
+    """A recurring Stripe subscription that grants a monthly credit allowance."""
+
+    __tablename__ = "subscriptions"
+    __table_args__ = (
+        Index("idx_subscriptions_user", "user_id"),
+    )
+
+    # Stripe subscription id (sub_...).
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When on, exceeding the monthly allowance auto-charges an overage pack
+    # instead of blocking the user.
+    overage_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CertificateRow(Base):
+    """An issued, third-party-verifiable accessibility conformance certificate."""
+
+    __tablename__ = "certificates"
+    __table_args__ = (
+        Index("idx_certificates_user", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    issued_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    conformance_claim: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fixed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    remaining_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    paid_with: Mapped[str] = mapped_column(String(32), nullable=False, default="credits")
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
