@@ -104,6 +104,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         from app.persistence.db import get_repo
 
         repo = get_repo()
+        repo.save_document({"id": "doc-test", "ownerId": self.user_id, "filename": "t.pdf", "docType": "pdf", "path": "/tmp/t.pdf"})
         job_id = "job-test-policy-queued"
         repo.save_job({"jobId": job_id, "docId": "doc-test", "status": "queued", "progress": 0, "message": "Queued"})
 
@@ -131,6 +132,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         repo.save_document(
             {
                 "id": doc_id,
+                "ownerId": self.user_id,
                 "filename": "score.pdf",
                 "docType": "pdf",
                 "path": str(Path(self.tmp_dir.name) / "score.pdf"),
@@ -191,6 +193,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         repo.save_document(
             {
                 "id": doc_id,
+                "ownerId": self.user_id,
                 "filename": "score-empty.pdf",
                 "docType": "pdf",
                 "path": str(doc_path),
@@ -208,6 +211,7 @@ class JobPolicySnapshotTests(unittest.TestCase):
         from app.persistence.db import get_repo
 
         repo = get_repo()
+        repo.save_document({"id": "doc-test", "ownerId": self.user_id, "filename": "t.pdf", "docType": "pdf", "path": "/tmp/t.pdf"})
         job_id = "job-test-policy-running"
         repo.save_job({"jobId": job_id, "docId": "doc-test", "status": "running", "progress": 50, "message": "Running"})
 

@@ -76,6 +76,13 @@ def main() -> int:
     print("[5] forged X-Account-Id (no Bearer) -> 401")
     assert client.get("/documents", headers={"X-Account-Id": "tenant-a@example.com"}).status_code == 401
 
+    print("[6] user B cannot access user A's job (job -> doc -> owner)")
+    from app.persistence.db import get_repo
+
+    get_repo().save_job({"jobId": "iso-job-1", "docId": doc_id, "status": "done", "progress": 100, "message": "Done"})
+    assert client.get("/jobs/iso-job-1", headers=b).status_code == 404
+    assert client.get("/jobs/iso-job-1", headers=a).status_code == 200
+
     print("ALL ASSERTS PASSED")
     return 0
 

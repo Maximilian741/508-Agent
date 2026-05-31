@@ -67,6 +67,14 @@ def enforce_document_access(
     ids cannot be enumerated by unauthorized callers.
     """
     doc_id = request.path_params.get("doc_id")
+    if not doc_id:
+        # /jobs/{job_id}* routes: resolve the job's document and check that.
+        job_id = request.path_params.get("job_id")
+        if job_id:
+            job = REPO.get_job(str(job_id))
+            if job is None:
+                raise HTTPException(status_code=404, detail="not_found")
+            doc_id = job.get("docId")
     if doc_id:
         doc = REPO.get_document(str(doc_id))
         if doc is None or (doc.get("ownerId") or None) != user_id:

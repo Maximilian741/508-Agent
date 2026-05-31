@@ -38,13 +38,15 @@ _log = logging.getLogger(__name__)
 
 settings = get_settings()
 app = FastAPI(title="508-Agent", version=settings.app_version)
-# In development we auto-create the schema for convenience. In production the
-# schema is owned by Alembic migrations (`alembic upgrade head`), so we do NOT
-# auto-create here — that would mask drift between the models and the migrations.
+# init_db is idempotent and safe in all environments: in dev (sqlite) it
+# creates the raw tables and seeds default policy packs; in production
+# (Postgres) it runs Alembic migrations and seeds policy packs.
+init_db()
+# create_all is DEV-ONLY. In dev (sqlite) it adds the ORM-only tables
+# (users, credit_ledger, email_verify_tokens) that init_db's raw path does not
+# create. In production Alembic owns the schema, so auto-creating here would
+# mask drift between the models and the migrations.
 if settings.environment != "production":
-    init_db()
-    # init_db only creates raw-SQL tables; create_all adds the SQLAlchemy ORM
-    # tables (users, credit_ledger, ...) so a fresh dev install can sign in.
     Base.metadata.create_all(bind=ENGINE)
 
 app.add_middleware(RequestIdLoggingMiddleware)
