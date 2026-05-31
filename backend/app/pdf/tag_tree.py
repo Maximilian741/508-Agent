@@ -32,10 +32,17 @@ def extract_tag_tree(reader: PdfReader) -> Dict[str, object]:
     warnings: List[str] = []
     try:
         root = reader.trailer.get("/Root", {})
+        # The catalog and /StructTreeRoot are normally indirect references;
+        # resolve them or `isinstance(..., dict)` checks below silently fail and
+        # we under-read every genuinely tagged PDF as "0 figures/headings/tables".
+        if hasattr(root, "get_object"):
+            root = root.get_object()
         struct_root = root.get("/StructTreeRoot")
+        if struct_root is not None and hasattr(struct_root, "get_object"):
+            struct_root = struct_root.get_object()
     except Exception as exc:
         return _safe_payload([f"tag tree: parse failed: {exc.__class__.__name__}"])
-    if not struct_root:
+    if struct_root is None:
         return _safe_payload(warnings, tagged=False)
 
     try:

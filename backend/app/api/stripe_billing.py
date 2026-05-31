@@ -270,10 +270,10 @@ class IssueCertificateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     filename: str = Field(min_length=1, max_length=400)
-    conformanceClaim: str = Field(min_length=1, max_length=600)
     score: int = Field(default=0, ge=0, le=100)
     fixedCount: int = Field(default=0, ge=0)
     remainingCount: int = Field(default=0, ge=0)
+    sourceFormat: Optional[str] = Field(default=None, max_length=16)
 
 
 class CertificateDTO(BaseModel):
@@ -383,6 +383,31 @@ def _verify_url_for(cert_id: str) -> str:
     # the public GET /billing/certificate/{id} API.
     base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
     return f"{base}/verify?cert={cert_id}" if base else f"/verify?cert={cert_id}"
+
+
+def _summary_claim(score: int, fixed: int, remaining: int) -> str:
+    """Build the certificate's claim text SERVER-SIDE.
+
+    Deliberately honest: this is an automated-remediation processing record, not
+    a formal WCAG / Section 508 conformance determination (which requires manual
+    evaluation of every applicable success criterion — including ones this tool
+    does not yet check, e.g. colour contrast). We never let the client supply a
+    "Conforms to ..." string, because a verifiable certificate that attests an
+    unverified, caller-supplied claim is worse than no certificate at all.
+    """
+    parts = [
+        "Automated accessibility remediation summary produced by 508 Agent.",
+        f"{int(fixed)} issue(s) were automatically remediated",
+    ]
+    if remaining > 0:
+        parts[-1] += f" and {int(remaining)} item(s) were flagged for manual review"
+    parts[-1] += f" (automated check score {int(score)}/100)."
+    parts.append(
+        "This is an automated processing record, not a formal WCAG 2.1 / "
+        "Section 508 conformance certification. A conformance determination "
+        "requires manual evaluation of all applicable success criteria."
+    )
+    return " ".join(parts)
 
 
 def _overage_eligible(user_id: str) -> Optional[str]:
@@ -644,6 +669,10 @@ async def issue_certificate(
             raise HTTPException(status_code=402, detail="insufficient_credits")
         paid_with = "credits"
 
+    # The claim is generated server-side and is intentionally an honest
+    # "automated remediation summary", never a client-supplied conformance claim.
+    claim = _summary_claim(payload.score, payload.fixedCount, payload.remainingCount)
+
     now = datetime.utcnow()
     cert_id = secrets.token_hex(8)  # 16 hex chars, unguessable
     with session_scope() as session:
@@ -657,7 +686,7 @@ async def issue_certificate(
                 user_id=user_id,
                 issued_email=email,
                 filename=payload.filename[:400],
-                conformance_claim=payload.conformanceClaim[:600],
+                conformance_claim=claim[:600],
                 score=int(payload.score),
                 fixed_count=int(payload.fixedCount),
                 remaining_count=int(payload.remainingCount),
@@ -672,7 +701,7 @@ async def issue_certificate(
         issuedAt=now.isoformat(),
         issuedTo=email,
         filename=payload.filename,
-        conformanceClaim=payload.conformanceClaim,
+        conformanceClaim=claim,
         score=int(payload.score),
         fixedCount=int(payload.fixedCount),
         remainingCount=int(payload.remainingCount),

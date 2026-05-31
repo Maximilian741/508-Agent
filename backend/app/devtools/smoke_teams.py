@@ -98,8 +98,7 @@ def main() -> int:
 
     # Certificates are free for members (owner has an active subscription).
     r = client.post("/billing/issue-certificate", headers=member_auth, json={
-        "filename": "report.pdf", "conformanceClaim": "WCAG 2.1 AA", "score": 98,
-        "fixedCount": 12, "remainingCount": 0,
+        "filename": "report.pdf", "score": 98, "fixedCount": 12, "remainingCount": 0,
     })
     check("member certificate -> 200", r.status_code == 200)
     check("member certificate is subscription-free", r.json().get("paidWith") == "subscription")
