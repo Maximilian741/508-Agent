@@ -650,15 +650,10 @@ export default function AuditScreen() {
       _openReport(report, decisions, decisionLog, fname);
       return;
     }
-    const summary = _conformanceSummary(report, decisions);
     try {
-      const cert = await issueCertificate({
-        filename: fname,
-        score: summary.score,
-        fixedCount: summary.fixedCount,
-        remainingCount: summary.remainingCount,
-        sourceFormat: report.summary.sourceFormat,
-      });
+      // The certificate is bound to the SERVER's analysis of this document
+      // (looked up by documentId) — the client no longer supplies the numbers.
+      const cert = await issueCertificate({ documentId: report.summary.documentId });
       _openReport(report, decisions, decisionLog, fname, cert);
       toast.success("Remediation summary issued", {
         description: cert.paidWith === "subscription" ? "Included with your plan." : "2 credits used.",
@@ -667,13 +662,17 @@ export default function AuditScreen() {
     } catch (e: any) {
       if (e?.status === 402) {
         toast.error("Subscribe or buy credits", {
-          description: "A verifiable conformance certificate needs an active plan or credits.",
+          description: "A verifiable remediation summary needs an active plan or credits.",
         });
         setTimeout(() => {
           try { router.push("/billing" as any); } catch { /* ignore */ }
         }, 700);
       } else if (e?.status === 401) {
         setSignInOpen(true);
+      } else if (e?.status === 400) {
+        toast.error("Analyze the document first", {
+          description: "Run an audit on this document before issuing a summary.",
+        });
       } else {
         toast.error("Couldn't issue certificate", { description: e?.message || "Try again." });
       }
@@ -2085,27 +2084,6 @@ function _relativeTime(iso: string): string {
   return new Date(iso).toLocaleTimeString();
 }
 
-function _conformanceSummary(
-  report: PipelineResponse,
-  decisions: Record<string, IssueState>,
-): { claim: string; score: number; fixedCount: number; remainingCount: number } {
-  const approved = report.violations.filter((v) => decisions[v.id]?.decision === "approved");
-  const rejected = report.violations.filter((v) => decisions[v.id]?.decision === "rejected");
-  const pending = report.violations.filter(
-    (v) => !decisions[v.id]?.decision || decisions[v.id]?.decision === "pending",
-  );
-  const score = report.score.score;
-  const remaining = pending.length + rejected.length;
-  // Honest, automated-pre-scan wording — NOT a formal conformance claim. The
-  // server generates the authoritative certificate text; this mirrors it for
-  // the printed report.
-  const claim =
-    `Automated accessibility pre-scan: ${approved.length} issue${approved.length === 1 ? "" : "s"} addressed` +
-    (remaining > 0 ? `, ${remaining} flagged for manual review` : "") +
-    ` (automated check score ${Math.round(score)}/100). ` +
-    `Not a formal WCAG 2.1 / Section 508 conformance determination.`;
-  return { claim, score: Math.round(score), fixedCount: approved.length, remainingCount: remaining };
-}
 
 function _openReport(
   report: PipelineResponse,

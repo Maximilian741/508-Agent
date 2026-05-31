@@ -97,9 +97,15 @@ def main() -> int:
     check("member balance reflects shared 15", bal(member_auth) == 15)
 
     # Certificates are free for members (owner has an active subscription).
-    r = client.post("/billing/issue-certificate", headers=member_auth, json={
-        "filename": "report.pdf", "score": 98, "fixedCount": 12, "remainingCount": 0,
-    })
+    from app.db.models import AnalysisResultRow
+    with session_scope() as s:
+        s.add(AnalysisResultRow(
+            id=f"{member_id}::report", user_id=member_id, document_id="report",
+            filename="report.pdf", source_format="pdf", initial_issues=12,
+            fixed_automatically=12, pending_manual=0, score=98, grade="A",
+            created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        ))
+    r = client.post("/billing/issue-certificate", headers=member_auth, json={"documentId": "report"})
     check("member certificate -> 200", r.status_code == 200)
     check("member certificate is subscription-free", r.json().get("paidWith") == "subscription")
     check("free certificate did not touch shared balance", bal(owner_auth) == 15)

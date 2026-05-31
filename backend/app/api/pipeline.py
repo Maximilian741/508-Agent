@@ -232,6 +232,10 @@ async def analyze(
 
     score = _build_score(violations=violations, executions=executions, source_format=result.format)
 
+    # Persist the SERVER-computed score so a certificate can be bound to a real
+    # measurement (never to client-supplied numbers).
+    _persist_analysis_result(user_id, summary, score, file.filename)
+
     # Provider name for transparency / UI badge.
     provider_name = "heuristic"
     try:
@@ -691,3 +695,38 @@ def _grade(score: float) -> str:
     if score >= 60:
         return "D"
     return "F"
+
+
+def _persist_analysis_result(user_id: str, summary, score, filename) -> None:
+    """Best-effort: persist the server-computed score keyed by (user, document).
+
+    A certificate is later bound to this row so its numbers are the server's own
+    measurement, not values supplied by the caller. Never raises.
+    """
+    document_id = getattr(summary, "documentId", None)
+    if not user_id or not document_id:
+        return
+    try:
+        from app.db.models import AnalysisResultRow
+        from app.db.session_sqlalchemy import session_scope
+
+        rid = f"{user_id}::{document_id}"
+        now = datetime.utcnow()
+        with session_scope() as session:
+            row = session.get(AnalysisResultRow, rid)
+            if row is None:
+                row = AnalysisResultRow(
+                    id=rid, user_id=user_id, document_id=str(document_id), created_at=now
+                )
+                session.add(row)
+            row.filename = str(filename or document_id)[:400]
+            row.source_format = str(getattr(summary, "sourceFormat", "") or "")[:16]
+            row.initial_issues = int(score.initialIssues)
+            row.fixed_automatically = int(score.fixedAutomatically)
+            row.pending_manual = int(score.pendingManual)
+            row.score = int(round(score.score))
+            row.grade = str(score.grade or "")[:8]
+            row.updated_at = now
+            session.flush()
+    except Exception:
+        logger.debug("persist analysis result failed", exc_info=True)
