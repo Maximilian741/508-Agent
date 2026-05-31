@@ -738,3 +738,148 @@ export async function requestEmailVerification(): Promise<boolean> {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Teams (multi-seat shared subscription wallet)
+// ---------------------------------------------------------------------------
+
+export interface TeamMember {
+  userId: string;
+  email?: string | null;
+  displayName?: string | null;
+  role: string;
+  joinedAt: string;
+  isOwner: boolean;
+}
+
+export interface TeamInvite {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  createdAt: string;
+  acceptUrl?: string | null;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  ownerId: string;
+  seatLimit: number;
+  seatsUsed: number;
+  role: string; // the caller's role
+  members: TeamMember[];
+  invites: TeamInvite[];
+}
+
+export interface MyTeam {
+  team: Team | null;
+  canCreate: boolean;
+}
+
+async function _throwDetail(res: Response, fallback: string): Promise<never> {
+  const body = await _readJson(res);
+  const detail = (body && (body.detail || body.message)) || "HTTP " + res.status;
+  const err = new Error(typeof detail === "string" ? detail : fallback) as Error & { status?: number };
+  err.status = res.status;
+  throw err;
+}
+
+/** The caller's team (or null) plus whether they're eligible to create one. */
+export async function getMyTeam(): Promise<MyTeam> {
+  if (!_readToken()) return { team: null, canCreate: false };
+  try {
+    const res = await apiFetch("/teams/me");
+    if (!res.ok) return { team: null, canCreate: false };
+    return ((await _readJson(res)) as MyTeam) || { team: null, canCreate: false };
+  } catch {
+    return { team: null, canCreate: false };
+  }
+}
+
+/** Create a team (active subscribers only). Throws (`.status === 402`) otherwise. */
+export async function createTeam(name: string): Promise<Team> {
+  const res = await apiFetch("/teams", { method: "POST", body: JSON.stringify({ name }) });
+  if (!res.ok) await _throwDetail(res, "Could not create team");
+  return (await _readJson(res)) as Team;
+}
+
+/** Invite a teammate by email. Throws (`.status === 409`) when seats are full. */
+export async function inviteTeamMember(email: string, role: string = "member"): Promise<TeamInvite> {
+  const res = await apiFetch("/teams/invite", { method: "POST", body: JSON.stringify({ email, role }) });
+  if (!res.ok) await _throwDetail(res, "Could not send invite");
+  return (await _readJson(res)) as TeamInvite;
+}
+
+/** Accept an invite by token. Throws on mismatch / full / unknown. */
+export async function acceptTeamInvite(token: string): Promise<Team> {
+  const res = await apiFetch("/teams/accept", { method: "POST", body: JSON.stringify({ token }) });
+  if (!res.ok) await _throwDetail(res, "Could not accept invite");
+  return (await _readJson(res)) as Team;
+}
+
+/** Remove a member (admins only). Returns true on success. */
+export async function removeTeamMember(userId: string): Promise<boolean> {
+  try {
+    const res = await apiFetch("/teams/remove", { method: "POST", body: JSON.stringify({ userId }) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Revoke a pending invite (admins only). Returns true on success. */
+export async function revokeTeamInvite(inviteId: string): Promise<boolean> {
+  try {
+    const res = await apiFetch("/teams/revoke-invite", { method: "POST", body: JSON.stringify({ inviteId }) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Leave the team you belong to (non-owners). Returns true on success. */
+export async function leaveTeam(): Promise<boolean> {
+  try {
+    const res = await apiFetch("/teams/leave", { method: "POST" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Disband the team you own (removes all members + invites). Returns true on success. */
+export async function disbandTeam(): Promise<boolean> {
+  try {
+    const res = await apiFetch("/teams", { method: "DELETE" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin metrics dashboard
+// ---------------------------------------------------------------------------
+
+export interface AdminMetrics {
+  users: { total: number; verified: number; newLast30d: number };
+  subscriptions: { active: number; byPlan: Record<string, number>; estimatedMrrUsd: number };
+  credits: { granted: number; spent: number; outstanding: number };
+  certificates: { total: number; last30d: number; bySubscription: number; byCredits: number };
+  teams: { count: number; seatsTotal: number; seatsUsed: number };
+  overage: { charges: number; revenueUsd: number };
+  recentCertificates: Array<{ id: string; issuedTo?: string | null; filename: string; paidWith: string; issuedAt: string }>;
+  recentSubscriptions: Array<{ plan: string; status: string; createdAt: string }>;
+  generatedAt: string;
+}
+
+/**
+ * Fetch admin metrics. Throws with `.status === 403` for non-admins (so the
+ * page can show an access-denied state) and `.status === 401` when signed out.
+ */
+export async function getAdminMetrics(): Promise<AdminMetrics> {
+  const res = await apiFetch("/admin/metrics");
+  if (!res.ok) await _throwDetail(res, "Could not load metrics");
+  return (await _readJson(res)) as AdminMetrics;
+}
