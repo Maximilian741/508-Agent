@@ -39,6 +39,7 @@ from app.models.accessibility import (
     ImageNode,
     iter_reading_order,
 )
+from app.pdf.ua_tagger import tag_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +157,22 @@ def write_remediated_pdf(
             continue
         if isinstance(node, DocumentNode):
             continue
-        # We don't write back headings, lists, tables, links — those need
-        # structure-tree manipulation which lives in app.api.documents.
-        # The caller can detect this and route appropriately.
+        # Per-element heading/list/table/link tagging is not yet written here
+        # (it needs fine-grained content-stream surgery). The basic structure
+        # tree added in step 4 makes the document tagged at page granularity;
+        # the score honestly reports these as pending-manual for PDF.
+
+    # ------- 4. Basic PDF/UA structure tree + document metadata --------
+    # Turns an untagged PDF into a tagged one (MarkInfo, StructTreeRoot,
+    # DisplayDocTitle, XMP). Fidelity-preserving and never corrupts.
+    try:
+        ua_report = tag_pdf(writer, tree)
+        for kind in ua_report.get("applied", []):
+            applied.append({"kind": f"pdfua_{kind}", "target_id": "document", "summary": kind})
+        if not ua_report.get("structTree"):
+            skipped.append({"target_id": "document", "reason": "pdfua_struct_tree_skipped"})
+    except Exception as exc:
+        skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
 
     try:
         with open(output_path, "wb") as fh:
