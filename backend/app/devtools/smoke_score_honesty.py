@@ -1,0 +1,88 @@
+"""Smoke: the pipeline score only counts fixes the writer ACTUALLY persists.
+
+Before this guard, any executor that reported ``success`` in-memory inflated the
+score and the conformance grade — even for actions (link text, list structure,
+reading order, PDF structure) that no writer persists to the downloaded file.
+This test pins the honest behaviour: non-persisted "successes" count as pending
+manual work, not as fixes.
+
+Usage:
+    python -m app.devtools.smoke_score_honesty
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from types import SimpleNamespace
+
+os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp(prefix='508_smoke_score_')}/s.db"
+
+from app.api.pipeline import _action_persists, _build_score  # noqa: E402
+from app.models.accessibility import Severity  # noqa: E402
+
+
+def _ex(action: str, status: str = "success"):
+    return SimpleNamespace(
+        action_code=SimpleNamespace(value=action),
+        status=SimpleNamespace(value=status),
+    )
+
+
+def _v(sev: str = Severity.ERROR.value):
+    return SimpleNamespace(severity=sev)
+
+
+def main() -> int:
+    failures = 0
+
+    def check(name: str, cond: bool) -> None:
+        nonlocal failures
+        print(("PASS" if cond else "FAIL"), "-", name)
+        if not cond:
+            failures += 1
+
+    viol = [_v(), _v()]
+
+    # DOCX: a link-text "success" is in-memory only (no writer) -> pending, not fixed.
+    s = _build_score(
+        violations=viol,
+        executions=[_ex("IMPROVE_LINK_TEXT"), _ex("SET_DOCUMENT_TITLE")],
+        source_format="docx",
+    )
+    check("docx: only persisted action counted as fixed", s.fixedAutomatically == 1)
+    check("docx: non-persisted success counted as pending", s.pendingManual == 1)
+
+    # PDF output is untagged: structural successes do not persist -> only metadata counts.
+    s2 = _build_score(
+        violations=viol,
+        executions=[_ex("NORMALIZE_HEADING_LEVEL"), _ex("SET_DOCUMENT_LANGUAGE")],
+        source_format="pdf",
+    )
+    check("pdf: structural success not counted (untagged output)", s2.fixedAutomatically == 1)
+    check("pdf: structural success counted pending", s2.pendingManual == 1)
+
+    # A flag-for-manual-review "success" must never count as a fix.
+    s3 = _build_score(
+        violations=viol,
+        executions=[_ex("FLAG_FOR_MANUAL_REVIEW")],
+        source_format="docx",
+    )
+    check("manual-review success is not a fix", s3.fixedAutomatically == 0 and s3.pendingManual == 1)
+
+    # _action_persists matrix sanity.
+    check("docx alt text persists", _action_persists("GENERATE_ALT_TEXT", "docx"))
+    check("pptx alt text persists", _action_persists("GENERATE_ALT_TEXT", "pptx"))
+    check("pdf alt text does NOT persist (untagged)", not _action_persists("GENERATE_ALT_TEXT", "pdf"))
+    check("docx link text does NOT persist", not _action_persists("IMPROVE_LINK_TEXT", "docx"))
+    check("docx list structure does NOT persist", not _action_persists("FIX_LIST_STRUCTURE", "docx"))
+    check("reading order does NOT persist", not _action_persists("RESOLVE_READING_ORDER", "docx"))
+    check("docx title persists", _action_persists("SET_DOCUMENT_TITLE", "docx"))
+
+    print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -44,23 +44,24 @@ from fastapi.testclient import TestClient
 # Synthetic fixture builder
 # ---------------------------------------------------------------------------
 
-# A 1x1 transparent PNG (smallest valid PNG payload). Used as the inline
-# picture so the analyzer has at least one image to flag for alt text.
-_TINY_PNG = (
-    b"\x89PNG\r\n\x1a\n"
-    b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
-    b"\x00\x00\x00\rIDATx\x9cc\xfc\xcf\xc0\x50\x0f\x00\x00\x05\x01\x01\x02\xcf\xa0.\xcd"
-    b"\x00\x00\x00\x00IEND\xaeB`\x82"
-)
+def _valid_png() -> bytes:
+    """A real, decodable PNG. python-docx's image parser is strict, so a
+    hand-rolled 1x1 stub is rejected (which silently degraded this test to
+    analyze-only and never exercised the round-trip). Generate one with Pillow.
+    """
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (24, 24), (200, 30, 30)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _build_synthetic_docx(path: Path) -> dict:
     """Write a tiny .docx with deliberate accessibility issues.
 
-    Returns metadata describing what we actually managed to embed so the
-    caller can soften assertions if (for example) python-docx couldn't
-    add the picture.
+    The inline image (no alt text) is mandatory now — it regression-tests the
+    DOCX image-detection fix (the lxml ``a or b`` blip bug that made every
+    Word image invisible to the analyzer).
     """
 
     from docx import Document
@@ -76,19 +77,13 @@ def _build_synthetic_docx(path: Path) -> dict:
     # Plain paragraph so there is body text in the tree.
     doc.add_paragraph("This is a plain paragraph used as filler.")
 
-    # Image with no alt text. python-docx requires Pillow to add a
-    # picture from bytes; if Pillow isn't available we degrade
-    # gracefully so the analyze half of the test still runs.
-    image_added = False
-    try:
-        run = doc.add_paragraph().add_run()
-        run.add_picture(io.BytesIO(_TINY_PNG))
-        image_added = True
-    except Exception as exc:
-        print(f"[smoke] picture insertion skipped: {exc.__class__.__name__}: {exc}")
+    # Image with no alt text — must succeed (Pillow is a hard dep of the
+    # picture path). If this raises, the test should FAIL, not degrade.
+    run = doc.add_paragraph().add_run()
+    run.add_picture(io.BytesIO(_valid_png()))
 
     doc.save(str(path))
-    return {"image_added": image_added}
+    return {"image_added": True}
 
 
 # ---------------------------------------------------------------------------
@@ -153,12 +148,13 @@ def main() -> int:
             f"expected a heading-jump violation; got {rule_ids}"
         )
 
-        if image_added:
-            assert "MISSING_ALT_TEXT" in rule_ids, (
-                f"expected MISSING_ALT_TEXT violation; got {rule_ids}"
-            )
-        else:
-            print("[smoke] no image was inserted; skipping alt-text assertion")
+        # The image MUST be detected and flagged — this regression-tests the
+        # DOCX blip-detection fix. Before the fix, Word images were invisible
+        # to the analyzer and this assertion would (correctly) fail.
+        assert image_added
+        assert "MISSING_ALT_TEXT" in rule_ids, (
+            f"expected MISSING_ALT_TEXT violation (DOCX image detection); got {rule_ids}"
+        )
 
         # ---- /pipeline/remediate -------------------------------------------
         # Pick exactly the alt-text violation as the approved subset. This
@@ -232,18 +228,44 @@ def main() -> int:
         assert image_nodes, "expected at least one image in the remediated tree"
         first_image = image_nodes[0]
 
-        if only_exec["status"] == "success":
+        # Under the default policy, AI alt-text generation is OFF, so the
+        # approved MISSING_ALT_TEXT is routed to manual review (a deferral, not
+        # an automated fix). Be honest about that: only assert baked alt text
+        # when the action that ran was actually GENERATE_ALT_TEXT. The strict
+        # writer round-trip is proven separately below.
+        action = only_exec.get("actionCode")
+        if action == "GENERATE_ALT_TEXT" and only_exec["status"] == "success":
             assert (first_image.alt_text or "").strip(), (
-                f"expected non-empty alt_text after successful remediation; "
+                f"GENERATE_ALT_TEXT succeeded but no alt_text was baked; "
                 f"got {first_image.alt_text!r}"
             )
         else:
-            # skipped: writer did not bake heuristic alt text. Still a
-            # valid outcome — we just confirm we didn't accidentally
-            # corrupt the image.
-            print(
-                f"[smoke] alt-text execution was skipped; alt_text={first_image.alt_text!r}"
-            )
+            # A manual-review deferral must NOT be counted as a fix (the score
+            # treats it as pending, asserted below).
+            print(f"[smoke] alt-text deferred to manual review (action={action}, status={only_exec['status']})")
+
+        # ---- Direct writer round-trip proof --------------------------------
+        # Independent of the pipeline's AI alt-text policy: set alt text on the
+        # parsed tree, write it, and confirm it actually reaches the output
+        # bytes. This is the regression guard for the DOCX alt-text round-trip
+        # (parser detected the image; writer persists <wp:docPr @descr>).
+        import zipfile
+
+        from app.parsers import parse_to_tree as _parse
+        from app.writers import write_remediated as _write
+
+        rt_res = _parse(str(tmp_path))
+        rt_imgs = [n for n in iter_reading_order(rt_res.tree.root) if isinstance(n, ImageNode)]
+        assert rt_imgs, "parser must detect the inline image (docx blip regression)"
+        _ALT = "Round-trip alt text proof"
+        rt_imgs[0].alt_text = _ALT
+        rt_imgs[0].is_decorative = False
+        rt_out = Path(tmp_dir) / "roundtrip.docx"
+        _write(tmp_path, rt_res.tree, rt_out, source_format=rt_res.format)
+        with zipfile.ZipFile(rt_out) as _z:
+            _xml = _z.read("word/document.xml").decode("utf-8", "ignore")
+        assert f'descr="{_ALT}"' in _xml, "alt text must persist to word/document.xml"
+        print("[smoke] DOCX alt-text round-trip persisted to output bytes: OK")
 
     print("ok pipeline smoke passed")
     return 0

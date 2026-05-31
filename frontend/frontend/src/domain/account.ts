@@ -481,10 +481,10 @@ export interface IssuedCertificate {
  */
 export async function issueCertificate(payload: {
   filename: string;
-  conformanceClaim: string;
   score: number;
   fixedCount: number;
   remainingCount: number;
+  sourceFormat?: string;
 }): Promise<IssuedCertificate> {
   const res = await apiFetch("/billing/issue-certificate", {
     method: "POST",

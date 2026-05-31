@@ -654,13 +654,13 @@ export default function AuditScreen() {
     try {
       const cert = await issueCertificate({
         filename: fname,
-        conformanceClaim: summary.claim,
         score: summary.score,
         fixedCount: summary.fixedCount,
         remainingCount: summary.remainingCount,
+        sourceFormat: report.summary.sourceFormat,
       });
       _openReport(report, decisions, decisionLog, fname, cert);
-      toast.success("Conformance certificate issued", {
+      toast.success("Remediation summary issued", {
         description: cert.paidWith === "subscription" ? "Included with your plan." : "2 credits used.",
       });
       void refreshAccount();
@@ -2095,13 +2095,16 @@ function _conformanceSummary(
     (v) => !decisions[v.id]?.decision || decisions[v.id]?.decision === "pending",
   );
   const score = report.score.score;
+  const remaining = pending.length + rejected.length;
+  // Honest, automated-pre-scan wording — NOT a formal conformance claim. The
+  // server generates the authoritative certificate text; this mirrors it for
+  // the printed report.
   const claim =
-    score >= 95
-      ? `Conforms to WCAG 2.1 Level AA after applying ${approved.length} approved fix${approved.length === 1 ? "" : "es"}.`
-      : score >= 80
-      ? `Substantial conformance to WCAG 2.1 Level AA. ${pending.length + rejected.length} item(s) require additional remediation.`
-      : `Partial conformance to WCAG 2.1 Level AA. Significant remediation work remaining.`;
-  return { claim, score: Math.round(score), fixedCount: approved.length, remainingCount: pending.length + rejected.length };
+    `Automated accessibility pre-scan: ${approved.length} issue${approved.length === 1 ? "" : "s"} addressed` +
+    (remaining > 0 ? `, ${remaining} flagged for manual review` : "") +
+    ` (automated check score ${Math.round(score)}/100). ` +
+    `Not a formal WCAG 2.1 / Section 508 conformance determination.`;
+  return { claim, score: Math.round(score), fixedCount: approved.length, remainingCount: remaining };
 }
 
 function _openReport(
@@ -2222,12 +2225,14 @@ function _buildReportHtml(
     (v) => !decisions[v.id]?.decision || decisions[v.id]?.decision === "pending",
   );
 
+  const _remaining = pending.length + rejected.length;
+  // Honest automated-pre-scan wording. This report is NOT a formal conformance
+  // determination — it summarizes what the automated checks found and fixed.
   const conformanceClaim =
-    report.score.score >= 95
-      ? `Conforms to WCAG 2.1 Level AA after applying ${approved.length} approved fix${approved.length === 1 ? "" : "es"}.`
-      : report.score.score >= 80
-      ? `Substantial conformance to WCAG 2.1 Level AA. ${pending.length + rejected.length} item(s) require additional remediation.`
-      : `Partial conformance to WCAG 2.1 Level AA. Significant remediation work remaining.`;
+    `Automated accessibility pre-scan: ${approved.length} issue${approved.length === 1 ? "" : "s"} addressed` +
+    (_remaining > 0 ? `, ${_remaining} flagged for manual review` : "") +
+    ` (automated check score ${Math.round(report.score.score)}/100). ` +
+    `Not a formal WCAG 2.1 / Section 508 conformance determination.`;
 
   const findingsSection = _findingsTable(report.violations, decisions);
   const decisionRows = log
@@ -2335,8 +2340,9 @@ function _buildReportHtml(
 
       <div class="conformance-callout">
         <strong>Audit date:</strong> ${formattedDate}<br>
-        <strong>Standards evaluated:</strong> WCAG 2.1 (Levels A & AA), Section 508, PDF/UA<br>
-        <strong>Methodology:</strong> Deterministic structural analyzers + heuristic / vision-AI suggestions for human review.
+        <strong>Automated checks performed:</strong> image alt text, heading structure, table headers, list structure, document title &amp; language, link text.<br>
+        <strong>Not evaluated — require manual review:</strong> colour contrast (WCAG 1.4.3), form labels (3.3.2 / 4.1.2), reading order (1.3.2), document parsing &amp; tagging (4.1.1), and other success criteria.<br>
+        <strong>Methodology:</strong> Deterministic structural analyzers + heuristic / vision-AI suggestions for human review. This is an automated pre-scan, <strong>not</strong> a formal WCAG 2.1 / Section 508 conformance determination.
       </div>
       ${
         cert

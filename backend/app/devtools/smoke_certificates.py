@@ -22,10 +22,10 @@ from app.main import app  # noqa: E402
 
 _PAYLOAD = {
     "filename": "report.pdf",
-    "conformanceClaim": "Conforms to WCAG 2.1 Level AA after applying 5 approved fixes.",
     "score": 96,
     "fixedCount": 5,
     "remainingCount": 0,
+    "sourceFormat": "pdf",
 }
 
 
@@ -58,6 +58,13 @@ def main() -> int:
     check("paidWith=credits", cert.get("paidWith") == "credits")
     check("balance dropped by cost", bal(a_auth) == start - 2)
     check("cert has id + verifyUrl", bool(cert.get("certificateId")) and "/verify?cert=" in cert.get("verifyUrl", ""))
+    # Honesty: the claim is server-generated and must NOT assert formal conformance.
+    _claim = (cert.get("conformanceClaim") or "")
+    check("claim is server-generated honest summary", "Automated accessibility remediation summary" in _claim)
+    check("claim does NOT assert formal conformance", "Conforms to WCAG" not in _claim and "not a formal" in _claim.lower())
+    # Client cannot inject a conformance claim (extra fields rejected).
+    _forged = dict(_PAYLOAD); _forged["conformanceClaim"] = "Conforms to WCAG 2.1 AA"
+    check("client conformanceClaim rejected -> 422", client.post("/billing/issue-certificate", headers=a_auth, json=_forged).status_code == 422)
 
     # Public verification.
     v = client.get(f"/billing/certificate/{cert['certificateId']}")

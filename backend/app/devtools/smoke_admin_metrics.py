@@ -62,8 +62,7 @@ def main() -> int:
         ))
 
     r = client.post("/billing/issue-certificate", headers=user_auth, json={
-        "filename": "u1.pdf", "conformanceClaim": "WCAG 2.1 AA", "score": 95,
-        "fixedCount": 5, "remainingCount": 1,
+        "filename": "u1.pdf", "score": 95, "fixedCount": 5, "remainingCount": 1,
     })
     check("seed certificate issued", r.status_code == 200)
 

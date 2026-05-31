@@ -210,17 +210,27 @@ async def analyze(
             )
         )
 
-    api_executions = [
-        PipelineExecutionResult(
-            actionCode=e.action_code.value,
-            targetNodeId=e.target_node_id,
-            status=e.status.value,
-            notes=e.notes,
+    api_executions = []
+    for e in executions:
+        notes = e.notes
+        # Be honest: a success the writer can't persist for this format is an
+        # in-memory-only change the downloaded file won't reflect.
+        if e.status.value == "success" and not _action_persists(e.action_code.value, result.format):
+            suffix = (
+                f" [Not auto-applied to the {result.format.upper()} file — "
+                "this fix requires manual remediation in the source document.]"
+            )
+            notes = (notes or "") + suffix
+        api_executions.append(
+            PipelineExecutionResult(
+                actionCode=e.action_code.value,
+                targetNodeId=e.target_node_id,
+                status=e.status.value,
+                notes=notes,
+            )
         )
-        for e in executions
-    ]
 
-    score = _build_score(violations=violations, executions=executions)
+    score = _build_score(violations=violations, executions=executions, source_format=result.format)
 
     # Provider name for transparency / UI badge.
     provider_name = "heuristic"
@@ -604,20 +614,59 @@ def _count_nodes_of(tree: AccessibilityTree, kind) -> int:
     return sum(1 for node in iter_reading_order(tree.root) if isinstance(node, kind))
 
 
-def _build_score(*, violations, executions) -> PipelineScore:
+# Which remediation actions the format's writer ACTUALLY persists to the output
+# file. Actions not listed mutate only the in-memory tree (no writer support
+# yet) so they must NOT be counted as "fixed" — counting an in-memory-only
+# success as a real fix is how the score inflated past what the file achieves.
+# PDF output is currently untagged, so only document metadata truly persists.
+_PERSISTED_ACTIONS: Dict[str, set] = {
+    "docx": {
+        "SET_DOCUMENT_TITLE",
+        "SET_DOCUMENT_LANGUAGE",
+        "NORMALIZE_HEADING_LEVEL",
+        "GENERATE_ALT_TEXT",
+        "REMOVE_DECORATIVE_ALT_TEXT",
+        "ADD_TABLE_HEADERS",
+    },
+    "pptx": {
+        "SET_DOCUMENT_TITLE",
+        "SET_DOCUMENT_LANGUAGE",
+        "GENERATE_ALT_TEXT",
+        "REMOVE_DECORATIVE_ALT_TEXT",
+    },
+    "pdf": {
+        "SET_DOCUMENT_TITLE",
+        "SET_DOCUMENT_LANGUAGE",
+    },
+}
+
+
+def _action_persists(action_code: str, source_format: str) -> bool:
+    return action_code in _PERSISTED_ACTIONS.get((source_format or "").lower(), set())
+
+
+def _build_score(*, violations, executions, source_format: str = "") -> PipelineScore:
     initial = len(violations)
     if initial == 0:
         return PipelineScore(initialIssues=0, fixedAutomatically=0, pendingManual=0, score=100.0, grade="A+")
 
-    fixed = sum(1 for e in executions if e.status.value == "success")
-    pending = sum(1 for e in executions if e.status.value == "skipped")
+    # Only count a success as "fixed" if the writer actually persists that
+    # action for this format; otherwise it's an in-memory-only change that the
+    # downloaded file does not reflect, so it's really a pending-manual item.
+    fixed = sum(
+        1 for e in executions
+        if e.status.value == "success" and _action_persists(e.action_code.value, source_format)
+    )
+    non_persisted = sum(
+        1 for e in executions
+        if e.status.value == "success" and not _action_persists(e.action_code.value, source_format)
+    )
+    pending = sum(1 for e in executions if e.status.value == "skipped") + non_persisted
+
     error_weight = sum(2 for v in violations if v.severity == Severity.ERROR.value)
     warning_weight = sum(1 for v in violations if v.severity == Severity.WARNING.value)
     total_weight = max(error_weight + warning_weight, 1)
-    fixed_weight = 0
-    for execution, _ in zip(executions, range(len(executions))):
-        if execution.status.value == "success":
-            fixed_weight += 2
+    fixed_weight = 2 * fixed
     score = max(0.0, 100.0 * (fixed_weight / (total_weight * 2 + 0.01)))
     score = min(100.0, score + 10.0 * (fixed / max(initial, 1)))
     grade = _grade(score)

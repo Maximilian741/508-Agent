@@ -73,7 +73,7 @@ class PPTXParser:
                 shape_positions.append((top, left))
                 if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                     slide_images += 1
-                    alt_text = (getattr(shape, "alternative_text", None) or "").strip()
+                    alt_text = _shape_descr(shape)
                     if not alt_text:
                         missing_alt += 1
                 if shape.has_table:
@@ -306,8 +306,25 @@ class _IdCounter:
         return f"{prefix}-{i}"
 
 
+def _shape_descr(shape) -> str:
+    """Read a shape's alt text from <p:cNvPr @descr>.
+
+    python-pptx's ``Picture`` does not expose ``alternative_text`` in current
+    versions, so reading that attribute returns nothing and every image looks
+    like it is missing alt text. The real value lives on the ``cNvPr`` element.
+    """
+    try:
+        for nv in shape._element.iter():
+            tag = nv.tag
+            if isinstance(tag, str) and tag.endswith("}cNvPr"):
+                return (nv.get("descr") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
 def _picture_to_image_node(shape, slide_index: int, ids: "_IdCounter", extra_props: Dict[str, Any]) -> ImageNode:
-    alt_text = (getattr(shape, "alternative_text", None) or "").strip()
+    alt_text = _shape_descr(shape)
     is_decorative = False
     image_b64: Optional[str] = None
     image_mime: Optional[str] = None

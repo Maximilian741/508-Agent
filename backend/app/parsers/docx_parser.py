@@ -411,13 +411,19 @@ def _inline_images_in_paragraph(
     for drawing in paragraph._p.iterfind(f".//{_DRAWING_NS}*"):
         # We look for a:blip references, regardless of whether the drawing is
         # inline or anchored.  python-docx exposes the ElementTree directly.
-        blip = drawing.find(f".//{_DRAWINGML_NS}blip") or drawing.find(f".//{_PIC_NS}blip")
+        # NOTE: lxml elements with no children are falsy, so `a or b` silently
+        # discards a found-but-childless <a:blip>.  Use explicit `is None`.
+        blip = drawing.find(f".//{_DRAWINGML_NS}blip")
+        if blip is None:
+            blip = drawing.find(f".//{_PIC_NS}blip")
         if blip is None:
             continue
         rid = blip.get(f"{_REL_IMAGE_NS}embed") or blip.get(f"{_REL_IMAGE_NS}link")
         if not rid:
             continue
-        alt = drawing.find(f".//{_DRAWING_NS}docPr") or drawing.find(f".//{_DRAWINGML_NS}docPr")
+        alt = drawing.find(f".//{_DRAWING_NS}docPr")
+        if alt is None:
+            alt = drawing.find(f".//{_DRAWINGML_NS}docPr")
         alt_text = ""
         is_decorative = False
         if alt is not None:

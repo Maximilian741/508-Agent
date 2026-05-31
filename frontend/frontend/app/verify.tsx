@@ -87,7 +87,7 @@ export default function VerifyScreen() {
             <Row label="Issued to" value={cert.issuedTo || "—"} theme={theme} />
             <Row label="Issued on" value={new Date(cert.issuedAt).toLocaleString()} theme={theme} />
             <Row label="Document" value={cert.filename} theme={theme} mono />
-            <Row label="Conformance" value={cert.conformanceClaim} theme={theme} />
+            <Row label="Summary" value={cert.conformanceClaim} theme={theme} />
             <Row label="Score" value={`${cert.score} / 100`} theme={theme} />
             <Row label="Fixes applied" value={String(cert.fixedCount)} theme={theme} />
             <Row label="Items remaining" value={String(cert.remainingCount)} theme={theme} />

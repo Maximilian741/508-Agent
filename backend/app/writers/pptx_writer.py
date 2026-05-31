@@ -38,6 +38,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from lxml import etree
+
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.oxml.ns import qn
@@ -332,22 +334,15 @@ def _apply_image(
         return
 
     if image.is_decorative:
-        # Clear any existing alt text — decorative shapes must not announce.
-        try:
-            shape.alternative_text = ""
-        except Exception as exc:  # pragma: no cover
-            skipped.append(
-                {"target_id": image.id, "reason": f"failed_to_clear_alt:{exc}"}
-            )
-            return
+        # Decorative: clear alt text and mark via the Office "decorative"
+        # extension (the only mechanism PowerPoint actually honors).
+        _clear_descr(shape)
         marked = _mark_shape_decorative(shape)
         applied.append(
             {
                 "kind": "image_decorative",
                 "target_id": image.id,
-                "summary": (
-                    "alternative_text='' " + ("decorative='1'" if marked else "(decorative attr unavailable)")
-                ),
+                "summary": ("descr cleared; " + ("marked decorative" if marked else "(decorative ext unavailable)")),
             }
         )
         return
@@ -361,15 +356,11 @@ def _apply_image(
         )
         return
 
-    try:
-        shape.alternative_text = alt_text
-    except Exception as exc:
-        skipped.append(
-            {"target_id": image.id, "reason": f"failed_to_set_alt:{exc}"}
-        )
+    if not _set_descr(shape, alt_text):
+        skipped.append({"target_id": image.id, "reason": "cNvPr_not_found"})
         return
 
-    # If the shape was previously marked decorative, clear that attribute so
+    # If the shape was previously marked decorative, drop the extension so
     # screen readers will announce the new alt text.
     _unmark_shape_decorative(shape)
 
@@ -377,53 +368,94 @@ def _apply_image(
         {
             "kind": "image_alt_text",
             "target_id": image.id,
-            "summary": f"alternative_text={alt_text!r}",
+            "summary": f"descr={alt_text!r}",
         }
     )
 
 
-def _mark_shape_decorative(shape) -> bool:
-    """Set ``decorative="1"`` on the picture's ``<p:cNvPr>`` element.
+# --- lxml helpers --------------------------------------------------------
+# PowerPoint stores alt text in <p:cNvPr @descr> and the decorative flag in an
+# Office 2017 extension. python-pptx's ``Picture`` does NOT expose
+# ``alternative_text`` in current versions (setting it is a silent no-op that
+# never reaches the XML), so we edit the underlying elements directly.
 
-    PowerPoint stores the "Mark as decorative" checkbox as an extension
-    list entry on ``cNvPr``.  python-pptx does not expose this directly,
-    so we patch the lxml element.  Returns ``True`` if the attribute was
-    set (or already present); ``False`` if the element layout was not what
-    we expected and we declined to touch it.
-    """
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_ADEC_NS = "http://schemas.microsoft.com/office/drawing/2017/decorative"
+_DECORATIVE_EXT_URI = "{C183D7F6-B498-43B3-948B-1728B52AA6E4}"
 
+
+def _find_cnvpr(shape):
+    """Return the <p:cNvPr> element for a shape/picture, or None."""
     try:
-        element = shape._element
-        # ``cNvPr`` lives at <p:nvSpPr|nvPicPr>/<p:cNvPr> on a Picture shape.
-        cnv_pr = None
-        for nv in element.iter():
+        for nv in shape._element.iter():
             tag = nv.tag
             if isinstance(tag, str) and tag.endswith("}cNvPr"):
-                cnv_pr = nv
-                break
-        if cnv_pr is None:
-            return False
-        # The decorative attribute is unprefixed in the OOXML schema PowerPoint
-        # writes when a user clicks "Mark as decorative".  Setting it as a
-        # plain attribute matches what PowerPoint round-trips.
-        cnv_pr.set("decorative", "1")
+                return nv
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return None
+
+
+def _set_descr(shape, alt_text: str) -> bool:
+    cnv = _find_cnvpr(shape)
+    if cnv is None:
+        return False
+    cnv.set("descr", alt_text)
+    return True
+
+
+def _clear_descr(shape) -> None:
+    cnv = _find_cnvpr(shape)
+    if cnv is None:
+        return
+    for attr in ("descr", "title"):
+        if attr in cnv.attrib:
+            del cnv.attrib[attr]
+
+
+def _mark_shape_decorative(shape) -> bool:
+    """Mark a picture decorative via the Office 2017 <adec:decorative> ext.
+
+    A bare ``decorative="1"`` attribute (what this code used to write) is NOT
+    valid OOXML — PowerPoint ignores it, so the image stays announced. The real
+    mechanism is an extension-list entry under <p:cNvPr>.
+    """
+    cnv = _find_cnvpr(shape)
+    if cnv is None:
+        return False
+    try:
+        _remove_decorative_ext(cnv)  # idempotent
+        extlst = cnv.find(f"{{{_A_NS}}}extLst")
+        if extlst is None:
+            extlst = etree.SubElement(cnv, f"{{{_A_NS}}}extLst")
+        ext = etree.SubElement(extlst, f"{{{_A_NS}}}ext")
+        ext.set("uri", _DECORATIVE_EXT_URI)
+        dec = etree.SubElement(ext, f"{{{_ADEC_NS}}}decorative", nsmap={"adec": _ADEC_NS})
+        dec.set("val", "1")
         return True
     except Exception:  # pragma: no cover - defensive
         logger.debug("mark_decorative_failed", exc_info=True)
         return False
 
 
-def _unmark_shape_decorative(shape) -> None:
-    """Best-effort removal of the ``decorative`` attribute on ``cNvPr``."""
+def _remove_decorative_ext(cnv) -> None:
+    extlst = cnv.find(f"{{{_A_NS}}}extLst")
+    if extlst is None:
+        return
+    for ext in list(extlst.findall(f"{{{_A_NS}}}ext")):
+        if ext.get("uri") == _DECORATIVE_EXT_URI:
+            extlst.remove(ext)
+    if len(extlst) == 0:
+        cnv.remove(extlst)
 
+
+def _unmark_shape_decorative(shape) -> None:
+    """Remove the Office decorative extension if present."""
+    cnv = _find_cnvpr(shape)
+    if cnv is None:
+        return
     try:
-        element = shape._element
-        for nv in element.iter():
-            tag = nv.tag
-            if isinstance(tag, str) and tag.endswith("}cNvPr"):
-                if nv.get("decorative") is not None:
-                    del nv.attrib["decorative"]
-                break
+        _remove_decorative_ext(cnv)
     except Exception:  # pragma: no cover
         logger.debug("unmark_decorative_failed", exc_info=True)
 
