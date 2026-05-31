@@ -38,7 +38,7 @@ import { clearDraft, loadDraft, saveDraft } from "../src/domain/auditDraft";
 import { appendHistory, findHistoryEntry } from "../src/domain/auditHistory";
 import { loadWeights } from "../src/domain/scoreWeights";
 import { lookupIssue } from "../src/domain/issueCatalog";
-import { loadAccount, loadToken, refreshAccount } from "../src/domain/account";
+import { IssuedCertificate, issueCertificate, loadAccount, loadToken, refreshAccount } from "../src/domain/account";
 import { costFor, formatForFile } from "../src/domain/creditCosts";
 import { SignInModal } from "../src/ui/components/SignInModal";
 import { notify, playChime } from "../src/domain/notifications";
@@ -642,6 +642,43 @@ export default function AuditScreen() {
       setDownloadingFixed(false);
     }
   }, [client, decisions, mockMode, report, router, sourceFile, toast]);
+
+  const onIssueCertificate = async () => {
+    if (!report) return;
+    const fname = filename ?? "document";
+    if (mockMode) {
+      _openReport(report, decisions, decisionLog, fname);
+      return;
+    }
+    const summary = _conformanceSummary(report, decisions);
+    try {
+      const cert = await issueCertificate({
+        filename: fname,
+        conformanceClaim: summary.claim,
+        score: summary.score,
+        fixedCount: summary.fixedCount,
+        remainingCount: summary.remainingCount,
+      });
+      _openReport(report, decisions, decisionLog, fname, cert);
+      toast.success("Conformance certificate issued", {
+        description: cert.paidWith === "subscription" ? "Included with your plan." : "2 credits used.",
+      });
+      void refreshAccount();
+    } catch (e: any) {
+      if (e?.status === 402) {
+        toast.error("Subscribe or buy credits", {
+          description: "A verifiable conformance certificate needs an active plan or credits.",
+        });
+        setTimeout(() => {
+          try { router.push("/billing" as any); } catch { /* ignore */ }
+        }, 700);
+      } else if (e?.status === 401) {
+        setSignInOpen(true);
+      } else {
+        toast.error("Couldn't issue certificate", { description: e?.message || "Try again." });
+      }
+    }
+  };
 
   const downloadRemediated = useCallback(async () => {
     // Free-scan gate fires before any of the existing branches so the user
@@ -1522,11 +1559,10 @@ export default function AuditScreen() {
           {showMoreOptions ? (
             <View style={[styles.row, { marginTop: 8 }]}>
               <Button
-                title={`Open audit report (${reviewedCount} reviewed)`}
-                onPress={() =>
-                  _openReport(report, decisions, decisionLog, filename ?? "document")
-                }
+                title="Issue conformance certificate"
+                onPress={onIssueCertificate}
                 variant="secondary"
+                accessibilityHint="Issues a verifiable certificate (free on a plan, or a few credits) and opens the printable report."
               />
               <Button
                 title="Export JSON"
@@ -2049,14 +2085,34 @@ function _relativeTime(iso: string): string {
   return new Date(iso).toLocaleTimeString();
 }
 
+function _conformanceSummary(
+  report: PipelineResponse,
+  decisions: Record<string, IssueState>,
+): { claim: string; score: number; fixedCount: number; remainingCount: number } {
+  const approved = report.violations.filter((v) => decisions[v.id]?.decision === "approved");
+  const rejected = report.violations.filter((v) => decisions[v.id]?.decision === "rejected");
+  const pending = report.violations.filter(
+    (v) => !decisions[v.id]?.decision || decisions[v.id]?.decision === "pending",
+  );
+  const score = report.score.score;
+  const claim =
+    score >= 95
+      ? `Conforms to WCAG 2.1 Level AA after applying ${approved.length} approved fix${approved.length === 1 ? "" : "es"}.`
+      : score >= 80
+      ? `Substantial conformance to WCAG 2.1 Level AA. ${pending.length + rejected.length} item(s) require additional remediation.`
+      : `Partial conformance to WCAG 2.1 Level AA. Significant remediation work remaining.`;
+  return { claim, score: Math.round(score), fixedCount: approved.length, remainingCount: pending.length + rejected.length };
+}
+
 function _openReport(
   report: PipelineResponse,
   decisions: Record<string, IssueState>,
   log: DecisionLogItem[],
   filename: string,
+  cert?: IssuedCertificate | null,
 ) {
   if (Platform.OS !== "web") return;
-  const html = _buildReportHtml(report, decisions, log, filename);
+  const html = _buildReportHtml(report, decisions, log, filename, cert);
   const blob = new Blob([html], { type: "text/html" });
   const url = URL.createObjectURL(blob);
   window.open(url, "_blank");
@@ -2154,6 +2210,7 @@ function _buildReportHtml(
   decisions: Record<string, IssueState>,
   log: DecisionLogItem[],
   filename: string,
+  cert?: IssuedCertificate | null,
 ): string {
   const approved = report.violations.filter(
     (v) => decisions[v.id]?.decision === "approved",
@@ -2281,6 +2338,15 @@ function _buildReportHtml(
         <strong>Standards evaluated:</strong> WCAG 2.1 (Levels A & AA), Section 508, PDF/UA<br>
         <strong>Methodology:</strong> Deterministic structural analyzers + heuristic / vision-AI suggestions for human review.
       </div>
+      ${
+        cert
+          ? `<div class="conformance-callout" style="background:#ECFDF5;border-left-color:var(--ok);margin-top:10px;">
+        <strong>&#10003; Certificate of Conformance &mdash; ${_escape(cert.certificateId)}</strong><br>
+        Issued to ${_escape(cert.issuedTo || "—")} on ${_escape(new Date(cert.issuedAt).toLocaleString())}.<br>
+        Independently verifiable at: <code>${_escape(cert.verifyUrl)}</code>
+      </div>`
+          : ""
+      }
 
       <h2>Findings</h2>
       ${findingsSection}

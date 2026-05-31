@@ -68,8 +68,9 @@ def main() -> int:
 
     cfg = client.get("/billing/config").json()
     plans = {p["plan"] for p in cfg.get("subscriptionPlans", [])}
-    check("config lists team+business plans", {"team", "business"} <= plans)
+    check("config lists monthly+annual plans", {"team", "team_annual", "business", "business_annual"} <= plans)
     check("team price configured", any(p["plan"] == "team" and p["priceConfigured"] for p in cfg["subscriptionPlans"]))
+    check("annual plan has year interval", any(p["plan"] == "team_annual" and p["interval"] == "year" for p in cfg["subscriptionPlans"]))
 
     sub_id = "sub_test_123"
     checkout = {"type": "checkout.session.completed", "data": {"object": {
@@ -95,8 +96,17 @@ def main() -> int:
     _post_event(client, create_inv)
     check("subscription_create invoice does not grant", balance() == start + 2000)
 
-    cancel = {"type": "customer.subscription.deleted", "data": {"object": {"id": sub_id, "status": "canceled"}}}
-    check("cancel -> 200", _post_event(client, cancel).status_code == 200)
+    # Annual plan grants 12x the monthly allowance up front (team_annual = 12000).
+    before_annual = balance()
+    annual = {"type": "checkout.session.completed", "data": {"object": {
+        "id": "cs_annual", "mode": "subscription", "subscription": "sub_annual_1", "customer": "cus_1",
+        "client_reference_id": user_id, "metadata": {"plan": "team_annual", "user_id": user_id}}}}
+    _post_event(client, annual)
+    check("annual checkout grants 12000", balance() == before_annual + 12000)
+
+    for sid in (sub_id, "sub_annual_1"):
+        cancel = {"type": "customer.subscription.deleted", "data": {"object": {"id": sid, "status": "canceled"}}}
+        check(f"cancel {sid} -> 200", _post_event(client, cancel).status_code == 200)
     check("subscription inactive after cancel", client.get("/billing/subscription", headers=auth).json()["active"] is False)
 
     body = json.dumps(checkout).encode("utf-8")

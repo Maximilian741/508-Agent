@@ -460,6 +460,45 @@ export async function openBillingPortal(): Promise<string> {
   return url;
 }
 
+export interface IssuedCertificate {
+  certificateId: string;
+  issuedAt: string;
+  issuedTo?: string | null;
+  filename: string;
+  conformanceClaim: string;
+  score: number;
+  fixedCount: number;
+  remainingCount: number;
+  paidWith: string;
+  verifyUrl: string;
+}
+
+/**
+ * Issue a verifiable conformance certificate. Free for active subscribers,
+ * otherwise spends credits. Throws with `.status === 402` when the caller has
+ * neither, so the caller can route them to billing.
+ */
+export async function issueCertificate(payload: {
+  filename: string;
+  conformanceClaim: string;
+  score: number;
+  fixedCount: number;
+  remainingCount: number;
+}): Promise<IssuedCertificate> {
+  const res = await apiFetch("/billing/issue-certificate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await _readJson(res);
+    const detail = (body && (body.detail || body.message)) || "HTTP " + res.status;
+    const err = new Error(typeof detail === "string" ? detail : "Certificate failed") as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  return (await _readJson(res)) as IssuedCertificate;
+}
+
 /**
  * Spend credits server-side. Returns true on success, false on insufficient
  * funds or any transport failure (logged + cached state untouched).

@@ -1,6 +1,6 @@
 /**
- * Billing screen: monthly subscription plans (for teams/high volume) plus
- * one-time credit packs.
+ * Billing screen: monthly/annual subscription plans (for teams/high volume)
+ * plus one-time credit packs.
  *
  * When real Stripe billing is configured (`/billing/config` -> enabled), the
  * buttons open Stripe Checkout / the Billing Portal. In a dev build without
@@ -9,7 +9,7 @@
  */
 
 import React, { useEffect, useState } from "react";
-import { Platform, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useRouter } from "expo-router";
 
 import {
@@ -34,6 +34,8 @@ import { SignInModal } from "../src/ui/components/SignInModal";
 import { useTheme } from "../src/ui/useTheme";
 import { useToast } from "../src/ui/toast";
 
+type Interval = "month" | "year";
+
 interface Tier {
   key: "starter" | "pro" | "studio";
   name: string;
@@ -50,33 +52,34 @@ const TIERS: Tier[] = [
   { key: "studio", name: "Studio", priceCents: 5000, baseCredits: 1000, bonusCredits: 300, features: ["1000 credits + 300 bonus", "Multi-workspace seats", "Custom severity weights", "Direct line to remediators"] },
 ];
 
-interface Plan {
-  key: "team" | "business";
+interface PlanFamily {
+  family: "team" | "business";
   name: string;
-  priceCents: number;
-  monthlyCredits: number;
   blurb: string;
   features: string[];
   highlight?: boolean;
+  monthly: { key: string; priceCents: number };
+  annual: { key: string; priceCents: number };
 }
 
-const PLANS: Plan[] = [
+// Annual is billed at 10x the monthly price (two months free ≈ 17% off).
+const PLAN_FAMILIES: PlanFamily[] = [
   {
-    key: "team",
+    family: "team",
     name: "Team",
-    priceCents: 9900,
-    monthlyCredits: 1000,
     blurb: "For small compliance teams",
-    features: ["1,000 credits / month", "~200 PDFs or 330 DOCX monthly", "Conformance certificates", "Priority queue", "Cancel anytime"],
+    features: ["1,000 credits / month", "~200 PDFs or 330 DOCX monthly", "Conformance certificates included", "Priority queue", "Cancel anytime"],
     highlight: true,
+    monthly: { key: "team", priceCents: 9900 },
+    annual: { key: "team_annual", priceCents: 99000 },
   },
   {
-    key: "business",
+    family: "business",
     name: "Business",
-    priceCents: 49900,
-    monthlyCredits: 6000,
     blurb: "High-volume remediation",
     features: ["6,000 credits / month", "~1,200 PDFs monthly", "Everything in Team", "Batch mode + multi-seat", "Direct support"],
+    monthly: { key: "business", priceCents: 49900 },
+    annual: { key: "business_annual", priceCents: 499000 },
   },
 ];
 
@@ -96,6 +99,7 @@ export default function BillingScreen() {
   const [busy, setBusy] = useState<string | null>(null);
   const [config, setConfig] = useState<BillingConfig | null>(null);
   const [subscription, setSubscription] = useState<SubscriptionStatus | null>(null);
+  const [interval, setInterval] = useState<Interval>("month");
 
   const stacked = width < 880;
   const stripeEnabled = config?.enabled ?? false;
@@ -114,9 +118,8 @@ export default function BillingScreen() {
     setBusy(tier.key);
     try {
       if (stripeEnabled) {
-        const url = await startCreditCheckout(tier.key);
-        redirectTo(url);
-        return; // browser navigates to Stripe
+        redirectTo(await startCreditCheckout(tier.key));
+        return;
       }
       const total = tier.baseCredits + tier.bonusCredits;
       const next = await purchaseTier(tier.key);
@@ -131,18 +134,17 @@ export default function BillingScreen() {
     }
   };
 
-  const onSubscribe = async (plan: Plan) => {
+  const onSubscribe = async (planKey: string) => {
     if (!account) { setSignInOpen(true); return; }
     if (!stripeEnabled) {
       toast.error("Subscriptions require Stripe", {
-        description: "Set STRIPE_SECRET_KEY and STRIPE_PRICE_TEAM / STRIPE_PRICE_BUSINESS to enable.",
+        description: "Set STRIPE_SECRET_KEY and the STRIPE_PRICE_* plan price ids to enable.",
       });
       return;
     }
-    setBusy(plan.key);
+    setBusy(planKey);
     try {
-      const url = await startSubscriptionCheckout(plan.key);
-      redirectTo(url);
+      redirectTo(await startSubscriptionCheckout(planKey));
     } catch (e: any) {
       toast.error("Couldn't start subscription", { description: e?.message || "Try again." });
     } finally {
@@ -153,8 +155,7 @@ export default function BillingScreen() {
   const onManage = async () => {
     setBusy("manage");
     try {
-      const url = await openBillingPortal();
-      redirectTo(url);
+      redirectTo(await openBillingPortal());
     } catch (e: any) {
       toast.error("Couldn't open billing portal", { description: e?.message || "Try again." });
     } finally {
@@ -168,7 +169,7 @@ export default function BillingScreen() {
         shader="ember"
         eyebrow="BILLING"
         title="Plans & credits"
-        subtitle="Subscribe for a monthly allowance (best for teams and high volume) or buy one-time credit packs. Credits power audits, batch runs, and AI remediation."
+        subtitle="Subscribe for a monthly or annual allowance (best for teams) — conformance certificates included — or buy one-time credit packs."
       />
 
       {subscription?.active ? (
@@ -176,12 +177,12 @@ export default function BillingScreen() {
           <View style={{ flexDirection: stacked ? "column" : "row", alignItems: stacked ? "flex-start" : "center", gap: 12 }}>
             <View style={{ flex: 1 }}>
               <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>
-                {(subscription.plan || "").charAt(0).toUpperCase() + (subscription.plan || "").slice(1)} plan active
+                {(subscription.plan || "").replace("_", " ")} plan active
               </Text>
               <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4 }}>
                 {subscription.monthlyCredits
-                  ? subscription.monthlyCredits + " credits refill each month."
-                  : "Your monthly allowance refills automatically."}
+                  ? subscription.monthlyCredits + " credits/month + free certificates."
+                  : "Your allowance refills automatically + free certificates."}
                 {subscription.currentPeriodEnd ? "  Renews " + new Date(subscription.currentPeriodEnd).toLocaleDateString() + "." : ""}
               </Text>
             </View>
@@ -190,26 +191,29 @@ export default function BillingScreen() {
         </Card>
       ) : null}
 
-      <Text style={[theme.typography.displaySmall, { color: theme.colors.text, marginTop: 28 }]}>
-        Monthly plans
-      </Text>
-      <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>
-        Best value for ongoing 508 / ADA compliance work. Cancel anytime from the billing portal.
-      </Text>
-      <View style={[styles.grid, stacked && styles.gridStacked]}>
-        {PLANS.map((plan) => (
-          <View key={plan.key} style={[styles.tierWrap, stacked ? styles.tierStacked : styles.tierFlex]}>
-            <PlanCard plan={plan} busy={busy === plan.key} onSubscribe={() => onSubscribe(plan)} />
-          </View>
-        ))}
+      <View style={{ flexDirection: stacked ? "column" : "row", alignItems: stacked ? "flex-start" : "flex-end", justifyContent: "space-between", marginTop: 28, gap: 8 }}>
+        <View style={{ flex: 1 }}>
+          <Text style={[theme.typography.displaySmall, { color: theme.colors.text }]}>Subscription plans</Text>
+          <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4 }}>
+            Best value for ongoing 508 / ADA compliance. Certificates included. Cancel anytime.
+          </Text>
+        </View>
+        <IntervalToggle interval={interval} onChange={setInterval} theme={theme} />
       </View>
 
-      <Text style={[theme.typography.displaySmall, { color: theme.colors.text, marginTop: 32 }]}>
-        One-time credit packs
-      </Text>
-      <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>
-        No commitment - credits never expire.
-      </Text>
+      <View style={[styles.grid, stacked && styles.gridStacked, { marginTop: 12 }]}>
+        {PLAN_FAMILIES.map((fam) => {
+          const v = interval === "year" ? fam.annual : fam.monthly;
+          return (
+            <View key={fam.family} style={[styles.tierWrap, stacked ? styles.tierStacked : styles.tierFlex]}>
+              <PlanCard family={fam} interval={interval} busy={busy === v.key} onSubscribe={() => onSubscribe(v.key)} />
+            </View>
+          );
+        })}
+      </View>
+
+      <Text style={[theme.typography.displaySmall, { color: theme.colors.text, marginTop: 32 }]}>One-time credit packs</Text>
+      <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>No commitment — credits never expire.</Text>
       <View style={[styles.grid, stacked && styles.gridStacked]}>
         {TIERS.map((tier) => (
           <View key={tier.key} style={[styles.tierWrap, stacked ? styles.tierStacked : styles.tierFlex]}>
@@ -229,25 +233,56 @@ export default function BillingScreen() {
   );
 }
 
-function PlanCard({ plan, busy, onSubscribe }: { plan: Plan; busy: boolean; onSubscribe: () => void }) {
-  const theme = useTheme();
-  const dollars = (plan.priceCents / 100).toFixed(0);
-  const borderColor = plan.highlight ? theme.colors.accent : theme.colors.border;
+function IntervalToggle({ interval, onChange, theme }: { interval: Interval; onChange: (i: Interval) => void; theme: ReturnType<typeof useTheme> }) {
   return (
-    <Card style={{ borderColor, borderWidth: plan.highlight ? 2 : 1 }}>
-      {plan.highlight ? (
+    <View style={{ flexDirection: "row", alignSelf: "flex-start", borderWidth: 1, borderColor: theme.colors.border, borderRadius: 999, padding: 3 }}>
+      {(["month", "year"] as Interval[]).map((opt) => {
+        const active = interval === opt;
+        return (
+          <Pressable
+            key={opt}
+            accessibilityRole="button"
+            accessibilityLabel={opt === "month" ? "Monthly billing" : "Annual billing"}
+            onPress={() => onChange(opt)}
+            style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999, backgroundColor: active ? theme.colors.accent : "transparent" }}
+          >
+            <Text style={{ color: active ? "#FFFFFF" : theme.colors.textMuted, fontWeight: "700", fontSize: 13 }}>
+              {opt === "month" ? "Monthly" : "Annual · save 17%"}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function PlanCard({ family, interval, busy, onSubscribe }: { family: PlanFamily; interval: Interval; busy: boolean; onSubscribe: () => void }) {
+  const theme = useTheme();
+  const v = interval === "year" ? family.annual : family.monthly;
+  const dollars = (v.priceCents / 100).toFixed(0);
+  const perLabel = interval === "year" ? "/ year" : "/ month";
+  const monthlyEquiv = interval === "year" ? Math.round(v.priceCents / 12 / 100) : Math.round(v.priceCents / 100);
+  const borderColor = family.highlight ? theme.colors.accent : theme.colors.border;
+  return (
+    <Card style={{ borderColor, borderWidth: family.highlight ? 2 : 1 }}>
+      {family.highlight ? (
         <View style={[styles.badge, { backgroundColor: theme.colors.accent + "22" }]}>
           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>BEST FOR TEAMS</Text>
         </View>
       ) : null}
-      <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{plan.name}</Text>
-      <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 2 }}>{plan.blurb}</Text>
+      <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{family.name}</Text>
+      <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 2 }}>{family.blurb}</Text>
       <View style={styles.priceRow}>
         <Text style={[theme.typography.display, { color: theme.colors.text }]}>${dollars}</Text>
-        <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginLeft: 6, marginBottom: 8 }}>/ month</Text>
+        <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginLeft: 6, marginBottom: 8 }}>{perLabel}</Text>
       </View>
+      {interval === "year" ? (
+        <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 13, marginBottom: 8 }}>
+          ${monthlyEquiv}/mo billed yearly · save ~17%
+        </Text>
+      ) : null}
       <View style={styles.features}>
-        {plan.features.map((f, i) => (
+        {family.features.map((f, i) => (
           <View key={i} style={styles.featureRow}>
             <View style={[styles.bullet, { backgroundColor: theme.colors.accent }]} />
             <Text style={{ color: theme.colors.text, fontSize: 13, flex: 1 }}>{f}</Text>
@@ -255,7 +290,7 @@ function PlanCard({ plan, busy, onSubscribe }: { plan: Plan; busy: boolean; onSu
         ))}
       </View>
       <View style={{ marginTop: 16 }}>
-        <Button title={busy ? "Working..." : "Subscribe"} onPress={onSubscribe} variant={plan.highlight ? "primary" : "secondary"} loading={busy} disabled={busy} />
+        <Button title={busy ? "Working..." : "Subscribe"} onPress={onSubscribe} variant={family.highlight ? "primary" : "secondary"} loading={busy} disabled={busy} />
       </View>
     </Card>
   );

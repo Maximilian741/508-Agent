@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import time
 import urllib.parse
 import urllib.request
@@ -31,7 +32,7 @@ from sqlalchemy import select
 
 from app.api.auth import get_current_user_row
 from app.api.deps import require_user_id
-from app.db.models import CreditLedgerRow, SubscriptionRow, UserRow
+from app.db.models import CertificateRow, CreditLedgerRow, SubscriptionRow, UserRow
 from app.db.session_sqlalchemy import session_scope
 
 logger = logging.getLogger(__name__)
@@ -50,18 +51,31 @@ _TIER_PRICE_ENV: Dict[str, str] = {
     "studio": "STRIPE_PRICE_STUDIO",
 }
 
-# Recurring subscription plans. Each paid invoice grants this many credits for
-# the billing period; users still spend credits per remediation, so a plan is
-# effectively a monthly allowance (set high enough to feel "unlimited").
-_SUB_PLAN_CREDITS: Dict[str, int] = {
-    "team": 1000,
-    "business": 6000,
+# Recurring subscription plans. "grant" = credits added per paid invoice;
+# "monthly" = effective monthly credits (for display). Annual plans bill once a
+# year and grant 12x up front. Each maps to a recurring Stripe Price via
+# "price_env". Users still spend credits per remediation, so a plan is an
+# allowance (and certificates are free for active subscribers).
+_SUB_PLANS: Dict[str, Dict[str, Any]] = {
+    "team": {"label": "Team", "interval": "month", "grant": 1000, "monthly": 1000, "price_env": "STRIPE_PRICE_TEAM"},
+    "team_annual": {"label": "Team", "interval": "year", "grant": 12000, "monthly": 1000, "price_env": "STRIPE_PRICE_TEAM_ANNUAL"},
+    "business": {"label": "Business", "interval": "month", "grant": 6000, "monthly": 6000, "price_env": "STRIPE_PRICE_BUSINESS"},
+    "business_annual": {"label": "Business", "interval": "year", "grant": 72000, "monthly": 6000, "price_env": "STRIPE_PRICE_BUSINESS_ANNUAL"},
 }
 
-_SUB_PLAN_PRICE_ENV: Dict[str, str] = {
-    "team": "STRIPE_PRICE_TEAM",
-    "business": "STRIPE_PRICE_BUSINESS",
-}
+
+def _plan_grant(plan: str) -> int:
+    return int(_SUB_PLANS.get(plan, {}).get("grant", 0))
+
+
+def _plan_monthly(plan: str) -> Optional[int]:
+    meta = _SUB_PLANS.get(plan)
+    return int(meta["monthly"]) if meta else None
+
+
+# Conformance certificates are free for active subscribers; pay-as-you-go users
+# spend this many credits per issued certificate.
+_CERTIFICATE_CREDIT_COST = 2
 
 
 def _stripe_secret() -> Optional[str]:
@@ -83,10 +97,10 @@ def _price_id_for(tier: str) -> Optional[str]:
 
 
 def _sub_price_id_for(plan: str) -> Optional[str]:
-    env_name = _SUB_PLAN_PRICE_ENV.get(plan)
-    if not env_name:
+    meta = _SUB_PLANS.get(plan)
+    if not meta:
         return None
-    val = os.environ.get(env_name, "").strip()
+    val = os.environ.get(str(meta["price_env"]), "").strip()
     return val or None
 
 
@@ -159,6 +173,8 @@ class SubscriptionPlanDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan: str
+    label: str
+    interval: str  # "month" | "year"
     monthlyCredits: int
     priceConfigured: bool
 
@@ -174,7 +190,7 @@ class BillingConfigResponse(BaseModel):
 class CreateSubscriptionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    plan: Literal["team", "business"]
+    plan: Literal["team", "team_annual", "business", "business_annual"]
     success_url: str = Field(min_length=1, max_length=2000)
     cancel_url: str = Field(min_length=1, max_length=2000)
 
@@ -199,6 +215,31 @@ class PortalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str
+
+
+class IssueCertificateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=400)
+    conformanceClaim: str = Field(min_length=1, max_length=600)
+    score: int = Field(default=0, ge=0, le=100)
+    fixedCount: int = Field(default=0, ge=0)
+    remainingCount: int = Field(default=0, ge=0)
+
+
+class CertificateDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    certificateId: str
+    issuedAt: str
+    issuedTo: Optional[str] = None
+    filename: str
+    conformanceClaim: str
+    score: int
+    fixedCount: int
+    remainingCount: int
+    paidWith: str  # "subscription" | "credits"
+    verifyUrl: str
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +318,22 @@ def _verify_signature(payload: bytes, sig_header: str, secret: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _has_active_subscription(user_id: str) -> bool:
+    with session_scope() as session:
+        row = session.execute(
+            select(SubscriptionRow).where(
+                SubscriptionRow.user_id == user_id,
+                SubscriptionRow.status == "active",
+            )
+        ).scalars().first()
+        return row is not None
+
+
+def _verify_url_for(cert_id: str) -> str:
+    base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+    return f"{base}/billing/certificate/{cert_id}" if base else f"/billing/certificate/{cert_id}"
+
+
 @router.get("/config", response_model=BillingConfigResponse)
 async def billing_config() -> BillingConfigResponse:
     enabled = _stripe_secret() is not None
@@ -291,10 +348,12 @@ async def billing_config() -> BillingConfigResponse:
     plans = [
         SubscriptionPlanDTO(
             plan=p,
-            monthlyCredits=_SUB_PLAN_CREDITS[p],
+            label=str(meta["label"]),
+            interval=str(meta["interval"]),
+            monthlyCredits=int(meta["monthly"]),
             priceConfigured=_sub_price_id_for(p) is not None,
         )
-        for p in ("team", "business")
+        for p, meta in _SUB_PLANS.items()
     ]
     return BillingConfigResponse(enabled=enabled, tiers=tiers, subscriptionPlans=plans)
 
@@ -390,7 +449,7 @@ async def get_subscription(user_id: str = Depends(require_user_id)) -> Subscript
             plan=row.plan,
             status=row.status,
             currentPeriodEnd=(row.current_period_end.isoformat() if row.current_period_end else None),
-            monthlyCredits=_SUB_PLAN_CREDITS.get(row.plan),
+            monthlyCredits=_plan_monthly(row.plan),
         )
 
 
@@ -423,6 +482,91 @@ async def create_portal_session(
     if not isinstance(url, str) or not url:
         raise HTTPException(status_code=502, detail="stripe_error")
     return PortalResponse(url=url)
+
+
+@router.post("/issue-certificate", response_model=CertificateDTO)
+async def issue_certificate(
+    payload: IssueCertificateRequest,
+    user_id: str = Depends(require_user_id),
+) -> CertificateDTO:
+    """Issue a verifiable conformance certificate.
+
+    Free for active subscribers; otherwise spends a small number of credits
+    (402 if the caller has neither). The certificate is recorded so a third
+    party can verify it at GET /billing/certificate/{id}.
+    """
+    from app.api.credits import InsufficientCreditsError, spend_credits_for_user
+
+    paid_with = "subscription"
+    if not _has_active_subscription(user_id):
+        try:
+            spend_credits_for_user(
+                user_id=user_id,
+                amount=_CERTIFICATE_CREDIT_COST,
+                description="certificate_issued",
+            )
+        except InsufficientCreditsError:
+            raise HTTPException(status_code=402, detail="insufficient_credits")
+        paid_with = "credits"
+
+    now = datetime.utcnow()
+    cert_id = secrets.token_hex(8)  # 16 hex chars, unguessable
+    with session_scope() as session:
+        user = session.execute(
+            select(UserRow).where(UserRow.id == user_id)
+        ).scalar_one_or_none()
+        email = user.email if user else None
+        session.add(
+            CertificateRow(
+                id=cert_id,
+                user_id=user_id,
+                issued_email=email,
+                filename=payload.filename[:400],
+                conformance_claim=payload.conformanceClaim[:600],
+                score=int(payload.score),
+                fixed_count=int(payload.fixedCount),
+                remaining_count=int(payload.remainingCount),
+                paid_with=paid_with,
+                issued_at=now,
+            )
+        )
+        session.flush()
+
+    return CertificateDTO(
+        certificateId=cert_id,
+        issuedAt=now.isoformat(),
+        issuedTo=email,
+        filename=payload.filename,
+        conformanceClaim=payload.conformanceClaim,
+        score=int(payload.score),
+        fixedCount=int(payload.fixedCount),
+        remainingCount=int(payload.remainingCount),
+        paidWith=paid_with,
+        verifyUrl=_verify_url_for(cert_id),
+    )
+
+
+@router.get("/certificate/{cert_id}", response_model=CertificateDTO)
+async def verify_certificate(cert_id: str) -> CertificateDTO:
+    """Public: verify a previously-issued certificate by its id."""
+    with session_scope() as session:
+        row = session.execute(
+            select(CertificateRow).where(CertificateRow.id == cert_id)
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="certificate_not_found")
+        return CertificateDTO(
+            certificateId=row.id,
+            issuedAt=(row.issued_at.isoformat() if row.issued_at else ""),
+            issuedTo=row.issued_email,
+            filename=row.filename,
+            conformanceClaim=row.conformance_claim,
+            score=int(row.score),
+            fixedCount=int(row.fixed_count),
+            remainingCount=int(row.remaining_count),
+            paidWith=row.paid_with,
+            verifyUrl=_verify_url_for(row.id),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -492,11 +636,11 @@ def _handle_subscription_checkout(obj: Dict[str, Any]) -> Dict[str, Any]:
     plan = metadata.get("plan")
     sub_id = obj.get("subscription")
     customer_id = obj.get("customer")
-    if not user_id or plan not in _SUB_PLAN_CREDITS or not sub_id:
+    if not user_id or plan not in _SUB_PLANS or not sub_id:
         logger.warning("stripe sub checkout: missing user_id=%r plan=%r sub=%r", user_id, plan, sub_id)
         return {"received": True, "credited": False}
     _upsert_subscription(str(sub_id), str(user_id), str(plan), "active", str(customer_id) if customer_id else None, None)
-    granted = _grant_credits_idempotent(str(user_id), _SUB_PLAN_CREDITS[plan], "subscription", f"sub_init_{sub_id}")
+    granted = _grant_credits_idempotent(str(user_id), _plan_grant(plan), "subscription", f"sub_init_{sub_id}")
     return {"received": True, "subscription": sub_id, "credited": granted, "plan": plan}
 
 
@@ -518,7 +662,7 @@ def _handle_invoice_paid(obj: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning("invoice paid for unknown subscription %s", sub_id)
             return {"received": True, "credited": False, "reason": "unknown_subscription"}
         user_id, plan = row.user_id, row.plan
-    amount = _SUB_PLAN_CREDITS.get(plan)
+    amount = _plan_grant(plan)
     if not amount:
         return {"received": True, "credited": False, "reason": "unknown_plan"}
     granted = _grant_credits_idempotent(user_id, amount, "subscription", f"sub_invoice_{invoice_id}")
