@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,6 +15,7 @@ from app.persistence.db import get_repo
 
 router = APIRouter()
 REPO = get_repo()
+logger = logging.getLogger(__name__)
 
 
 class ManualReviewItem(BaseModel):
@@ -51,7 +53,7 @@ async def manual_review(_admin: UserRow = Depends(require_admin)) -> List[Manual
     # read their own items via the owner-protected
     # GET /documents/{doc_id}/manual-review route.
     items = REPO.list_manual_review_items()
-    print(f"[api] GET /manual-review count={len(items)}")
+    logger.info("GET /manual-review count=%s", len(items))
     return [ManualReviewItem(**item) for item in items]
 
 
@@ -75,7 +77,7 @@ async def clear_manual_review(
     # Clearing the entire global queue is a destructive cross-tenant action,
     # so it is admin-only. Per-item resolution uses PATCH /manual-review/{id}.
     cleared = REPO.clear_manual_review_items()
-    print(f"[api] DELETE /manual-review cleared={cleared}")
+    logger.info("DELETE /manual-review cleared=%s", cleared)
     return ManualReviewClearResponse(cleared=cleared)
 
 

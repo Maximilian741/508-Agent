@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,7 @@ from app.models.accessibility import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ScanRequest(BaseModel):
@@ -258,7 +260,7 @@ async def scan(
     request: ScanRequest,
     user_id: str = Depends(require_user_id),
 ) -> ScanResponse:
-    print(f"[api] POST /scan documentId={request.documentId} sourceFormat={request.sourceFormat}")
+    logger.info("POST /scan documentId=%s sourceFormat=%s", request.documentId, request.sourceFormat)
     tree = _build_tree(request)
     run_analyzers(tree, get_default_analyzers())
     issues = _build_issues(tree)
