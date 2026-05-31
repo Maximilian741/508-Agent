@@ -118,12 +118,72 @@ def _wrap_page_marked_content(writer: PdfWriter, page: Any, mcid: int = 0) -> bo
     return True
 
 
+def _page_content_bytes(page: Any) -> bytes:
+    """Best-effort decoded content bytes for a page (single or array streams)."""
+    try:
+        c = page.raw_get("/Contents") if "/Contents" in page else None
+    except Exception:
+        return b""
+    c = _resolve(c)
+    if c is None:
+        return b""
+    try:
+        if isinstance(c, ArrayObject):
+            parts = []
+            for item in c:
+                obj = _resolve(item)
+                if obj is not None:
+                    parts.append(obj.get_data())
+            return b"\n".join(parts)
+        return c.get_data()
+    except Exception:
+        return b""
+
+
+def _is_already_tagged(catalog: DictionaryObject) -> bool:
+    """True if the PDF already carries a structure tree / is marked Tagged.
+
+    We must NOT touch already-tagged PDFs: overwriting an existing
+    ``/StructTreeRoot`` destroys real structure, and prepending another
+    marked-content sequence collides MCIDs. For those we apply only safe,
+    additive document metadata and leave the structure alone.
+    """
+    try:
+        if _resolve(catalog.get("/StructTreeRoot")) is not None:
+            return True
+        mi = _resolve(catalog.get("/MarkInfo"))
+        if isinstance(mi, DictionaryObject) and bool(_resolve(mi.get("/Marked"))):
+            return True
+    except Exception:
+        return True  # if unsure, treat as tagged (never risk corruption)
+    return False
+
+
+def _is_taggable_page(page: Any) -> bool:
+    """A page we can safely wrap: has content and no existing marked content.
+
+    Skipping pages that already contain BDC/BMC avoids nesting real content or
+    artifacts (headers/footers/page numbers) inside our paragraph, and avoids
+    MCID collisions.
+    """
+    if "/Contents" not in page:
+        return False
+    data = _page_content_bytes(page)
+    if not data.strip():
+        return False
+    if b"BDC" in data or b"BMC" in data:
+        return False
+    return True
+
+
 def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
     """Add PDF/UA document metadata + a basic structure tree to ``writer``.
 
-    Never raises. Returns a report dict describing what was applied. The
-    structure-tree step is isolated so that, if anything goes wrong, the
-    document-level essentials still land and the PDF is never corrupted.
+    Never raises. Returns a report dict. Safe by construction:
+    * already-tagged PDFs keep their structure (only additive metadata is set);
+    * pages with existing marked content or no content are skipped;
+    * the structure step is isolated so a failure still lands metadata and
+      never corrupts the file.
     """
     report: Dict[str, Any] = {"applied": [], "structTree": False}
     applied: List[str] = report["applied"]
@@ -141,7 +201,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["error"] = f"no_catalog: {exc}"
         return report
 
-    # ---- Document-level essentials (low risk, always) --------------------
+    # ---- Document-level essentials (additive, safe even when tagged) ------
     try:
         if language:
             catalog[NameObject("/Lang")] = TextStringObject(str(language))
@@ -149,15 +209,18 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
     except Exception as exc:
         logger.debug("set /Lang failed: %s", exc)
 
-    try:
-        vp = _resolve(catalog.get("/ViewerPreferences"))
-        if not isinstance(vp, DictionaryObject):
-            vp = DictionaryObject()
-            catalog[NameObject("/ViewerPreferences")] = vp
-        vp[NameObject("/DisplayDocTitle")] = BooleanObject(True)
-        applied.append("display_doc_title")
-    except Exception as exc:
-        logger.debug("set DisplayDocTitle failed: %s", exc)
+    # Only declare DisplayDocTitle when there is actually a title to display,
+    # otherwise the viewer shows an empty title bar.
+    if title:
+        try:
+            vp = _resolve(catalog.get("/ViewerPreferences"))
+            if not isinstance(vp, DictionaryObject):
+                vp = DictionaryObject()
+                catalog[NameObject("/ViewerPreferences")] = vp
+            vp[NameObject("/DisplayDocTitle")] = BooleanObject(True)
+            applied.append("display_doc_title")
+        except Exception as exc:
+            logger.debug("set DisplayDocTitle failed: %s", exc)
 
     try:
         meta = DecodedStreamObject()
@@ -169,8 +232,18 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
     except Exception as exc:
         logger.debug("write XMP failed: %s", exc)
 
-    # ---- Structure tree (isolated; never corrupts) -----------------------
+    # ---- Never modify an already-tagged document's structure --------------
+    if _is_already_tagged(catalog):
+        report["alreadyTagged"] = True
+        return report
+
+    # ---- Structure tree over taggable pages only --------------------------
     try:
+        taggable = [p for p in writer.pages if _is_taggable_page(p)]
+        if not taggable:
+            report["structSkipped"] = "no_taggable_pages"
+            return report
+
         struct_root = DictionaryObject()
         struct_root_ref = writer._add_object(struct_root)  # noqa: SLF001
         doc_elem = DictionaryObject()
@@ -178,7 +251,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
 
         p_refs: List[IndirectObject] = []
         nums = ArrayObject()
-        for i, page in enumerate(writer.pages):
+        for key, page in enumerate(taggable):
             p_elem = DictionaryObject(
                 {
                     NameObject("/Type"): NameObject("/StructElem"),
@@ -192,10 +265,10 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
             p_refs.append(p_ref)
 
             _wrap_page_marked_content(writer, page, mcid=0)
-            page[NameObject("/StructParents")] = NumberObject(i)
+            page[NameObject("/StructParents")] = NumberObject(key)
             page[NameObject("/Tabs")] = NameObject("/S")
 
-            nums.append(NumberObject(i))
+            nums.append(NumberObject(key))
             nums.append(ArrayObject([p_ref]))
 
         doc_elem.update(

@@ -66,13 +66,20 @@ def write_remediated_pdf(
     except Exception as exc:  # pragma: no cover - filesystem errors
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": f"copy_failed: {exc}"}]}
 
+    # Open + clone inside one guard: PdfWriter(clone_from=...) raises on
+    # encrypted / malformed PDFs, and the documented contract is to fall back
+    # to the unchanged copy rather than crash the request.
     try:
         reader = PdfReader(str(output_path))
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")  # try the empty/owner password
+            except Exception:
+                pass
+        writer = PdfWriter(clone_from=reader)
     except Exception as exc:
         skipped.append({"target_id": str(source_path), "reason": f"failed_to_open_pdf: {exc}"})
         return {"applied": applied, "skipped": skipped}
-
-    writer = PdfWriter(clone_from=reader)
 
     # ------- 1. Document metadata -------------------------------------
     title = None
