@@ -51,7 +51,7 @@ from app.models.accessibility import (
     TableCellNode,
     TableCellType,
 )
-from app.parsers.pptx_parser import PPTXParser, _IdCounter
+from app.parsers.pptx_parser import PPTXParser, _IdCounter, _iter_shapes_recursive
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +220,7 @@ def _index_shapes_by_parser_id(
         if slide_title:
             ids(f"slide-{slide_index}-h")
 
-        for shape in slide.shapes:
+        for shape in _iter_shapes_recursive(slide.shapes):
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 node_id = ids(f"slide-{slide_index}-img")
                 image_by_node_id[node_id] = shape

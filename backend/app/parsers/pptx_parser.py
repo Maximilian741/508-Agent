@@ -67,7 +67,7 @@ class PPTXParser:
             slide_images = 0
             slide_tables = 0
             shape_positions: List[tuple[float, float]] = []
-            for shape in slide.shapes:
+            for shape in _iter_shapes_recursive(slide.shapes):
                 left = float(getattr(shape, "left", 0) or 0)
                 top = float(getattr(shape, "top", 0) or 0)
                 shape_positions.append((top, left))
@@ -232,7 +232,7 @@ class PPTXParser:
                     )
                 )
 
-            for shape in slide.shapes:
+            for shape in _iter_shapes_recursive(slide.shapes):
                 top = float(getattr(shape, "top", 0) or 0)
                 left = float(getattr(shape, "left", 0) or 0)
                 shape_meta_props = {"order_hint": (top, left)}
@@ -304,6 +304,31 @@ class _IdCounter:
         i = self._counts.get(prefix, 0) + 1
         self._counts[prefix] = i
         return f"{prefix}-{i}"
+
+
+def _iter_shapes_recursive(shapes):
+    """Yield shapes depth-first, descending into group shapes.
+
+    A group is a container, not content, so we yield its children (recursively)
+    rather than the group itself. Without this, pictures/tables nested in a
+    group are invisible to the analyzer — a common real-world false negative
+    ("no missing alt") for grouped images.
+
+    ``parse_to_tree`` and the writer's ``_index_shapes_by_parser_id`` MUST use
+    this same walker so the ids minted in iteration order stay aligned.
+    """
+    for shape in shapes:
+        try:
+            is_group = shape.shape_type == MSO_SHAPE_TYPE.GROUP
+        except Exception:
+            is_group = False
+        if is_group:
+            try:
+                yield from _iter_shapes_recursive(shape.shapes)
+            except Exception:
+                continue
+        else:
+            yield shape
 
 
 def _shape_descr(shape) -> str:
