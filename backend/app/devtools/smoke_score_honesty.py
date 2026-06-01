@@ -45,10 +45,11 @@ def main() -> int:
 
     viol = [_v(), _v()]
 
-    # DOCX: a link-text "success" is in-memory only (no writer) -> pending, not fixed.
+    # DOCX: a list-structure "success" is in-memory only (no writer) -> pending,
+    # not fixed; the document title write does persist.
     s = _build_score(
         violations=viol,
-        executions=[_ex("IMPROVE_LINK_TEXT"), _ex("SET_DOCUMENT_TITLE")],
+        executions=[_ex("FIX_LIST_STRUCTURE"), _ex("SET_DOCUMENT_TITLE")],
         source_format="docx",
     )
     check("docx: only persisted action counted as fixed", s.fixedAutomatically == 1)
@@ -77,7 +78,9 @@ def main() -> int:
     check("pptx alt text persists", _action_persists("GENERATE_ALT_TEXT", "pptx"))
     check("pdf alt text NOW persists (tagged as /Figure with /Alt)", _action_persists("GENERATE_ALT_TEXT", "pdf"))
     check("pdf heading LEVELS still do not persist (no H1/H2 tagging yet)", not _action_persists("NORMALIZE_HEADING_LEVEL", "pdf"))
-    check("docx link text does NOT persist", not _action_persists("IMPROVE_LINK_TEXT", "docx"))
+    check("docx link text NOW persists (link-text writer)", _action_persists("IMPROVE_LINK_TEXT", "docx"))
+    check("pptx link text NOW persists (link-text writer)", _action_persists("IMPROVE_LINK_TEXT", "pptx"))
+    check("pdf link text does NOT persist (no pdf link writer)", not _action_persists("IMPROVE_LINK_TEXT", "pdf"))
     check("docx list structure does NOT persist", not _action_persists("FIX_LIST_STRUCTURE", "docx"))
     check("reading order does NOT persist", not _action_persists("RESOLVE_READING_ORDER", "docx"))
     check("docx title persists", _action_persists("SET_DOCUMENT_TITLE", "docx"))

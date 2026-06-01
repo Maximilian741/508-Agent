@@ -45,6 +45,7 @@ from app.models.accessibility import (
     DocumentNode,
     HeadingNode,
     ImageNode,
+    LinkNode,
     ParagraphNode,
     TableCellNode,
     TableCellType,
@@ -131,6 +132,7 @@ def write_remediated_docx(
     image_by_rid = _index_image_doc_pr_by_rid(doc)
     table_rows_by_id = _index_table_rows_by_parser_id(doc)
     table_cells_by_id = _index_table_cells_by_parser_id(doc)
+    hyperlink_by_id = _index_hyperlinks_by_parser_id(doc)
 
     # Step 4: walk the mutated tree and apply each supported mutation.  Order
     # is intentional — document-level metadata first, then per-node updates.
@@ -139,6 +141,8 @@ def write_remediated_docx(
     for node in mutated_index.values():
         if isinstance(node, ImageNode):
             _apply_image(node, image_by_rid, applied, skipped)
+        elif isinstance(node, LinkNode):
+            _apply_link(node, hyperlink_by_id, applied, skipped)
         elif isinstance(node, HeadingNode):
             _apply_heading(node, paragraph_by_id, applied, skipped)
         elif isinstance(node, TableCellNode):
@@ -451,6 +455,58 @@ def _apply_image(
             "summary": f"docPr[@rid={rid}] x{len(doc_prs)} descr={alt_text!r}",
         }
     )
+
+
+def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
+    """Map ``docx-link-N`` ids to their ``<w:hyperlink>`` element.
+
+    Mirrors the parser walk exactly (``doc.paragraphs`` then ``.//w:hyperlink``,
+    skipping hyperlinks with no visible text) so ids align.
+    """
+    out: Dict[str, Any] = {}
+    n = 0
+    for para in doc.paragraphs:
+        for hyperlink in para._p.iterfind(f".//{qn('w:hyperlink')}"):
+            text = "".join((t.text or "") for t in hyperlink.iterfind(f".//{qn('w:t')}")).strip()
+            if not text:
+                continue
+            n += 1
+            out[f"docx-link-{n}"] = hyperlink
+    return out
+
+
+def _apply_link(
+    link: LinkNode,
+    hyperlink_by_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Rewrite a hyperlink's display text (e.g. 'click here' -> 'Visit example.com').
+
+    The new text replaces the first text run; remaining runs in the hyperlink are
+    cleared. The link target and the first run's formatting are preserved.
+    """
+    hyperlink = hyperlink_by_id.get(link.id)
+    if hyperlink is None:
+        skipped.append({"target_id": link.id, "reason": "hyperlink_not_found_in_source"})
+        return
+    new_text = (link.content.text or "").strip() if link.content else ""
+    if not new_text:
+        skipped.append({"target_id": link.id, "reason": "empty_link_text"})
+        return
+    t_elems = list(hyperlink.iterfind(f".//{qn('w:t')}"))
+    if not t_elems:
+        skipped.append({"target_id": link.id, "reason": "no_text_run_in_hyperlink"})
+        return
+    current = "".join((t.text or "") for t in t_elems).strip()
+    if current == new_text:
+        skipped.append({"target_id": link.id, "reason": "no_change_required"})
+        return
+    t_elems[0].text = new_text
+    t_elems[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    for t in t_elems[1:]:
+        t.text = ""
+    applied.append({"kind": "link_text", "target_id": link.id, "summary": f"{current!r} -> {new_text!r}"})
 
 
 def _apply_heading(

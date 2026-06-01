@@ -48,10 +48,16 @@ from app.models.accessibility import (
     AccessibilityTree,
     DocumentNode,
     ImageNode,
+    LinkNode,
     TableCellNode,
     TableCellType,
 )
-from app.parsers.pptx_parser import PPTXParser, _IdCounter, _iter_shapes_recursive
+from app.parsers.pptx_parser import (
+    PPTXParser,
+    _IdCounter,
+    _iter_hyperlink_groups,
+    _iter_shapes_recursive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +135,7 @@ def write_remediated_pptx(
 
     # Step 3 — build per-id lookups against the *output* deck using the same
     # visit-order the parser uses.
-    image_by_node_id, cell_by_node_id = _index_shapes_by_parser_id(prs)
+    image_by_node_id, cell_by_node_id, link_by_node_id = _index_shapes_by_parser_id(prs)
 
     # Step 4 — document-level metadata (title, language) first.
     _apply_document_metadata(prs, tree.root, applied, skipped)
@@ -140,6 +146,8 @@ def write_remediated_pptx(
     for node in mutated_index.values():
         if isinstance(node, ImageNode):
             _apply_image(node, image_by_node_id, applied, skipped)
+        elif isinstance(node, LinkNode):
+            _apply_pptx_link(node, link_by_node_id, applied, skipped)
         elif isinstance(node, TableCellNode):
             _apply_table_cell(
                 node,
@@ -187,23 +195,57 @@ def _index_tree(tree: Optional[AccessibilityTree]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _apply_pptx_link(
+    link: LinkNode,
+    link_by_node_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Rewrite a hyperlink's display text. The link may span several runs (one
+    visual link split across runs); the canonical text goes in the first run and
+    the rest are cleared. python-pptx's ``run.text`` setter preserves each run's
+    formatting and its ``a:hlinkClick`` (the link)."""
+    runs = link_by_node_id.get(link.id)
+    if not runs:
+        skipped.append({"target_id": link.id, "reason": "link_run_not_found"})
+        return
+    if not isinstance(runs, list):
+        runs = [runs]
+    new_text = (link.content.text or "").strip() if link.content else ""
+    if not new_text:
+        skipped.append({"target_id": link.id, "reason": "empty_link_text"})
+        return
+    current = "".join((r.text or "") for r in runs).strip()
+    if current == new_text:
+        skipped.append({"target_id": link.id, "reason": "no_change_required"})
+        return
+    try:
+        runs[0].text = new_text
+        for r in runs[1:]:
+            r.text = ""
+    except Exception as exc:  # pragma: no cover - defensive
+        skipped.append({"target_id": link.id, "reason": f"failed_to_set_link_text:{exc}"})
+        return
+    applied.append({"kind": "link_text", "target_id": link.id, "summary": f"{current!r} -> {new_text!r}"})
+
+
 def _index_shapes_by_parser_id(
     prs,
-) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int, int]]]:
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int, int]], Dict[str, Any]]:
     """Walk ``prs`` exactly the way :func:`PPTXParser.parse_to_tree` does and
     pair each minted id with the underlying python-pptx object.
 
-    Returns two dicts:
+    Returns three dicts:
 
     * ``image_by_node_id`` — ``{node_id: shape}`` for picture shapes.
     * ``cell_by_node_id`` — ``{node_id: (table_shape, row_index, col_index)}``
-      for table cells.  We carry the table shape (so we can reach
-      ``table._tbl``) plus the cell's grid position so the table-header
-      mutation can promote the right row.
+      for table cells.
+    * ``link_by_node_id`` — ``{node_id: run}`` for hyperlink runs.
     """
 
     image_by_node_id: Dict[str, Any] = {}
     cell_by_node_id: Dict[str, Tuple[Any, int, int]] = {}
+    link_by_node_id: Dict[str, Any] = {}
 
     ids = _IdCounter()
 
@@ -243,16 +285,12 @@ def _index_shapes_by_parser_id(
                 # Paragraph id allocated by the parser; we don't need it but
                 # the counter must advance.
                 ids(f"slide-{slide_index}-p")
-                # Hyperlinks inside runs each consume a link-id.
+                # Hyperlinks inside runs each consume a link-id (adjacent
+                # same-address runs are coalesced, mirroring the parser).
                 try:
                     for paragraph in shape.text_frame.paragraphs:
-                        for run in paragraph.runs:
-                            try:
-                                href = run.hyperlink.address
-                            except Exception:
-                                href = None
-                            if href:
-                                ids(f"slide-{slide_index}-link")
+                        for _href, runs in _iter_hyperlink_groups(paragraph):
+                            link_by_node_id[ids(f"slide-{slide_index}-link")] = runs
                 except Exception:
                     # Defensive — text_frame parsing rarely fails but a
                     # corrupted shape shouldn't take down id alignment.
@@ -260,7 +298,7 @@ def _index_shapes_by_parser_id(
                         "skip_text_frame_walk slide=%s", slide_index, exc_info=True
                     )
 
-    return image_by_node_id, cell_by_node_id
+    return image_by_node_id, cell_by_node_id, link_by_node_id
 
 
 # ---------------------------------------------------------------------------

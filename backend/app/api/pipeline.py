@@ -631,12 +631,14 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         "ADD_TABLE_HEADERS",
+        "IMPROVE_LINK_TEXT",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",
         "SET_DOCUMENT_LANGUAGE",
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
+        "IMPROVE_LINK_TEXT",
     },
     "pdf": {
         "SET_DOCUMENT_TITLE",
