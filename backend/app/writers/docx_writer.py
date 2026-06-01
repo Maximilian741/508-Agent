@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from app.models.accessibility import (
@@ -261,7 +262,9 @@ def _record_doc_pr(drawing, out: Dict[str, Any]) -> None:
         doc_pr = drawing.find(f".//{_DRAWINGML_NS}docPr")
     if doc_pr is None:
         return
-    out.setdefault(rid, doc_pr)
+    # Collect EVERY occurrence — the same image (rId) may be inserted multiple
+    # times, and each visual instance needs its own docPr updated.
+    out.setdefault(rid, []).append(doc_pr)
 
 
 def _index_table_rows_by_parser_id(doc) -> Dict[str, Any]:
@@ -301,6 +304,34 @@ def _index_table_cells_by_parser_id(doc) -> Dict[str, Tuple[Any, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _set_docx_default_lang(doc, language: str) -> None:
+    """Set ``w:lang`` on the document defaults (``styles.xml``).
+
+    Screen readers and the Word Accessibility Checker read the document language
+    from ``w:lang`` (docDefaults / run properties), NOT from the Dublin Core
+    ``dc:language`` core property. Setting only the latter does not make content
+    speak in the right language — so we set the run-default ``w:lang`` here.
+    """
+    styles_el = doc.styles.element  # <w:styles>
+    doc_defaults = styles_el.find(qn("w:docDefaults"))
+    if doc_defaults is None:
+        doc_defaults = OxmlElement("w:docDefaults")
+        styles_el.insert(0, doc_defaults)
+    rpr_default = doc_defaults.find(qn("w:rPrDefault"))
+    if rpr_default is None:
+        rpr_default = OxmlElement("w:rPrDefault")
+        doc_defaults.append(rpr_default)
+    rpr = rpr_default.find(qn("w:rPr"))
+    if rpr is None:
+        rpr = OxmlElement("w:rPr")
+        rpr_default.append(rpr)
+    lang = rpr.find(qn("w:lang"))
+    if lang is None:
+        lang = OxmlElement("w:lang")
+        rpr.append(lang)
+    lang.set(qn("w:val"), language)
+
+
 def _apply_document_metadata(
     doc,
     root: DocumentNode,
@@ -325,6 +356,20 @@ def _apply_document_metadata(
         except Exception as exc:  # pragma: no cover - python-docx setter rarely fails
             skipped.append(
                 {"target_id": root.id, "reason": f"failed_to_set_language: {exc}"}
+            )
+        # The accessibility-relevant location: w:lang on the document defaults.
+        try:
+            _set_docx_default_lang(doc, language)
+            applied.append(
+                {
+                    "kind": "document_language_wlang",
+                    "target_id": root.id,
+                    "summary": f"w:lang = {language!r}",
+                }
+            )
+        except Exception as exc:
+            skipped.append(
+                {"target_id": root.id, "reason": f"failed_to_set_wlang: {exc}"}
             )
 
     title = (root.metadata.properties.get("title") if root.metadata.properties else None) or ""
@@ -363,24 +408,26 @@ def _apply_image(
     if not rid:
         skipped.append({"target_id": image.id, "reason": "image_rid_missing_on_node"})
         return
-    doc_pr = image_by_rid.get(rid)
-    if doc_pr is None:
+    doc_prs = image_by_rid.get(rid)
+    if not doc_prs:
         skipped.append({"target_id": image.id, "reason": f"image_rid_not_found_in_source:{rid}"})
         return
+    if not isinstance(doc_prs, list):  # back-compat if ever a single element
+        doc_prs = [doc_prs]
 
     if image.is_decorative:
-        # Decorative: descr must be empty AND hidden=1.  Some readers also
-        # honor a title attribute, so we clear that too for safety.
-        doc_pr.set("descr", "")
-        if doc_pr.get("title"):
-            doc_pr.set("title", "")
-        if doc_pr.get("hidden") not in {"1", "true"}:
-            doc_pr.set("hidden", "1")
+        # Decorative: descr must be empty AND hidden=1 on every instance.
+        for doc_pr in doc_prs:
+            doc_pr.set("descr", "")
+            if doc_pr.get("title"):
+                doc_pr.set("title", "")
+            if doc_pr.get("hidden") not in {"1", "true"}:
+                doc_pr.set("hidden", "1")
         applied.append(
             {
                 "kind": "image_decorative",
                 "target_id": image.id,
-                "summary": f"docPr[@rid={rid}] descr='' hidden=1",
+                "summary": f"docPr[@rid={rid}] x{len(doc_prs)} descr='' hidden=1",
             }
         )
         return
@@ -392,16 +439,16 @@ def _apply_image(
         skipped.append({"target_id": image.id, "reason": "alt_text_empty_and_not_decorative"})
         return
 
-    doc_pr.set("descr", alt_text)
-    # If the image used to be decorative we also clear the hidden flag so
-    # screen readers will announce the new alt text.
-    if doc_pr.get("hidden") in {"1", "true"}:
-        doc_pr.set("hidden", "0")
+    # Write the alt text to EVERY visual instance of this image.
+    for doc_pr in doc_prs:
+        doc_pr.set("descr", alt_text)
+        if doc_pr.get("hidden") in {"1", "true"}:
+            doc_pr.set("hidden", "0")
     applied.append(
         {
             "kind": "image_alt_text",
             "target_id": image.id,
-            "summary": f"docPr[@rid={rid}] descr={alt_text!r}",
+            "summary": f"docPr[@rid={rid}] x{len(doc_prs)} descr={alt_text!r}",
         }
     )
 

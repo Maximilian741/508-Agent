@@ -81,6 +81,7 @@ class AccessibilityFlagCode(str, Enum):
     TABLE_CAPTION_MISSING = "TABLE_CAPTION_MISSING"
     LINK_TARGET_BROKEN = "LINK_TARGET_BROKEN"
     LOW_CONTRAST_TEXT = "LOW_CONTRAST_TEXT"
+    FORM_FIELD_UNLABELED = "FORM_FIELD_UNLABELED"
 
 
 class StandardReference(BaseModel):
@@ -249,6 +250,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["1.4.3"],
             section_508=["E205.4"],
             pdf_ua=[],
+        ),
+    ),
+    AccessibilityFlagCode.FORM_FIELD_UNLABELED: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.FORM_FIELD_UNLABELED,
+        severity=Severity.ERROR,
+        message="One or more form fields are missing an accessible label.",
+        standards=StandardReference(
+            wcag_2_1=["3.3.2", "4.1.2"],
+            section_508=["E205.4"],
+            pdf_ua=["7.18-1"],
         ),
     ),
 }

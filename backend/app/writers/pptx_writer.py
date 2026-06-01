@@ -268,6 +268,31 @@ def _index_shapes_by_parser_id(
 # ---------------------------------------------------------------------------
 
 
+def _set_pptx_run_langs(prs, language: str) -> int:
+    """Set ``lang`` on every text run's ``a:rPr`` so AT speaks the right language.
+
+    PowerPoint/screen readers read spoken language from the run-level ``lang``
+    attribute, not ``docProps/core.xml``. Returns the number of runs touched.
+    """
+    count = 0
+    for slide in prs.slides:
+        for shape in _iter_shapes_recursive(slide.shapes):
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            try:
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        try:
+                            rpr = run._r.get_or_add_rPr()
+                            rpr.set("lang", language)
+                            count += 1
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+    return count
+
+
 def _apply_document_metadata(
     prs,
     root: DocumentNode,
@@ -310,6 +335,21 @@ def _apply_document_metadata(
         except Exception as exc:  # pragma: no cover
             skipped.append(
                 {"target_id": root.id, "reason": f"failed_to_set_language:{exc}"}
+            )
+        # Screen readers read the spoken language from each run's a:rPr@lang,
+        # not from core properties — set it on every text run.
+        try:
+            n = _set_pptx_run_langs(prs, language)
+            applied.append(
+                {
+                    "kind": "document_language_runs",
+                    "target_id": root.id,
+                    "summary": f"a:rPr@lang = {language!r} on {n} run(s)",
+                }
+            )
+        except Exception as exc:
+            skipped.append(
+                {"target_id": root.id, "reason": f"failed_to_set_run_lang:{exc}"}
             )
 
 
