@@ -480,11 +480,7 @@ export interface IssuedCertificate {
  * neither, so the caller can route them to billing.
  */
 export async function issueCertificate(payload: {
-  filename: string;
-  score: number;
-  fixedCount: number;
-  remainingCount: number;
-  sourceFormat?: string;
+  documentId: string;
 }): Promise<IssuedCertificate> {
   const res = await apiFetch("/billing/issue-certificate", {
     method: "POST",

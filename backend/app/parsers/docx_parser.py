@@ -221,7 +221,7 @@ class DOCXParser:
                     ListItemNode(
                         id=ids("docx-li"),
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "•"),
-                        metadata=NodeMetadata(source_format="docx"),
+                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph)),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -240,7 +240,7 @@ class DOCXParser:
                         id=ids("docx-h"),
                         level=heading_level,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "Heading"),
-                        metadata=NodeMetadata(source_format="docx"),
+                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph)),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -261,7 +261,7 @@ class DOCXParser:
                     ParagraphNode(
                         id=ids("docx-p"),
                         content=NodeContent(kind=ContentKind.TEXT, text=text),
-                        metadata=NodeMetadata(source_format="docx"),
+                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph)),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -297,6 +297,57 @@ _DOCX_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relations
 _DRAWING_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 _DRAWINGML_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _PIC_NS = "{http://schemas.openxmlformats.org/drawingml/2006/picture}"
+
+
+def _explicit_run_colors(paragraph) -> List[Dict[str, Any]]:
+    """Per-run explicit sRGB colours (for contrast analysis).
+
+    Only runs with a concrete RGB colour are returned; theme/auto/inherited
+    colours yield ``None`` from python-docx and are skipped, so we never guess.
+    """
+    out: List[Dict[str, Any]] = []
+    for run in getattr(paragraph, "runs", []) or []:
+        if not (run.text or "").strip():
+            continue
+        try:
+            rgb = run.font.color.rgb  # RGBColor only when explicitly RGB
+        except Exception:
+            rgb = None
+        if rgb is None:
+            continue
+        size_pt = None
+        try:
+            if run.font.size is not None:
+                size_pt = float(run.font.size.pt)
+        except Exception:
+            size_pt = None
+        out.append({"c": str(rgb), "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
+    return out
+
+
+def _paragraph_bg(paragraph) -> Optional[str]:
+    """Explicit paragraph shading fill (``w:shd@w:fill``) if a real colour."""
+    try:
+        shd = paragraph._p.find(f"{_DOCX_NS}pPr/{_DOCX_NS}shd")
+        if shd is not None:
+            fill = shd.get(f"{_DOCX_NS}fill")
+            if fill and fill.lower() not in ("auto",):
+                return fill
+    except Exception:
+        pass
+    return None
+
+
+def _text_color_props(paragraph) -> Dict[str, Any]:
+    """Build the ``metadata.properties`` carrying contrast inputs (or empty)."""
+    colors = _explicit_run_colors(paragraph)
+    if not colors:
+        return {}
+    props: Dict[str, Any] = {"explicit_text_colors": colors}
+    bg = _paragraph_bg(paragraph)
+    if bg:
+        props["bg_color"] = bg
+    return props
 _REL_IMAGE_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 

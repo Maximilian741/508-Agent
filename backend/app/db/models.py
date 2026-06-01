@@ -285,3 +285,31 @@ class TeamInviteRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     accepted_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AnalysisResultRow(Base):
+    """A server-computed analysis score, persisted per (user, document).
+
+    A certificate is bound to one of these rows so its score / issue counts are
+    the server's own measurement — never numbers supplied by the client.
+    """
+
+    __tablename__ = "analysis_results"
+    __table_args__ = (
+        UniqueConstraint("user_id", "document_id", name="uq_analysis_user_doc"),
+        Index("idx_analysis_user", "user_id"),
+    )
+
+    # id = f"{user_id}::{document_id}" so /analyze can upsert deterministically.
+    id: Mapped[str] = mapped_column(String(260), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    document_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    source_format: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    initial_issues: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fixed_automatically: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_manual: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    grade: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

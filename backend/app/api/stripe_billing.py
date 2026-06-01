@@ -269,11 +269,9 @@ class PortalResponse(BaseModel):
 class IssueCertificateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    filename: str = Field(min_length=1, max_length=400)
-    score: int = Field(default=0, ge=0, le=100)
-    fixedCount: int = Field(default=0, ge=0)
-    remainingCount: int = Field(default=0, ge=0)
-    sourceFormat: Optional[str] = Field(default=None, max_length=16)
+    # The certificate is bound to a server-side analysis; the client supplies
+    # only which analyzed document to certify (never the score/claim).
+    documentId: str = Field(min_length=1, max_length=128)
 
 
 class CertificateDTO(BaseModel):
@@ -646,16 +644,30 @@ async def issue_certificate(
     payload: IssueCertificateRequest,
     user_id: str = Depends(require_user_id),
 ) -> CertificateDTO:
-    """Issue a verifiable conformance certificate.
+    """Issue a verifiable remediation-summary certificate.
 
-    Free for active subscribers; otherwise spends a small number of credits
-    (402 if the caller has neither). The certificate is recorded so a third
-    party can verify it at GET /billing/certificate/{id}.
+    The score and issue counts are taken from the caller's own server-side
+    ``/pipeline/analyze`` of this document (looked up by ``documentId``), never
+    from the client — so a caller cannot mint a certificate asserting more than
+    the server actually measured. Requires that the document was analyzed first
+    (400 otherwise). Free for active subscribers; otherwise spends credits.
     """
     from app.api.credits import InsufficientCreditsError, spend_credits_for_user
     from app.api.teams import resolve_credit_user_id
+    from app.db.models import AnalysisResultRow
 
-    # Team members inherit the owner's subscription benefit and shared wallet.
+    # 1. Bind to a real, server-computed analysis owned by the caller.
+    rid = f"{user_id}::{payload.documentId}"
+    with session_scope() as session:
+        rec = session.get(AnalysisResultRow, rid)
+        if rec is None:
+            raise HTTPException(status_code=400, detail="analyze_required")
+        filename = rec.filename or payload.documentId
+        score_val = int(rec.score)
+        fixed_val = int(rec.fixed_automatically)
+        remaining_val = int(rec.pending_manual)
+
+    # 2. Gate on subscription / credits (team members use the owner's wallet).
     holder = resolve_credit_user_id(user_id)
     paid_with = "subscription"
     if not _has_active_subscription(holder):
@@ -669,9 +681,8 @@ async def issue_certificate(
             raise HTTPException(status_code=402, detail="insufficient_credits")
         paid_with = "credits"
 
-    # The claim is generated server-side and is intentionally an honest
-    # "automated remediation summary", never a client-supplied conformance claim.
-    claim = _summary_claim(payload.score, payload.fixedCount, payload.remainingCount)
+    # 3. Honest claim, generated server-side from the server's own numbers.
+    claim = _summary_claim(score_val, fixed_val, remaining_val)
 
     now = datetime.utcnow()
     cert_id = secrets.token_hex(8)  # 16 hex chars, unguessable
@@ -685,11 +696,11 @@ async def issue_certificate(
                 id=cert_id,
                 user_id=user_id,
                 issued_email=email,
-                filename=payload.filename[:400],
+                filename=str(filename)[:400],
                 conformance_claim=claim[:600],
-                score=int(payload.score),
-                fixed_count=int(payload.fixedCount),
-                remaining_count=int(payload.remainingCount),
+                score=score_val,
+                fixed_count=fixed_val,
+                remaining_count=remaining_val,
                 paid_with=paid_with,
                 issued_at=now,
             )
@@ -700,11 +711,11 @@ async def issue_certificate(
         certificateId=cert_id,
         issuedAt=now.isoformat(),
         issuedTo=email,
-        filename=payload.filename,
+        filename=str(filename),
         conformanceClaim=claim,
-        score=int(payload.score),
-        fixedCount=int(payload.fixedCount),
-        remainingCount=int(payload.remainingCount),
+        score=score_val,
+        fixedCount=fixed_val,
+        remainingCount=remaining_val,
         paidWith=paid_with,
         verifyUrl=_verify_url_for(cert_id),
     )

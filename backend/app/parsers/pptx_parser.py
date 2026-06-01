@@ -15,6 +15,11 @@ from urllib.parse import urlparse
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+try:
+    from pptx.enum.dml import MSO_FILL
+except Exception:  # pragma: no cover - defensive
+    MSO_FILL = None
+
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -246,6 +251,10 @@ class PPTXParser:
                     text = (shape.text or "").strip()
                     if not text:
                         continue
+                    _props = dict(shape_meta_props)
+                    _cc = _contrast_props_for_shape(shape)
+                    if _cc:
+                        _props.update(_cc)
                     section.children.append(
                         ParagraphNode(
                             id=ids(f"slide-{slide_index}-p"),
@@ -253,7 +262,7 @@ class PPTXParser:
                             metadata=NodeMetadata(
                                 page=slide_index,
                                 source_format="pptx",
-                                properties=shape_meta_props,
+                                properties=_props,
                             ),
                             children=[],
                             accessibility_flags=[],
@@ -329,6 +338,60 @@ def _iter_shapes_recursive(shapes):
                 continue
         else:
             yield shape
+
+
+def _shape_bg_hex(shape) -> Optional[str]:
+    """Explicit solid-fill background colour of a shape, or None.
+
+    PPTX backgrounds are often theme/slide-level and not reliably knowable, so
+    we only report a background when the shape itself has an explicit solid RGB
+    fill. Text whose background we can't determine is left unevaluated (we never
+    assume white on a slide — that would false-flag light text on dark slides).
+    """
+    if MSO_FILL is None:
+        return None
+    try:
+        fill = shape.fill
+        if fill.type == MSO_FILL.SOLID:
+            rgb = fill.fore_color.rgb
+            if rgb is not None:
+                return str(rgb)
+    except Exception:
+        pass
+    return None
+
+
+def _contrast_props_for_shape(shape) -> Dict[str, Any]:
+    """Contrast inputs for a text shape: only when BOTH an explicit run colour
+    and an explicit shape background are known."""
+    bg = _shape_bg_hex(shape)
+    if not bg:
+        return {}
+    colors: List[Dict[str, Any]] = []
+    try:
+        tf = shape.text_frame
+    except Exception:
+        return {}
+    for para in tf.paragraphs:
+        for run in para.runs:
+            if not (run.text or "").strip():
+                continue
+            try:
+                rgb = run.font.color.rgb
+            except Exception:
+                rgb = None
+            if rgb is None:
+                continue
+            size_pt = None
+            try:
+                if run.font.size is not None:
+                    size_pt = float(run.font.size.pt)
+            except Exception:
+                size_pt = None
+            colors.append({"c": str(rgb), "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
+    if not colors:
+        return {}
+    return {"explicit_text_colors": colors, "bg_color": bg}
 
 
 def _shape_descr(shape) -> str:

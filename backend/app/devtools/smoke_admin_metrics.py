@@ -61,9 +61,15 @@ def main() -> int:
             created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
         ))
 
-    r = client.post("/billing/issue-certificate", headers=user_auth, json={
-        "filename": "u1.pdf", "score": 95, "fixedCount": 5, "remainingCount": 1,
-    })
+    from app.db.models import AnalysisResultRow
+    with session_scope() as s:
+        s.add(AnalysisResultRow(
+            id=f"{user_id}::u1", user_id=user_id, document_id="u1",
+            filename="u1.pdf", source_format="pdf", initial_issues=6,
+            fixed_automatically=5, pending_manual=1, score=95, grade="A",
+            created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        ))
+    r = client.post("/billing/issue-certificate", headers=user_auth, json={"documentId": "u1"})
     check("seed certificate issued", r.status_code == 200)
 
     r = client.post("/teams", headers=user_auth, json={"name": "U1 Team"})

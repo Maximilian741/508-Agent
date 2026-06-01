@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 
 from app.analyzers.base import Analyzer
+from app.analyzers.contrast_analyzer import ContrastAnalyzer
 from app.analyzers.document_analyzer import DocumentLanguageAnalyzer, DocumentTitleAnalyzer
 from app.analyzers.heading_analyzer import HeadingLevelJumpAnalyzer, SkippedHeadingLevelAnalyzer
 from app.analyzers.heading_text_analyzer import HeadingTextEmptyAnalyzer
@@ -34,6 +35,7 @@ def get_default_analyzers() -> List[Analyzer]:
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
         ReadingOrderAnalyzer(),
+        ContrastAnalyzer(),
     ]
 
 
