@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 from pypdf import PdfReader
 from pypdf.generic import (
     ArrayObject,
+    ContentStream,
     DictionaryObject,
     IndirectObject,
     NameObject,
@@ -126,6 +127,59 @@ def _document_language(reader: PdfReader) -> str:
     except Exception:
         lang = None
     return _safe_text(lang)
+
+
+def _channels_to_hex(ch) -> str:
+    r, g, b = (max(0, min(255, round(float(c) * 255))) for c in ch[:3])
+    return f"{r:02X}{g:02X}{b:02X}"
+
+
+def _cmyk_to_hex(ch) -> str:
+    c, m, y, k = (float(x) for x in ch[:4])
+    r = round(255 * (1 - c) * (1 - k))
+    g = round(255 * (1 - m) * (1 - k))
+    b = round(255 * (1 - y) * (1 - k))
+    return f"{max(0, min(255, r)):02X}{max(0, min(255, g)):02X}{max(0, min(255, b)):02X}"
+
+
+def _pdf_text_colors(reader: PdfReader) -> List[Dict[str, Any]]:
+    """Distinct (colour, size) used by text, scanned from content-stream fill
+    colour operators (rg / g / k). Default text colour is black.
+
+    Backgrounds in document PDFs are overwhelmingly white, so the contrast
+    analyzer compares these against white. (Coloured-background pages can
+    therefore be a false positive — disclosed as a known limitation.)
+    """
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for page in reader.pages:
+        try:
+            ops = ContentStream(page.get_contents(), reader).operations
+        except Exception:
+            continue
+        fill = "000000"
+        size = None
+        for operands, op in ops:
+            try:
+                if op == b"rg" and len(operands) >= 3:
+                    fill = _channels_to_hex(operands)
+                elif op == b"g" and len(operands) >= 1:
+                    v = max(0, min(255, round(float(operands[0]) * 255)))
+                    fill = f"{v:02X}{v:02X}{v:02X}"
+                elif op == b"k" and len(operands) >= 4:
+                    fill = _cmyk_to_hex(operands)
+                elif op == b"Tf" and len(operands) >= 2:
+                    size = float(operands[1])
+                elif op in (b"Tj", b"TJ", b"'", b'"'):
+                    key = (fill, size)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append({"c": fill, "sz": size, "b": False})
+            except (TypeError, ValueError):
+                continue
+        if len(out) > 64:  # representative sample is plenty
+            break
+    return out
 
 
 def _form_field_label_counts(reader: PdfReader) -> tuple[int, int]:
@@ -329,6 +383,11 @@ class PDFParser:
         if ff_total:
             properties["form_fields_total"] = ff_total
             properties["form_fields_unlabeled"] = ff_unlabeled
+        # Text colours from the content stream → contrast analysis (vs white).
+        text_colors = _pdf_text_colors(reader)
+        if text_colors:
+            properties["explicit_text_colors"] = text_colors
+            properties["bg_color"] = "FFFFFF"
 
         root = DocumentNode(
             id="doc-1",
