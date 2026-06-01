@@ -274,20 +274,16 @@ class PPTXParser:
                             accessibility_flags=[],
                         )
                     )
-                    # Hyperlinks within runs get their own LinkNode.
+                    # Hyperlinks within runs get their own LinkNode (adjacent
+                    # same-address runs are coalesced so the text isn't doubled).
                     for paragraph in shape.text_frame.paragraphs:
-                        for run in paragraph.runs:
-                            try:
-                                href = run.hyperlink.address
-                            except Exception:
-                                href = None
-                            if not href:
-                                continue
+                        for href, runs in _iter_hyperlink_groups(paragraph):
+                            text = "".join((r.text or "") for r in runs).strip() or "link"
                             section.children.append(
                                 LinkNode(
                                     id=ids(f"slide-{slide_index}-link"),
                                     target=str(href),
-                                    content=NodeContent(kind=ContentKind.TEXT, text=(run.text or "").strip() or "link"),
+                                    content=NodeContent(kind=ContentKind.TEXT, text=text),
                                     metadata=NodeMetadata(page=slide_index, source_format="pptx"),
                                     children=[],
                                     accessibility_flags=[],
@@ -487,6 +483,30 @@ def _contrast_props_for_shape(shape, theme_colors: Optional[Dict[str, str]] = No
     if not colors:
         return {}
     return {"explicit_text_colors": colors, "bg_color": bg}
+
+
+def _iter_hyperlink_groups(paragraph):
+    """Yield ``(href, [runs])`` for each hyperlink in a paragraph.
+
+    Consecutive runs sharing the same address are coalesced into ONE group —
+    PowerPoint frequently splits a single visual hyperlink across multiple runs,
+    and treating each as its own link would duplicate the rewritten text. Both
+    the parser and the writer use this so link ids stay aligned.
+    """
+    groups: List = []
+    prev_href = None
+    for run in getattr(paragraph, "runs", []) or []:
+        try:
+            href = run.hyperlink.address
+        except Exception:
+            href = None
+        if href:
+            if href == prev_href and groups:
+                groups[-1][1].append(run)
+            else:
+                groups.append((href, [run]))
+        prev_href = href
+    return groups
 
 
 def _shape_descr(shape) -> str:
