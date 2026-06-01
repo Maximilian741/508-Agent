@@ -80,6 +80,7 @@ class AccessibilityFlagCode(str, Enum):
     HEADING_TEXT_EMPTY = "HEADING_TEXT_EMPTY"
     TABLE_CAPTION_MISSING = "TABLE_CAPTION_MISSING"
     LINK_TARGET_BROKEN = "LINK_TARGET_BROKEN"
+    LOW_CONTRAST_TEXT = "LOW_CONTRAST_TEXT"
 
 
 class StandardReference(BaseModel):
@@ -238,6 +239,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["2.4.4"],
             section_508=["E205.4"],
             pdf_ua=["7.6-6"],
+        ),
+    ),
+    AccessibilityFlagCode.LOW_CONTRAST_TEXT: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.LOW_CONTRAST_TEXT,
+        severity=Severity.WARNING,
+        message="Text colour may not meet the WCAG AA minimum contrast ratio.",
+        standards=StandardReference(
+            wcag_2_1=["1.4.3"],
+            section_508=["E205.4"],
+            pdf_ua=[],
         ),
     ),
 }
