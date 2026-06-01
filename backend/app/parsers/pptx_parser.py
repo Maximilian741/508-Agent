@@ -8,10 +8,12 @@ dict-returning :meth:`PPTXParser.parse` plus a new
 from __future__ import annotations
 
 import base64
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from lxml import etree
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -186,6 +188,7 @@ class PPTXParser:
     def parse_to_tree(self, file_path: str) -> ParserResult:
         path = Path(file_path)
         prs = Presentation(file_path)
+        theme_colors = _pptx_theme_colors(file_path)
         title = (prs.core_properties.title or "").strip()
         language = (getattr(prs.core_properties, "language", None) or "").strip()
         properties: Dict[str, Any] = {"filename": path.name}
@@ -255,7 +258,7 @@ class PPTXParser:
                     if not text:
                         continue
                     _props = dict(shape_meta_props)
-                    _cc = _contrast_props_for_shape(shape)
+                    _cc = _contrast_props_for_shape(shape, theme_colors)
                     if _cc:
                         _props.update(_cc)
                     section.children.append(
@@ -368,9 +371,97 @@ def _shape_bg_hex(shape) -> Optional[str]:
     return None
 
 
-def _contrast_props_for_shape(shape) -> Dict[str, Any]:
-    """Contrast inputs for a text shape: only when BOTH an explicit run colour
-    and an explicit shape background are known."""
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+# a:schemeClr val -> theme clrScheme element name (standard colour map).
+_PPTX_SCHEME_MAP = {
+    "tx1": "dk1", "dk1": "dk1", "bg1": "lt1", "lt1": "lt1",
+    "tx2": "dk2", "dk2": "dk2", "bg2": "lt2", "lt2": "lt2",
+    "accent1": "accent1", "accent2": "accent2", "accent3": "accent3",
+    "accent4": "accent4", "accent5": "accent5", "accent6": "accent6",
+    "hlink": "hlink", "folHlink": "folHlink",
+}
+
+
+def _pptx_theme_colors(file_path: str) -> Dict[str, str]:
+    """Map theme colour-scheme names (dk1, lt1, accent1…) to RGB hex."""
+    out: Dict[str, str] = {}
+    try:
+        with zipfile.ZipFile(file_path) as z:
+            names = [n for n in z.namelist() if n.startswith("ppt/theme/theme") and n.endswith(".xml")]
+            if not names:
+                return {}
+            xml = z.read(sorted(names)[0])
+        root = etree.fromstring(xml)
+        scheme = root.find(f".//{_A_NS}clrScheme")
+        if scheme is None:
+            return {}
+        for child in scheme:
+            name = etree.QName(child).localname
+            srgb = child.find(f"{_A_NS}srgbClr")
+            sysclr = child.find(f"{_A_NS}sysClr")
+            if srgb is not None and srgb.get("val"):
+                out[name] = srgb.get("val").upper()
+            elif sysclr is not None and sysclr.get("lastClr"):
+                out[name] = sysclr.get("lastClr").upper()
+    except Exception:
+        return {}
+    return out
+
+
+def _apply_pptx_color_mods(hex_color: str, scheme_el) -> str:
+    """Apply a:lumMod / a:lumOff / a:tint / a:shade modifiers (RGB approximation)."""
+    try:
+        r = float(int(hex_color[0:2], 16))
+        g = float(int(hex_color[2:4], 16))
+        b = float(int(hex_color[4:6], 16))
+    except (ValueError, IndexError):
+        return hex_color
+    for mod in scheme_el:
+        tag = etree.QName(mod).localname
+        try:
+            val = int(mod.get("val", "0")) / 100000.0
+        except (TypeError, ValueError):
+            continue
+        if tag == "lumMod":
+            r, g, b = r * val, g * val, b * val
+        elif tag == "lumOff":
+            r, g, b = r + 255 * val, g + 255 * val, b + 255 * val
+        elif tag == "tint":  # toward white
+            r, g, b = r + (255 - r) * val, g + (255 - g) * val, b + (255 - b) * val
+        elif tag == "shade":  # toward black
+            r, g, b = r * val, g * val, b * val
+    return f"{max(0, min(255, round(r))):02X}{max(0, min(255, round(g))):02X}{max(0, min(255, round(b))):02X}"
+
+
+def _run_color_hex_pptx(run, theme_colors: Dict[str, str]) -> Optional[str]:
+    """Run text colour as RGB hex: explicit sRGB, or a resolved theme scheme
+    colour (with lum/tint/shade modifiers). ``None`` if unknown."""
+    try:
+        rgb = run.font.color.rgb
+    except Exception:
+        rgb = None
+    if rgb is not None:
+        return str(rgb)
+    if not theme_colors:
+        return None
+    try:
+        scheme_el = run._r.find(f"{_A_NS}rPr/{_A_NS}solidFill/{_A_NS}schemeClr")
+        if scheme_el is None:
+            return None
+        val = scheme_el.get("val")
+        base = theme_colors.get(_PPTX_SCHEME_MAP.get(val, val))
+        if not base:
+            return None
+        return _apply_pptx_color_mods(base, scheme_el)
+    except Exception:
+        return None
+
+
+def _contrast_props_for_shape(shape, theme_colors: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Contrast inputs for a text shape: only when BOTH a run colour (explicit or
+    resolved theme) and an explicit shape background are known."""
+    theme_colors = theme_colors or {}
     bg = _shape_bg_hex(shape)
     if not bg:
         return {}
@@ -383,11 +474,8 @@ def _contrast_props_for_shape(shape) -> Dict[str, Any]:
         for run in para.runs:
             if not (run.text or "").strip():
                 continue
-            try:
-                rgb = run.font.color.rgb
-            except Exception:
-                rgb = None
-            if rgb is None:
+            hex6 = _run_color_hex_pptx(run, theme_colors)
+            if not hex6:
                 continue
             size_pt = None
             try:
@@ -395,7 +483,7 @@ def _contrast_props_for_shape(shape) -> Dict[str, Any]:
                     size_pt = float(run.font.size.pt)
             except Exception:
                 size_pt = None
-            colors.append({"c": str(rgb), "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
+            colors.append({"c": hex6, "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
     if not colors:
         return {}
     return {"explicit_text_colors": colors, "bg_color": bg}
