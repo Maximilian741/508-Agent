@@ -57,19 +57,28 @@ class GenerateAltTextExecutor(RemediationExecutor):
                 status=ExecutionStatus.SKIPPED,
                 notes="Image is decorative; no alt text generated.",
             )
-        if target.alt_text and target.alt_text.strip():
+
+        has_missing = _has_alt_flag(plan, target, AccessibilityFlagCode.MISSING_ALT_TEXT)
+        has_nondescriptive = _has_alt_flag(
+            plan, target, AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE
+        )
+        if not has_missing and not has_nondescriptive:
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes="Image does not include an alt-text flag; no changes applied.",
+            )
+        existing_alt = (target.alt_text or "").strip()
+        # Existing alt is left alone UNLESS it was flagged non-descriptive (a
+        # filename / placeholder) — only then do we replace it. Good alt never
+        # carries that flag, so it is never overwritten.
+        if existing_alt and not has_nondescriptive:
             return ExecutionResult(
                 action_code=action_code,
                 target_node_id=plan.target_node_id,
                 status=ExecutionStatus.SKIPPED,
                 notes=f"Alt text already present: {target.alt_text!r}.",
-            )
-        if not _has_missing_alt_flag(plan, target):
-            return ExecutionResult(
-                action_code=action_code,
-                target_node_id=plan.target_node_id,
-                status=ExecutionStatus.SKIPPED,
-                notes="Image does not include a missing-alt-text flag; no changes applied.",
             )
 
         page = getattr(target.metadata, "page", None)
@@ -106,6 +115,7 @@ class GenerateAltTextExecutor(RemediationExecutor):
                 notes="Semantic provider returned empty alt text; no changes applied.",
             )
 
+        replaced = existing_alt
         target.alt_text = suggestion
         # Persist provenance so the UI/manual-review queue can reflect the source.
         # NodeMetadata.properties defaults to {} but ImageNode.model_construct
@@ -117,12 +127,16 @@ class GenerateAltTextExecutor(RemediationExecutor):
         target.metadata.properties["alt_text_confidence"] = round(result.confidence, 3)
         target.metadata.properties["alt_text_pending_review"] = True
 
+        if replaced:
+            action_note = f"Replaced non-descriptive alt {replaced!r} using {result.provider}"
+        else:
+            action_note = f"Generated alt text via {result.provider}"
         return ExecutionResult(
             action_code=action_code,
             target_node_id=plan.target_node_id,
             status=ExecutionStatus.SUCCESS,
             notes=(
-                f"Generated alt text via {result.provider} (confidence {result.confidence:.2f}). "
+                f"{action_note} (confidence {result.confidence:.2f}). "
                 f"Pending human review. Text={suggestion!r}."
             ),
         )
@@ -135,7 +149,9 @@ def _find_image_node(tree: AccessibilityTree, target_id: str) -> Optional[ImageN
     return None
 
 
-def _has_missing_alt_flag(plan: RemediationPlan, target: ImageNode) -> bool:
-    if plan.flag.code == AccessibilityFlagCode.MISSING_ALT_TEXT:
+def _has_alt_flag(
+    plan: RemediationPlan, target: ImageNode, code: AccessibilityFlagCode
+) -> bool:
+    if plan.flag.code == code:
         return True
-    return any(flag.code == AccessibilityFlagCode.MISSING_ALT_TEXT for flag in target.accessibility_flags)
+    return any(flag.code == code for flag in target.accessibility_flags)

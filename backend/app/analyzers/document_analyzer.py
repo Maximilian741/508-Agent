@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from app.analyzers.base import Analyzer
-from app.analyzers.helpers import attach_flag
+from app.analyzers.helpers import attach_flag, iter_nodes
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
+    HeadingNode,
+    ParagraphNode,
 )
+
+
+# A document needs at least this much running text before "no headings at all"
+# becomes a navigation problem worth flagging — keeps short notes/letters quiet.
+_NO_HEADINGS_MIN_PARAGRAPHS = 12
+_NO_HEADINGS_MIN_CHARS = 1200
 
 
 class DocumentLanguageAnalyzer(Analyzer):
@@ -59,3 +67,34 @@ class SlideTitleAnalyzer(Analyzer):
             missing = 0
         if missing > 0:
             attach_flag(tree.root, AccessibilityFlagCode.SLIDE_TITLE_MISSING)
+
+
+class DocumentHeadingsAnalyzer(Analyzer):
+    """Flag long documents that have no headings at all (WCAG 2.4.6 / 1.3.1).
+
+    Headings are how screen-reader and keyboard users skim and navigate; a
+    multi-page document with zero headings forces linear reading. Scoped to
+    page-flow formats (DOCX/PDF) — slide decks organise by slide title, not
+    headings, so PPTX is excluded to avoid false positives. Conservative
+    thresholds keep short letters/notes from being flagged."""
+
+    name = "document_no_headings"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        fmt = (tree.root.metadata.source_format or "").lower()
+        if fmt not in ("docx", "pdf"):
+            return
+
+        paragraphs = 0
+        chars = 0
+        for node in iter_nodes(tree):
+            if isinstance(node, HeadingNode):
+                return  # has at least one heading — nothing to flag
+            if isinstance(node, ParagraphNode):
+                text = (node.content.text or "").strip() if node.content else ""
+                if text:
+                    paragraphs += 1
+                    chars += len(text)
+
+        if paragraphs >= _NO_HEADINGS_MIN_PARAGRAPHS and chars >= _NO_HEADINGS_MIN_CHARS:
+            attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_NO_HEADINGS)

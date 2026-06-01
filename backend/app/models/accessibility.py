@@ -83,6 +83,8 @@ class AccessibilityFlagCode(str, Enum):
     LOW_CONTRAST_TEXT = "LOW_CONTRAST_TEXT"
     FORM_FIELD_UNLABELED = "FORM_FIELD_UNLABELED"
     SLIDE_TITLE_MISSING = "SLIDE_TITLE_MISSING"
+    ALT_TEXT_NOT_DESCRIPTIVE = "ALT_TEXT_NOT_DESCRIPTIVE"
+    DOCUMENT_NO_HEADINGS = "DOCUMENT_NO_HEADINGS"
 
 
 class StandardReference(BaseModel):
@@ -271,6 +273,26 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["2.4.2", "1.3.1"],
             section_508=["E205.4"],
             pdf_ua=[],
+        ),
+    ),
+    AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE,
+        severity=Severity.WARNING,
+        message="Image alternative text is a filename or generic placeholder, not a description.",
+        standards=StandardReference(
+            wcag_2_1=["1.1.1"],
+            section_508=["E205.1"],
+            pdf_ua=["7.1-4"],
+        ),
+    ),
+    AccessibilityFlagCode.DOCUMENT_NO_HEADINGS: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.DOCUMENT_NO_HEADINGS,
+        severity=Severity.WARNING,
+        message="Document has substantial text but no headings to organize it.",
+        standards=StandardReference(
+            wcag_2_1=["2.4.6", "1.3.1"],
+            section_508=["E207.2"],
+            pdf_ua=["7.3-1"],
         ),
     ),
 }
@@ -527,6 +549,17 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
         is_auto_applicable=False,
         supported_node_types=[NodeType.IMAGE],
         related_flag_code=AccessibilityFlagCode.MISSING_ALT_TEXT,
+        )
+    ],
+    AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE: [
+        RemediationAction(
+        action_code=ActionCode.GENERATE_ALT_TEXT,
+        description="Replace filename/placeholder alt text with a real description.",
+        requires_ai=True,
+        requires_human_review=True,
+        is_auto_applicable=False,
+        supported_node_types=[NodeType.IMAGE],
+        related_flag_code=AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE,
         )
     ],
     AccessibilityFlagCode.DECORATIVE_IMAGE_WITH_ALT: [

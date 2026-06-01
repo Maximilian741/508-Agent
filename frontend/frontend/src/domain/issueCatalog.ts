@@ -295,6 +295,101 @@ const C: Record<string, IssueCatalogEntry> = {
     },
     learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/link-purpose-in-context.html",
   },
+
+  ALT_TEXT_NOT_DESCRIPTIVE: {
+    ruleId: "ALT_TEXT_NOT_DESCRIPTIVE",
+    title: "Image alt text is a filename or placeholder",
+    summary: "Alt text reads like \"image1.png\" or \"Picture 1\" — it describes nothing.",
+    why:
+      "Alt text like a filename (\"DSC_0042.jpg\") or a generic placeholder (\"Picture 1\", \"image\") passes the does-it-have-alt check but tells a screen reader user nothing about what the image shows. WCAG 1.1.1 requires the text alternative to convey the image's purpose, not just exist.",
+    autoFix:
+      "We'll regenerate a real description (vision AI when configured, otherwise a heuristic from surrounding text) and replace the filename/placeholder. You review and approve before it's applied.",
+    manualJudgment:
+      "Always review the regenerated description — the model can be wrong about what the image shows or what's relevant in context.",
+    severity: "warning",
+    standards: {
+      wcag: ["1.1.1 Non-text Content"],
+      section508: ["E205.1"],
+      pdfUa: ["7.1-4"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/tutorials/images/",
+  },
+
+  DOCUMENT_NO_HEADINGS: {
+    ruleId: "DOCUMENT_NO_HEADINGS",
+    title: "Document has no headings",
+    summary: "A long document with no headings at all — nothing to navigate by.",
+    why:
+      "Headings are how screen-reader and keyboard users skim a document and jump to the part they need. A multi-page document with zero headings forces a slow, linear read from the top with no way to orient. WCAG 2.4.6 expects headings to organize substantial content.",
+    autoFix:
+      "We flag this for review — deciding which lines should become headings requires human judgment about the document's structure, so there's no safe automatic fix.",
+    manualJudgment:
+      "In the source document, apply real heading styles (Heading 1/2/3) to section titles so the outline becomes navigable. Don't just bold text — use the actual heading styles.",
+    severity: "warning",
+    standards: {
+      wcag: ["2.4.6 Headings and Labels", "1.3.1 Info and Relationships"],
+      section508: ["E207.2"],
+      pdfUa: ["7.3-1"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/tutorials/page-structure/headings/",
+  },
+
+  SLIDE_TITLE_MISSING: {
+    ruleId: "SLIDE_TITLE_MISSING",
+    title: "Slide has no title",
+    summary: "A slide is missing a title — the primary way to navigate a deck.",
+    why:
+      "Screen-reader users move through a presentation by slide title, and the title placeholder is what assistive tech announces when a slide opens. A slide with no title (or with text typed into a stray text box instead of the title placeholder) leaves users unsure where they are. WCAG 2.4.2 / 1.3.1.",
+    autoFix:
+      "We flag this for review — a meaningful slide title depends on the slide's content, so it needs human input rather than an automatic guess.",
+    manualJudgment:
+      "Add a title in the slide's Title placeholder (PowerPoint's Outline view is the fastest way). If a slide is intentionally title-less, give it a title and hide it off-canvas only as a last resort.",
+    severity: "error",
+    standards: {
+      wcag: ["2.4.2 Page Titled", "1.3.1 Info and Relationships"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Techniques/general/G91",
+  },
+
+  FORM_FIELD_UNLABELED: {
+    ruleId: "FORM_FIELD_UNLABELED",
+    title: "Form field has no label",
+    summary: "An interactive form field has no accessible name.",
+    why:
+      "When a screen reader lands on an unlabeled field it announces something like \"edit text, blank\" — the user has no idea what to type. Every input needs a programmatically associated label so its purpose is clear. WCAG 3.3.2 (Labels or Instructions) and 4.1.2 (Name, Role, Value).",
+    autoFix:
+      "We flag this for review — the correct label depends on what the field is for, which can't be inferred reliably.",
+    manualJudgment:
+      "Give the field an accessible name: in a PDF set the field's tooltip (TU); in Word give the content control a Title/Tag in its properties.",
+    severity: "error",
+    standards: {
+      wcag: ["3.3.2 Labels or Instructions", "4.1.2 Name, Role, Value"],
+      section508: ["E205.4"],
+      pdfUa: ["7.18-1"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/labels-or-instructions.html",
+  },
+
+  LOW_CONTRAST_TEXT: {
+    ruleId: "LOW_CONTRAST_TEXT",
+    title: "Text contrast may be too low",
+    summary: "Text colour may not meet the WCAG AA minimum against its background.",
+    why:
+      "Low-contrast text is hard to read for people with low vision, colour-vision deficiencies, or anyone on a dim screen or in bright light. WCAG 1.4.3 requires a contrast ratio of at least 4.5:1 for normal text (3:1 for large text) between the text and its background.",
+    autoFix:
+      "We flag this for review — recolouring text or backgrounds is a visual-design decision, so we detect the problem rather than silently changing your colours.",
+    manualJudgment:
+      "Darken the text or lighten the background until the ratio reaches 4.5:1 (3:1 for large/bold text). A contrast checker confirms the exact ratio. Note: contrast is only assessed where colours are explicit — inherited/themed colours and coloured-background pages still need a manual check.",
+    severity: "warning",
+    standards: {
+      wcag: ["1.4.3 Contrast (Minimum)"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html",
+  },
 };
 
 export function lookupIssue(ruleId: string): IssueCatalogEntry {
