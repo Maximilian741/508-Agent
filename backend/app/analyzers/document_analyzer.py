@@ -42,3 +42,20 @@ class FormFieldLabelAnalyzer(Analyzer):
             unlabeled = 0
         if unlabeled > 0:
             attach_flag(tree.root, AccessibilityFlagCode.FORM_FIELD_UNLABELED)
+
+
+class SlideTitleAnalyzer(Analyzer):
+    """Flag presentations where one or more slides lack a title (the #1
+    PowerPoint accessibility failure). The parser records the count on the
+    document root."""
+
+    name = "slide_title_missing"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        props = tree.root.metadata.properties or {}
+        try:
+            missing = int(props.get("slides_missing_titles") or 0)
+        except (TypeError, ValueError):
+            missing = 0
+        if missing > 0:
+            attach_flag(tree.root, AccessibilityFlagCode.SLIDE_TITLE_MISSING)

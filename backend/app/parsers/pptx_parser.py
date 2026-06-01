@@ -203,6 +203,7 @@ class PPTXParser:
             accessibility_flags=[],
         )
         ids = _IdCounter()
+        slides_missing_titles = 0
 
         for slide_index, slide in enumerate(prs.slides, start=1):
             slide_title = ""
@@ -211,6 +212,8 @@ class PPTXParser:
                     slide_title = slide.shapes.title.text.strip()
             except Exception:
                 slide_title = ""
+            if not slide_title:
+                slides_missing_titles += 1
 
             section = SectionNode(
                 id=ids(f"slide-{slide_index}-section"),
@@ -287,6 +290,10 @@ class PPTXParser:
                                     accessibility_flags=[],
                                 )
                             )
+
+        # Record per-deck slide-title coverage for the analyzer.
+        root.metadata.properties["slides_total"] = len(prs.slides)
+        root.metadata.properties["slides_missing_titles"] = slides_missing_titles
 
         raw_metadata = {
             "filename": path.name,

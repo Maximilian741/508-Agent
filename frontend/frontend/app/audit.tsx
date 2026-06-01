@@ -2318,8 +2318,8 @@ function _buildReportHtml(
 
       <div class="conformance-callout">
         <strong>Audit date:</strong> ${formattedDate}<br>
-        <strong>Automated checks performed:</strong> image alt text, heading structure, table headers, list structure, document title &amp; language, link text, colour contrast (WCAG 1.4.3) for explicitly-coloured text, and PDF form-field labels (3.3.2 / 4.1.2).<br>
-        <strong>Not evaluated — require manual review:</strong> colour contrast for theme/inherited colours, DOCX/PPTX form labels, reading order (1.3.2), document parsing (4.1.1), and other success criteria.<br>
+        <strong>Automated checks performed:</strong> image alt text, heading structure, table headers, list structure, slide titles, document title &amp; language, link text, colour contrast (WCAG 1.4.3 — explicit &amp; theme colours), and form-field labels (3.3.2 / 4.1.2 — PDF &amp; Word).<br>
+        <strong>Not evaluated — require manual review:</strong> colour contrast for PDF text &amp; inherited colours, reading order (1.3.2), document parsing (4.1.1), and other success criteria.<br>
         <strong>Methodology:</strong> Deterministic structural analyzers + heuristic / vision-AI suggestions for human review. This is an automated pre-scan, <strong>not</strong> a formal WCAG 2.1 / Section 508 conformance determination.
       </div>
       ${

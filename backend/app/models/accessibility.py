@@ -82,6 +82,7 @@ class AccessibilityFlagCode(str, Enum):
     LINK_TARGET_BROKEN = "LINK_TARGET_BROKEN"
     LOW_CONTRAST_TEXT = "LOW_CONTRAST_TEXT"
     FORM_FIELD_UNLABELED = "FORM_FIELD_UNLABELED"
+    SLIDE_TITLE_MISSING = "SLIDE_TITLE_MISSING"
 
 
 class StandardReference(BaseModel):
@@ -260,6 +261,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["3.3.2", "4.1.2"],
             section_508=["E205.4"],
             pdf_ua=["7.18-1"],
+        ),
+    ),
+    AccessibilityFlagCode.SLIDE_TITLE_MISSING: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.SLIDE_TITLE_MISSING,
+        severity=Severity.ERROR,
+        message="One or more slides are missing a title.",
+        standards=StandardReference(
+            wcag_2_1=["2.4.2", "1.3.1"],
+            section_508=["E205.4"],
+            pdf_ua=[],
         ),
     ),
 }

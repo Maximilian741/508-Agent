@@ -12,11 +12,13 @@ Two complementary entry points are exposed:
 from __future__ import annotations
 
 import base64
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from docx import Document
+from lxml import etree
 
 from app.models.accessibility import (
     AccessibilityTree,
@@ -167,6 +169,7 @@ class DOCXParser:
 
         path = Path(file_path)
         doc = Document(file_path)
+        theme_colors = _docx_theme_colors(file_path)
         core = doc.core_properties
 
         title = (core.title or "").strip()
@@ -174,6 +177,10 @@ class DOCXParser:
         properties: Dict[str, Any] = {"filename": path.name}
         if title:
             properties["title"] = title
+        ff_total, ff_unlabeled = _docx_form_field_counts(doc)
+        if ff_total:
+            properties["form_fields_total"] = ff_total
+            properties["form_fields_unlabeled"] = ff_unlabeled
         root = DocumentNode(
             id="doc-1",
             content=NodeContent(kind=ContentKind.NONE),
@@ -221,7 +228,7 @@ class DOCXParser:
                     ListItemNode(
                         id=ids("docx-li"),
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "•"),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph)),
+                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -240,7 +247,7 @@ class DOCXParser:
                         id=ids("docx-h"),
                         level=heading_level,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "Heading"),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph)),
+                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -261,7 +268,7 @@ class DOCXParser:
                     ParagraphNode(
                         id=ids("docx-p"),
                         content=NodeContent(kind=ContentKind.TEXT, text=text),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph)),
+                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -299,21 +306,111 @@ _DRAWINGML_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _PIC_NS = "{http://schemas.openxmlformats.org/drawingml/2006/picture}"
 
 
-def _explicit_run_colors(paragraph) -> List[Dict[str, Any]]:
-    """Per-run explicit sRGB colours (for contrast analysis).
+# w:themeColor attribute value -> clrScheme element name.
+_THEME_COLOR_MAP = {
+    "dark1": "dk1", "text1": "dk1",
+    "light1": "lt1", "background1": "lt1",
+    "dark2": "dk2", "text2": "dk2",
+    "light2": "lt2", "background2": "lt2",
+    "accent1": "accent1", "accent2": "accent2", "accent3": "accent3",
+    "accent4": "accent4", "accent5": "accent5", "accent6": "accent6",
+    "hyperlink": "hlink", "followedHyperlink": "folHlink",
+}
 
-    Only runs with a concrete RGB colour are returned; theme/auto/inherited
-    colours yield ``None`` from python-docx and are skipped, so we never guess.
+
+def _docx_theme_colors(file_path: str) -> Dict[str, str]:
+    """Map theme colour-scheme names (dk1, lt1, accent1…) to RGB hex."""
+    out: Dict[str, str] = {}
+    try:
+        with zipfile.ZipFile(file_path) as z:
+            names = [n for n in z.namelist() if n.startswith("word/theme/theme") and n.endswith(".xml")]
+            if not names:
+                return {}
+            xml = z.read(sorted(names)[0])
+        root = etree.fromstring(xml)
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        scheme = root.find(f".//{a}clrScheme")
+        if scheme is None:
+            return {}
+        for child in scheme:
+            name = etree.QName(child).localname
+            srgb = child.find(f"{a}srgbClr")
+            sysclr = child.find(f"{a}sysClr")
+            if srgb is not None and srgb.get("val"):
+                out[name] = srgb.get("val").upper()
+            elif sysclr is not None and sysclr.get("lastClr"):
+                out[name] = sysclr.get("lastClr").upper()
+    except Exception:
+        return {}
+    return out
+
+
+def _apply_tint_shade(hex_color: str, tint_hex: Optional[str], shade_hex: Optional[str]) -> str:
+    """Apply WordprocessingML w:themeTint / w:themeShade to a base RGB hex.
+
+    themeTint blends toward white (keep ``tint/255`` of the colour); themeShade
+    blends toward black (multiply by ``shade/255``).
     """
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+    except (ValueError, IndexError):
+        return hex_color
+    if tint_hex:
+        try:
+            t = int(tint_hex, 16) / 255.0
+            r = round(r * t + 255 * (1 - t)); g = round(g * t + 255 * (1 - t)); b = round(b * t + 255 * (1 - t))
+        except ValueError:
+            pass
+    if shade_hex:
+        try:
+            s = int(shade_hex, 16) / 255.0
+            r = round(r * s); g = round(g * s); b = round(b * s)
+        except ValueError:
+            pass
+    return f"{max(0, min(255, r)):02X}{max(0, min(255, g)):02X}{max(0, min(255, b)):02X}"
+
+
+def _run_color_hex(run, theme_colors: Dict[str, str]) -> Optional[str]:
+    """The run's effective text colour as RGB hex: explicit sRGB, or a resolved
+    theme colour (with tint/shade). ``None`` for auto/inherited/unknown."""
+    try:
+        rgb = run.font.color.rgb  # RGBColor only when explicitly sRGB
+    except Exception:
+        rgb = None
+    if rgb is not None:
+        return str(rgb)
+    # Theme colour via the underlying w:color element.
+    try:
+        color_el = run._element.find(f".//{_DOCX_NS}rPr/{_DOCX_NS}color")
+        if color_el is None:
+            return None
+        tc = color_el.get(f"{_DOCX_NS}themeColor")
+        if not tc or not theme_colors:
+            return None
+        base = theme_colors.get(_THEME_COLOR_MAP.get(tc, tc))
+        if not base:
+            return None
+        return _apply_tint_shade(
+            base,
+            color_el.get(f"{_DOCX_NS}themeTint"),
+            color_el.get(f"{_DOCX_NS}themeShade"),
+        )
+    except Exception:
+        return None
+
+
+def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Per-run text colours (for contrast analysis): explicit sRGB *and* resolved
+    theme colours. Auto/inherited/unknown colours are skipped, never guessed."""
+    theme_colors = theme_colors or {}
     out: List[Dict[str, Any]] = []
     for run in getattr(paragraph, "runs", []) or []:
         if not (run.text or "").strip():
             continue
-        try:
-            rgb = run.font.color.rgb  # RGBColor only when explicitly RGB
-        except Exception:
-            rgb = None
-        if rgb is None:
+        hex6 = _run_color_hex(run, theme_colors)
+        if not hex6:
             continue
         size_pt = None
         try:
@@ -321,7 +418,7 @@ def _explicit_run_colors(paragraph) -> List[Dict[str, Any]]:
                 size_pt = float(run.font.size.pt)
         except Exception:
             size_pt = None
-        out.append({"c": str(rgb), "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
+        out.append({"c": hex6, "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
     return out
 
 
@@ -338,9 +435,9 @@ def _paragraph_bg(paragraph) -> Optional[str]:
     return None
 
 
-def _text_color_props(paragraph) -> Dict[str, Any]:
+def _text_color_props(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Build the ``metadata.properties`` carrying contrast inputs (or empty)."""
-    colors = _explicit_run_colors(paragraph)
+    colors = _explicit_run_colors(paragraph, theme_colors)
     if not colors:
         return {}
     props: Dict[str, Any] = {"explicit_text_colors": colors}
@@ -348,6 +445,28 @@ def _text_color_props(paragraph) -> Dict[str, Any]:
     if bg:
         props["bg_color"] = bg
     return props
+
+
+def _docx_form_field_counts(doc) -> "tuple[int, int]":
+    """Return ``(total, unlabeled)`` content controls (``w:sdt``).
+
+    A content control's accessible label is its ``w:alias`` (the title). One
+    with no alias has no accessible name. Reuses the same root-metadata keys as
+    the PDF AcroForm check so a single analyzer flags both.
+    """
+    total = 0
+    unlabeled = 0
+    try:
+        body = doc.element.body
+        for sdt in body.iter(f"{_DOCX_NS}sdt"):
+            total += 1
+            alias = sdt.find(f"{_DOCX_NS}sdtPr/{_DOCX_NS}alias")
+            val = alias.get(f"{_DOCX_NS}val") if alias is not None else None
+            if not val or not str(val).strip():
+                unlabeled += 1
+    except Exception:
+        return (total, unlabeled)
+    return (total, unlabeled)
 _REL_IMAGE_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 
