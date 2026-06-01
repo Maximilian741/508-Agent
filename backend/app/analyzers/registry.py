@@ -7,6 +7,7 @@ from typing import Iterable, List, Optional
 from app.analyzers.base import Analyzer
 from app.analyzers.contrast_analyzer import ContrastAnalyzer
 from app.analyzers.document_analyzer import (
+    DocumentHeadingsAnalyzer,
     DocumentLanguageAnalyzer,
     DocumentTitleAnalyzer,
     FormFieldLabelAnalyzer,
@@ -14,7 +15,11 @@ from app.analyzers.document_analyzer import (
 )
 from app.analyzers.heading_analyzer import HeadingLevelJumpAnalyzer, SkippedHeadingLevelAnalyzer
 from app.analyzers.heading_text_analyzer import HeadingTextEmptyAnalyzer
-from app.analyzers.image_analyzer import DecorativeImageAltAnalyzer, MissingAltTextAnalyzer
+from app.analyzers.image_analyzer import (
+    DecorativeImageAltAnalyzer,
+    MissingAltTextAnalyzer,
+    NonDescriptiveAltTextAnalyzer,
+)
 from app.analyzers.link_analyzer import LinkTextAnalyzer
 from app.analyzers.link_target_analyzer import LinkTargetBrokenAnalyzer
 from app.analyzers.list_analyzer import ListStructureAnalyzer
@@ -28,6 +33,7 @@ def get_default_analyzers() -> List[Analyzer]:
     return [
         MissingAltTextAnalyzer(),
         DecorativeImageAltAnalyzer(),
+        NonDescriptiveAltTextAnalyzer(),
         HeadingLevelJumpAnalyzer(),
         SkippedHeadingLevelAnalyzer(),
         HeadingTextEmptyAnalyzer(),
@@ -39,6 +45,7 @@ def get_default_analyzers() -> List[Analyzer]:
         LinkTargetBrokenAnalyzer(),
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
+        DocumentHeadingsAnalyzer(),
         ReadingOrderAnalyzer(),
         ContrastAnalyzer(),
         FormFieldLabelAnalyzer(),
