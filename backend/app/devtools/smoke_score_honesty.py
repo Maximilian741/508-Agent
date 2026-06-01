@@ -54,14 +54,15 @@ def main() -> int:
     check("docx: only persisted action counted as fixed", s.fixedAutomatically == 1)
     check("docx: non-persisted success counted as pending", s.pendingManual == 1)
 
-    # PDF output is untagged: structural successes do not persist -> only metadata counts.
+    # PDF heading-LEVEL structure is not written (text blocks are tagged /P, not
+    # H1/H2), so NORMALIZE_HEADING_LEVEL does not persist; metadata does.
     s2 = _build_score(
         violations=viol,
         executions=[_ex("NORMALIZE_HEADING_LEVEL"), _ex("SET_DOCUMENT_LANGUAGE")],
         source_format="pdf",
     )
-    check("pdf: structural success not counted (untagged output)", s2.fixedAutomatically == 1)
-    check("pdf: structural success counted pending", s2.pendingManual == 1)
+    check("pdf: heading-level success not counted (not written as H1/H2)", s2.fixedAutomatically == 1)
+    check("pdf: heading-level success counted pending", s2.pendingManual == 1)
 
     # A flag-for-manual-review "success" must never count as a fix.
     s3 = _build_score(
@@ -74,7 +75,8 @@ def main() -> int:
     # _action_persists matrix sanity.
     check("docx alt text persists", _action_persists("GENERATE_ALT_TEXT", "docx"))
     check("pptx alt text persists", _action_persists("GENERATE_ALT_TEXT", "pptx"))
-    check("pdf alt text does NOT persist (untagged)", not _action_persists("GENERATE_ALT_TEXT", "pdf"))
+    check("pdf alt text NOW persists (tagged as /Figure with /Alt)", _action_persists("GENERATE_ALT_TEXT", "pdf"))
+    check("pdf heading LEVELS still do not persist (no H1/H2 tagging yet)", not _action_persists("NORMALIZE_HEADING_LEVEL", "pdf"))
     check("docx link text does NOT persist", not _action_persists("IMPROVE_LINK_TEXT", "docx"))
     check("docx list structure does NOT persist", not _action_persists("FIX_LIST_STRUCTURE", "docx"))
     check("reading order does NOT persist", not _action_persists("RESOLVE_READING_ORDER", "docx"))
