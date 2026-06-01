@@ -35,6 +35,7 @@ from pypdf import PdfWriter
 from pypdf.generic import (
     ArrayObject,
     BooleanObject,
+    ContentStream,
     DecodedStreamObject,
     DictionaryObject,
     IndirectObject,
@@ -176,6 +177,96 @@ def _is_taggable_page(page: Any) -> bool:
     return True
 
 
+def _build_alt_by_xobject(tree: AccessibilityTree) -> Dict[str, str]:
+    """Map image XObject name -> alt text, for tagging Figures in the tree."""
+    out: Dict[str, str] = {}
+    try:
+        from app.models.accessibility import ImageNode, iter_reading_order
+
+        for node in iter_reading_order(tree.root):
+            if isinstance(node, ImageNode) and not node.is_decorative and node.alt_text:
+                xname = (node.metadata.properties or {}).get("xobject")
+                if isinstance(xname, str) and xname:
+                    out[xname.lstrip("/")] = str(node.alt_text)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return out
+
+
+def _count_text_ops(ops) -> int:
+    return sum(1 for _, opc in ops if opc in (b"Tj", b"TJ", b"'", b'"'))
+
+
+def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
+    """Per-element marked content for one page.
+
+    Each ``BT … ET`` text block becomes its own ``/P`` and each image ``Do`` with
+    known alt text becomes a ``/Figure``. Returns a list of ``{"s", "alt"}`` specs
+    (mcid = list index) or ``None`` to signal the caller to fall back to safe
+    page-level wrapping. Bails (returns None) on anything unexpected so a page is
+    never half-tagged or corrupted.
+    """
+    try:
+        contents = page.get_contents()
+        if contents is None:
+            return None
+        cs = ContentStream(contents, pdf)
+        ops = cs.operations
+    except Exception:
+        return None
+    if not ops:
+        return None
+
+    orig_text = _count_text_ops(ops)
+    new_ops = []
+    specs = []
+    mcid = 0
+    block = None  # operations between BT and ET
+    for operands, op in ops:
+        if op == b"BT":
+            block = [(operands, op)]
+        elif op == b"ET" and block is not None:
+            block.append((operands, op))
+            new_ops.append(([NameObject("/P"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
+            new_ops.extend(block)
+            new_ops.append(([], b"EMC"))
+            specs.append({"s": "/P", "alt": None})
+            mcid += 1
+            block = None
+        elif block is not None:
+            block.append((operands, op))
+        elif op == b"Do":
+            xname = str(operands[0]).lstrip("/") if operands else ""
+            alt = alt_by_xobject.get(xname)
+            if alt:
+                new_ops.append(([NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
+                new_ops.append((operands, op))
+                new_ops.append(([], b"EMC"))
+                specs.append({"s": "/Figure", "alt": alt})
+                mcid += 1
+            else:
+                new_ops.append((operands, op))
+        else:
+            new_ops.append((operands, op))
+
+    if block is not None:  # unterminated BT — don't risk it
+        return None
+    if not specs:
+        return None
+    if _count_text_ops(new_ops) != orig_text:  # text must be preserved exactly
+        return None
+
+    cs.operations = new_ops
+    try:
+        new_data = cs.get_data()
+    except Exception:
+        return None
+    ns = DecodedStreamObject()
+    ns.set_data(new_data)
+    page[NameObject("/Contents")] = pdf._add_object(ns)  # noqa: SLF001
+    return specs
+
+
 def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
     """Add PDF/UA document metadata + a basic structure tree to ``writer``.
 
@@ -249,34 +340,49 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         doc_elem = DictionaryObject()
         doc_elem_ref = writer._add_object(doc_elem)  # noqa: SLF001
 
-        p_refs: List[IndirectObject] = []
+        alt_by_xobject = _build_alt_by_xobject(tree)
+        elem_refs: List[IndirectObject] = []  # all struct elems, reading order
         nums = ArrayObject()
+        figures = 0
+        per_element_pages = 0
         for key, page in enumerate(taggable):
-            p_elem = DictionaryObject(
-                {
-                    NameObject("/Type"): NameObject("/StructElem"),
-                    NameObject("/S"): NameObject("/P"),
-                    NameObject("/P"): doc_elem_ref,
-                    NameObject("/Pg"): page.indirect_reference,
-                    NameObject("/K"): NumberObject(0),
-                }
-            )
-            p_ref = writer._add_object(p_elem)  # noqa: SLF001
-            p_refs.append(p_ref)
+            specs = _tag_page_elements(writer, page, alt_by_xobject)
+            if specs is None:
+                # Safe fallback: page-level single /P (original bytes untouched).
+                _wrap_page_marked_content(writer, page, mcid=0)
+                specs = [{"s": "/P", "alt": None}]
+            else:
+                per_element_pages += 1
 
-            _wrap_page_marked_content(writer, page, mcid=0)
+            page_refs: List[IndirectObject] = []
+            for mcid, spec in enumerate(specs):
+                elem = DictionaryObject(
+                    {
+                        NameObject("/Type"): NameObject("/StructElem"),
+                        NameObject("/S"): NameObject(spec["s"]),
+                        NameObject("/P"): doc_elem_ref,
+                        NameObject("/Pg"): page.indirect_reference,
+                        NameObject("/K"): NumberObject(mcid),
+                    }
+                )
+                if spec.get("alt"):
+                    elem[NameObject("/Alt")] = TextStringObject(str(spec["alt"]))
+                    figures += 1
+                ref = writer._add_object(elem)  # noqa: SLF001
+                page_refs.append(ref)
+                elem_refs.append(ref)
+
             page[NameObject("/StructParents")] = NumberObject(key)
             page[NameObject("/Tabs")] = NameObject("/S")
-
             nums.append(NumberObject(key))
-            nums.append(ArrayObject([p_ref]))
+            nums.append(ArrayObject(page_refs))
 
         doc_elem.update(
             {
                 NameObject("/Type"): NameObject("/StructElem"),
                 NameObject("/S"): NameObject("/Document"),
                 NameObject("/P"): struct_root_ref,
-                NameObject("/K"): ArrayObject(p_refs),
+                NameObject("/K"): ArrayObject(elem_refs),
             }
         )
         parent_tree = DictionaryObject({NameObject("/Nums"): nums})
@@ -286,7 +392,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                 NameObject("/Type"): NameObject("/StructTreeRoot"),
                 NameObject("/K"): ArrayObject([doc_elem_ref]),
                 NameObject("/ParentTree"): parent_tree_ref,
-                NameObject("/ParentTreeNextKey"): NumberObject(len(p_refs)),
+                NameObject("/ParentTreeNextKey"): NumberObject(len(taggable)),
             }
         )
         catalog[NameObject("/StructTreeRoot")] = struct_root_ref
@@ -295,7 +401,10 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
             {NameObject("/Marked"): BooleanObject(True)}
         )
         report["structTree"] = True
-        report["pages"] = len(p_refs)
+        report["pages"] = len(taggable)
+        report["elements"] = len(elem_refs)
+        report["figures"] = figures
+        report["perElementPages"] = per_element_pages
         applied.append("struct_tree")
         applied.append("mark_info")
     except Exception as exc:

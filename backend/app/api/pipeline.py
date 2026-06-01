@@ -641,6 +641,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
     "pdf": {
         "SET_DOCUMENT_TITLE",
         "SET_DOCUMENT_LANGUAGE",
+        # Images are now tagged as /Figure with /Alt in the structure tree
+        # (plus /Alt on the XObject), so alt text genuinely persists for PDF.
+        "GENERATE_ALT_TEXT",
+        "REMOVE_DECORATIVE_ALT_TEXT",
     },
 }
 

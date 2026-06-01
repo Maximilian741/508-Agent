@@ -27,6 +27,7 @@ from pypdf.generic import (  # noqa: E402
     DecodedStreamObject,
     DictionaryObject,
     NameObject,
+    NumberObject,
 )
 
 from app.models.accessibility import DocumentNode  # noqa: E402
@@ -205,6 +206,59 @@ def main() -> int:
         km = _g(st_m, "/K")
         doc_m = (km[0].get_object() if km and hasattr(km[0], "get_object") else (km[0] if km else None))
     check("mixed: only the clean page is in the struct tree (1 P)", doc_m is not None and len(_g(doc_m, "/K")) == 1)
+
+    # ---- Case 6: per-element tagging (multi-block text + image -> Figure) ---
+    pe = tmp / "perel.pdf"
+    w = PdfWriter()
+    page = w.add_blank_page(width=400, height=300)
+    img = DecodedStreamObject()
+    img.set_data(bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0]))
+    for k, v in {
+        "/Type": NameObject("/XObject"), "/Subtype": NameObject("/Image"),
+        "/Width": NumberObject(2), "/Height": NumberObject(2),
+        "/ColorSpace": NameObject("/DeviceRGB"), "/BitsPerComponent": NumberObject(8),
+    }.items():
+        img[NameObject(k)] = v
+    img_ref = w._add_object(img)  # noqa: SLF001
+    content = b"BT /F1 18 Tf 20 250 Td (Heading block) Tj ET\nBT /F1 12 Tf 20 200 Td (Paragraph block) Tj ET\nq 50 0 0 50 100 80 cm /Im0 Do Q"
+    cs = DecodedStreamObject(); cs.set_data(content)
+    page[NameObject("/Contents")] = w._add_object(cs)  # noqa: SLF001
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): w._add_object(font)}),  # noqa: SLF001
+        NameObject("/XObject"): DictionaryObject({NameObject("/Im0"): img_ref}),
+    })
+    with open(pe, "wb") as fh:
+        w.write(fh)
+
+    # Set alt on the parsed image, then remediate.
+    from app.models.accessibility import ImageNode, iter_reading_order
+    res = parse_to_tree(str(pe))
+    for n in iter_reading_order(res.tree.root):
+        if isinstance(n, ImageNode):
+            n.alt_text = "A coloured test figure"; n.is_decorative = False
+    if isinstance(res.tree.root, DocumentNode):
+        res.tree.root.metadata.properties = dict(res.tree.root.metadata.properties or {})
+        res.tree.root.metadata.properties["title"] = "Per Element"; res.tree.root.metadata.language = "en"
+    pe_out = tmp / "perel_out.pdf"
+    write_remediated(pe, res.tree, pe_out, source_format=res.format)
+
+    rp = PdfReader(str(pe_out))
+    st_p = _g(_g(rp.trailer, "/Root"), "/StructTreeRoot")
+    doc_p = None
+    if st_p is not None:
+        kp = _g(st_p, "/K")
+        doc_p = (kp[0].get_object() if kp and hasattr(kp[0], "get_object") else (kp[0] if kp else None))
+    specs = [str(_g(k.get_object() if hasattr(k, "get_object") else k, "/S")) for k in (_g(doc_p, "/K") or [])] if doc_p else []
+    check("per-element: 2 paragraphs + 1 figure", specs.count("/P") == 2 and specs.count("/Figure") == 1)
+    # the Figure carries alt
+    fig_alt = ""
+    for k in (_g(doc_p, "/K") or []):
+        el = k.get_object() if hasattr(k, "get_object") else k
+        if str(_g(el, "/S")) == "/Figure":
+            fig_alt = str(_g(el, "/Alt") or "")
+    check("per-element: figure has /Alt in the tree", "coloured test figure" in fig_alt)
+    check("per-element: all text still extracts", all(s in (rp.pages[0].extract_text() or "") for s in ["Heading block", "Paragraph block"]))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
