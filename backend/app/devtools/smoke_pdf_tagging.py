@@ -250,7 +250,7 @@ def main() -> int:
         kp = _g(st_p, "/K")
         doc_p = (kp[0].get_object() if kp and hasattr(kp[0], "get_object") else (kp[0] if kp else None))
     specs = [str(_g(k.get_object() if hasattr(k, "get_object") else k, "/S")) for k in (_g(doc_p, "/K") or [])] if doc_p else []
-    check("per-element: 2 paragraphs + 1 figure", specs.count("/P") == 2 and specs.count("/Figure") == 1)
+    check("per-element: heading + paragraph + figure", specs.count("/H1") == 1 and specs.count("/P") == 1 and specs.count("/Figure") == 1)
     # the Figure carries alt
     fig_alt = ""
     for k in (_g(doc_p, "/K") or []):
@@ -259,6 +259,62 @@ def main() -> int:
             fig_alt = str(_g(el, "/Alt") or "")
     check("per-element: figure has /Alt in the tree", "coloured test figure" in fig_alt)
     check("per-element: all text still extracts", all(s in (rp.pages[0].extract_text() or "") for s in ["Heading block", "Paragraph block"]))
+
+    # ---- Case 7: heading-level detection by font size ----------------------
+    hp = tmp / "headings.pdf"
+    w = PdfWriter()
+    page = w.add_blank_page(width=400, height=300)
+    content = (
+        b"BT /F1 24 Tf 20 260 Td (Big Heading) Tj ET\n"
+        b"BT /F1 12 Tf 20 230 Td (Body paragraph one) Tj ET\n"
+        b"BT /F1 12 Tf 20 200 Td (Body paragraph two) Tj ET\n"
+        b"BT /F1 18 Tf 20 170 Td (Sub Heading) Tj ET"
+    )
+    cs = DecodedStreamObject(); cs.set_data(content)
+    page[NameObject("/Contents")] = w._add_object(cs)  # noqa: SLF001
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): w._add_object(font)})})  # noqa: SLF001
+    with open(hp, "wb") as fh:
+        w.write(fh)
+    hp_out = tmp / "headings_out.pdf"
+    _remediate(hp, hp_out, title="Headings", lang="en")
+    rh = PdfReader(str(hp_out))
+    st_h = _g(_g(rh.trailer, "/Root"), "/StructTreeRoot")
+    doc_h = None
+    if st_h is not None:
+        kh = _g(st_h, "/K")
+        doc_h = (kh[0].get_object() if kh and hasattr(kh[0], "get_object") else (kh[0] if kh else None))
+    hspecs = [str(_g(k.get_object() if hasattr(k, "get_object") else k, "/S")) for k in (_g(doc_h, "/K") or [])] if doc_h else []
+    check("heading detection: 24pt->H1, 12pt body->P, 18pt->H2", hspecs == ["/H1", "/P", "/P", "/H2"])
+
+    # ---- Case 8: adversarial content-stream cases (expert findings) --------
+    def _one_page(content_bytes: bytes) -> bytes:
+        w2 = PdfWriter()
+        pg = w2.add_blank_page(width=400, height=300)
+        c = DecodedStreamObject(); c.set_data(content_bytes)
+        pg[NameObject("/Contents")] = w2._add_object(c)  # noqa: SLF001
+        fnt = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+        pg[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): w2._add_object(fnt)})})  # noqa: SLF001
+        p = tmp / f"adv_{abs(hash(content_bytes)) % 99999}.pdf"
+        with open(p, "wb") as fh:
+            w2.write(fh)
+        o = p.with_name(p.stem + "_out.pdf")
+        _remediate(p, o, title="Adv", lang="en")
+        return _content_bytes(PdfReader(str(o)).pages[0])
+
+    # 8a: visible text containing the acronym "BDC" must NOT exclude the page.
+    out_bdc = _one_page(b"BT /F1 12 Tf 20 250 Td (Report by the BDC team) Tj ET")
+    check("acronym 'BDC' in visible text still gets tagged", out_bdc.count(b"BDC") >= 1)
+
+    # 8b: graphics state (cm transform + rg colour) is preserved through re-serialization.
+    gstate = b"q 1 0 0 1 10 10 cm 0.2 0.4 0.6 rg BT /F1 12 Tf 20 250 Td (Coloured text) Tj ET Q"
+    out_g = _one_page(gstate)
+    check("graphics-state ops (cm + rg) preserved", b"cm" in out_g and b"rg" in out_g)
+    check("graphics-state page got tagged", out_g.count(b"BDC") >= 1)
+
+    # 8c: unterminated BT must fall back to the safe page-level wrap (1 BDC), not corrupt.
+    out_bad = _one_page(b"BT /F1 12 Tf 20 250 Td (Unterminated block) Tj")
+    check("unterminated BT -> safe fallback, still wrapped once", out_bad.count(b"BDC") == 1)
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

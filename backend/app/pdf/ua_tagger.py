@@ -29,6 +29,7 @@ improvement over untagged output, and we never claim full PDF/UA conformance.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from pypdf import PdfWriter
@@ -160,21 +161,29 @@ def _is_already_tagged(catalog: DictionaryObject) -> bool:
     return False
 
 
-def _is_taggable_page(page: Any) -> bool:
+def _is_taggable_page(pdf, page: Any) -> bool:
     """A page we can safely wrap: has content and no existing marked content.
 
-    Skipping pages that already contain BDC/BMC avoids nesting real content or
-    artifacts (headers/footers/page numbers) inside our paragraph, and avoids
-    MCID collisions.
+    The marked-content check is done at the OPERATOR level (via the tokenized
+    content stream), not a raw-bytes substring — so a page whose *visible text*
+    contains an acronym like "BDC" or "BMC" is not wrongly excluded.
     """
     if "/Contents" not in page:
         return False
-    data = _page_content_bytes(page)
-    if not data.strip():
+    try:
+        contents = page.get_contents()
+        if contents is None:
+            return False
+        ops = ContentStream(contents, pdf).operations
+    except Exception:
         return False
-    if b"BDC" in data or b"BMC" in data:
+    if not ops:
         return False
-    return True
+    # Already tagged / has marked content or artifacts → leave it alone.
+    if any(op in (b"BDC", b"BMC", b"EMC") for _, op in ops):
+        return False
+    # Require some actual text/drawing content to wrap.
+    return any(op in (b"Tj", b"TJ", b"'", b'"', b"Do") for _, op in ops)
 
 
 def _build_alt_by_xobject(tree: AccessibilityTree) -> Dict[str, str]:
@@ -197,14 +206,44 @@ def _count_text_ops(ops) -> int:
     return sum(1 for _, opc in ops if opc in (b"Tj", b"TJ", b"'", b'"'))
 
 
+def _block_font_size(block_ops) -> float:
+    """Largest ``Tf`` font size used inside a BT..ET block (0 if none)."""
+    size = 0.0
+    for operands, op in block_ops:
+        if op == b"Tf" and len(operands) >= 2:
+            try:
+                size = max(size, float(operands[1]))
+            except (TypeError, ValueError):
+                pass
+    return size
+
+
+def _heading_levels(sizes: List[float]) -> Dict[float, int]:
+    """Map block font-size -> heading level (1..6); body-text sizes are absent.
+
+    Body text is taken as the most common block size; sizes meaningfully larger
+    than body are headings (largest -> H1). Returns {} when there is no clear
+    body size (so a page with one size yields only /P, never spurious headings).
+    """
+    real = [round(s, 1) for s in sizes if s and s > 0]
+    if len(real) < 2:
+        return {}
+    counts = Counter(real)
+    top = counts.most_common(1)[0][1]
+    # Body text = the most common size; on a tie (e.g. one title + one body line)
+    # prefer the SMALLER size as body so the larger is recognised as a heading.
+    body = min(s for s, c in counts.items() if c == top)
+    heading_sizes = sorted({s for s in real if s > body * 1.15}, reverse=True)
+    return {s: min(i + 1, 6) for i, s in enumerate(heading_sizes)}
+
+
 def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
     """Per-element marked content for one page.
 
-    Each ``BT … ET`` text block becomes its own ``/P`` and each image ``Do`` with
-    known alt text becomes a ``/Figure``. Returns a list of ``{"s", "alt"}`` specs
-    (mcid = list index) or ``None`` to signal the caller to fall back to safe
-    page-level wrapping. Bails (returns None) on anything unexpected so a page is
-    never half-tagged or corrupted.
+    Segments the content into text blocks (BT..ET) and known-alt images (Do),
+    tags each text block ``/H1``..``/H6`` (by relative font size) or ``/P``, and
+    each image ``/Figure`` with ``/Alt``. Returns specs (mcid = list index) or
+    ``None`` to signal the caller to fall back to safe page-level wrapping.
     """
     try:
         contents = page.get_contents()
@@ -216,22 +255,23 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
         return None
     if not ops:
         return None
-
     orig_text = _count_text_ops(ops)
-    new_ops = []
-    specs = []
-    mcid = 0
-    block = None  # operations between BT and ET
+
+    # Pass 1 — split into ordered segments, preserving non-block ("raw") ops.
+    segments = []  # (kind, ops, meta);  kind in {"raw", "text", "figure"}
+    raw = []
+    block = None
     for operands, op in ops:
         if op == b"BT":
+            if block is not None:
+                return None  # nested BT (malformed text objects) — fall back
+            if raw:
+                segments.append(("raw", raw, None))
+                raw = []
             block = [(operands, op)]
         elif op == b"ET" and block is not None:
             block.append((operands, op))
-            new_ops.append(([NameObject("/P"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
-            new_ops.extend(block)
-            new_ops.append(([], b"EMC"))
-            specs.append({"s": "/P", "alt": None})
-            mcid += 1
+            segments.append(("text", block, _block_font_size(block)))
             block = None
         elif block is not None:
             block.append((operands, op))
@@ -239,21 +279,49 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
             xname = str(operands[0]).lstrip("/") if operands else ""
             alt = alt_by_xobject.get(xname)
             if alt:
-                new_ops.append(([NameObject("/Figure"), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
-                new_ops.append((operands, op))
-                new_ops.append(([], b"EMC"))
-                specs.append({"s": "/Figure", "alt": alt})
-                mcid += 1
+                if raw:
+                    segments.append(("raw", raw, None))
+                    raw = []
+                segments.append(("figure", [(operands, op)], alt))
             else:
-                new_ops.append((operands, op))
+                raw.append((operands, op))
         else:
-            new_ops.append((operands, op))
-
+            raw.append((operands, op))
     if block is not None:  # unterminated BT — don't risk it
         return None
+    if raw:
+        segments.append(("raw", raw, None))
+
+    levels = _heading_levels([m for k, _, m in segments if k == "text" and m])
+
+    # Pass 2 — emit marked content.
+    new_ops = []
+    specs = []
+    mcid = 0
+    for kind, seg_ops, meta in segments:
+        if kind == "raw":
+            new_ops.extend(seg_ops)
+            continue
+        if kind == "text":
+            lvl = levels.get(round(meta, 1)) if meta else None
+            tag = f"/H{lvl}" if lvl else "/P"
+            alt = None
+        else:  # figure
+            tag = "/Figure"
+            alt = meta
+        new_ops.append(([NameObject(tag), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
+        new_ops.extend(seg_ops)
+        new_ops.append(([], b"EMC"))
+        specs.append({"s": tag, "alt": alt})
+        mcid += 1
+
     if not specs:
         return None
     if _count_text_ops(new_ops) != orig_text:  # text must be preserved exactly
+        return None
+    # Every original op must survive exactly once; we add only 2 ops (BDC+EMC)
+    # per tagged segment. Anything else means an operator was dropped/duplicated.
+    if len(new_ops) != len(ops) + 2 * len(specs):
         return None
 
     cs.operations = new_ops
@@ -330,7 +398,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
 
     # ---- Structure tree over taggable pages only --------------------------
     try:
-        taggable = [p for p in writer.pages if _is_taggable_page(p)]
+        taggable = [p for p in writer.pages if _is_taggable_page(writer, p)]
         if not taggable:
             report["structSkipped"] = "no_taggable_pages"
             return report

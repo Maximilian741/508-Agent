@@ -128,6 +128,39 @@ def _document_language(reader: PdfReader) -> str:
     return _safe_text(lang)
 
 
+def _form_field_label_counts(reader: PdfReader) -> tuple[int, int]:
+    """Return ``(total, unlabeled)`` AcroForm fields.
+
+    "Unlabeled" means no ``/TU`` (the field's accessible label/tooltip — what AT
+    announces). A named field with no ``/TU`` is still unlabeled for AT.
+    """
+    total = 0
+    unlabeled = 0
+    try:
+        root = reader.trailer.get("/Root", {})
+        root = root.get_object() if hasattr(root, "get_object") else root
+        acro = root.get("/AcroForm") if root else None
+        acro = acro.get_object() if hasattr(acro, "get_object") else acro
+        if not acro:
+            return (0, 0)
+        fields = acro.get("/Fields") or []
+        fields = fields.get_object() if hasattr(fields, "get_object") else fields
+        for field in fields:
+            fo = field.get_object() if hasattr(field, "get_object") else field
+            try:
+                # Pushbuttons (field flag bit 17, /Ft Btn with PushButton) don't
+                # require a /TU the same way; but counting them is conservative.
+                total += 1
+                tu = fo.get("/TU")
+                if not tu or not str(tu).strip():
+                    unlabeled += 1
+            except Exception:
+                continue
+    except Exception:
+        return (total, unlabeled)
+    return (total, unlabeled)
+
+
 # ---------------------------------------------------------------------------
 # Image / annotation extraction
 # ---------------------------------------------------------------------------
@@ -292,6 +325,10 @@ class PDFParser:
         properties: Dict[str, Any] = {}
         if title:
             properties["title"] = title
+        ff_total, ff_unlabeled = _form_field_label_counts(reader)
+        if ff_total:
+            properties["form_fields_total"] = ff_total
+            properties["form_fields_unlabeled"] = ff_unlabeled
 
         root = DocumentNode(
             id="doc-1",

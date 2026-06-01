@@ -26,3 +26,19 @@ class DocumentTitleAnalyzer(Analyzer):
         title = tree.root.metadata.properties.get("title")
         if not isinstance(title, str) or not title.strip():
             attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_TITLE_MISSING)
+
+
+class FormFieldLabelAnalyzer(Analyzer):
+    """Flag documents whose form fields lack an accessible label (WCAG 3.3.2 /
+    4.1.2). The parser records ``form_fields_unlabeled`` on the document root."""
+
+    name = "form_field_unlabeled"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        props = tree.root.metadata.properties or {}
+        try:
+            unlabeled = int(props.get("form_fields_unlabeled") or 0)
+        except (TypeError, ValueError):
+            unlabeled = 0
+        if unlabeled > 0:
+            attach_flag(tree.root, AccessibilityFlagCode.FORM_FIELD_UNLABELED)
