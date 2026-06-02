@@ -16,6 +16,9 @@ from app.models.accessibility import (
 # becomes a navigation problem worth flagging — keeps short notes/letters quiet.
 _NO_HEADINGS_MIN_PARAGRAPHS = 12
 _NO_HEADINGS_MIN_CHARS = 1200
+# PDFs are gated on characters only (pypdf collapses paragraphs), so use a
+# higher character bar to be sure it's genuinely a substantial document.
+_NO_HEADINGS_MIN_CHARS_PDF = 2000
 
 
 class DocumentLanguageAnalyzer(Analyzer):
@@ -96,5 +99,14 @@ class DocumentHeadingsAnalyzer(Analyzer):
                     paragraphs += 1
                     chars += len(text)
 
-        if paragraphs >= _NO_HEADINGS_MIN_PARAGRAPHS and chars >= _NO_HEADINGS_MIN_CHARS:
+        # DOCX yields one ParagraphNode per paragraph, so the paragraph count is
+        # a reliable "this is a long document" signal. PDF text extraction
+        # (pypdf) collapses a whole page into one or two big ParagraphNodes, so
+        # the paragraph count is unreliable there — gate PDFs on character count
+        # alone (with a higher bar) so a long, heading-less PDF still flags.
+        if fmt == "pdf":
+            enough = chars >= _NO_HEADINGS_MIN_CHARS_PDF
+        else:  # docx
+            enough = paragraphs >= _NO_HEADINGS_MIN_PARAGRAPHS and chars >= _NO_HEADINGS_MIN_CHARS
+        if enough:
             attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_NO_HEADINGS)
