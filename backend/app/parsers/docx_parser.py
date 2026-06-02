@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from docx import Document
+from docx.oxml.ns import qn
 from lxml import etree
 
 from app.models.accessibility import (
@@ -635,13 +636,50 @@ def _inline_images_in_paragraph(
     return images
 
 
+def _cell_text_is_bold(cell) -> bool:
+    """True when the cell has visible text and every run carrying it is bold —
+    the common 'visual header' convention (a bold first row)."""
+    saw_text = False
+    for para in cell.paragraphs:
+        for run in para.runs:
+            if (run.text or "").strip():
+                saw_text = True
+                if not run.bold:
+                    return False
+    return saw_text
+
+
+def _docx_row_is_header(row) -> bool:
+    """A row is a genuine header row when Word marks it as one (``w:tblHeader``,
+    the *Repeat as header row* property) or every populated cell is bold."""
+    trPr = row._tr.find(qn("w:trPr"))
+    if trPr is not None:
+        th = trPr.find(qn("w:tblHeader"))
+        if th is not None and th.get(qn("w:val")) not in ("0", "false", "off"):
+            return True
+    populated = [c for c in row.cells if (c.text or "").strip()]
+    return bool(populated) and all(_cell_text_is_bold(c) for c in populated)
+
+
 def _table_to_node(table, ids: _IdCounter) -> TableNode:
+    # Decide once whether row 0 is a header. Word marks real headers with
+    # w:tblHeader or styles them bold; if neither AND the table is a clear data
+    # grid (>=3 rows, >=2 cols), type row 0 as DATA so TABLE_MISSING_HEADERS can
+    # fire. Small/ambiguous tables keep the legacy header assumption to avoid
+    # false positives on layout tables.
+    all_rows = list(table.rows)
+    n_cols = max((len(r.cells) for r in all_rows), default=0)
+    looks_like_data_table = len(all_rows) >= 3 and n_cols >= 2
+    first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
+    treat_row0_as_header = first_is_header or not looks_like_data_table
+
     rows: List[TableRowNode] = []
     for row_index, row in enumerate(table.rows):
         cells: List[TableCellNode] = []
         for cell in row.cells:
             text = (cell.text or "").strip()
-            cell_type = TableCellType.HEADER if row_index == 0 and text else TableCellType.DATA
+            is_header_cell = row_index == 0 and bool(text) and treat_row0_as_header
+            cell_type = TableCellType.HEADER if is_header_cell else TableCellType.DATA
             cells.append(
                 TableCellNode(
                     id=ids("docx-cell"),
