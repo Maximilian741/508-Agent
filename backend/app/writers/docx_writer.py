@@ -132,6 +132,7 @@ def write_remediated_docx(
     image_by_rid = _index_image_doc_pr_by_rid(doc)
     table_rows_by_id = _index_table_rows_by_parser_id(doc)
     table_cells_by_id = _index_table_cells_by_parser_id(doc)
+    tables_by_id = _index_tables_by_parser_id(doc)
     hyperlink_by_id = _index_hyperlinks_by_parser_id(doc)
 
     # Step 4: walk the mutated tree and apply each supported mutation.  Order
@@ -159,6 +160,12 @@ def write_remediated_docx(
                 applied,
                 skipped,
             )
+        elif isinstance(node, TableNode):
+            # A header-less table may have had a SYNTHESIZED header row inserted
+            # at the top of the tree by AddTableHeadersExecutor. That row has no
+            # source element, so insert a real <w:tr> (tblHeader + bold cells)
+            # into the source table — otherwise the "fix" never reaches the file.
+            _apply_synthetic_table_header(node, tables_by_id, applied, skipped)
 
     # Step 5: persist.
     doc.save(str(output_path))
@@ -300,6 +307,24 @@ def _index_table_cells_by_parser_id(doc) -> Dict[str, Tuple[Any, Any]]:
                 out[ids("docx-cell")] = (row, cell)
             ids("docx-row")
         ids("docx-table")
+    return out
+
+
+def _index_tables_by_parser_id(doc) -> Dict[str, Any]:
+    """Map ``docx-table-N`` ids to python-docx Table objects.
+
+    Mirrors the parser's id allocation order EXACTLY (cells, then row, per row;
+    then the table id) so a ``TableNode.id`` resolves to its source ``<w:tbl>``.
+    """
+
+    ids = _IdCounter()
+    out: Dict[str, Any] = {}
+    for table in doc.tables:
+        for row in table.rows:
+            for _ in row.cells:
+                ids("docx-cell")
+            ids("docx-row")
+        out[ids("docx-table")] = table
     return out
 
 
@@ -610,3 +635,82 @@ def _apply_table_cell(
                 "summary": "trPr/tblHeader already present",
             }
         )
+
+
+def _apply_synthetic_table_header(
+    table: TableNode,
+    tables_by_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Insert a real header ``<w:tr>`` when the tree's first row is synthesized.
+
+    ``AddTableHeadersExecutor`` inserts a placeholder header row (tagged
+    ``metadata.properties['synthesized']``) at the top of a header-less table's
+    tree when its first data row doesn't read like a header. That row has no
+    counterpart in the source document, so without this it would silently never
+    reach the output. We materialise it as a genuine header row: a new
+    ``<w:tr>`` with ``<w:trPr><w:tblHeader/></w:trPr>`` and one bold cell per
+    column.
+    """
+
+    rows = [c for c in table.children if isinstance(c, TableRowNode)]
+    if not rows:
+        return
+    first = rows[0]
+    props = (first.metadata.properties if first.metadata else None) or {}
+    if not props.get("synthesized"):
+        return  # the executor promoted an existing row instead — nothing to insert
+
+    docx_table = tables_by_id.get(table.id)
+    if docx_table is None:
+        skipped.append({"target_id": table.id, "reason": "table_not_found_in_source"})
+        return
+
+    header_cells = [c for c in first.children if isinstance(c, TableCellNode)]
+    texts = [
+        ((c.content.text or "").strip() if c.content else "") or " " for c in header_cells
+    ]
+    if not texts:
+        return
+
+    _insert_docx_header_row(docx_table, texts)
+    applied.append(
+        {
+            "kind": "table_header_row_inserted",
+            "target_id": table.id,
+            "summary": f"inserted {len(texts)}-column header row (tblHeader)",
+        }
+    )
+
+
+def _insert_docx_header_row(docx_table, texts: List[str]) -> None:
+    """Build and insert a header ``<w:tr>`` at the top of ``docx_table``."""
+
+    tbl = docx_table._tbl
+    tr = OxmlElement("w:tr")
+    trPr = OxmlElement("w:trPr")
+    trPr.append(OxmlElement("w:tblHeader"))  # repeat-as-header-row = header semantics
+    tr.append(trPr)
+
+    for text in texts:
+        tc = OxmlElement("w:tc")
+        para = OxmlElement("w:p")
+        run = OxmlElement("w:r")
+        rpr = OxmlElement("w:rPr")
+        rpr.append(OxmlElement("w:b"))  # bold, the visual header convention
+        run.append(rpr)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = text
+        run.append(t)
+        para.append(run)
+        tc.append(para)
+        tr.append(tc)
+
+    # Insert before the first existing row (after <w:tblPr>/<w:tblGrid>).
+    first_tr = tbl.find(qn("w:tr"))
+    if first_tr is not None:
+        first_tr.addprevious(tr)
+    else:
+        tbl.append(tr)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Optional
 
 from app.models.accessibility import (
@@ -87,7 +88,12 @@ class AddTableHeadersExecutor(RemediationExecutor):
                 f"Promoted {len(existing_cells)} cells in row 1 to TH/scope=col.",
             )
 
-        column_count = max((len(r.children) for r in rows), default=2)
+        # Use the MODAL (most-common) row width, not max(): a jagged table whose
+        # rows have differing cell counts would otherwise get a header wider than
+        # the table grid, which a real Office engine reflows (mangling the grid).
+        # The dominant row width matches the declared <w:tblGrid> column count.
+        width_counts = Counter(len(r.children) for r in rows)
+        column_count = width_counts.most_common(1)[0][0] if width_counts else 2
         synthetic_row, columns = _synthesize_header_row(target.id, column_count=column_count)
         target.children.insert(0, synthetic_row)
         return _result(
