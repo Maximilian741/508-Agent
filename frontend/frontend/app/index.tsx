@@ -21,7 +21,6 @@ import { Chip } from "../src/ui/components/Chip";
 import { ScoreBadge } from "../src/ui/components/ScoreBadge";
 import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
-import { EmptyState } from "../src/ui/components/EmptyState";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -32,6 +31,24 @@ function greetingFor(date: Date): string {
   if (h < 18) return "Good afternoon";
   return "Good evening";
 }
+
+const FIRST_RUN_STEPS = [
+  {
+    n: "1",
+    title: "Drop a document",
+    body: "Upload a PDF, Word, or PowerPoint file. We never train on your documents.",
+  },
+  {
+    n: "2",
+    title: "Review findings",
+    body: "Walk every WCAG 2.1, Section 508, and PDF/UA finding one at a time, in plain English.",
+  },
+  {
+    n: "3",
+    title: "Approve & download",
+    body: "Approve the fixes you trust, edit the rest, and download a remediated file — plus a conformance certificate.",
+  },
+];
 
 function relativeTime(iso: string | undefined): string {
   if (!iso) return "";
@@ -91,7 +108,8 @@ export default function HomeScreen() {
       ).length;
       return `${pending} finding${pending === 1 ? "" : "s"} still waiting on ${inProgress.filename}.`;
     }
-    if (history.length === 0) return "Nothing audited yet. Drop a document below to get started.";
+    if (history.length === 0)
+      return "Find and fix accessibility issues in your PDFs, Word docs, and slides — checked against WCAG 2.1, Section 508, and PDF/UA.";
     return `${history.length} document${history.length === 1 ? "" : "s"} on the bench. Pick one up where you left it.`;
   }, [history]);
 
@@ -282,18 +300,10 @@ export default function HomeScreen() {
           </View>
         </View>
       ) : (
-        <View style={styles.recent}>
-          <View style={styles.recentHead}>
-            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
-              Recent work
-            </Text>
-          </View>
-          <EmptyState
-            icon="doc"
-            title="Nothing here yet"
-            body="Drop a document above and your finished audits will live here so you can pick up where you left off."
-          />
-        </View>
+        <FirstRun
+          onSeePricing={() => router.push("/billing" as any)}
+          onSeeTour={() => router.push("/landing" as any)}
+        />
       )}
 
       {/* Footer - stays quiet at the bottom */}
@@ -314,6 +324,99 @@ export default function HomeScreen() {
         </Text>
       </View>
     </Screen>
+  );
+}
+
+function FirstRun({
+  onSeePricing,
+  onSeeTour,
+}: {
+  onSeePricing: () => void;
+  onSeeTour: () => void;
+}) {
+  const theme = useTheme();
+  return (
+    <View style={styles.firstRun}>
+      <Text style={[theme.typography.h2, { color: theme.colors.text }]}>How it works</Text>
+      <View style={styles.steps}>
+        {FIRST_RUN_STEPS.map((s) => (
+          <View
+            key={s.n}
+            style={[
+              styles.step,
+              { borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <View style={[styles.stepDot, { backgroundColor: theme.colors.accent }]}>
+              <Text style={styles.stepDotText}>{s.n}</Text>
+            </View>
+            <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>
+              {s.title}
+            </Text>
+            <Text
+              style={[
+                theme.typography.caption,
+                {
+                  color: theme.colors.textMuted,
+                  marginTop: 4,
+                  textTransform: "none",
+                  letterSpacing: 0.2,
+                  lineHeight: 18,
+                },
+              ]}
+            >
+              {s.body}
+            </Text>
+          </View>
+        ))}
+      </View>
+
+      {/* Trust + transparency strip */}
+      <View style={styles.trustRow}>
+        <Chip label="WCAG 2.1" tone="info" />
+        <Chip label="Section 508" tone="info" />
+        <Chip label="PDF/UA" tone="info" />
+      </View>
+      <Text
+        style={[
+          theme.typography.caption,
+          {
+            color: theme.colors.textMuted,
+            textTransform: "none",
+            letterSpacing: 0.2,
+            lineHeight: 19,
+            marginTop: 10,
+            maxWidth: 620,
+          },
+        ]}
+      >
+        Your first audit is free — no account needed to start. After that, credit packs start at
+        $5, or subscribe for a monthly allowance with conformance certificates included.
+      </Text>
+      <View style={styles.firstRunLinks}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="See pricing"
+          onPress={onSeePricing}
+          style={({ hovered }: any) => [hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.accent, fontWeight: "600" }]}>
+            See pricing
+          </Text>
+        </Pressable>
+        <Text style={{ color: theme.colors.textMuted, opacity: 0.5 }}>·</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="The full tour"
+          onPress={onSeeTour}
+          style={({ hovered }: any) => [hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.accent, fontWeight: "600" }]}>
+            The full tour
+          </Text>
+        </Pressable>
+      </View>
+    </View>
   );
 }
 
@@ -478,5 +581,44 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingTop: 32,
     paddingBottom: 24,
+  },
+  // First-run onboarding (shown only when there is no audit history)
+  firstRun: {
+    marginTop: 48,
+    paddingHorizontal: 4,
+  },
+  steps: {
+    flexDirection: "row",
+    gap: 12,
+    flexWrap: "wrap",
+    marginTop: 16,
+  },
+  step: {
+    flex: 1,
+    minWidth: 220,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 16,
+  },
+  stepDot: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+  },
+  stepDotText: { color: "#FFFFFF", fontWeight: "800", fontSize: 13 },
+  trustRow: {
+    flexDirection: "row",
+    gap: 8,
+    flexWrap: "wrap",
+    marginTop: 24,
+  },
+  firstRunLinks: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 14,
   },
 });
