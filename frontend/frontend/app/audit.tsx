@@ -397,7 +397,11 @@ export default function AuditScreen() {
   const handleFile = useCallback(
     async (file: File) => {
       // Free-scan gate: a second upload requires sign-in unless bypassed.
-      if (gateFreeScan("Sign in to keep auditing - your first scan was free.")) {
+      if (
+        gateFreeScan(
+          "Your first audit was on us. Create a free account to keep auditing, save your history, and download remediated files.",
+        )
+      ) {
         return;
       }
       setBusy(true);
