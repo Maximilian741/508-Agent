@@ -22,13 +22,24 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 
-_RATE_LIMITED_PREFIXES: Tuple[str, ...] = ("/auth", "/credits", "/pipeline")
+_RATE_LIMITED_PREFIXES: Tuple[str, ...] = (
+    "/auth",
+    "/credits",
+    "/pipeline",
+    "/billing",  # checkout / cert issuance / overage — abuse + Stripe-cost surface
+    "/teams",  # invite endpoint sends email per call — block invite/email spam
+)
 _RATE_LIMITED_EXACT: frozenset = frozenset({"/documents/upload"})
+# Stripe POSTs webhooks here and retries on any non-2xx; a 429 would silently
+# drop real payment events, so this exact path is never rate-limited.
+_RATE_LIMIT_EXEMPT_EXACT: frozenset = frozenset({"/billing/webhook"})
 _DEFAULT_LIMIT = 60
 _DEFAULT_WINDOW_SECONDS = 60.0
 
 
 def _is_rate_limited_path(path: str) -> bool:
+    if path in _RATE_LIMIT_EXEMPT_EXACT:
+        return False
     if path in _RATE_LIMITED_EXACT:
         return True
     for prefix in _RATE_LIMITED_PREFIXES:

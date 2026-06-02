@@ -428,11 +428,17 @@ def _charge_overage(customer_id: str, user_id: str) -> Optional[str]:
     without live Stripe; in production it creates a real off-session
     PaymentIntent against the customer's default payment method.
     """
-    test_mode = os.getenv("OVERAGE_TEST_MODE", "").strip().lower()
-    if test_mode == "succeed":
-        return "pi_test_" + secrets.token_hex(6)
-    if test_mode == "fail":
-        return None
+    # OVERAGE_TEST_MODE grants credits off a synthetic charge — it must NEVER be
+    # honoured in production, or a leftover/mis-set env var would hand out free
+    # credits with no real Stripe charge. Ignore it outside dev/test.
+    from app.config import get_settings
+
+    if get_settings().environment != "production":
+        test_mode = os.getenv("OVERAGE_TEST_MODE", "").strip().lower()
+        if test_mode == "succeed":
+            return "pi_test_" + secrets.token_hex(6)
+        if test_mode == "fail":
+            return None
     secret = _stripe_secret()
     if not secret:
         return None
@@ -721,9 +727,38 @@ async def issue_certificate(
     )
 
 
+def _mask_email(email: str) -> str:
+    """Redact an account email for the PUBLIC certificate endpoint. A cert link
+    is shared with auditors/agencies, so the raw email must not be harvestable:
+    show the first character + the domain (enough to recognise the issuing org,
+    not enough to harvest the address). e.g. alice@example.com -> a***@example.com."""
+    e = (email or "").strip()
+    if "@" not in e:
+        return "verified account"
+    local, _, domain = e.partition("@")
+    masked_local = (local[0] + "***") if local else "***"
+    return f"{masked_local}@{domain}"
+
+
+def _public_filename(filename: str) -> str:
+    """Redact the original filename on the PUBLIC endpoint — the document name is
+    often business-sensitive (e.g. "Q4-Financial-Report.docx"). Preserve only the
+    file type so the verifier can see what kind of document was certified."""
+    name = (filename or "").strip()
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext and len(ext) <= 5 and ext.isalnum():
+        return f"document.{ext}"
+    return "document"
+
+
 @router.get("/certificate/{cert_id}", response_model=CertificateDTO)
 async def verify_certificate(cert_id: str) -> CertificateDTO:
-    """Public: verify a previously-issued certificate by its id."""
+    """Public: verify a previously-issued certificate by its id.
+
+    This endpoint is unauthenticated (cert links are meant to be shared), so it
+    must NOT leak the issuer's raw email or the original document filename. The
+    authenticated issue response returns full detail to the owner; here we redact.
+    """
     with session_scope() as session:
         row = session.execute(
             select(CertificateRow).where(CertificateRow.id == cert_id)
@@ -733,8 +768,8 @@ async def verify_certificate(cert_id: str) -> CertificateDTO:
         return CertificateDTO(
             certificateId=row.id,
             issuedAt=(row.issued_at.isoformat() if row.issued_at else ""),
-            issuedTo=row.issued_email,
-            filename=row.filename,
+            issuedTo=_mask_email(row.issued_email),
+            filename=_public_filename(row.filename),
             conformanceClaim=row.conformance_claim,
             score=int(row.score),
             fixedCount=int(row.fixed_count),

@@ -86,10 +86,14 @@ def main() -> int:
     _forged = {"documentId": _DOC, "conformanceClaim": "Conforms to WCAG 2.1 AA", "score": 100}
     check("client-supplied claim/score rejected -> 422", client.post("/billing/issue-certificate", headers=a_auth, json=_forged).status_code == 422)
 
-    # Public verification.
+    # Public verification — must NOT leak the raw issuer email or document name
+    # (the link is shared with auditors). Identity/filename are redacted.
     v = client.get(f"/billing/certificate/{cert['certificateId']}")
     check("verify -> 200", v.status_code == 200)
-    check("verify matches", v.json().get("filename") == "report.pdf" and v.json().get("issuedTo") == "cert-a@example.com")
+    vj = v.json()
+    check("verify redacts email (no raw address)", vj.get("issuedTo") == "c***@example.com" and "cert-a@example.com" != vj.get("issuedTo"))
+    check("verify redacts filename to type only", vj.get("filename") == "document.pdf" and "report" not in (vj.get("filename") or ""))
+    check("verify still proves score/claim", isinstance(vj.get("score"), int) and bool(vj.get("conformanceClaim")))
     check("verify bogus id -> 404", client.get("/billing/certificate/deadbeefdeadbeef").status_code == 404)
 
     # User B: no subscription, no credits -> 402 (analysis seeded so it reaches the paywall).

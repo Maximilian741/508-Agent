@@ -387,7 +387,17 @@ async def remediate(
     tree = result.tree
     engine = RemediationEngine()
     violations = engine.detect_violations(tree)
-    plans = plan_remediations(tree, RemediationPolicy())
+    # This endpoint APPLIES the fixes the user explicitly approved (approved_ids),
+    # so the user's approval IS the human review — use an apply policy that allows
+    # every recommended action to run. The default RemediationPolicy() is the
+    # conservative *preview* policy (allow_ai_actions=False blocks alt-text
+    # generation entirely, and require_human_review_for_all=True also filters out
+    # the auto-apply fixes), which silently turned approved fixes into no-ops.
+    apply_policy = RemediationPolicy(
+        allow_ai_actions=True,
+        require_human_review_for_all=False,
+    )
+    plans = plan_remediations(tree, apply_policy)
 
     # Filter plans down to only those whose violation id is approved.
     selected_plans = []
