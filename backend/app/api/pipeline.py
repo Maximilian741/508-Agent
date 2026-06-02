@@ -649,6 +649,8 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         "IMPROVE_LINK_TEXT",
+        # Promote sets <a:tblPr firstRow="1">; synthesize inserts a real <a:tr>.
+        "ADD_TABLE_HEADERS",
     },
     "pdf": {
         "SET_DOCUMENT_TITLE",

@@ -571,11 +571,22 @@ def _picture_to_image_node(shape, slide_index: int, ids: "_IdCounter", extra_pro
 def _table_to_node_pptx(table, slide_index: int, ids: "_IdCounter") -> TableNode:
     rows: List[TableRowNode] = []
     row_objects = list(table.rows)
+    # PowerPoint marks a header row with the "Header Row" band (the firstRow flag
+    # on <a:tblPr>, exposed as Table.first_row). Type row 0 as a header only when
+    # that band is on, OR the table is too small/ambiguous to be a clear data
+    # grid. A data grid (>=3 rows, >=2 cols) with the header band OFF has no
+    # header — type row 0 as DATA so TABLE_MISSING_HEADERS fires. (Mirrors the
+    # DOCX rule; conservative — small/ambiguous tables keep the header assumption.)
+    n_cols = max((len(r.cells) for r in row_objects), default=0)
+    looks_like_data_table = len(row_objects) >= 3 and n_cols >= 2
+    has_header_band = bool(getattr(table, "first_row", False))
+    treat_row0_as_header = has_header_band or not looks_like_data_table
     for row_index, row in enumerate(row_objects):
         cells: List[TableCellNode] = []
         for cell in row.cells:
             text = (cell.text or "").strip()
-            cell_type = TableCellType.HEADER if row_index == 0 and text else TableCellType.DATA
+            is_header_cell = row_index == 0 and bool(text) and treat_row0_as_header
+            cell_type = TableCellType.HEADER if is_header_cell else TableCellType.DATA
             cells.append(
                 TableCellNode(
                     id=ids(f"slide-{slide_index}-cell"),
