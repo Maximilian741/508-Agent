@@ -11,7 +11,7 @@ ports on the host.
    copy the `--token <...>` value from the install snippet — that is
    `CF_TUNNEL_TOKEN`.
 2. **Add public hostnames.** On the same tunnel, add two public hostnames:
-   - `app.example.com` -> service `http://frontend:80`
+   - `app.example.com` -> service `http://frontend:8080`
    - `api.example.com` -> service `http://backend:8000`
 
    These names resolve internally on the compose network — do NOT bind ports

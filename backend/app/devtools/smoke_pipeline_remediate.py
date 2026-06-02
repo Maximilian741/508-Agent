@@ -193,19 +193,24 @@ def main() -> int:
             assert key in remediate_data, f"remediate response missing key: {key!r}"
 
         executions = remediate_data["executions"]
-        # We approved exactly one violation, so exactly one execution
-        # attempt should have been made. Either ``success`` or
-        # ``skipped`` is acceptable: heuristic alt text may not always
-        # bake in deterministically (e.g., if the executor decides the
-        # node needs human review). What we MUST see is that nothing
-        # outside the approved set was touched.
+        # We approved exactly one violation, so exactly one execution attempt
+        # should have been made, and nothing outside the approved set touched.
         assert len(executions) == 1, (
             f"expected exactly one execution (the approved alt-text fix), "
             f"got {len(executions)}: {executions}"
         )
         only_exec = executions[0]
-        assert only_exec["status"] in {"success", "skipped"}, (
-            f"unexpected execution status: {only_exec['status']!r}"
+        # REGRESSION GUARD (launch blocker): the /pipeline/remediate apply policy
+        # MUST actually run the alt-text generator — not silently defer it to
+        # manual review. This test previously tolerated a "skipped" status, which
+        # is exactly how the no-op shipped unnoticed. Require the real fix.
+        assert only_exec["actionCode"] == "GENERATE_ALT_TEXT", (
+            f"approved MISSING_ALT_TEXT must run GENERATE_ALT_TEXT, not "
+            f"{only_exec.get('actionCode')!r} (apply policy regression)"
+        )
+        assert only_exec["status"] == "success", (
+            f"GENERATE_ALT_TEXT must succeed under the apply policy, got "
+            f"{only_exec['status']!r}: {only_exec}"
         )
 
         # ---- /pipeline/files/{jobId}/{filename} ---------------------------
@@ -228,21 +233,14 @@ def main() -> int:
         assert image_nodes, "expected at least one image in the remediated tree"
         first_image = image_nodes[0]
 
-        # Under the default policy, AI alt-text generation is OFF, so the
-        # approved MISSING_ALT_TEXT is routed to manual review (a deferral, not
-        # an automated fix). Be honest about that: only assert baked alt text
-        # when the action that ran was actually GENERATE_ALT_TEXT. The strict
-        # writer round-trip is proven separately below.
-        action = only_exec.get("actionCode")
-        if action == "GENERATE_ALT_TEXT" and only_exec["status"] == "success":
-            assert (first_image.alt_text or "").strip(), (
-                f"GENERATE_ALT_TEXT succeeded but no alt_text was baked; "
-                f"got {first_image.alt_text!r}"
-            )
-        else:
-            # A manual-review deferral must NOT be counted as a fix (the score
-            # treats it as pending, asserted below).
-            print(f"[smoke] alt-text deferred to manual review (action={action}, status={only_exec['status']})")
+        # The approved alt-text fix MUST have been baked into the downloaded
+        # file by the real pipeline (this is the end-to-end proof that the apply
+        # policy runs GENERATE_ALT_TEXT and the writer persists it).
+        assert (first_image.alt_text or "").strip(), (
+            f"the remediated DOCX must carry generated alt text on its image; "
+            f"got {first_image.alt_text!r} (alt-text remediation no-op regression)"
+        )
+        print(f"[smoke] pipeline baked alt text into the download: {first_image.alt_text!r}")
 
         # ---- Direct writer round-trip proof --------------------------------
         # Independent of the pipeline's AI alt-text policy: set alt text on the

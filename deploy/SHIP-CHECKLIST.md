@@ -46,7 +46,7 @@ Docs: https://developers.cloudflare.com/dns/zone-setups/full-setup/setup/
 4. On the install screen, copy the long token from the install command. It
    is the value after `--token`. Save it as `CF_TUNNEL_TOKEN`.
 5. Add two public hostnames on the tunnel page:
-   - `app.yourdomain.com` -> Service `HTTP` -> URL `frontend:80`
+   - `app.yourdomain.com` -> Service `HTTP` -> URL `frontend:8080`
    - `api.yourdomain.com` -> Service `HTTP` -> URL `backend:8000`
 6. Click `Save`. The tunnel will show `Inactive` until Step 7 brings up
    `cloudflared` on the VPS.
@@ -66,7 +66,15 @@ Docs: https://developers.cloudflare.com/cloudflare-one/connections/connect-netwo
 
 ---
 
-## Step 3. Cloudflare Access policy
+## Step 3. Cloudflare Access policy — SKIP for a public launch
+
+> **Public self-serve SaaS (the default model): SKIP this entire step and leave
+> `CLOUDFLARE_ACCESS_AUD` EMPTY.** Your customers sign in with the app's own
+> accounts. Putting Cloudflare Access in front of the site would 401 every
+> customer, the Stripe webhook, and the public certificate-verification links.
+>
+> Only follow the steps below if you are deploying a **private / internal-only**
+> instance that should be gated to a fixed allow-list of emails.
 
 1. In Zero Trust, go to `Access -> Applications -> Add an application ->
    Self-hosted`.

@@ -463,7 +463,14 @@ def _audit_single_file(
     executions: List[Any] = []
 
     if apply:
-        plans = plan_remediations(tree, RemediationPolicy())
+        # Apply mode runs the fixes the user opted into (--apply / --approve-*),
+        # so allow every recommended action — including AI/heuristic alt-text —
+        # rather than the conservative preview default (which no-ops alt-text and
+        # the auto-apply fixes).
+        plans = plan_remediations(
+            tree,
+            RemediationPolicy(allow_ai_actions=True, require_human_review_for_all=False),
+        )
 
         if approve_all_errors:
             # Only execute plans whose flag severity is "error".

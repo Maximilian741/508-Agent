@@ -68,7 +68,10 @@ services:
     volumes:
       - backend_runtime:/app/.runtime
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      # /readyz is DB-backed readiness (fails if Postgres is unreachable) so the
+      # container reports unhealthy when it cannot actually serve, not just when
+      # the process is up. /healthz remains the liveness probe.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/readyz"]
       interval: 15s
       timeout: 5s
       retries: 5

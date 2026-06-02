@@ -72,7 +72,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-_AUTH_BYPASS_PATHS = {"/healthz"}
+# Paths that must stay reachable even if a Cloudflare Access JWT is required.
+# NOTE: the chosen product model is a PUBLIC self-serve SaaS, so CF Access should
+# normally be OFF (cloudflare_access_aud empty). These bypasses are defense in
+# depth for the endpoints that are public *by design* regardless: liveness +
+# readiness probes (load balancer), the Stripe webhook (machine-to-machine, no
+# JWT to present), and public certificate verification (links are shared).
+_AUTH_BYPASS_PATHS = {"/healthz", "/readyz", "/billing/webhook"}
+_AUTH_BYPASS_PREFIXES = ("/billing/certificate",)
 
 
 class CFAccessAuthMiddleware(BaseHTTPMiddleware):
@@ -91,7 +98,8 @@ class CFAccessAuthMiddleware(BaseHTTPMiddleware):
         if not self._aud:
             return await call_next(request)
 
-        if request.url.path in _AUTH_BYPASS_PATHS:
+        path = request.url.path
+        if path in _AUTH_BYPASS_PATHS or path.startswith(_AUTH_BYPASS_PREFIXES):
             return await call_next(request)
 
         token = request.headers.get("Cf-Access-Jwt-Assertion") or request.headers.get(
