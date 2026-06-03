@@ -51,6 +51,8 @@ from app.models.accessibility import (
     LinkNode,
     TableCellNode,
     TableCellType,
+    TableNode,
+    TableRowNode,
 )
 from app.parsers.pptx_parser import (
     PPTXParser,
@@ -135,7 +137,7 @@ def write_remediated_pptx(
 
     # Step 3 — build per-id lookups against the *output* deck using the same
     # visit-order the parser uses.
-    image_by_node_id, cell_by_node_id, link_by_node_id = _index_shapes_by_parser_id(prs)
+    image_by_node_id, cell_by_node_id, link_by_node_id, table_by_node_id = _index_shapes_by_parser_id(prs)
 
     # Step 4 — document-level metadata (title, language) first.
     _apply_document_metadata(prs, tree.root, applied, skipped)
@@ -156,6 +158,12 @@ def write_remediated_pptx(
                 applied,
                 skipped,
             )
+        elif isinstance(node, TableNode):
+            # A header-less table may have had a SYNTHESIZED header row inserted
+            # at the top of the tree by AddTableHeadersExecutor. That row has no
+            # source <a:tr>, so insert a real one (and set the firstRow band) —
+            # otherwise the fix would be counted but never reach the file.
+            _apply_synthetic_pptx_table_header(node, table_by_node_id, applied, skipped)
 
     # Step 6 — persist.
     try:
@@ -231,21 +239,23 @@ def _apply_pptx_link(
 
 def _index_shapes_by_parser_id(
     prs,
-) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int, int]], Dict[str, Any]]:
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int, int]], Dict[str, Any], Dict[str, Any]]:
     """Walk ``prs`` exactly the way :func:`PPTXParser.parse_to_tree` does and
     pair each minted id with the underlying python-pptx object.
 
-    Returns three dicts:
+    Returns four dicts:
 
     * ``image_by_node_id`` — ``{node_id: shape}`` for picture shapes.
     * ``cell_by_node_id`` — ``{node_id: (table_shape, row_index, col_index)}``
       for table cells.
     * ``link_by_node_id`` — ``{node_id: run}`` for hyperlink runs.
+    * ``table_by_node_id`` — ``{table_node_id: table_shape}`` for tables.
     """
 
     image_by_node_id: Dict[str, Any] = {}
     cell_by_node_id: Dict[str, Tuple[Any, int, int]] = {}
     link_by_node_id: Dict[str, Any] = {}
+    table_by_node_id: Dict[str, Any] = {}
 
     ids = _IdCounter()
 
@@ -276,7 +286,7 @@ def _index_shapes_by_parser_id(
                         cell_id = ids(f"slide-{slide_index}-cell")
                         cell_by_node_id[cell_id] = (shape, row_index, col_index)
                     ids(f"slide-{slide_index}-row")
-                ids(f"slide-{slide_index}-table")
+                table_by_node_id[ids(f"slide-{slide_index}-table")] = shape
                 continue
             if hasattr(shape, "text_frame") and shape.text_frame:
                 text = (shape.text or "").strip()
@@ -298,7 +308,7 @@ def _index_shapes_by_parser_id(
                         "skip_text_frame_walk slide=%s", slide_index, exc_info=True
                     )
 
-    return image_by_node_id, cell_by_node_id, link_by_node_id
+    return image_by_node_id, cell_by_node_id, link_by_node_id, table_by_node_id
 
 
 # ---------------------------------------------------------------------------
@@ -614,3 +624,101 @@ def _apply_table_cell(
             "summary": "tblPr/@firstRow=1",
         }
     )
+
+
+def _apply_synthetic_pptx_table_header(
+    table: TableNode,
+    table_by_node_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Insert a real header ``<a:tr>`` when the tree's first row is synthesized.
+
+    ``AddTableHeadersExecutor`` inserts a placeholder header row (tagged
+    ``metadata.properties['synthesized']``) at the top of a header-less table
+    whose first data row doesn't read like a header. That row has no source
+    ``<a:tr>``, so we materialise it: a new top row plus the ``firstRow`` band so
+    PowerPoint and screen readers treat it as the header.
+    """
+
+    rows = [c for c in table.children if isinstance(c, TableRowNode)]
+    if not rows:
+        return
+    first = rows[0]
+    props = (first.metadata.properties if first.metadata else None) or {}
+    if not props.get("synthesized"):
+        return  # promote path handled per-cell; nothing to insert
+
+    shape = table_by_node_id.get(table.id)
+    if shape is None:
+        skipped.append({"target_id": table.id, "reason": "table_not_found_in_source"})
+        return
+
+    header_cells = [c for c in first.children if isinstance(c, TableCellNode)]
+    texts = [
+        ((c.content.text or "").strip() if c.content else "") or " " for c in header_cells
+    ]
+    if not texts:
+        return
+
+    try:
+        _insert_pptx_header_row(shape.table, texts)
+    except Exception as exc:  # pragma: no cover - defensive
+        skipped.append({"target_id": table.id, "reason": f"failed_to_insert_pptx_header:{exc}"})
+        return
+
+    applied.append(
+        {
+            "kind": "table_header_row_inserted",
+            "target_id": table.id,
+            "summary": f"inserted {len(texts)}-column header row + firstRow band",
+        }
+    )
+
+
+def _insert_pptx_header_row(pptx_table, texts: List[str]) -> None:
+    """Build and insert a header ``<a:tr>`` at the top of ``pptx_table``."""
+
+    from lxml import etree
+
+    tbl = pptx_table._tbl
+
+    # Defense in depth: the row MUST have exactly one cell per <a:gridCol>, or
+    # the table won't reopen. The executor already sizes the header to the grid,
+    # but pad/truncate here so the writer is self-consistent for any input.
+    grid = tbl.find(qn("a:tblGrid"))
+    n_cols = len(grid.findall(qn("a:gridCol"))) if grid is not None else len(texts)
+    if n_cols > 0:
+        texts = (list(texts) + [" "] * n_cols)[:n_cols]
+
+    existing_trs = tbl.findall(qn("a:tr"))
+    # Reuse an existing row height so the new row matches; default ~0.3in (EMU).
+    height = existing_trs[0].get("h") if existing_trs else None
+
+    tr = etree.Element(qn("a:tr"))
+    tr.set("h", height or "370840")
+    for text in texts:
+        tc = etree.SubElement(tr, qn("a:tc"))
+        tx_body = etree.SubElement(tc, qn("a:txBody"))
+        etree.SubElement(tx_body, qn("a:bodyPr"))
+        para = etree.SubElement(tx_body, qn("a:p"))
+        run = etree.SubElement(para, qn("a:r"))
+        r_pr = etree.SubElement(run, qn("a:rPr"))
+        r_pr.set("lang", "en-US")
+        r_pr.set("b", "1")  # bold — the visual header convention
+        t = etree.SubElement(run, qn("a:t"))
+        t.text = text
+        etree.SubElement(tc, qn("a:tcPr"))
+
+    # Insert before the first existing row (after <a:tblPr>/<a:tblGrid>).
+    if existing_trs:
+        existing_trs[0].addprevious(tr)
+    else:
+        tbl.append(tr)
+
+    # Mark the header band so the new first row is announced as the header.
+    tbl_pr = tbl.find(qn("a:tblPr"))
+    if tbl_pr is None:
+        tbl_pr = etree.SubElement(tbl, qn("a:tblPr"))
+        tbl.insert(0, tbl_pr)
+    tbl_pr.set("firstRow", "1")
