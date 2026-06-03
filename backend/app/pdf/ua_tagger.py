@@ -11,24 +11,31 @@ Document-level (always):
 * an XMP ``/Metadata`` stream carrying ``dc:title`` + ``pdfuaid:part 1``
 
 Structure (best-effort, never corrupts):
-* each page's content is wrapped in a marked-content sequence (``/P … BDC/EMC``)
-  by *appending* prefix/suffix content streams — the existing streams are kept
-  byte-for-byte, so nothing about the visible page changes.
-* a ``/StructTreeRoot`` (Document → one P per page) is built and linked to that
-  marked content via a ``/ParentTree``; the catalog is marked
-  ``/MarkInfo << /Marked true >>``.
+* page content is segmented into text blocks + images and each gets its own
+  marked-content sequence (``BDC … EMC``) with an MCID — re-serialized with a
+  hard guard that the visible text is byte-identical (any anomaly falls back to a
+  single page-level ``/P`` wrap, original bytes untouched).
+* a linked ``/StructTreeRoot`` → ``/Document`` is built with a correct
+  ``/ParentTree``; the catalog is marked ``/MarkInfo << /Marked true >>``.
 
-HONEST SCOPE (v1): the structure is page/paragraph-granular — every page becomes
-one tagged paragraph. Fine-grained per-element tagging (real H1/H2, individual
-``/Figure`` elements with their own marked content, ``/Table`` → TR/TH/TD) and
-images tagged as Figures in the tree are a deliberate future step; today images
-still carry ``/Alt`` on their XObject (written by the PDF writer). This is a real
-improvement over untagged output, and we never claim full PDF/UA conformance.
+Per-element structure reconstructed from the flat content stream:
+* headings ``/H1``..``/H6`` by relative font size;
+* images ``/Figure`` with ``/Alt`` (from the analysis tree);
+* LISTS ``/L`` → ``/LI`` → ``/LBody`` from runs of bullet/ordinal text blocks;
+* TABLES ``/Table`` → ``/TR`` → ``/TH``/``/TD`` from positioned grids of text.
+
+Table detection is heuristic and HIGH-PRECISION by design: it only tags a grid
+when it is unambiguous (>=3 rows, aligned columns, short data-like cells, no
+form-label/filler columns, no interrupting figure, split on large row gaps). It
+intentionally MISSES ambiguous grids (borderless / form-like / TOC-like) rather
+than mis-tag a non-table — verified against an adversarial review (forms, TOCs,
+two-column prose stay plain text). We never claim full PDF/UA conformance.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -41,6 +48,7 @@ from pypdf.generic import (
     DictionaryObject,
     IndirectObject,
     NameObject,
+    NullObject,
     NumberObject,
     TextStringObject,
 )
@@ -237,6 +245,222 @@ def _heading_levels(sizes: List[float]) -> Dict[float, int]:
     return {s: min(i + 1, 6) for i, s in enumerate(heading_sizes)}
 
 
+# Unambiguous bullet glyphs (always a list marker) and weak ones (only when
+# followed by whitespace, so "-5C" or a stray asterisk isn't mistaken for a list).
+# Content-stream text is in the font's encoding, not Unicode — for single-byte
+# fonts (the common case) a bullet arrives as the raw WinAnsi/MacRoman byte
+# (latin-1 decoded), so include those byte chars alongside the Unicode glyphs.
+_STRONG_BULLETS = set("•‣◦▪▫●○■□⁃") | {"\x95", "\xa5"}  # WinAnsi/MacRoman bullet
+# Hyphen / asterisk / middot are real list markers; en/em dashes are excluded —
+# consecutive em-dash lines are far more often dialogue/quotes than a list.
+_WEAK_BULLETS = set("-*·")
+# Ordinal markers: "1.", "1)", "(1)", "a.", "iv)", etc. — a number/letter/roman
+# numeral then a . or ) then whitespace and more text.
+_ORDINAL_RE = re.compile(
+    r"^\(?\s*(?:\d{1,3}|[ivxlcdmIVXLCDM]{1,7}|[A-Za-z])\s*[.)]\s+\S"
+)
+
+
+def _operand_str(obj: Any) -> str:
+    """Best-effort text of a single show-text operand for MARKER detection.
+
+    We prefer the RAW operand bytes (latin-1) over pypdf's decoded string: list
+    markers are font-encoded single bytes (e.g. a WinAnsi bullet is 0x95), and
+    pypdf decodes string operands with PDFDocEncoding, which maps 0x95 to 'Ł' —
+    so the decoded text loses the bullet. The raw byte value is what our bullet
+    set is keyed on, and it gives a correct length for the table prose guard.
+    """
+    try:
+        raw = getattr(obj, "original_bytes", None)
+        if raw is not None:
+            return bytes(raw).decode("latin-1", "ignore")
+        if isinstance(obj, (bytes, bytearray)):
+            return bytes(obj).decode("latin-1", "ignore")
+        return str(obj)
+    except Exception:
+        return ""
+
+
+def _block_text(block_ops) -> str:
+    """Concatenate the visible text shown by a BT..ET block's Tj/TJ/'/" ops."""
+    parts: List[str] = []
+    for operands, op in block_ops:
+        if op == b"Tj" and operands:
+            parts.append(_operand_str(operands[0]))
+        elif op == b"TJ" and operands and isinstance(operands[0], (list, ArrayObject)):
+            for el in operands[0]:
+                if not isinstance(el, NumberObject) and not isinstance(el, (int, float)):
+                    parts.append(_operand_str(el))
+        elif op in (b"'", b'"') and operands:
+            parts.append(_operand_str(operands[-1]))
+    return "".join(parts)
+
+
+def _is_list_item(text: str) -> bool:
+    """True when ``text`` begins with a bullet or an ordinal list marker.
+
+    Conservative: strong bullets always count; weak ones (-, *, dashes) only when
+    followed by whitespace; ordinals need a separator and following text."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    c = t[0]
+    if c in _STRONG_BULLETS:
+        return True
+    if c in _WEAK_BULLETS and len(t) > 1 and t[1] in " \t":
+        return True
+    return bool(_ORDINAL_RE.match(t))
+
+
+# Table detection tolerances (PDF user-space units ~= points).
+_ROW_TOL = 4.0   # text whose baselines are within this are the same row
+_COL_TOL = 10.0  # column x-origins must line up within this across rows
+
+
+def _block_origin(block_ops) -> tuple:
+    """The (x, y) text origin of a block, from its first Td/TD/Tm operator.
+
+    ``BT`` resets the text + line matrices to identity, so the first ``x y Td``
+    in a block is effectively its absolute origin; ``Tm`` carries the translation
+    in operands 4/5. Returns (None, None) when no positioning op is present.
+    """
+    for operands, op in block_ops:
+        if op in (b"Td", b"TD") and len(operands) >= 2:
+            try:
+                return float(operands[0]), float(operands[1])
+            except Exception:
+                return None, None
+        if op == b"Tm" and len(operands) >= 6:
+            try:
+                return float(operands[4]), float(operands[5])
+            except Exception:
+                return None, None
+    return None, None
+
+
+def _looks_like_data_cells(run) -> bool:
+    """Reject grids that are really forms / prose / TOCs rather than data tables.
+
+    An adversarial review showed pure geometry tags forms (``Name:`` / blank),
+    two-column prose, and TOCs as tables. Genuine data cells are short, mostly
+    not label-style (``foo:``) and not long running prose. Conservative: when in
+    doubt we DON'T call it a table (a missed table is far less harmful in
+    PDF/UA terms than mis-tagging a form as one)."""
+    ncols = len(run[0])
+    cells = [blk[3] for r in run for blk in r]
+    # 1) Prose: a column layout whose cells are long lines, not table values.
+    if sum(1 for t in cells if len(t) > 40) > len(cells) / 2:
+        return False
+    # 2) Prose by word count: real cells are short (<=3 words); sentences aren't.
+    word_counts = sorted(len(t.split()) for t in cells)
+    median_words = word_counts[len(word_counts) // 2]
+    if median_words > 3:
+        return False
+    # 3) Form: any column that is mostly "label:" or blank/underscore fillers.
+    for c in range(ncols):
+        col = [r[c][3].strip() for r in run]
+        labelish = sum(1 for t in col if t.endswith(":"))
+        fillerish = sum(1 for t in col if t and set(t) <= set("_-.… "))
+        if labelish > len(col) / 2 or fillerish > len(col) / 2:
+            return False
+    return True
+
+
+def _detect_table_groups(segments):
+    """Reconstruct DATA tables from positioned text blocks (high-precision).
+
+    A table is a run of >=3 consecutive rows (text blocks sharing a baseline,
+    with a consistent row pitch) where every row has the SAME number of cells
+    (>=2), the per-column x-origins line up, the cells look like short data
+    values (not prose / form labels / fillers), and no figure interrupts the
+    run. Anything that fails these is left untagged — we never risk a false
+    table (forms, TOCs, two-column prose all stay plain text).
+
+    Returns ``(cell_of, tables)`` where ``cell_of[segidx] = (table_id, row, col)``
+    and ``tables[table_id] = {"nrows": n, "ncols": m}``.
+    """
+    figure_idxs = {i for i, (k, _o, _m) in enumerate(segments) if k == "figure"}
+    blocks = []  # (segidx, x, y, text)
+    for idx, (kind, ops, _meta) in enumerate(segments):
+        if kind != "text":
+            continue
+        x, y = _block_origin(ops)
+        if x is None or y is None:
+            continue
+        text = _block_text(ops).strip()
+        if not text:
+            continue
+        blocks.append((idx, x, y, text))
+
+    cell_of: Dict[int, tuple] = {}
+    tables: Dict[int, Dict[str, int]] = {}
+    if len(blocks) < 6:  # need at least a 3x2 grid
+        return cell_of, tables
+
+    # Group blocks into rows by baseline (y), top to bottom; sort each row L→R.
+    blocks.sort(key=lambda b: (-b[2], b[1]))
+    rows: List[List[tuple]] = []
+    cur = [blocks[0]]
+    for b in blocks[1:]:
+        if abs(b[2] - cur[0][2]) <= _ROW_TOL:
+            cur.append(b)
+        else:
+            cur.sort(key=lambda z: z[1])
+            rows.append(cur)
+            cur = [b]
+    cur.sort(key=lambda z: z[1])
+    rows.append(cur)
+
+    def _row_y(r):
+        return sum(b[2] for b in r) / len(r)
+
+    def _emit(run, tid):
+        ncols = len(run[0])
+        if len(run) < 3 or ncols < 2 or any(len(r) != ncols for r in run):
+            return False
+        col_xs = [run[0][c][1] for c in range(ncols)]
+        if not all(abs(r[c][1] - col_xs[c]) <= _COL_TOL for r in run for c in range(ncols)):
+            return False
+        # No figure may interrupt the run (would scramble reading order).
+        seg_idxs = [blk[0] for r in run for blk in r]
+        if any(lo < f < hi for f in figure_idxs for lo, hi in [(min(seg_idxs), max(seg_idxs))]):
+            return False
+        if not _looks_like_data_cells(run):
+            return False
+        for rr, r in enumerate(run):
+            for cc, blk in enumerate(r):
+                cell_of[blk[0]] = (tid, rr, cc)
+        tables[tid] = {"nrows": len(run), "ncols": ncols}
+        return True
+
+    # Find maximal runs of consecutive multi-cell rows, then split each run where
+    # the vertical gap jumps (so two stacked tables don't merge into one).
+    tid = 0
+    i = 0
+    while i < len(rows):
+        if len(rows[i]) >= 2:
+            j = i
+            while j < len(rows) and len(rows[j]) >= 2:
+                j += 1
+            band = rows[i:j]
+            # Split the band on large row-pitch jumps.
+            gaps = [abs(_row_y(band[k]) - _row_y(band[k + 1])) for k in range(len(band) - 1)]
+            sub_start = 0
+            if gaps:
+                med = sorted(gaps)[len(gaps) // 2] or 1.0
+                for k, g in enumerate(gaps):
+                    if g > 2.2 * med:
+                        if _emit(band[sub_start : k + 1], tid):
+                            tid += 1
+                        sub_start = k + 1
+            if _emit(band[sub_start:], tid):
+                tid += 1
+            i = j
+        else:
+            i += 1
+    return cell_of, tables
+
+
 def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
     """Per-element marked content for one page.
 
@@ -294,17 +518,53 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
 
     levels = _heading_levels([m for k, _, m in segments if k == "text" and m])
 
-    # Pass 2 — emit marked content.
+    # Pass 1.5a — reconstruct tables from positioned text (cells get tagged
+    # TH/TD and are excluded from list/heading/paragraph handling).
+    cell_of, tables = _detect_table_groups(segments)
+
+    # Pass 1.5b — find runs of >=2 consecutive list-item text blocks. Raw ops
+    # between items don't break a run; a figure, table cell, or non-list text
+    # block does.
+    group_of: Dict[int, int] = {}  # segment idx -> list-group id
+    gid = 0
+    run: List[int] = []
+
+    def _flush_run() -> None:
+        nonlocal gid
+        if len(run) >= 2:
+            for ti in run:
+                group_of[ti] = gid
+            gid += 1
+        run.clear()
+
+    for idx, (kind, seg_ops, _meta) in enumerate(segments):
+        if kind == "raw":
+            continue
+        if kind == "text" and idx not in cell_of and _is_list_item(_block_text(seg_ops)):
+            run.append(idx)
+        else:
+            _flush_run()
+    _flush_run()
+
+    # Pass 2 — emit marked content; record an ordered leaf per tagged segment.
     new_ops = []
-    specs = []
+    leaves = []  # ordered dicts: mcid, tag, alt, group, table=(tid,row,col)
+    table_cell_mcid: Dict[tuple, int] = {}  # (tid,row,col) -> mcid
     mcid = 0
-    for kind, seg_ops, meta in segments:
+    for idx, (kind, seg_ops, meta) in enumerate(segments):
         if kind == "raw":
             new_ops.extend(seg_ops)
             continue
+        tcell = cell_of.get(idx) if kind == "text" else None
+        grp = group_of.get(idx) if kind == "text" else None
         if kind == "text":
-            lvl = levels.get(round(meta, 1)) if meta else None
-            tag = f"/H{lvl}" if lvl else "/P"
+            if tcell is not None:
+                tag = "/TH" if tcell[1] == 0 else "/TD"  # first row = header
+            elif grp is not None:
+                tag = "/LBody"
+            else:
+                lvl = levels.get(round(meta, 1)) if meta else None
+                tag = f"/H{lvl}" if lvl else "/P"
             alt = None
         else:  # figure
             tag = "/Figure"
@@ -312,16 +572,18 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
         new_ops.append(([NameObject(tag), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
         new_ops.extend(seg_ops)
         new_ops.append(([], b"EMC"))
-        specs.append({"s": tag, "alt": alt})
+        leaves.append({"mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell})
+        if tcell is not None:
+            table_cell_mcid[tcell] = mcid
         mcid += 1
 
-    if not specs:
+    if not leaves:
         return None
     if _count_text_ops(new_ops) != orig_text:  # text must be preserved exactly
         return None
     # Every original op must survive exactly once; we add only 2 ops (BDC+EMC)
     # per tagged segment. Anything else means an operator was dropped/duplicated.
-    if len(new_ops) != len(ops) + 2 * len(specs):
+    if len(new_ops) != len(ops) + 2 * len(leaves):
         return None
 
     cs.operations = new_ops
@@ -332,7 +594,90 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
     ns = DecodedStreamObject()
     ns.set_data(new_data)
     page[NameObject("/Contents")] = pdf._add_object(ns)  # noqa: SLF001
+
+    # Pass 3 — build nested specs. A table emits one /Table -> /TR -> /TH|/TD at
+    # the position of its first cell; a list run emits /L -> /LI -> /LBody;
+    # everything else stays a flat leaf (/P, /Hn, /Figure).
+    specs: List[Dict[str, Any]] = []
+    emitted_tables: set = set()
+    i = 0
+    while i < len(leaves):
+        leaf = leaves[i]
+        tcell = leaf["table"]
+        grp = leaf["group"]
+        if tcell is not None:
+            tid = tcell[0]
+            if tid not in emitted_tables:
+                emitted_tables.add(tid)
+                dims = tables[tid]
+                trs = []
+                for r in range(dims["nrows"]):
+                    tcs = []
+                    for c in range(dims["ncols"]):
+                        mc = table_cell_mcid.get((tid, r, c))
+                        if mc is None:
+                            continue
+                        tcs.append({"s": "/TH" if r == 0 else "/TD", "mcid": mc})
+                    if tcs:
+                        trs.append({"s": "/TR", "kids": tcs})
+                if trs:
+                    specs.append({"s": "/Table", "kids": trs})
+            i += 1  # this cell is already inside the table spec
+        elif grp is not None:
+            items = []
+            while i < len(leaves) and leaves[i]["group"] == grp and leaves[i]["table"] is None:
+                items.append({"s": "/LI", "kids": [{"s": "/LBody", "mcid": leaves[i]["mcid"]}]})
+                i += 1
+            specs.append({"s": "/L", "kids": items})
+        else:
+            node = {"s": leaf["tag"], "mcid": leaf["mcid"]}
+            if leaf["alt"]:
+                node["alt"] = leaf["alt"]
+            specs.append(node)
+            i += 1
     return specs
+
+
+def _build_struct_elem(
+    writer: PdfWriter,
+    spec: Dict[str, Any],
+    parent_ref: IndirectObject,
+    page: Any,
+    mcid_to_ref: Dict[int, IndirectObject],
+    stats: Dict[str, int],
+) -> IndirectObject:
+    """Recursively build a StructElem from a (possibly nested) spec.
+
+    A *container* spec (``{"s": "/L", "kids": [...]}``) gets ``/K`` = an array of
+    child StructElem refs and carries no marked content. A *leaf* spec
+    (``{"s": "/P", "mcid": n}``) gets ``/K`` = its MCID and ``/Pg`` = the page,
+    and is registered in ``mcid_to_ref`` so the ParentTree can point back to it.
+    """
+
+    elem = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/StructElem"),
+            NameObject("/S"): NameObject(spec["s"]),
+            NameObject("/P"): parent_ref,
+        }
+    )
+    ref = writer._add_object(elem)  # noqa: SLF001
+    kids = spec.get("kids")
+    if kids:
+        kid_refs = ArrayObject()
+        for kid in kids:
+            kid_refs.append(
+                _build_struct_elem(writer, kid, ref, page, mcid_to_ref, stats)
+            )
+        elem[NameObject("/K")] = kid_refs
+    else:
+        elem[NameObject("/Pg")] = page.indirect_reference
+        elem[NameObject("/K")] = NumberObject(spec["mcid"])
+        if spec.get("alt"):
+            elem[NameObject("/Alt")] = TextStringObject(str(spec["alt"]))
+            stats["figures"] += 1
+        mcid_to_ref[spec["mcid"]] = ref
+    return ref
 
 
 def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
@@ -413,37 +758,41 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         nums = ArrayObject()
         figures = 0
         per_element_pages = 0
+        lists_tagged = 0
+        tables_tagged = 0
         for key, page in enumerate(taggable):
             specs = _tag_page_elements(writer, page, alt_by_xobject)
             if specs is None:
                 # Safe fallback: page-level single /P (original bytes untouched).
                 _wrap_page_marked_content(writer, page, mcid=0)
-                specs = [{"s": "/P", "alt": None}]
+                specs = [{"s": "/P", "mcid": 0}]
             else:
                 per_element_pages += 1
 
-            page_refs: List[IndirectObject] = []
-            for mcid, spec in enumerate(specs):
-                elem = DictionaryObject(
-                    {
-                        NameObject("/Type"): NameObject("/StructElem"),
-                        NameObject("/S"): NameObject(spec["s"]),
-                        NameObject("/P"): doc_elem_ref,
-                        NameObject("/Pg"): page.indirect_reference,
-                        NameObject("/K"): NumberObject(mcid),
-                    }
+            # Build the page's (possibly nested) struct elements. Leaves register
+            # their MCID -> ref so the ParentTree can index back to them.
+            mcid_to_ref: Dict[int, IndirectObject] = {}
+            stats = {"figures": 0}
+            for spec in specs:
+                ref = _build_struct_elem(
+                    writer, spec, doc_elem_ref, page, mcid_to_ref, stats
                 )
-                if spec.get("alt"):
-                    elem[NameObject("/Alt")] = TextStringObject(str(spec["alt"]))
-                    figures += 1
-                ref = writer._add_object(elem)  # noqa: SLF001
-                page_refs.append(ref)
-                elem_refs.append(ref)
+                elem_refs.append(ref)  # top-level elems are the Document's kids
+                if spec.get("s") == "/L":
+                    lists_tagged += 1
+                elif spec.get("s") == "/Table":
+                    tables_tagged += 1
+            figures += stats["figures"]
 
+            # ParentTree row: index = MCID -> the leaf StructElem that owns it.
+            page_arr = ArrayObject()
+            if mcid_to_ref:
+                for m in range(max(mcid_to_ref) + 1):
+                    page_arr.append(mcid_to_ref.get(m, NullObject()))
             page[NameObject("/StructParents")] = NumberObject(key)
             page[NameObject("/Tabs")] = NameObject("/S")
             nums.append(NumberObject(key))
-            nums.append(ArrayObject(page_refs))
+            nums.append(page_arr)
 
         doc_elem.update(
             {
@@ -472,6 +821,8 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["pages"] = len(taggable)
         report["elements"] = len(elem_refs)
         report["figures"] = figures
+        report["lists"] = lists_tagged
+        report["tables"] = tables_tagged
         report["perElementPages"] = per_element_pages
         applied.append("struct_tree")
         applied.append("mark_info")
