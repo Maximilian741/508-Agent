@@ -366,7 +366,7 @@ def _looks_like_data_cells(run) -> bool:
     return True
 
 
-def _detect_table_groups(segments):
+def _detect_table_groups(segments, exclude=frozenset()):
     """Reconstruct DATA tables from positioned text blocks (high-precision).
 
     A table is a run of >=3 consecutive rows (text blocks sharing a baseline,
@@ -382,7 +382,7 @@ def _detect_table_groups(segments):
     figure_idxs = {i for i, (k, _o, _m) in enumerate(segments) if k == "figure"}
     blocks = []  # (segidx, x, y, text)
     for idx, (kind, ops, _meta) in enumerate(segments):
-        if kind != "text":
+        if kind != "text" or idx in exclude:
             continue
         x, y = _block_origin(ops)
         if x is None or y is None:
@@ -461,13 +461,148 @@ def _detect_table_groups(segments):
     return cell_of, tables
 
 
-def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
+_LIST_INDENT = 12.0  # x increase (pts) that marks a nested (deeper) list level
+
+
+def _build_nested_list(items: List[tuple]) -> Dict[str, Any]:
+    """Build a /L spec from list items, nesting by x-indentation.
+
+    ``items`` is ``[(mcid, x), ...]`` in reading order. A item indented further
+    right than the current level starts a nested ``/L`` inside the previous
+    ``/LI``; a item further left pops back out. Indentation we can't read (x is
+    None) keeps everything at the current level (flat). The result is always a
+    valid /L -> /LI -> (/LBody [, nested /L]) tree."""
+    root: Dict[str, Any] = {"s": "/L", "kids": []}
+    # stack of (level_x, list_spec); deeper items nest under the last LI.
+    base_x = next((x for _m, x in items if x is not None), 0.0)
+    stack: List[tuple] = [(base_x, root)]
+    for mcid, x in items:
+        xx = base_x if x is None else x
+        while len(stack) > 1 and xx < stack[-1][0] - _LIST_INDENT:
+            stack.pop()
+        level_x, cur = stack[-1]
+        if xx > level_x + _LIST_INDENT and cur["kids"]:
+            parent_li = cur["kids"][-1]
+            sub = {"s": "/L", "kids": []}
+            parent_li["kids"].append(sub)
+            stack.append((xx, sub))
+            cur = sub
+        cur["kids"].append({"s": "/LI", "kids": [{"s": "/LBody", "mcid": mcid}]})
+    return root
+
+
+# Running heads/footers/page numbers live in the top/bottom band of the page.
+_ARTIFACT_BAND = 0.11  # fraction of page height at top and bottom
+
+
+def _page_height(page) -> Optional[float]:
+    try:
+        return float(page.mediabox.height)
+    except Exception:
+        return None
+
+
+def _artifact_sig(x: float, y: float) -> tuple:
+    """Position signature (quantized) used to match a block across pages."""
+    return (round(x / 6.0), round(y / 6.0))
+
+
+def _in_artifact_band(y: float, height: Optional[float]) -> bool:
+    if not height:
+        return False
+    return y > height * (1 - _ARTIFACT_BAND) or y < height * _ARTIFACT_BAND
+
+
+_PAGENUM_RE = re.compile(
+    r"^(?:[-–—‒]\s*)?(?:page\s+|p\.?\s*|pg\.?\s*)?\d{1,4}"
+    r"(?:\s*(?:of|/)\s*\d{1,4})?(?:\s*[-–—‒])?$",
+    re.IGNORECASE,
+)
+_ROMAN_RE = re.compile(r"^[ivxlcdm]{1,7}$", re.IGNORECASE)
+
+
+def _is_page_number(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(t) and bool(_PAGENUM_RE.match(t) or _ROMAN_RE.match(t))
+
+
+def _page_band_blocks(pdf: PdfWriter, page) -> List[tuple]:
+    """``(pos_sig, text)`` for each text block in this page's header/footer band."""
+    height = _page_height(page)
+    if not height:
+        return []
+    try:
+        ops = ContentStream(page.get_contents(), pdf).operations
+    except Exception:
+        return []
+    out: List[tuple] = []
+    block = None
+    for operands, op in ops:
+        if op == b"BT":
+            block = [(operands, op)]
+        elif op == b"ET" and block is not None:
+            block.append((operands, op))
+            x, y = _block_origin(block)
+            if x is not None and y is not None and _in_artifact_band(y, height):
+                t = _block_text(block).strip()
+                if t:
+                    out.append((_artifact_sig(x, y), t))
+            block = None
+        elif block is not None:
+            block.append((operands, op))
+    return out
+
+
+def _collect_artifact_sigs(pdf: PdfWriter, pages) -> tuple:
+    """Identify pagination artifacts that recur across >=2 pages.
+
+    A running head/footer is the SAME text at the SAME band position page to
+    page; a page number keeps its position but changes the digits. Matching on
+    position ALONE wrongly eats ordinary body lines / per-page headings that sit
+    at the standard top/bottom margin (different text, same position) — so we
+    require the TEXT to repeat too, with a narrow page-number carve-out.
+
+    Returns ``(text_keys, pagenum_positions)``:
+    * ``text_keys`` — set of ``(pos_sig, casefolded_text)`` seen on >=2 pages;
+    * ``pagenum_positions`` — set of ``pos_sig`` whose band text is a page-number
+      token on >=2 pages (text varies, position is stable).
+    """
+    if len(pages) < 2:
+        return (frozenset(), frozenset())
+    pos_texts: Dict[tuple, List[str]] = {}
+    for page in pages:
+        for sig, text in _page_band_blocks(pdf, page):
+            pos_texts.setdefault(sig, []).append(text)
+
+    text_keys = set()
+    pagenum_positions = set()
+    for sig, texts in pos_texts.items():
+        if len(texts) < 2:
+            continue
+        norm = [t.casefold() for t in texts]
+        common, count = Counter(norm).most_common(1)[0]
+        if count >= 2:  # the same running head/footer text recurs
+            text_keys.add((sig, common))
+        if sum(1 for t in texts if _is_page_number(t)) >= 2:  # a page-number slot
+            pagenum_positions.add(sig)
+    return (frozenset(text_keys), frozenset(pagenum_positions))
+
+
+def _tag_page_elements(
+    pdf: PdfWriter,
+    page,
+    alt_by_xobject: Dict[str, str],
+    artifact_info: tuple = (frozenset(), frozenset()),
+    counters: Optional[Dict[str, int]] = None,
+):
     """Per-element marked content for one page.
 
     Segments the content into text blocks (BT..ET) and known-alt images (Do),
     tags each text block ``/H1``..``/H6`` (by relative font size) or ``/P``, and
-    each image ``/Figure`` with ``/Alt``. Returns specs (mcid = list index) or
-    ``None`` to signal the caller to fall back to safe page-level wrapping.
+    each image ``/Figure`` with ``/Alt``. Repeated header/footer/page-number
+    blocks (``artifact_sigs``) are wrapped as ``/Artifact`` and kept OUT of the
+    structure tree. Returns specs (mcid = list index) or ``None`` to signal the
+    caller to fall back to safe page-level wrapping.
     """
     try:
         contents = page.get_contents()
@@ -516,11 +651,32 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
     if raw:
         segments.append(("raw", raw, None))
 
-    levels = _heading_levels([m for k, _, m in segments if k == "text" and m])
+    height = _page_height(page)
 
-    # Pass 1.5a — reconstruct tables from positioned text (cells get tagged
-    # TH/TD and are excluded from list/heading/paragraph handling).
+    # Pass 1.4 — reconstruct tables from positioned text (cells get tagged
+    # TH/TD and are excluded from list/heading/paragraph/artifact handling).
     cell_of, tables = _detect_table_groups(segments)
+
+    # Pass 1.5 — pagination artifacts: header/footer-band blocks whose TEXT (or
+    # page-number role) repeats across pages. Wrapped /Artifact, kept out of the
+    # tree. Table cells are NEVER artifacts (protects multi-page table headers).
+    text_keys, pagenum_positions = artifact_info
+    artifact_idxs: set = set()
+    if text_keys or pagenum_positions:
+        for idx, (kind, seg_ops, _m) in enumerate(segments):
+            if kind != "text" or idx in cell_of:
+                continue
+            bx, by = _block_origin(seg_ops)
+            if bx is None or by is None or not _in_artifact_band(by, height):
+                continue
+            sig = _artifact_sig(bx, by)
+            t = _block_text(seg_ops).strip()
+            if (sig, t.casefold()) in text_keys or (sig in pagenum_positions and _is_page_number(t)):
+                artifact_idxs.add(idx)
+
+    levels = _heading_levels(
+        [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs]
+    )
 
     # Pass 1.5b — find runs of >=2 consecutive list-item text blocks. Raw ops
     # between items don't break a run; a figure, table cell, or non-list text
@@ -540,7 +696,12 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
     for idx, (kind, seg_ops, _meta) in enumerate(segments):
         if kind == "raw":
             continue
-        if kind == "text" and idx not in cell_of and _is_list_item(_block_text(seg_ops)):
+        if (
+            kind == "text"
+            and idx not in cell_of
+            and idx not in artifact_idxs
+            and _is_list_item(_block_text(seg_ops))
+        ):
             run.append(idx)
         else:
             _flush_run()
@@ -550,10 +711,18 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
     new_ops = []
     leaves = []  # ordered dicts: mcid, tag, alt, group, table=(tid,row,col)
     table_cell_mcid: Dict[tuple, int] = {}  # (tid,row,col) -> mcid
+    n_artifacts = 0
     mcid = 0
     for idx, (kind, seg_ops, meta) in enumerate(segments):
         if kind == "raw":
             new_ops.extend(seg_ops)
+            continue
+        if idx in artifact_idxs:
+            # Pagination artifact: wrap /Artifact BMC..EMC, NOT in the tree.
+            new_ops.append(([NameObject("/Artifact")], b"BMC"))
+            new_ops.extend(seg_ops)
+            new_ops.append(([], b"EMC"))
+            n_artifacts += 1
             continue
         tcell = cell_of.get(idx) if kind == "text" else None
         grp = group_of.get(idx) if kind == "text" else None
@@ -569,10 +738,12 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
         else:  # figure
             tag = "/Figure"
             alt = meta
+        # x-indent is used to nest list items (deeper x => sub-list).
+        lx = _block_origin(seg_ops)[0] if (kind == "text" and grp is not None) else None
         new_ops.append(([NameObject(tag), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
         new_ops.extend(seg_ops)
         new_ops.append(([], b"EMC"))
-        leaves.append({"mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell})
+        leaves.append({"mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell, "x": lx})
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
         mcid += 1
@@ -581,10 +752,12 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
         return None
     if _count_text_ops(new_ops) != orig_text:  # text must be preserved exactly
         return None
-    # Every original op must survive exactly once; we add only 2 ops (BDC+EMC)
-    # per tagged segment. Anything else means an operator was dropped/duplicated.
-    if len(new_ops) != len(ops) + 2 * len(leaves):
+    # Every original op must survive exactly once; we add 2 ops (BDC/BMC+EMC) per
+    # tagged segment AND per artifact. Anything else means an op was lost/dupd.
+    if len(new_ops) != len(ops) + 2 * (len(leaves) + n_artifacts):
         return None
+    if counters is not None:
+        counters["artifacts"] = counters.get("artifacts", 0) + n_artifacts
 
     cs.operations = new_ops
     try:
@@ -626,9 +799,9 @@ def _tag_page_elements(pdf: PdfWriter, page, alt_by_xobject: Dict[str, str]):
         elif grp is not None:
             items = []
             while i < len(leaves) and leaves[i]["group"] == grp and leaves[i]["table"] is None:
-                items.append({"s": "/LI", "kids": [{"s": "/LBody", "mcid": leaves[i]["mcid"]}]})
+                items.append((leaves[i]["mcid"], leaves[i].get("x")))
                 i += 1
-            specs.append({"s": "/L", "kids": items})
+            specs.append(_build_nested_list(items))
         else:
             node = {"s": leaf["tag"], "mcid": leaf["mcid"]}
             if leaf["alt"]:
@@ -754,6 +927,8 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         doc_elem_ref = writer._add_object(doc_elem)  # noqa: SLF001
 
         alt_by_xobject = _build_alt_by_xobject(tree)
+        artifact_info = _collect_artifact_sigs(writer, taggable)
+        page_counters: Dict[str, int] = {"artifacts": 0}
         elem_refs: List[IndirectObject] = []  # all struct elems, reading order
         nums = ArrayObject()
         figures = 0
@@ -761,7 +936,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         lists_tagged = 0
         tables_tagged = 0
         for key, page in enumerate(taggable):
-            specs = _tag_page_elements(writer, page, alt_by_xobject)
+            specs = _tag_page_elements(writer, page, alt_by_xobject, artifact_info, page_counters)
             if specs is None:
                 # Safe fallback: page-level single /P (original bytes untouched).
                 _wrap_page_marked_content(writer, page, mcid=0)
@@ -823,6 +998,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["figures"] = figures
         report["lists"] = lists_tagged
         report["tables"] = tables_tagged
+        report["artifacts"] = page_counters.get("artifacts", 0)
         report["perElementPages"] = per_element_pages
         applied.append("struct_tree")
         applied.append("mark_info")
