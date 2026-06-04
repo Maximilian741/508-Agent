@@ -11,6 +11,7 @@ from app.analyzers.document_analyzer import (
     DocumentLanguageAnalyzer,
     DocumentTitleAnalyzer,
     FormFieldLabelAnalyzer,
+    ScannedDocumentAnalyzer,
     SlideTitleAnalyzer,
 )
 from app.analyzers.heading_analyzer import HeadingLevelJumpAnalyzer, SkippedHeadingLevelAnalyzer
@@ -50,6 +51,7 @@ def get_default_analyzers() -> List[Analyzer]:
         ContrastAnalyzer(),
         FormFieldLabelAnalyzer(),
         SlideTitleAnalyzer(),
+        ScannedDocumentAnalyzer(),
     ]
 
 

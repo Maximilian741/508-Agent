@@ -315,6 +315,25 @@ const C: Record<string, IssueCatalogEntry> = {
     learnMoreUrl: "https://www.w3.org/WAI/tutorials/images/",
   },
 
+  SCANNED_DOCUMENT_NO_TEXT: {
+    ruleId: "SCANNED_DOCUMENT_NO_TEXT",
+    title: "PDF is a scanned image — OCR required",
+    summary: "This PDF is a scanned image, not text. A screen reader cannot read any of it.",
+    why:
+      "When a PDF is just images of pages (scanned paper, photos of slides), the words you see are pixels — assistive technology cannot extract or read them. This is the single most-common reason a PDF that 'looks fine' is completely inaccessible. WCAG 1.1.1 requires a text alternative; WCAG 1.4.5 prefers real text over images of text.",
+    autoFix:
+      "We cannot fix this from inside the document — it needs Optical Character Recognition (OCR) first to convert the page images into selectable text. After OCR, re-upload and the rest of the engine can do its work.",
+    manualJudgment:
+      "Run OCR on the PDF (Adobe Acrobat: Tools → Scan & OCR → Recognize Text; or any OCR tool like Tesseract). Verify the recognized text matches the original, then re-upload the OCR'd version here.",
+    severity: "error",
+    standards: {
+      wcag: ["1.1.1 Non-text Content", "1.4.5 Images of Text"],
+      section508: ["E205.1"],
+      pdfUa: ["7.1-2"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/non-text-content.html",
+  },
+
   DOCUMENT_NO_HEADINGS: {
     ruleId: "DOCUMENT_NO_HEADINGS",
     title: "Document has no headings",

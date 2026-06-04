@@ -404,6 +404,10 @@ class PDFParser:
         page_count = len(reader.pages)
         next_id = _IdCounter()
 
+        # Aggregate signals for the "scanned PDF / image-only" detector.
+        total_text_chars = 0
+        image_only_pages = 0  # pages with image XObject(s) and <50 chars of text
+
         for page_index in range(page_count):
             page = reader.pages[page_index]
             page_label = f"page-{page_index + 1}"
@@ -420,6 +424,8 @@ class PDFParser:
                 raw_text = page.extract_text() or ""
             except Exception:
                 raw_text = ""
+            page_text_chars = len((raw_text or "").strip())
+            total_text_chars += page_text_chars
             for para_index, paragraph in enumerate(_split_paragraphs(raw_text), start=1):
                 heading_level = _classify_paragraph(paragraph)
                 if heading_level is not None:
@@ -445,7 +451,9 @@ class PDFParser:
                     )
 
             # --- Images ------------------------------------------------------
+            page_image_count = 0
             for image_idx, (name, xobject) in enumerate(_iter_image_xobjects(page), start=1):
+                page_image_count += 1
                 alt_text, decorative = _alt_for_xobject(xobject)
                 image_b64, image_mime = _extract_image_bytes(xobject)
                 section.children.append(
@@ -459,6 +467,11 @@ class PDFParser:
                         image_mime=image_mime,
                     )
                 )
+            # A page with image content but essentially no extractable text is
+            # almost certainly a scanned page (or a poster/infographic). Used
+            # downstream to flag SCANNED_DOCUMENT_NO_TEXT.
+            if page_image_count > 0 and page_text_chars < 50:
+                image_only_pages += 1
 
             # --- Links -------------------------------------------------------
             for link_idx, link in enumerate(_link_annotations(page), start=1):
@@ -475,6 +488,11 @@ class PDFParser:
                 )
 
             root.children.append(section)
+
+        # Stash scan-detection signals on the root for ScannedDocumentAnalyzer.
+        root.metadata.properties["page_count"] = page_count
+        root.metadata.properties["total_text_chars"] = total_text_chars
+        root.metadata.properties["image_only_pages"] = image_only_pages
 
         raw_metadata: Dict[str, Any] = {
             "page_count": page_count,

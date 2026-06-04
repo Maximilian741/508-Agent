@@ -2322,7 +2322,7 @@ function _buildReportHtml(
 
       <div class="conformance-callout">
         <strong>Audit date:</strong> ${formattedDate}<br>
-        <strong>Automated checks performed:</strong> image alt text (incl. filename / placeholder alt that says nothing, 1.1.1), heading structure (incl. long documents with no headings at all, 2.4.6), table headers, list structure, slide titles, document title &amp; language, link text (incl. bare-URL link text, 2.4.4), colour contrast (WCAG 1.4.3 — explicit, theme &amp; PDF text colours, vs. white), and form-field labels (3.3.2 / 4.1.2 — PDF &amp; Word).<br>
+        <strong>Automated checks performed:</strong> image alt text (incl. filename / placeholder alt that says nothing, 1.1.1), heading structure (incl. long documents with no headings at all, 2.4.6), table headers, list structure, slide titles, document title &amp; language, link text (incl. bare-URL link text, 2.4.4), colour contrast (WCAG 1.4.3 — explicit, theme &amp; PDF text colours, vs. white), form-field labels (3.3.2 / 4.1.2 — PDF &amp; Word), and scanned PDF / no-extractable-text detection (1.1.1 — OCR required before remediation).<br>
         <strong>Not evaluated — require manual review:</strong> colour contrast for inherited colours &amp; coloured-background pages, reading order (1.3.2), document parsing (4.1.1), and other success criteria.<br>
         <strong>Methodology:</strong> Deterministic structural analyzers + heuristic / vision-AI suggestions for human review. This is an automated pre-scan, <strong>not</strong> a formal WCAG 2.1 / Section 508 conformance determination.
       </div>
