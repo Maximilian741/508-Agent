@@ -120,6 +120,28 @@ def main() -> int:
               all(li[0] == "/LI" and li[1] == ["/LBody"] for li in s[1]) for s in top))
     check("list page reopens + text preserved", "First" in (r.pages[0].extract_text() or ""))
 
+    # --- 1b. Nested list (indented sub-items nest inside the parent /LI) ---
+    _, r1b = _tag([
+        _bt(12, 40, 480, b"1. top one"),
+        _bt(12, 62, 462, b"a. sub one"),
+        _bt(12, 62, 444, b"b. sub two"),
+        _bt(12, 40, 426, b"2. top two"),
+    ])
+    topb = _top(r1b)
+    lst = next((s for s in topb if isinstance(s, tuple) and s[0] == "/L"), None)
+
+    def _has_nested_L(node):
+        # node = ('/L', [ ('/LI', [kids...]), ... ])
+        if not (isinstance(node, tuple) and node[0] == "/L"):
+            return False
+        for li in node[1]:
+            if isinstance(li, tuple) and li[0] == "/LI":
+                if any(isinstance(k, tuple) and k[0] == "/L" for k in li[1]):
+                    return True
+        return False
+
+    check("nested list -> a sub-/L nests inside an /LI", lst is not None and _has_nested_L(lst))
+
     # --- 2. Bullet list (WinAnsi bullet byte 0x95) ---
     _, r2 = _tag([
         _bt(12, 40, 480, b"\x95 alpha"),
