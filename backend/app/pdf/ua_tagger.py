@@ -491,6 +491,282 @@ def _build_nested_list(items: List[tuple]) -> Dict[str, Any]:
     return root
 
 
+# ----- Ruling-line table detection ----------------------------------------
+#
+# Bordered tables draw their cell structure as stroked rectangles or m/l/S
+# line sequences. Detecting these lines and reconstructing the grid gives us
+# what pure text-geometry can't:
+# 1. RECALL — tables whose cells contain prose, labels, or a single column;
+#    the text heuristic intentionally rejects these to avoid form FPs, but
+#    actual ruling lines remove the ambiguity.
+# 2. PRECISION — a candidate enclosed by a real grid IS a table.
+#
+# We never DELETE a text-geometry table (those have already been guarded
+# against FPs); ruling-line detection only ADDS cells the text pass missed.
+
+# Minimum length (pt) for an axis-aligned segment to count as a ruling line.
+_MIN_RULE_LEN = 15.0
+# Coordinate tolerances (pt).
+_AXIS_TOL = 0.5
+_CLUSTER_TOL = 3.0
+# A rectangle whose short side is <= this is a "thin filled bar" = ruling line.
+_LINE_THICKNESS = 2.5
+# Maximum vertical distance between successive horizontals to count as one band.
+_BAND_MAX_GAP = 200.0
+# A bordered grid must have at least half its cells filled with text to be a
+# table (rejects isolated bordered boxes / multi-card layouts that happen to
+# share alignment).
+_GRID_MIN_FILL = 0.5
+
+_IDENTITY_CTM = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def _ctm_apply(ctm, x, y):
+    a, b, c, d, e, f = ctm
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def _ctm_concat(m, parent):
+    """Compose ``m`` onto ``parent`` (PDF cm: new = m * current)."""
+    a1, b1, c1, d1, e1, f1 = m
+    a2, b2, c2, d2, e2, f2 = parent
+    return (
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
+    )
+
+
+def _collect_ruling_lines(ops):
+    """Walk page ops with CTM tracking; return (horizontal, vertical) lines.
+
+    Each line is ``(x0, y0, x1, y1)`` in device-space coords (CTM applied) with
+    coordinates ordered so horizontals have ``y0==y1, x0<=x1`` and verticals
+    have ``x0==x1, y0<=y1``. Non-axis-aligned segments (after CTM) are ignored
+    — rotated lines aren't ruling for any layout engine we care about.
+
+    Captures BOTH stroked path segments (m..l..S) and rectangles (re). A thin
+    filled rectangle is treated as a single ruling line on its long axis (some
+    PDF generators draw rules that way).
+    """
+    ctm = _IDENTITY_CTM
+    stack: List[tuple] = []
+    horiz: List[tuple] = []
+    vert: List[tuple] = []
+    path_start = None
+    cur = None
+    pending: List[tuple] = []  # (p0, p1) candidate segments until paint op
+
+    def _emit(p0, p1):
+        x0, y0 = _ctm_apply(ctm, *p0)
+        x1, y1 = _ctm_apply(ctm, *p1)
+        if abs(y0 - y1) <= _AXIS_TOL and abs(x0 - x1) >= _MIN_RULE_LEN:
+            horiz.append((min(x0, x1), y0, max(x0, x1), y0))
+        elif abs(x0 - x1) <= _AXIS_TOL and abs(y0 - y1) >= _MIN_RULE_LEN:
+            vert.append((x0, min(y0, y1), x0, max(y0, y1)))
+
+    for operands, op in ops:
+        if op == b"q":
+            stack.append(ctm)
+        elif op == b"Q":
+            if stack:
+                ctm = stack.pop()
+        elif op == b"cm" and len(operands) >= 6:
+            try:
+                m = tuple(float(o) for o in operands[:6])
+                ctm = _ctm_concat(m, ctm)
+            except Exception:
+                pass
+        elif op == b"m" and len(operands) >= 2:
+            try:
+                x = float(operands[0]); y = float(operands[1])
+                path_start = (x, y); cur = (x, y); pending = []
+            except Exception:
+                pass
+        elif op == b"l" and len(operands) >= 2 and cur is not None:
+            try:
+                x = float(operands[0]); y = float(operands[1])
+                pending.append((cur, (x, y))); cur = (x, y)
+            except Exception:
+                pass
+        elif op == b"h" and path_start is not None and cur is not None:
+            pending.append((cur, path_start))
+            cur = path_start
+        elif op == b"re" and len(operands) >= 4:
+            try:
+                x = float(operands[0]); y = float(operands[1])
+                w = float(operands[2]); h = float(operands[3])
+            except Exception:
+                continue
+            short = min(abs(w), abs(h))
+            if short <= _LINE_THICKNESS:
+                # Thin filled bar: emit single ruling line on its long axis.
+                if abs(w) > abs(h):
+                    y_mid = y + h / 2.0
+                    pending.append(((x, y_mid), (x + w, y_mid)))
+                else:
+                    x_mid = x + w / 2.0
+                    pending.append(((x_mid, y), (x_mid, y + h)))
+            else:
+                # Real rectangle (cell border or filled cell): emit 4 edges. A
+                # filled-only background contributes the same edges as a stroke,
+                # which is what we want (filled cells form a coherent grid too).
+                pending.append(((x, y), (x + w, y)))
+                pending.append(((x + w, y), (x + w, y + h)))
+                pending.append(((x + w, y + h), (x, y + h)))
+                pending.append(((x, y + h), (x, y)))
+        elif op in (b"S", b"s", b"B", b"B*", b"b", b"b*", b"f", b"F", b"f*", b"n"):
+            for p0, p1 in pending:
+                _emit(p0, p1)
+            pending = []
+            path_start = None
+            cur = None
+    return horiz, vert
+
+
+def _cluster_1d(values, tol):
+    """Cluster sorted 1D values into bins within ``tol``; return bin centers."""
+    if not values:
+        return []
+    vs = sorted(values)
+    bins = [[vs[0]]]
+    for v in vs[1:]:
+        if v - bins[-1][-1] <= tol:
+            bins[-1].append(v)
+        else:
+            bins.append([v])
+    return [sum(b) / len(b) for b in bins]
+
+
+def _detect_ruling_grids(horiz, vert):
+    """Cluster axis-aligned lines into rectangular grids.
+
+    For each y-band of horizontals (consecutive ys within ``_BAND_MAX_GAP``),
+    find verticals that span the band's y-range and lie within its x-range.
+    A grid needs >=2 distinct row-lines AND >=2 distinct column-lines (so the
+    grid has >=2 rows AND >=2 columns of cells is checked by the caller).
+
+    Returns ``[{xs, ys, x0, x1, y0, y1}]`` — xs sorted L→R, ys sorted top→bottom.
+    """
+    if not horiz or not vert:
+        return []
+
+    h_sorted = sorted(horiz, key=lambda h: -h[1])  # top first (PDF y up)
+    bands: List[List[tuple]] = [[h_sorted[0]]]
+    for h in h_sorted[1:]:
+        if bands[-1][-1][1] - h[1] <= _BAND_MAX_GAP:
+            bands[-1].append(h)
+        else:
+            bands.append([h])
+
+    grids = []
+    for band in bands:
+        if len(band) < 2:
+            continue
+        ys = _cluster_1d([h[1] for h in band], _CLUSTER_TOL)
+        if len(ys) < 2:
+            continue
+        y_top, y_bot = max(ys), min(ys)
+        x_min = min(h[0] for h in band)
+        x_max = max(h[2] for h in band)
+        # Verticals only need to OVERLAP the band's y-range (not span it) — many
+        # tables are drawn as one rect per cell, so each vertical edge is only
+        # cell-tall, not table-tall. Demand x within the horizontal x-range too.
+        relevant = [
+            v for v in vert
+            if v[3] >= y_bot - _CLUSTER_TOL  # extends above the band bottom
+            and v[1] <= y_top + _CLUSTER_TOL  # starts below the band top
+            and v[0] >= x_min - _CLUSTER_TOL
+            and v[0] <= x_max + _CLUSTER_TOL
+        ]
+        xs = _cluster_1d([v[0] for v in relevant], _CLUSTER_TOL)
+        if len(xs) < 2:
+            continue
+        grids.append({
+            "xs": sorted(xs),
+            "ys": sorted(ys, reverse=True),
+            "x0": x_min, "x1": x_max,
+            "y0": y_bot, "y1": y_top,
+        })
+    return grids
+
+
+def _tables_from_grids(grids, segments, cell_of_existing):
+    """Assign text blocks to cells defined by ruling-line grids.
+
+    Skips blocks already claimed by text-geometry tables (no double-tagging).
+    A grid that fills <50% of its cells with text is dropped — protects
+    against isolated bordered boxes / multi-card layouts that happen to share
+    alignment.
+
+    Returns ``(cell_of_extra, tables_extra)`` keyed by NEW tids that don't
+    collide with text-geometry tids.
+    """
+    cell_of: Dict[int, tuple] = {}
+    tables: Dict[int, Dict[str, int]] = {}
+    if not grids:
+        return cell_of, tables
+
+    # Snapshot block positions once; expensive otherwise.
+    blocks = []
+    for idx, (kind, ops, _meta) in enumerate(segments):
+        if kind != "text" or idx in cell_of_existing:
+            continue
+        x, y = _block_origin(ops)
+        if x is None or y is None:
+            continue
+        if not _block_text(ops).strip():
+            continue
+        blocks.append((idx, x, y))
+
+    # Pick first ruling tid AFTER any text-geometry tids.
+    next_tid = (max((t for t, _r, _c in cell_of_existing.values()), default=-1)) + 1
+
+    for grid in grids:
+        xs = grid["xs"]; ys = grid["ys"]
+        nrows = len(ys) - 1
+        ncols = len(xs) - 1
+        if nrows < 2 or ncols < 2:
+            continue  # not a real table grid
+
+        claimed: Dict[tuple, int] = {}  # (row,col) -> seg idx (first wins)
+        for (idx, bx, by) in blocks:
+            if bx < grid["x0"] - _CLUSTER_TOL or bx > grid["x1"] + _CLUSTER_TOL:
+                continue
+            if by < grid["y0"] - _CLUSTER_TOL or by > grid["y1"] + _CLUSTER_TOL:
+                continue
+            # Row: ys descend (top first); row r spans (ys[r], ys[r+1]).
+            row = None
+            for r in range(nrows):
+                if ys[r + 1] - _CLUSTER_TOL <= by <= ys[r] + _CLUSTER_TOL:
+                    row = r
+                    break
+            if row is None:
+                continue
+            col = None
+            for c in range(ncols):
+                if xs[c] - _CLUSTER_TOL <= bx <= xs[c + 1] + _CLUSTER_TOL:
+                    col = c
+                    break
+            if col is None:
+                continue
+            claimed.setdefault((row, col), idx)
+
+        fill_ratio = len(claimed) / max(1, nrows * ncols)
+        if fill_ratio < _GRID_MIN_FILL:
+            continue  # mostly empty grid -> probably card layout, not a table
+
+        tid = next_tid
+        next_tid += 1
+        for (r, c), idx in claimed.items():
+            cell_of[idx] = (tid, r, c)
+        tables[tid] = {"nrows": nrows, "ncols": ncols}
+    return cell_of, tables
+
+
 # Running heads/footers/page numbers live in the top/bottom band of the page.
 _ARTIFACT_BAND = 0.11  # fraction of page height at top and bottom
 
@@ -656,6 +932,21 @@ def _tag_page_elements(
     # Pass 1.4 — reconstruct tables from positioned text (cells get tagged
     # TH/TD and are excluded from list/heading/paragraph/artifact handling).
     cell_of, tables = _detect_table_groups(segments)
+
+    # Pass 1.4b — ruling-line tables (additive). Bordered grids whose cells
+    # contain prose / labels / a single column — which the text heuristic
+    # intentionally rejects — get caught here when actual ruling lines confirm
+    # the structure. Existing text-geometry cells are NEVER overwritten.
+    try:
+        h_lines, v_lines = _collect_ruling_lines(ops)
+        ring_cells, ring_tables = _tables_from_grids(
+            _detect_ruling_grids(h_lines, v_lines), segments, cell_of
+        )
+        cell_of.update(ring_cells)
+        tables.update(ring_tables)
+    except Exception:
+        # Ruling-line detection is best-effort; never block tagging on it.
+        logger.debug("ruling-line detection failed", exc_info=True)
 
     # Pass 1.5 — pagination artifacts: header/footer-band blocks whose TEXT (or
     # page-number role) repeats across pages. Wrapped /Artifact, kept out of the
