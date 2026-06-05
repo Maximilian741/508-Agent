@@ -85,6 +85,7 @@ class AccessibilityFlagCode(str, Enum):
     SLIDE_TITLE_MISSING = "SLIDE_TITLE_MISSING"
     ALT_TEXT_NOT_DESCRIPTIVE = "ALT_TEXT_NOT_DESCRIPTIVE"
     DOCUMENT_NO_HEADINGS = "DOCUMENT_NO_HEADINGS"
+    SCANNED_DOCUMENT_NO_TEXT = "SCANNED_DOCUMENT_NO_TEXT"
 
 
 class StandardReference(BaseModel):
@@ -293,6 +294,19 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["2.4.6", "1.3.1"],
             section_508=["E207.2"],
             pdf_ua=["7.3-1"],
+        ),
+    ),
+    AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT,
+        severity=Severity.ERROR,
+        message=(
+            "Document appears to be scanned image(s) with little or no extractable text. "
+            "OCR is required before any accessibility remediation can apply."
+        ),
+        standards=StandardReference(
+            wcag_2_1=["1.1.1", "1.4.5"],
+            section_508=["E205.1"],
+            pdf_ua=["7.1-2"],
         ),
     ),
 }

@@ -110,3 +110,42 @@ class DocumentHeadingsAnalyzer(Analyzer):
             enough = paragraphs >= _NO_HEADINGS_MIN_PARAGRAPHS and chars >= _NO_HEADINGS_MIN_CHARS
         if enough:
             attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_NO_HEADINGS)
+
+
+class ScannedDocumentAnalyzer(Analyzer):
+    """Flag PDFs that are scanned image(s) with little/no extractable text.
+
+    This is the single most-embarrassing failure mode for a compliance tool: a
+    user uploads a scanned PDF (government forms, contracts), the engine sees
+    zero text → zero violations → reports "accessible" — but the document is
+    100% unreadable to screen readers. We flag it as an ERROR with a clear
+    "OCR required first" message, so the user knows nothing else we report is
+    meaningful until they OCR the file.
+
+    Detection signals (populated by ``pdf_parser``):
+    * ``image_only_pages`` — pages that have image content but <50 chars of text
+    * ``total_text_chars`` — characters extracted across all pages
+    * ``page_count``
+
+    Conservative thresholds: flag when >=80% of pages are image-only AND average
+    text per page is below 50 chars. A short non-scanned PDF (a 1-page memo) is
+    excluded by the per-page text count.
+    """
+
+    name = "scanned_document_no_text"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        fmt = (tree.root.metadata.source_format or "").lower()
+        if fmt != "pdf":
+            return
+        props = tree.root.metadata.properties or {}
+        try:
+            pages = int(props.get("page_count") or 0)
+            image_pages = int(props.get("image_only_pages") or 0)
+            total_chars = int(props.get("total_text_chars") or 0)
+        except (TypeError, ValueError):
+            return
+        if pages == 0:
+            return
+        if image_pages >= pages * 0.8 and total_chars / pages < 50:
+            attach_flag(tree.root, AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT)
