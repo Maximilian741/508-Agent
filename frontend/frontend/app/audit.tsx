@@ -145,6 +145,14 @@ export default function AuditScreen() {
   const lastScoreRef = useRef<number>(0);
   const [downloadingFixed, setDownloadingFixed] = useState(false);
   const [fixedDownloadUrl, setFixedDownloadUrl] = useState<string | null>(null);
+  // "Verify the fix" re-audit of the remediated file (free analyze pass).
+  const [reaudit, setReaudit] = useState<{
+    beforeIssues: number;
+    afterIssues: number;
+    afterScore: number;
+    afterGrade: string;
+  } | null>(null);
+  const [reauditBusy, setReauditBusy] = useState(false);
   const [lastRemediation, setLastRemediation] = useState<
     | {
         applied: Array<{ kind: string; target_id: string; summary: string }>;
@@ -420,6 +428,7 @@ export default function AuditScreen() {
       setFilename(file.name);
       setSourceFile(file);
       setFixedDownloadUrl(null);
+      setReaudit(null);
       setRestoredFromDraft(false);
       clearDraft();
       setDecisions({});
@@ -647,6 +656,7 @@ export default function AuditScreen() {
       // is unsigned and the backend rejects it with 403 missing_signature).
       const fullUrl = result.downloadUrl || client.getPipelineFileUrl(result.jobId, result.filename);
       setFixedDownloadUrl(fullUrl);
+      setReaudit(null); // fresh remediation -> any old comparison is stale
       setLastRemediation(result.writer);
       toast.success("Remediated file ready", {
         description: `${result.writer.applied.length} change(s) baked in · ${result.writer.skipped.length} skipped.${
@@ -684,6 +694,39 @@ export default function AuditScreen() {
       setDownloadingFixed(false);
     }
   }, [client, decisions, mockMode, report, router, sourceFile, toast]);
+
+  /**
+   * "Verify the fix": fetch the remediated file from its signed URL and run
+   * a FREE analyze pass on it, so the user sees before/after issue counts
+   * and the new score without spending credits or leaving the page.
+   */
+  const _runReaudit = useCallback(async () => {
+    if (!fixedDownloadUrl || !report) return;
+    setReauditBusy(true);
+    try {
+      const resp = await fetch(fixedDownloadUrl);
+      if (!resp.ok) throw new Error(`Could not fetch the remediated file (${resp.status})`);
+      const blob = await resp.blob();
+      const fixedName = (filename ?? "document").replace(/(\.[A-Za-z0-9]+)$/, "_fixed$1");
+      const file = new File([blob], fixedName, { type: blob.type || "application/octet-stream" });
+      // Same call shape as the initial audit so the counts are comparable.
+      const after = await client.runPipeline(file, true);
+      setReaudit({
+        beforeIssues: report.violations.length,
+        afterIssues: after.violations.length,
+        afterScore: after.score.score,
+        afterGrade: after.score.grade,
+      });
+      toast.success("Re-audit complete", {
+        description: `${report.violations.length} issue(s) before → ${after.violations.length} after.`,
+      });
+    } catch (e) {
+      const err = e as Error;
+      toast.error("Couldn't re-audit the fixed file", { description: err.message });
+    } finally {
+      setReauditBusy(false);
+    }
+  }, [client, filename, fixedDownloadUrl, report, toast]);
 
   const onIssueCertificate = async () => {
     if (!report) return;
@@ -1646,6 +1689,36 @@ export default function AuditScreen() {
                   Rejected or manual items? Open the manual review queue →
                 </Text>
               </Pressable>
+            </View>
+          ) : null}
+
+          {/* Verify the fix: free re-audit of the remediated file. */}
+          {fixedDownloadUrl && Platform.OS === "web" && !mockMode ? (
+            <View style={{ marginTop: 12, gap: 8 }}>
+              {reaudit ? (
+                <InlineNotice
+                  tone={reaudit.afterIssues === 0 ? "success" : "info"}
+                  title={
+                    reaudit.afterIssues === 0
+                      ? "Verified: every detected issue is resolved"
+                      : `Verified: ${reaudit.beforeIssues} issue${reaudit.beforeIssues === 1 ? "" : "s"} → ${reaudit.afterIssues}`
+                  }
+                  message={
+                    `Re-audit of the fixed file scored ${reaudit.afterScore} (${reaudit.afterGrade}).` +
+                    (reaudit.afterIssues > 0
+                      ? " Remaining items are detect-only checks or need manual judgment — see the manual review queue."
+                      : "")
+                  }
+                />
+              ) : (
+                <Button
+                  title={reauditBusy ? "Re-auditing..." : "Verify the fix — free re-audit"}
+                  onPress={_runReaudit}
+                  loading={reauditBusy}
+                  variant="secondary"
+                  accessibilityHint="Downloads your remediated file and runs a free analysis so you can see the before and after issue counts."
+                />
+              )}
             </View>
           ) : null}
 

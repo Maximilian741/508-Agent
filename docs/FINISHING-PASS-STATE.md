@@ -52,6 +52,14 @@ corpus smoke + live HTTP against a running server).
     falls back to the field's /TU label); every /TH carries /A /Scope /Column;
     digit-ordinal lists carry /A /ListNumbering /Decimal (letters/romans left
     unset — ambiguous, precision first). smoke_pdf_links now 21 asserts.
+13. "Verify the fix" re-audit CTA (iteration 10, audit.tsx): after
+    remediation, one click fetches the fixed file from its signed URL and
+    runs a FREE analyze pass — InlineNotice shows "N issues → M" + new
+    score/grade ("every detected issue is resolved" at zero). Web-only,
+    resets on new upload/remediation. Backend loop already proven live
+    (journey v2); CTA verified in the production bundle. (Also confirmed
+    PDF link-annotation detection needs no work: parser falls back
+    Contents→URI, so unlabeled URI links already flag as bare-URL.)
 
 ## Engine capability statement (all verified in suite)
 
