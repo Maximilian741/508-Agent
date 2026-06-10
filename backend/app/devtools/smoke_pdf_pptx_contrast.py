@@ -67,6 +67,33 @@ def main() -> int:
     check("PDF black text not flagged", not _flagged(tmp / "black.pdf"))
     check("PDF default(black) text not flagged", not _flagged(tmp / "default.pdf"))
 
+    # --- Coloured-background false positive (fixed) ---------------------------
+    # Dark navy band painted first, then WHITE text on it: perfectly readable,
+    # but the white-bg assumption would call it 1:1 contrast. The page paints a
+    # non-white fill, so contrast scanning skips it -> no flag.
+    build_pdf(
+        tmp / "darkband.pdf",
+        b"0.05 0.10 0.30 rg 0 0 400 300 re f "
+        b"1 1 1 rg BT /F1 14 Tf 20 200 Td (White on navy reads fine) Tj ET",
+    )
+    check("PDF white-on-dark band NOT flagged (FP fixed)", not _flagged(tmp / "darkband.pdf"))
+
+    # A WHITE painted background keeps the assumption valid — light gray text
+    # on it must still be caught.
+    build_pdf(
+        tmp / "whitebg.pdf",
+        b"1 1 1 rg 0 0 400 300 re f "
+        b"0.6 0.6 0.6 rg BT /F1 12 Tf 20 200 Td (Gray on painted white) Tj ET",
+    )
+    check("PDF gray text on painted-white bg still flagged", _flagged(tmp / "whitebg.pdf"))
+
+    # Gradient (sh) pages are unknowable -> skipped, no flag either way.
+    build_pdf(
+        tmp / "shading.pdf",
+        b"sh 0.6 0.6 0.6 rg BT /F1 12 Tf 20 200 Td (Gray over gradient) Tj ET",
+    )
+    check("PDF gradient page skipped (no flag)", not _flagged(tmp / "shading.pdf"))
+
     # --- PPTX theme-colour contrast ---
     prs = Presentation(); slide = prs.slides.add_slide(prs.slide_layouts[6])
     box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(4), Inches(1))

@@ -142,13 +142,28 @@ def _cmyk_to_hex(ch) -> str:
     return f"{max(0, min(255, r)):02X}{max(0, min(255, g)):02X}{max(0, min(255, b)):02X}"
 
 
+# Path-painting operators that FILL (used to spot coloured backgrounds).
+_PAINT_FILL_OPS = {b"f", b"F", b"f*", b"b", b"b*", b"B", b"B*"}
+
+
+def _is_whiteish_hex(hex6: str) -> bool:
+    try:
+        r, g, b = int(hex6[0:2], 16), int(hex6[2:4], 16), int(hex6[4:6], 16)
+    except (TypeError, ValueError):
+        return False
+    return r >= 242 and g >= 242 and b >= 242
+
+
 def _pdf_text_colors(reader: PdfReader) -> List[Dict[str, Any]]:
     """Distinct (colour, size) used by text, scanned from content-stream fill
     colour operators (rg / g / k). Default text colour is black.
 
     Backgrounds in document PDFs are overwhelmingly white, so the contrast
-    analyzer compares these against white. (Coloured-background pages can
-    therefore be a false positive — disclosed as a known limitation.)
+    analyzer compares these against white. A page that PAINTS a non-white
+    fill (coloured rectangle, cell shading, gradient `sh`) breaks that
+    assumption — light text on a dark band would be flagged as low-contrast
+    even though it reads fine. Such pages are skipped entirely: no guess, no
+    false positive (precision over recall).
     """
     out: List[Dict[str, Any]] = []
     seen = set()
@@ -159,6 +174,8 @@ def _pdf_text_colors(reader: PdfReader) -> List[Dict[str, Any]]:
             continue
         fill = "000000"
         size = None
+        page_hits: List[Dict[str, Any]] = []
+        colored_bg = False
         for operands, op in ops:
             try:
                 if op == b"rg" and len(operands) >= 3:
@@ -168,15 +185,29 @@ def _pdf_text_colors(reader: PdfReader) -> List[Dict[str, Any]]:
                     fill = f"{v:02X}{v:02X}{v:02X}"
                 elif op == b"k" and len(operands) >= 4:
                     fill = _cmyk_to_hex(operands)
+                elif op in _PAINT_FILL_OPS:
+                    if not _is_whiteish_hex(fill):
+                        colored_bg = True
+                        break
+                elif op == b"sh":  # shading/gradient paint — bg unknowable
+                    colored_bg = True
+                    break
                 elif op == b"Tf" and len(operands) >= 2:
                     size = float(operands[1])
                 elif op in (b"Tj", b"TJ", b"'", b'"'):
                     key = (fill, size)
                     if key not in seen:
                         seen.add(key)
-                        out.append({"c": fill, "sz": size, "b": False})
+                        page_hits.append({"c": fill, "sz": size, "b": False})
             except (TypeError, ValueError):
                 continue
+        if colored_bg:
+            # Undo this page's contribution to the dedupe set so another
+            # white-background page can still report the same colour.
+            for hit in page_hits:
+                seen.discard((hit["c"], hit["sz"]))
+            continue
+        out.extend(page_hits)
         if len(out) > 64:  # representative sample is plenty
             break
     return out

@@ -43,11 +43,23 @@
    writer but never emitted by the parser). Merged cells dedupe by w:tc.
    smoke_link_text_writer grew 10 assertions incl. an alignment torture doc.
 
+7. PDF coloured-background contrast FP — _pdf_text_colors now skips any page
+   that PAINTS a non-white fill (f/F/f*/b/B variants) or shading (sh): the
+   white-bg assumption doesn't hold there, so no guess and no false flag.
+   White painted backgrounds keep recall. 3 new smoke cases.
+8. PPTX fake-list conversion — typed "- item" lines in plain TEXT BOXES
+   (placeholders excluded: bullets inherit invisibly from layout/master) are
+   flagged via the same fake_list_run_ids contract; the pptx writer adds real
+   a:buChar / a:buAutoNum bullets per line + strips markers.
+   FIX_LIST_STRUCTURE persists for pptx. Also fixed a latent writer id-drift:
+   the pptx id-mirror still minted slide-N-p for title shapes after the
+   iteration-1 parser change (harmless until paragraphs were indexed — which
+   this feature does). smoke_fake_lists now 24 cases (8 pptx).
+
 ## Known remaining
 
-- PPTX/PDF fake-list conversion (DOCX-only for now; PDF tagger already
-  handles real bullet glyphs when tagging untagged PDFs).
-- PDF coloured-background contrast false-positive (disclosed).
+- PDF fake-list conversion via this action (PDF lists are already rebuilt by
+  the ua_tagger when tagging untagged PDFs — separate path, works today).
 
 ## Verification gates (run before every push)
 

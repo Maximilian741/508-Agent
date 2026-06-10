@@ -49,16 +49,19 @@ from app.models.accessibility import (
     DocumentNode,
     ImageNode,
     LinkNode,
+    ParagraphNode,
     TableCellNode,
     TableCellType,
     TableNode,
     TableRowNode,
 )
+from app.parsers.docx_parser import _fake_list_signature, strip_fake_list_prefix
 from app.parsers.pptx_parser import (
     PPTXParser,
     _IdCounter,
     _iter_hyperlink_groups,
     _iter_shapes_recursive,
+    _paragraph_has_real_bullet,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,7 +140,13 @@ def write_remediated_pptx(
 
     # Step 3 — build per-id lookups against the *output* deck using the same
     # visit-order the parser uses.
-    image_by_node_id, cell_by_node_id, link_by_node_id, table_by_node_id = _index_shapes_by_parser_id(prs)
+    (
+        image_by_node_id,
+        cell_by_node_id,
+        link_by_node_id,
+        table_by_node_id,
+        text_by_node_id,
+    ) = _index_shapes_by_parser_id(prs)
 
     # Step 4 — document-level metadata (title, language) first.
     _apply_document_metadata(prs, tree.root, applied, skipped)
@@ -148,6 +157,10 @@ def write_remediated_pptx(
     for node in mutated_index.values():
         if isinstance(node, ImageNode):
             _apply_image(node, image_by_node_id, applied, skipped)
+        elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
+            # A typed fake-list text box the FIX_LIST_STRUCTURE executor
+            # approved — give its lines real bullet formatting.
+            _apply_pptx_list_conversion(node, text_by_node_id, applied, skipped)
         elif isinstance(node, LinkNode):
             _apply_pptx_link(node, link_by_node_id, applied, skipped)
         elif isinstance(node, TableCellNode):
@@ -239,23 +252,31 @@ def _apply_pptx_link(
 
 def _index_shapes_by_parser_id(
     prs,
-) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int, int]], Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[
+    Dict[str, Any],
+    Dict[str, Tuple[Any, int, int]],
+    Dict[str, Any],
+    Dict[str, Any],
+    Dict[str, Any],
+]:
     """Walk ``prs`` exactly the way :func:`PPTXParser.parse_to_tree` does and
     pair each minted id with the underlying python-pptx object.
 
-    Returns four dicts:
+    Returns five dicts:
 
     * ``image_by_node_id`` — ``{node_id: shape}`` for picture shapes.
     * ``cell_by_node_id`` — ``{node_id: (table_shape, row_index, col_index)}``
       for table cells.
     * ``link_by_node_id`` — ``{node_id: run}`` for hyperlink runs.
     * ``table_by_node_id`` — ``{table_node_id: table_shape}`` for tables.
+    * ``text_by_node_id`` — ``{paragraph_node_id: shape}`` for text shapes.
     """
 
     image_by_node_id: Dict[str, Any] = {}
     cell_by_node_id: Dict[str, Tuple[Any, int, int]] = {}
     link_by_node_id: Dict[str, Any] = {}
     table_by_node_id: Dict[str, Any] = {}
+    text_by_node_id: Dict[str, Any] = {}
 
     ids = _IdCounter()
 
@@ -264,11 +285,16 @@ def _index_shapes_by_parser_id(
         # shapes.  We mirror that to keep the counter in lock-step.
         ids(f"slide-{slide_index}-section")
         slide_title = ""
+        title_shape_id = None
         try:
-            if slide.shapes.title and slide.shapes.title.text:
-                slide_title = slide.shapes.title.text.strip()
+            title_shape = slide.shapes.title
+            if title_shape is not None and title_shape.text:
+                slide_title = title_shape.text.strip()
+                if slide_title:
+                    title_shape_id = title_shape.shape_id
         except Exception:
             slide_title = ""
+            title_shape_id = None
         if slide_title:
             ids(f"slide-{slide_index}-h")
 
@@ -292,9 +318,17 @@ def _index_shapes_by_parser_id(
                 text = (shape.text or "").strip()
                 if not text:
                     continue
-                # Paragraph id allocated by the parser; we don't need it but
-                # the counter must advance.
-                ids(f"slide-{slide_index}-p")
+                # The parser does NOT mint a paragraph id for the title
+                # placeholder (it became the slide's HeadingNode) — mirror
+                # that, matched by shape_id, or every later paragraph id on
+                # the slide drifts.
+                is_title = (
+                    title_shape_id is not None
+                    and getattr(shape, "shape_id", None) == title_shape_id
+                )
+                if not is_title:
+                    node_id = ids(f"slide-{slide_index}-p")
+                    text_by_node_id[node_id] = shape
                 # Hyperlinks inside runs each consume a link-id (adjacent
                 # same-address runs are coalesced, mirroring the parser).
                 try:
@@ -308,7 +342,7 @@ def _index_shapes_by_parser_id(
                         "skip_text_frame_walk slide=%s", slide_index, exc_info=True
                     )
 
-    return image_by_node_id, cell_by_node_id, link_by_node_id, table_by_node_id
+    return image_by_node_id, cell_by_node_id, link_by_node_id, table_by_node_id, text_by_node_id
 
 
 # ---------------------------------------------------------------------------
@@ -722,3 +756,75 @@ def _insert_pptx_header_row(pptx_table, texts: List[str]) -> None:
         tbl_pr = etree.SubElement(tbl, qn("a:tblPr"))
         tbl.insert(0, tbl_pr)
     tbl_pr.set("firstRow", "1")
+
+
+# ---------------------------------------------------------------------------
+# Typed fake-list -> real bullet formatting (a:buChar / a:buAutoNum)
+# ---------------------------------------------------------------------------
+
+_A_URI = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def _apply_pptx_list_conversion(node, text_by_node_id, applied, skipped) -> None:
+    """Give a typed fake-list text box real bullet semantics.
+
+    Each paragraph whose text starts with a typed marker gets explicit bullet
+    formatting on its ``a:pPr`` — ``a:buChar`` for dashes/asterisks, or
+    ``a:buAutoNum type="arabicPeriod"`` for sequential numbers — and the
+    literal marker is stripped from its first run.
+    """
+
+    shape = text_by_node_id.get(node.id)
+    if shape is None:
+        skipped.append({
+            "target_id": node.id,
+            "reason": "text shape not found for list conversion",
+        })
+        return
+
+    converted = 0
+    try:
+        paragraphs = list(shape.text_frame.paragraphs)
+    except Exception:
+        skipped.append({"target_id": node.id, "reason": "text_frame unreadable"})
+        return
+
+    for paragraph in paragraphs:
+        line = "".join((r.text or "") for r in paragraph.runs).strip()
+        sig = _fake_list_signature(line) if line else None
+        if sig is None or _paragraph_has_real_bullet(paragraph):
+            continue
+        kind = sig[0]
+
+        pPr = paragraph._p.find(qn("a:pPr"))
+        if pPr is None:
+            pPr = paragraph._p.makeelement(qn("a:pPr"), {})
+            paragraph._p.insert(0, pPr)  # a:pPr must be the first child of a:p
+        # Drop an explicit "no bullet" marker if present, then add the bullet.
+        for tag in ("a:buNone", "a:buChar", "a:buAutoNum"):
+            stale = pPr.find(qn(tag))
+            if stale is not None:
+                pPr.remove(stale)
+        if kind == "bullet":
+            bu = pPr.makeelement(qn("a:buChar"), {"char": "•"})
+        else:
+            bu = pPr.makeelement(qn("a:buAutoNum"), {"type": "arabicPeriod"})
+        pPr.append(bu)
+
+        # Strip the typed marker from the first non-empty run.
+        for run in paragraph.runs:
+            if run.text and run.text.strip():
+                new_text = strip_fake_list_prefix(run.text)
+                if new_text != run.text:
+                    run.text = new_text
+                break
+        converted += 1
+
+    if converted == 0:
+        skipped.append({"target_id": node.id, "reason": "no typed list lines found"})
+        return
+    applied.append({
+        "kind": "list_conversion",
+        "target_id": node.id,
+        "summary": f"converted {converted} typed lines to real bullets",
+    })

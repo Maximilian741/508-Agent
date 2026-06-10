@@ -85,7 +85,11 @@ def main() -> int:
         "docx list structure NOW persists (w:numPr + numbering.xml writer; see smoke_fake_lists)",
         _action_persists("FIX_LIST_STRUCTURE", "docx"),
     )
-    check("pptx list structure does NOT persist", not _action_persists("FIX_LIST_STRUCTURE", "pptx"))
+    check(
+        "pptx list structure NOW persists (a:buChar/a:buAutoNum writer; see smoke_fake_lists)",
+        _action_persists("FIX_LIST_STRUCTURE", "pptx"),
+    )
+    check("pdf list structure does NOT persist via this action", not _action_persists("FIX_LIST_STRUCTURE", "pdf"))
     check("reading order does NOT persist", not _action_persists("RESOLVE_READING_ORDER", "docx"))
     check("docx title persists", _action_persists("SET_DOCUMENT_TITLE", "docx"))
 

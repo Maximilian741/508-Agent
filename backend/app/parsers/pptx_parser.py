@@ -297,9 +297,18 @@ class PPTXParser:
                         _cc = _contrast_props_for_shape(shape, theme_colors)
                         if _cc:
                             _props.update(_cc)
+                        pid = ids(f"slide-{slide_index}-p")
+                        fake_kind = _fake_list_kind_for_shape(shape, text)
+                        if fake_kind:
+                            # Typed "- item" lines in a plain text box (no real
+                            # bullet formatting). ListStructureAnalyzer flags it;
+                            # FIX_LIST_STRUCTURE + the pptx writer convert the
+                            # lines to real a:buChar/a:buAutoNum bullets.
+                            _props["fake_list_run_ids"] = [pid]
+                            _props["fake_list_kind"] = fake_kind
                         section.children.append(
                             ParagraphNode(
-                                id=ids(f"slide-{slide_index}-p"),
+                                id=pid,
                                 content=NodeContent(kind=ContentKind.TEXT, text=text),
                                 metadata=NodeMetadata(
                                     page=slide_index,
@@ -404,6 +413,74 @@ def _shape_bg_hex(shape) -> Optional[str]:
 
 
 _A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def _paragraph_has_real_bullet(paragraph) -> bool:
+    """True when the a:pPr explicitly carries bullet formatting."""
+    pPr = paragraph._p.find(f"{_A_NS}pPr")
+    if pPr is None:
+        return False
+    return (
+        pPr.find(f"{_A_NS}buChar") is not None
+        or pPr.find(f"{_A_NS}buAutoNum") is not None
+    )
+
+
+def _fake_list_kind_for_shape(shape, text: str) -> Optional[str]:
+    """Return "bullet"/"decimal" when a plain TEXT BOX contains a typed
+    fake-list run (>=2 consecutive lines like "- item" / sequential "1. item").
+
+    Scoped to non-placeholder shapes: placeholders inherit bullet formatting
+    from the layout/master (invisible at paragraph level), so typed markers
+    there can't be judged safely. Paragraphs that already carry explicit
+    bullet formatting never count.
+    """
+
+    from app.parsers.docx_parser import _fake_list_signature  # shared predicate
+
+    try:
+        if getattr(shape, "is_placeholder", False):
+            return None
+    except Exception:
+        return None
+    try:
+        paragraphs = list(shape.text_frame.paragraphs)
+    except Exception:
+        return None
+
+    run_len = 0
+    run_kind: Optional[str] = None
+    run_char: Optional[str] = None
+    next_ord: Optional[int] = None
+    for p in paragraphs:
+        line = "".join((r.text or "") for r in p.runs).strip() or (p.text or "").strip()
+        sig = _fake_list_signature(line) if line else None
+        if sig is None or _paragraph_has_real_bullet(p):
+            if run_len >= 2:
+                return run_kind
+            run_len = 0
+            run_kind = run_char = next_ord = None
+            continue
+        kind, char, ordinal = sig
+        if run_len and (kind != run_kind or (kind == "bullet" and char != run_char)):
+            if run_len >= 2:
+                return run_kind
+            run_len = 0
+            run_kind = run_char = next_ord = None
+        if kind == "decimal":
+            expected = 1 if not run_len else next_ord
+            if ordinal != expected:
+                if run_len >= 2:
+                    return run_kind
+                run_len = 0
+                run_kind = run_char = next_ord = None
+                if ordinal != 1:
+                    continue
+            next_ord = (ordinal or 0) + 1
+        if not run_len:
+            run_kind, run_char = kind, char
+        run_len += 1
+    return run_kind if run_len >= 2 else None
 
 # a:schemeClr val -> theme clrScheme element name (standard colour map).
 _PPTX_SCHEME_MAP = {

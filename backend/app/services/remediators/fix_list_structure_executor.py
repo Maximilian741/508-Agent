@@ -62,7 +62,11 @@ class FixListStructureExecutor(RemediationExecutor):
                 props["convert_to_list"] = kind
                 member.metadata.properties = props
                 if member.content and member.content.text:
-                    member.content.text = strip_fake_list_prefix(member.content.text)
+                    # DOCX members are one paragraph each; a PPTX member is the
+                    # whole text frame (one line per typed item) — strip per line.
+                    member.content.text = "\n".join(
+                        strip_fake_list_prefix(line) for line in member.content.text.split("\n")
+                    )
                 converted += 1
             return ExecutionResult(
                 action_code=action_code,

@@ -153,6 +153,68 @@ def main() -> int:
     run_analyzers(res3.tree)
     check("clean doc: no fake-list flag", _flag_count(res3.tree) == 0)
 
+    # =========================================================================
+    # PPTX: typed markers in a plain text box -> real a:buChar bullets
+    # =========================================================================
+    from pptx import Presentation
+    from pptx.oxml.ns import qn as pqn
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    tb = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(3))
+    tf = tb.text_frame
+    tf.text = "- alpha item"
+    tf.add_paragraph().text = "- beta item"
+    tf.add_paragraph().text = "- gamma item"
+    tf.add_paragraph().text = "Closing prose sentence here."
+    # second text box: ordinary prose, must NOT flag
+    tb2 = slide.shapes.add_textbox(Inches(1), Inches(5), Inches(6), Inches(1))
+    tb2.text_frame.text = "Speaker notes style - prose with a dash inside."
+    psrc = tmp / "deck.pptx"
+    prs.save(str(psrc))
+
+    pres = parse_to_tree(str(psrc))
+    run_analyzers(pres.tree)
+    check("pptx: typed text box flagged exactly once", _flag_count(pres.tree) == 1)
+    check("pptx: FIX_LIST_STRUCTURE persists (honesty matrix)", _action_persists("FIX_LIST_STRUCTURE", "pptx"))
+
+    pplans = [p for p in plan_remediations(pres.tree, apply_policy) if p.flag.code.value == FLAG]
+    pexecs = execute_plans(pres.tree, pplans)
+    check(
+        "pptx: conversion executes successfully",
+        len([e for e in pexecs if e.status.value == "success"]) == 1,
+        str([(e.status.value, e.notes) for e in pexecs]),
+    )
+
+    pout = tmp / "deck_fixed.pptx"
+    from app.writers import write_remediated
+
+    write_remediated(psrc, pres.tree, pout, source_format="pptx")
+    fixed_prs = Presentation(str(pout))
+    sl = fixed_prs.slides[0]
+    boxes = [sh for sh in sl.shapes if sh.has_text_frame]
+    target_tf = boxes[0].text_frame
+    bullet_paras = [
+        p for p in target_tf.paragraphs
+        if p._p.find(pqn("a:pPr")) is not None
+        and p._p.find(pqn("a:pPr")).find(pqn("a:buChar")) is not None
+    ]
+    check("pptx: 3 lines gained real a:buChar bullets", len(bullet_paras) == 3, f"got {len(bullet_paras)}")
+    texts = [p.text for p in target_tf.paragraphs]
+    check("pptx: markers stripped from output lines", texts[:3] == ["alpha item", "beta item", "gamma item"], str(texts))
+    check("pptx: prose line untouched (no bullet)", texts[3] == "Closing prose sentence here.")
+    prose_tf = boxes[1].text_frame
+    check(
+        "pptx: prose text box untouched",
+        prose_tf.paragraphs[0].text.startswith("Speaker notes style"),
+    )
+
+    # Idempotency: re-parse output -> bullets are real now -> no flag.
+    pres2 = parse_to_tree(str(pout))
+    run_analyzers(pres2.tree)
+    check("pptx: re-analysis of output raises NO fake-list flag", _flag_count(pres2.tree) == 0)
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

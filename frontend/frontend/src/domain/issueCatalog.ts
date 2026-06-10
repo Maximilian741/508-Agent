@@ -154,9 +154,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen readers announce \"List of 5 items\" before reading a list, then count down each one. Lines typed with a literal dash or number are read as disconnected paragraphs — no list, no item count, no structure.",
     autoFix:
-      "Word documents: fixed automatically and saved into your download — we convert the typed run into a real Word list (proper numbering definitions) and strip the literal markers. PDF and PowerPoint list rebuilds are queued for manual remediation instead of being silently claimed.",
+      "Word and PowerPoint: fixed automatically and saved into your download — typed runs become real lists (Word numbering definitions / PowerPoint bullet formatting) with the literal markers stripped. PDF list rebuilds are queued for manual remediation instead of being silently claimed.",
     manualJudgment:
-      "Check the converted list reads in the right order. In PDFs, tag items as LI/LBody; in PowerPoint, retype the lines using the placeholder's bullet formatting.",
+      "Check the converted list reads in the right order. In PDFs, tag items as LI/LBody.",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],

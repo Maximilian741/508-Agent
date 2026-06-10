@@ -667,6 +667,9 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "IMPROVE_LINK_TEXT",
         # Promote sets <a:tblPr firstRow="1">; synthesize inserts a real <a:tr>.
         "ADD_TABLE_HEADERS",
+        # Typed "- item" lines in text boxes gain real a:buChar/a:buAutoNum
+        # bullets with markers stripped — verified by smoke_fake_lists.
+        "FIX_LIST_STRUCTURE",
     },
     "pdf": {
         "SET_DOCUMENT_TITLE",
