@@ -210,40 +210,75 @@ class PPTXParser:
 
         for slide_index, slide in enumerate(prs.slides, start=1):
             slide_title = ""
+            title_shape = None
             try:
-                if slide.shapes.title and slide.shapes.title.text:
-                    slide_title = slide.shapes.title.text.strip()
+                title_shape = slide.shapes.title
+                if title_shape is not None and title_shape.text:
+                    slide_title = title_shape.text.strip()
             except Exception:
+                title_shape = None
                 slide_title = ""
             if not slide_title:
                 slides_missing_titles += 1
 
+            section_props: dict = {"slide_number": slide_index}
+            if not slide_title:
+                # Per-slide marker so the analyzer can flag THIS slide (the
+                # issue count then reflects how many slides lack titles).
+                section_props["missing_title"] = True
             section = SectionNode(
                 id=ids(f"slide-{slide_index}-section"),
                 content=NodeContent(kind=ContentKind.TEXT, text=slide_title or f"Slide {slide_index}"),
                 metadata=NodeMetadata(
                     page=slide_index,
                     source_format="pptx",
-                    properties={"slide_number": slide_index},
+                    properties=section_props,
                 ),
                 children=[],
                 accessibility_flags=[],
             )
             root.children.append(section)
 
+            # python-pptx builds a fresh proxy per access, so identity (`is`)
+            # is unreliable — match the title placeholder by shape id.
+            title_shape_id = None
             if slide_title:
+                try:
+                    title_shape_id = title_shape.shape_id
+                except Exception:
+                    title_shape_id = None
+                _h_props: dict = {
+                    "order_hint": (
+                        float(getattr(title_shape, "top", 0) or 0),
+                        float(getattr(title_shape, "left", 0) or 0),
+                    )
+                }
+                _h_cc = _contrast_props_for_shape(title_shape, theme_colors)
+                if _h_cc:
+                    _h_props.update(_h_cc)
                 section.children.append(
                     HeadingNode(
                         id=ids(f"slide-{slide_index}-h"),
                         level=1,
                         content=NodeContent(kind=ContentKind.TEXT, text=slide_title),
-                        metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                        metadata=NodeMetadata(
+                            page=slide_index,
+                            source_format="pptx",
+                            properties=_h_props,
+                        ),
                         children=[],
                         accessibility_flags=[],
                     )
                 )
 
             for shape in _iter_shapes_recursive(slide.shapes):
+                # The title placeholder already became the slide's HeadingNode;
+                # emitting its text again as a ParagraphNode would double-count
+                # it (its hyperlinks, if any, are still collected below).
+                is_title_shape = (
+                    title_shape_id is not None
+                    and getattr(shape, "shape_id", None) == title_shape_id
+                )
                 top = float(getattr(shape, "top", 0) or 0)
                 left = float(getattr(shape, "left", 0) or 0)
                 shape_meta_props = {"order_hint": (top, left)}
@@ -257,23 +292,24 @@ class PPTXParser:
                     text = (shape.text or "").strip()
                     if not text:
                         continue
-                    _props = dict(shape_meta_props)
-                    _cc = _contrast_props_for_shape(shape, theme_colors)
-                    if _cc:
-                        _props.update(_cc)
-                    section.children.append(
-                        ParagraphNode(
-                            id=ids(f"slide-{slide_index}-p"),
-                            content=NodeContent(kind=ContentKind.TEXT, text=text),
-                            metadata=NodeMetadata(
-                                page=slide_index,
-                                source_format="pptx",
-                                properties=_props,
-                            ),
-                            children=[],
-                            accessibility_flags=[],
+                    if not is_title_shape:
+                        _props = dict(shape_meta_props)
+                        _cc = _contrast_props_for_shape(shape, theme_colors)
+                        if _cc:
+                            _props.update(_cc)
+                        section.children.append(
+                            ParagraphNode(
+                                id=ids(f"slide-{slide_index}-p"),
+                                content=NodeContent(kind=ContentKind.TEXT, text=text),
+                                metadata=NodeMetadata(
+                                    page=slide_index,
+                                    source_format="pptx",
+                                    properties=_props,
+                                ),
+                                children=[],
+                                accessibility_flags=[],
+                            )
                         )
-                    )
                     # Hyperlinks within runs get their own LinkNode (adjacent
                     # same-address runs are coalesced so the text isn't doubled).
                     for paragraph in shape.text_frame.paragraphs:
