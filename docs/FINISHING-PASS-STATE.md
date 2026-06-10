@@ -40,6 +40,13 @@ corpus smoke + live HTTP against a running server).
 9. smoke_realistic_corpus — 30-assert end-to-end buyer-invariant proof.
 10. Sales surfaces synced: README 19-analyzer reality; landing typed-list
     differentiator; catalog LIST_STRUCTURE_INVALID card truthful per format.
+11. PDF/UA link tagging (iteration 8): every /Link annotation on a tagged
+    page is nested in a /Link StructElem via OBJR (Matterhorn 28-011), annot
+    gets /StructParent with an ascending ParentTree entry resolving straight
+    to the elem, ParentTreeNextKey raised above annot keys, /Contents
+    accessible description falls back to the URI action (28-012); explicit
+    Contents preserved; non-link annots + no-annot docs untouched.
+    smoke_pdf_links (13 asserts; suite 49).
 
 ## Engine capability statement (all verified in suite)
 

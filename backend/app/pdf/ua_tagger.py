@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pypdf import PdfWriter
 from pypdf.generic import (
@@ -1275,6 +1275,11 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         per_element_pages = 0
         lists_tagged = 0
         tables_tagged = 0
+        links_tagged = 0
+        # Annotation ParentTree keys live ABOVE the page keys; a number tree's
+        # /Nums must stay ascending, so collect and append them after the loop.
+        next_annot_key = len(taggable)
+        annot_nums: List[Tuple[int, IndirectObject]] = []
         for key, page in enumerate(taggable):
             specs = _tag_page_elements(
                 writer, page, alt_by_xobject, artifact_info, page_counters, doc_levels
@@ -1311,6 +1316,53 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
             nums.append(NumberObject(key))
             nums.append(page_arr)
 
+            # Link annotations: PDF/UA (Matterhorn 28-011) requires every link
+            # annotation to be nested inside a /Link structure element via an
+            # OBJR reference, with a ParentTree entry pointing back at it.
+            for a in list(page.get("/Annots") or []):
+                try:
+                    a_obj = a.get_object()
+                except Exception:
+                    continue
+                if a_obj.get("/Subtype") != "/Link":
+                    continue
+                a_ref = a if isinstance(a, IndirectObject) else None
+                if a_ref is None:
+                    continue  # direct-dict annots are vanishingly rare; skip
+                objr = DictionaryObject(
+                    {
+                        NameObject("/Type"): NameObject("/OBJR"),
+                        NameObject("/Obj"): a_ref,
+                        NameObject("/Pg"): page.indirect_reference,
+                    }
+                )
+                link_elem = DictionaryObject(
+                    {
+                        NameObject("/Type"): NameObject("/StructElem"),
+                        NameObject("/S"): NameObject("/Link"),
+                        NameObject("/P"): doc_elem_ref,
+                        NameObject("/Pg"): page.indirect_reference,
+                        NameObject("/K"): objr,
+                    }
+                )
+                link_ref = writer._add_object(link_elem)  # noqa: SLF001
+                elem_refs.append(link_ref)
+                a_obj[NameObject("/StructParent")] = NumberObject(next_annot_key)
+                annot_nums.append((next_annot_key, link_ref))
+                next_annot_key += 1
+                # Accessible description (Matterhorn 28-012): give the annot a
+                # /Contents fallback from its URI action when none is present.
+                if not str(a_obj.get("/Contents") or "").strip():
+                    try:
+                        action = a_obj.get("/A")
+                        action = action.get_object() if hasattr(action, "get_object") else action
+                        uri = str((action or {}).get("/URI") or "").strip()
+                    except Exception:
+                        uri = ""
+                    if uri:
+                        a_obj[NameObject("/Contents")] = TextStringObject(uri)
+                links_tagged += 1
+
         doc_elem.update(
             {
                 NameObject("/Type"): NameObject("/StructElem"),
@@ -1319,6 +1371,10 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                 NameObject("/K"): ArrayObject(elem_refs),
             }
         )
+        # Annotation keys appended after all page keys keeps /Nums ascending.
+        for k, link_ref in annot_nums:
+            nums.append(NumberObject(k))
+            nums.append(link_ref)
         parent_tree = DictionaryObject({NameObject("/Nums"): nums})
         parent_tree_ref = writer._add_object(parent_tree)  # noqa: SLF001
         struct_root.update(
@@ -1326,7 +1382,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                 NameObject("/Type"): NameObject("/StructTreeRoot"),
                 NameObject("/K"): ArrayObject([doc_elem_ref]),
                 NameObject("/ParentTree"): parent_tree_ref,
-                NameObject("/ParentTreeNextKey"): NumberObject(len(taggable)),
+                NameObject("/ParentTreeNextKey"): NumberObject(next_annot_key),
             }
         )
         catalog[NameObject("/StructTreeRoot")] = struct_root_ref
@@ -1340,6 +1396,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["figures"] = figures
         report["lists"] = lists_tagged
         report["tables"] = tables_tagged
+        report["links"] = links_tagged
         report["artifacts"] = page_counters.get("artifacts", 0)
         report["perElementPages"] = per_element_pages
         applied.append("struct_tree")
