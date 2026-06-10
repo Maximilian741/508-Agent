@@ -163,7 +163,15 @@ def _build_bad_tagged_pdf(path: Path) -> None:
         trs.append(_struct_elem(w, "/TR", doc_ref, page_ref, cells))
     table = _struct_elem(w, "/Table", doc_ref, page_ref, trs)
 
-    doc_el[NameObject("/K")] = ArrayObject([h1, h3, para, fig_a, fig_b, table])
+    # MALFORMED tagged list: /L whose kids are /P (not /LI) — the classic
+    # bad-remediation artifact.
+    bad_list_kids = [_struct_elem(w, "/P", doc_ref, page_ref, []) for _ in range(2)]
+    bad_list = _struct_elem(w, "/L", doc_ref, page_ref, bad_list_kids)
+    # WELL-FORMED tagged list: /L -> /LI — must stay quiet.
+    good_list_kids = [_struct_elem(w, "/LI", doc_ref, page_ref, []) for _ in range(2)]
+    good_list = _struct_elem(w, "/L", doc_ref, page_ref, good_list_kids)
+
+    doc_el[NameObject("/K")] = ArrayObject([h1, h3, para, fig_a, fig_b, table, bad_list, good_list])
     st.update(
         {
             NameObject("/Type"): NameObject("/StructTreeRoot"),
@@ -217,6 +225,15 @@ def main() -> int:
     tables = [n for n in nodes if isinstance(n, TableNode)]
     check("tagged table emitted", len(tables) == 1)
     check("tagged TH-less table raises TABLE_MISSING_HEADERS", "TABLE_MISSING_HEADERS" in rule_ids)
+
+    list_flags = [
+        v for v in viols if v.rule_id == "LIST_STRUCTURE_INVALID"
+    ]
+    check(
+        "malformed tagged /L (P kids) flagged exactly once (LI list quiet)",
+        len(list_flags) == 1,
+        str(rule_ids),
+    )
 
     images = [n for n in nodes if isinstance(n, ImageNode)]
     with_alt = [n for n in images if n.alt_text]

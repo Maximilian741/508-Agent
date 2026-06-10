@@ -45,6 +45,8 @@ from app.models.accessibility import (
     HeadingNode,
     ImageNode,
     LinkNode,
+    ListItemNode,
+    ListNode,
     NodeContent,
     NodeMetadata,
     ParagraphNode,
@@ -482,6 +484,7 @@ class PDFParser:
         tree_alt_by_xobject = (struct_info or {}).get("figure_alt_by_xobject", {})
         struct_headings = (struct_info or {}).get("headings", [])
         struct_tables = (struct_info or {}).get("tables", [])
+        struct_lists = (struct_info or {}).get("lists", [])
         # When the tree declares headings, the tags are authoritative — the
         # text-shape heuristic stays for untagged documents only.
         use_tag_headings = bool(struct_headings)
@@ -582,6 +585,43 @@ class PDFParser:
                             content=NodeContent(kind=ContentKind.NONE),
                             metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
                             children=rows,
+                            accessibility_flags=[],
+                        )
+                    )
+
+            # --- Lists from the EXISTING structure tree (tagged PDFs) -------
+            # A tagged /L whose kids aren't /LI is a classic bad-remediation
+            # artifact; ListStructureAnalyzer flags exactly that shape.
+            for l in (l for l in struct_lists if (l.get("page") or 0) == page_index):
+                kid_nodes: List[Any] = []
+                for kid_s in l.get("kids", []):
+                    if kid_s == "LI":
+                        kid_nodes.append(
+                            ListItemNode(
+                                id=next_id(f"{page_label}-tli"),
+                                content=NodeContent(kind=ContentKind.TEXT, text=" "),
+                                metadata=_node_metadata(page_index=page_index + 1),
+                                children=[],
+                                accessibility_flags=[],
+                            )
+                        )
+                    else:
+                        kid_nodes.append(
+                            ParagraphNode(
+                                id=next_id(f"{page_label}-tlp"),
+                                content=NodeContent(kind=ContentKind.TEXT, text=" "),
+                                metadata=_node_metadata(page_index=page_index + 1),
+                                children=[],
+                                accessibility_flags=[],
+                            )
+                        )
+                if kid_nodes:
+                    section.children.append(
+                        ListNode(
+                            id=next_id(f"{page_label}-tlist"),
+                            content=NodeContent(kind=ContentKind.NONE),
+                            metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
+                            children=kid_nodes,
                             accessibility_flags=[],
                         )
                     )

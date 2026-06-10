@@ -144,6 +144,7 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
     headings: List[Dict[str, Any]] = []
     figures: List[Dict[str, Any]] = []
     tables: List[Dict[str, Any]] = []
+    lists: List[Dict[str, Any]] = []
 
     def kid_mcids(elem: Any, page_ctx: Optional[int]) -> List[Tuple[int, int]]:
         """(page_index, mcid) pairs for an element's direct content kids."""
@@ -183,6 +184,18 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
             figures.append(
                 {"alt": (str(alt) if alt is not None else None), "mcids": kid_mcids(el, page), "page": page}
             )
+        elif s == "L":
+            # Record each structural kid's tag name so the parser can build a
+            # ListNode — kids that aren't /LI mark a malformed tagged list.
+            kid_names: List[str] = []
+            k = _resolve(el.get("/K"))
+            l_kids = k if isinstance(k, (list, ArrayObject)) else ([k] if k is not None else [])
+            for lk in l_kids:
+                lr = _resolve(lk)
+                if isinstance(lr, DictionaryObject) and "/MCID" not in lr and str(lr.get("/Type") or "") != "/OBJR":
+                    kid_names.append(_norm_s(lr.get("/S"), role_map))
+            if kid_names:
+                lists.append({"page": page, "kids": kid_names})
         elif s == "Table":
             rows: List[List[str]] = []
             k = _resolve(el.get("/K"))
@@ -255,4 +268,5 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
         "headings": headings_out,
         "figure_alt_by_xobject": figure_alt_by_xobject,
         "tables": tables,
+        "lists": lists,
     }
