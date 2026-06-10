@@ -51,9 +51,16 @@ export default function SettingsScreen() {
   const setApiBaseUrl = useAppStore((state) => state.setApiBaseUrl);
   const saveApiBaseUrl = useAppStore((state) => state.saveApiBaseUrl);
   const setMockMode = useAppStore((state) => state.setMockMode);
+  const backendUrlSource = useAppStore((state) => state.backendUrlSource);
   const [draftUrl, setDraftUrl] = useState(apiBaseUrl);
   const [notifyOn, setNotifyOn] = useState(notificationsEnabled());
   const systemScheme = useColorScheme();
+  // Operator/dev affordances (free-scan bypass, analyzer URL override, AI
+  // provider notes) are hidden on managed builds: customers on the hosted
+  // product must never see a "bypass the paywall" switch or be told to run
+  // dev_run.py. They appear in dev builds, or when no env API URL is baked
+  // (self-hosted operators pointing the UI at their own backend).
+  const showOperatorTools = __DEV__ || backendUrlSource !== "env";
 
   return (
     <Screen scroll title="Settings">
@@ -85,49 +92,57 @@ export default function SettingsScreen() {
           <Text style={[theme.typography.body, { color: theme.colors.text }]}>
             {mockMode ? "Demo Mode is ON" : "Demo Mode is OFF (live)"}
           </Text>
-          <Switch value={mockMode} onValueChange={setMockMode} />
+          <Switch value={mockMode} onValueChange={setMockMode} accessibilityLabel="Demo Mode" />
         </View>
       </Card>
 
-      <Card>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="key" size={3} color={theme.colors.accent} />
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Free-scan gate (testing)</Text>
-        </View>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          New visitors get one free scan, then the app prompts them to sign in
-          before the second upload or any download. Flip the bypass below to
-          test the full flow without burning your free scan every time.
-        </Text>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
-          Free scans used so far: {freeScansUsed}
-        </Text>
-        <View style={styles.toggleRow}>
-          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
-            {bypassFreeScanGate ? "Bypass is ON (gate skipped)" : "Bypass is OFF (gate active)"}
+      {__DEV__ ? (
+        <Card>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <PixelIcon name="key" size={3} color={theme.colors.accent} />
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Free-scan gate (dev only)</Text>
+          </View>
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+            New visitors get one free scan, then the app prompts them to sign in
+            before the second upload or any download. Flip the bypass below to
+            test the full flow without burning your free scan every time. This
+            card is only visible in development builds.
           </Text>
-          <Switch value={bypassFreeScanGate} onValueChange={setBypassFreeScanGate} />
-        </View>
-        <View style={[styles.buttonRow, { marginTop: 8 }]}>
-          <Button
-            title="Reset free-scan counter"
-            variant="ghost"
-            disabled={freeScansUsed === 0}
-            onPress={() => {
-              setFreeScansUsed(0);
-              toast.info("Free-scan counter reset");
-            }}
-          />
-        </View>
-        {bypassFreeScanGate ? (
-          <InlineNotice
-            tone="warning"
-            title="Bypass is on"
-            message="The sign-in gate is disabled. Turn this off before shipping to real users."
-          />
-        ) : null}
-      </Card>
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+            Free scans used so far: {freeScansUsed}
+          </Text>
+          <View style={styles.toggleRow}>
+            <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+              {bypassFreeScanGate ? "Bypass is ON (gate skipped)" : "Bypass is OFF (gate active)"}
+            </Text>
+            <Switch
+              value={bypassFreeScanGate}
+              onValueChange={setBypassFreeScanGate}
+              accessibilityLabel="Bypass the free-scan sign-in gate (dev only)"
+            />
+          </View>
+          <View style={[styles.buttonRow, { marginTop: 8 }]}>
+            <Button
+              title="Reset free-scan counter"
+              variant="ghost"
+              disabled={freeScansUsed === 0}
+              onPress={() => {
+                setFreeScansUsed(0);
+                toast.info("Free-scan counter reset");
+              }}
+            />
+          </View>
+          {bypassFreeScanGate ? (
+            <InlineNotice
+              tone="warning"
+              title="Bypass is on"
+              message="The sign-in gate is disabled. Turn this off before shipping to real users."
+            />
+          ) : null}
+        </Card>
+      ) : null}
 
+      {showOperatorTools ? (
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
@@ -164,7 +179,7 @@ export default function SettingsScreen() {
             message={
               backendHealthMessage ??
               backendUrlWarning ??
-              "Open a terminal in the project folder and run:  cd backend  then  python dev_run.py — leave it running."
+              "Check that your backend is running and reachable at the URL above, then Save & test."
             }
             tone="danger"
           />
@@ -177,6 +192,7 @@ export default function SettingsScreen() {
           />
         )}
       </Card>
+      ) : null}
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -239,6 +255,7 @@ export default function SettingsScreen() {
           <Switch
             value={notifyOn}
             disabled={!notificationsAvailable()}
+            accessibilityLabel="Desktop notifications"
             onValueChange={async (next) => {
               if (next) {
                 const status = await requestPermission();
@@ -359,27 +376,29 @@ export default function SettingsScreen() {
         <DiagnosticsPanel apiBaseUrl={apiBaseUrl} />
       </Card>
 
-      <Card>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="spark" size={3} color={theme.colors.accent} />
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
-        </View>
-        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Alt-text and link-text suggestions can be powered by an AI vision model. The backend
-          picks one based on environment variables when it starts:
-        </Text>
-        <View style={styles.aiList}>
-          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
-            • Set <Text style={[theme.typography.mono]}>ANTHROPIC_API_KEY</Text> for Claude with vision.
+      {showOperatorTools ? (
+        <Card>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
+          </View>
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+            Alt-text and link-text suggestions can be powered by an AI vision model. The backend
+            picks one based on environment variables when it starts:
           </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
-            • Set <Text style={[theme.typography.mono]}>OPENAI_API_KEY</Text> for GPT-4 with vision.
-          </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.text }]}>
-            • Without either, the backend falls back to local heuristics (no network, lower quality).
-          </Text>
-        </View>
-      </Card>
+          <View style={styles.aiList}>
+            <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+              • Set <Text style={[theme.typography.mono]}>ANTHROPIC_API_KEY</Text> for Claude with vision.
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+              • Set <Text style={[theme.typography.mono]}>OPENAI_API_KEY</Text> for GPT-4 with vision.
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+              • Without either, the backend falls back to local heuristics (no network, lower quality).
+            </Text>
+          </View>
+        </Card>
+      ) : null}
     </Screen>
   );
 }

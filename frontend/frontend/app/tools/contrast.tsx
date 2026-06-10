@@ -85,7 +85,7 @@ export default function ContrastChecker() {
               key={label}
               label={label}
               tone="default"
-              // @ts-ignore — Chip is a Pressable on web
+              accessibilityLabel={`Use preset ${label}`}
               onPress={() => {
                 setFg(f);
                 setBg(b);

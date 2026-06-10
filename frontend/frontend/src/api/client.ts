@@ -448,7 +448,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 issues: mockIssues,
             };
         }
-        console.log("[api] POST /scan", payload);
+        if (__DEV__) console.log("[api] POST /scan");
         return request<ScanResponse>("/scan", payload);
     };
 
@@ -496,7 +496,11 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         const response = await fetch(url, { method: "POST", body: form, headers: authHeaders() });
         if (!response.ok) {
             const message = await response.text();
-            throw new Error(message || "Pipeline analyze failed");
+            // Attach the HTTP status (like runPipelineRemediate does) so the UI
+            // can branch on 401/402 instead of string-matching raw JSON.
+            const err = new Error(message || "Pipeline analyze failed") as Error & { status?: number };
+            err.status = response.status;
+            throw err;
         }
         return (await response.json()) as PipelineResponse;
     };
@@ -572,7 +576,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
                 ],
             };
         }
-        console.log("[api] POST /remediate", payload);
+        if (__DEV__) console.log("[api] POST /remediate");
         return request<RemediateResponse>("/remediate", payload);
     };
 
@@ -581,7 +585,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             return [];
         }
         const path = docId ? `/documents/${docId}/manual-review` : "/manual-review";
-        console.log(`[api] GET ${path}`);
+        if (__DEV__) console.log(`[api] GET ${path}`);
         const response = await fetch(`${baseUrl}${path}`, { headers: authHeaders() });
         if (!response.ok) {
             return [];
@@ -593,7 +597,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         if (mockMode) {
             return { cleared: 0 };
         }
-        console.log("[api] DELETE /manual-review");
+        if (__DEV__) console.log("[api] DELETE /manual-review");
         const response = await fetch(`${baseUrl}/manual-review`, { method: "DELETE", headers: authHeaders() });
         if (!response.ok) {
             return { cleared: 0 };

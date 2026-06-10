@@ -271,7 +271,13 @@ async function probeBackend(baseUrl: string): Promise<{ ok: boolean; message?: s
         return { ok: false, message: "Backend responded but health check failed." };
     } catch (error) {
         clearTimeout(timeout);
-        return { ok: false, message: "Backend is unreachable. Check the port and restart using dev_run.py." };
+        // Customer-safe copy: on a managed build (env-baked API URL) this is a
+        // service interruption, not something the user can fix locally.
+        const message =
+            resolved.source === "env"
+                ? "We're having trouble reaching the service. It usually recovers in a moment — please retry."
+                : "Backend is unreachable. Check that it is running and that the URL in Settings is correct.";
+        return { ok: false, message };
     }
 }
 
@@ -291,7 +297,10 @@ function getClient(state: AppState): ApiClient {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-    apiBaseUrl: readStoredBaseUrl() ?? defaultBaseUrl,
+    // On managed builds the env-baked API URL always wins: a stale URL saved
+    // in localStorage (e.g. from a dev session or an old deploy) would
+    // otherwise strand the session on a dead backend with no recovery hint.
+    apiBaseUrl: resolved.source === "env" ? defaultBaseUrl : readStoredBaseUrl() ?? defaultBaseUrl,
     backendUrlSource: resolved.source,
     backendUrlWarning: resolved.warning ?? null,
     backendHealth: "unknown",

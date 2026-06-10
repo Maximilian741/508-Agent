@@ -53,7 +53,8 @@ export class ErrorBoundary extends Component<Props, State> {
           <View style={styles.errBox}>
             <Text style={styles.errLabel}>Error</Text>
             <Text style={styles.errMessage}>{this.state.error.message}</Text>
-            {this.state.error.stack ? (
+            {/* Stack traces are developer information — never show customers. */}
+            {__DEV__ && this.state.error.stack ? (
               <Text style={styles.errStack} numberOfLines={6}>
                 {this.state.error.stack}
               </Text>

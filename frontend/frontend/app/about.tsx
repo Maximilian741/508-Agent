@@ -26,7 +26,7 @@ export default function AboutScreen() {
         shader="aurora"
         eyebrow="ABOUT"
         title="Built for remediators, not bureaucrats"
-        subtitle="An accessibility auditor that ships in two flavors: a self-hosted package you run on your own machine, and 508-agent.app - a managed deployment locked behind Cloudflare Access. Both run the same code; they differ in where your files live."
+        subtitle="An accessibility auditor that ships in two flavors: a self-hosted package you run on your own machine, and 508-agent.app — the managed service with self-serve accounts. Both run the same open code; they differ in where your files live."
       />
 
       <Card>
@@ -57,15 +57,15 @@ export default function AboutScreen() {
             />
             <Bullet
               label="24-hour retention"
-              body="Documents are deleted after 24 hours. Remediated artifacts and analysis metadata may be retained longer for your audit history; the source document goes away."
+              body="Source documents AND remediated artifacts are deleted from hosted storage after about 24 hours — download your results promptly. Lightweight analysis metadata (scores, finding counts) is kept for your audit history."
             />
             <Bullet
-              label="Cloudflare Access auth"
-              body="Authentication is enforced via Cloudflare Access. We never see your password — Cloudflare hands us a signed JWT on every request."
+              label="Account auth, hashed passwords"
+              body="You sign in with email + password. Passwords are hashed with salted scrypt before storage — we keep only the hash — and sessions are short-lived signed tokens. Cloudflare fronts the service for TLS and WAF."
             />
             <Bullet
               label="Append-only audit log"
-              body="Every analyze, remediate, share, view, and download is recorded against your account. You can request a copy at any time, and admins can browse it from the in-app Admin screen."
+              body="Every analyze, remediate, certificate, and download is recorded against your account. You can request a copy at any time, and admins can browse it from the in-app Admin screen."
             />
             <Bullet
               label="AI is opt-in and minimal"
@@ -153,15 +153,21 @@ export default function AboutScreen() {
           <Pressable accessibilityRole="button" accessibilityLabel="Go to security" onPress={() => router.push("/security" as any)}>
             <Chip label="Read the Security page" tone="default" />
           </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Read the privacy policy" onPress={() => router.push("/privacy" as any)}>
+            <Chip label="Privacy policy" tone="default" />
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Read the terms of service" onPress={() => router.push("/terms" as any)}>
+            <Chip label="Terms of service" tone="default" />
+          </Pressable>
         </View>
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Reporting issues</Text>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Reporting issues & support</Text>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Found a bug, a false-positive, or a missing standard? Open an issue in the project
-          repository. Include the input document type, the rule code that misfired, and (if
-          shareable) a redacted sample.
+          Found a bug, a false-positive, or a missing standard? Email support@508-agent.app, or
+          open an issue in the project repository. Include the input document type, the rule code
+          that misfired, and (if shareable) a redacted sample.
         </Text>
       </Card>
     </Screen>

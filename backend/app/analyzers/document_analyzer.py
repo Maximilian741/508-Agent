@@ -14,11 +14,9 @@ from app.models.accessibility import (
 
 # A document needs at least this much running text before "no headings at all"
 # becomes a navigation problem worth flagging — keeps short notes/letters quiet.
+# (DOCX-only: PDFs are covered by the stronger PDF_UNTAGGED check instead.)
 _NO_HEADINGS_MIN_PARAGRAPHS = 12
 _NO_HEADINGS_MIN_CHARS = 1200
-# PDFs are gated on characters only (pypdf collapses paragraphs), so use a
-# higher character bar to be sure it's genuinely a substantial document.
-_NO_HEADINGS_MIN_CHARS_PDF = 2000
 
 
 class DocumentLanguageAnalyzer(Analyzer):
@@ -85,7 +83,12 @@ class DocumentHeadingsAnalyzer(Analyzer):
 
     def analyze(self, tree: AccessibilityTree) -> None:
         fmt = (tree.root.metadata.source_format or "").lower()
-        if fmt not in ("docx", "pdf"):
+        # DOCX only. PDFs are covered by PDF_UNTAGGED instead: an untagged PDF
+        # gets that (stronger, more accurate) error, and a TAGGED PDF carries
+        # its headings in the structure tree, which this text-shape heuristic
+        # cannot see — firing here would contradict the struct tree, including
+        # the one our own remediation just wrote.
+        if fmt != "docx":
             return
 
         paragraphs = 0
@@ -100,15 +103,8 @@ class DocumentHeadingsAnalyzer(Analyzer):
                     chars += len(text)
 
         # DOCX yields one ParagraphNode per paragraph, so the paragraph count is
-        # a reliable "this is a long document" signal. PDF text extraction
-        # (pypdf) collapses a whole page into one or two big ParagraphNodes, so
-        # the paragraph count is unreliable there — gate PDFs on character count
-        # alone (with a higher bar) so a long, heading-less PDF still flags.
-        if fmt == "pdf":
-            enough = chars >= _NO_HEADINGS_MIN_CHARS_PDF
-        else:  # docx
-            enough = paragraphs >= _NO_HEADINGS_MIN_PARAGRAPHS and chars >= _NO_HEADINGS_MIN_CHARS
-        if enough:
+        # a reliable "this is a long document" signal.
+        if paragraphs >= _NO_HEADINGS_MIN_PARAGRAPHS and chars >= _NO_HEADINGS_MIN_CHARS:
             attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_NO_HEADINGS)
 
 
@@ -149,3 +145,44 @@ class ScannedDocumentAnalyzer(Analyzer):
             return
         if image_pages >= pages * 0.8 and total_chars / pages < 50:
             attach_flag(tree.root, AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT)
+
+
+class UntaggedPdfAnalyzer(Analyzer):
+    """Flag text PDFs that have NO structure tree (untagged PDFs).
+
+    This is the single most common real-world PDF accessibility failure: the
+    text is extractable, so naive checkers report "0 issues" — but a screen
+    reader gets an undifferentiated text stream with no headings, lists,
+    tables, or reading structure (WCAG 1.3.1 / PDF-UA 7.1-2). It is also the
+    failure our remediation genuinely repairs: the PDF writer reconstructs a
+    full structure tree (headings, lists, tables, figures, artifacts), so a
+    re-uploaded remediated file no longer carries this flag.
+
+    Scanned PDFs (no extractable text) are excluded — they get the stronger
+    SCANNED_DOCUMENT_NO_TEXT error and need OCR first.
+    """
+
+    name = "pdf_untagged"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        fmt = (tree.root.metadata.source_format or "").lower()
+        if fmt != "pdf":
+            return
+        props = tree.root.metadata.properties or {}
+        if props.get("pdf_tagged"):
+            return
+        try:
+            pages = int(props.get("page_count") or 0)
+            image_pages = int(props.get("image_only_pages") or 0)
+            total_chars = int(props.get("total_text_chars") or 0)
+        except (TypeError, ValueError):
+            return
+        if pages == 0:
+            return
+        # Scanned docs are handled by ScannedDocumentAnalyzer; don't double-flag.
+        if image_pages >= pages * 0.8 and total_chars / pages < 50:
+            return
+        # Needs to actually have text content worth structuring.
+        if total_chars < 200:
+            return
+        attach_flag(tree.root, AccessibilityFlagCode.PDF_UNTAGGED)

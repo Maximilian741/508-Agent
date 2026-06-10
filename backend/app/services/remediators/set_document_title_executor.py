@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Optional
 
 from app.models.accessibility import (
@@ -9,10 +11,44 @@ from app.models.accessibility import (
     AccessibilityTree,
     ActionCode,
     DocumentNode,
+    HeadingNode,
     iter_reading_order,
 )
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
+
+
+def _derive_title(tree: AccessibilityTree, target: DocumentNode) -> str:
+    """Best real title we can derive — never a bare placebo when avoidable.
+
+    Preference order:
+    1. The first heading's text (H1 first, else the first heading of any
+       level) — almost always the document's actual title.
+    2. A humanized filename stem ("q3-financial_report v2" → "Q3 Financial
+       Report V2").
+    3. "Untitled Document" as the last resort.
+    """
+    first_any: Optional[str] = None
+    for node in iter_reading_order(tree.root):
+        if isinstance(node, HeadingNode):
+            text = (node.content.text or "").strip() if node.content else ""
+            if not text:
+                continue
+            if node.level == 1:
+                return text[:200]
+            if first_any is None:
+                first_any = text
+    if first_any:
+        return first_any[:200]
+
+    filename = (target.metadata.properties or {}).get("filename")
+    if isinstance(filename, str) and filename.strip():
+        stem = Path(filename).stem
+        words = re.sub(r"[_\-\.]+", " ", stem).strip()
+        words = re.sub(r"\s+", " ", words)
+        if words:
+            return words.title()[:200]
+    return "Untitled Document"
 
 
 class SetDocumentTitleExecutor(RemediationExecutor):
@@ -51,7 +87,7 @@ class SetDocumentTitleExecutor(RemediationExecutor):
                 notes="Document does not include a title-missing flag; no changes applied.",
             )
         before_title = target.metadata.properties.get("title")
-        after_title = "Untitled Document"
+        after_title = _derive_title(tree, target)
         if isinstance(before_title, str) and before_title.strip():
             return ExecutionResult(
                 action_code=action_code,

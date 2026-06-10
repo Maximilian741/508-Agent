@@ -203,7 +203,6 @@ function AccountChip() {
       <>
         <Pressable
           onPress={() => {
-            console.log("[AppNav] Sign in clicked - opening modal");
             setSignInOpen(true);
           }}
           accessibilityLabel="Sign in"

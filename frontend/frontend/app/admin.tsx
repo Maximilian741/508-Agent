@@ -8,8 +8,7 @@
 import { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { createApiClient } from "../src/api/client";
-import { AdminMetrics, getAdminMetrics } from "../src/domain/account";
+import { AdminMetrics, AuditLogEntry, getAdminMetrics, getAuditLog } from "../src/domain/account";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
@@ -22,14 +21,7 @@ import { useToast } from "../src/ui/toast";
 import { useAppStore } from "../src/store/useAppStore";
 import { useTheme } from "../src/ui/useTheme";
 
-interface LogEntry {
-  id: number;
-  at: string;
-  actor: string;
-  action: string;
-  documentId?: string | null;
-  details?: string | null;
-}
+type LogEntry = AuditLogEntry;
 
 const PLAN_LABELS: Record<string, string> = {
   team: "Team (monthly)",
@@ -79,12 +71,14 @@ export default function AdminScreen() {
     setLoading(true);
     setError(null);
     try {
-      const client = createApiClient({ baseUrl: apiBaseUrl, mockMode });
-      const data = await (client as any).getAuditLog?.();
-      setEntries(Array.isArray(data) ? data : []);
+      const data = await getAuditLog(200);
+      setEntries(data);
     } catch (e: any) {
-      const msg = e?.message ?? "Could not load audit log.";
-      setError(msg);
+      if (e?.status === 403 || e?.status === 401) {
+        setDenied(true);
+      } else {
+        setError(e?.message ?? "Could not load audit log.");
+      }
     } finally {
       setLoading(false);
     }
@@ -206,12 +200,15 @@ export default function AdminScreen() {
               <View style={styles.list}>
                 {entries.map((e) => (
                   <View key={e.id} style={[styles.item, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
-                    <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>{e.action}</Text>
+                    <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>{e.event}</Text>
                     <Text style={[theme.typography.body, { color: theme.colors.textMuted, fontSize: 12 }]}>
-                      {new Date(e.at).toLocaleString()} - {e.actor}
+                      {new Date(e.at).toLocaleString()} - {e.actorEmail || "system"}
+                      {e.docId ? ` - doc ${e.docId}` : ""}
                     </Text>
-                    {e.details ? (
-                      <Text style={[theme.typography.body, { color: theme.colors.textMuted, fontSize: 12 }]}>{e.details}</Text>
+                    {e.details && Object.keys(e.details).length > 0 ? (
+                      <Text style={[theme.typography.body, { color: theme.colors.textMuted, fontSize: 12 }]}>
+                        {JSON.stringify(e.details)}
+                      </Text>
                     ) : null}
                   </View>
                 ))}

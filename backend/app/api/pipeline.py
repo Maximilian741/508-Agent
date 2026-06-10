@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -157,8 +158,11 @@ async def analyze(
     )
     tmp_path = upload_result.path
 
+    # Parsing + analysis are CPU-bound (and remediation can make blocking AI
+    # calls). Run them in the threadpool so two concurrent large documents
+    # don't freeze the event loop — including /healthz — for everyone else.
     try:
-        result = parse_to_tree(str(tmp_path))
+        result = await run_in_threadpool(parse_to_tree, str(tmp_path))
     except Exception as exc:
         logger.exception("pipeline parse failed: %s", exc)
         raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF/DOCX/PPTX.")
@@ -170,9 +174,9 @@ async def analyze(
 
     tree = result.tree
     engine = RemediationEngine()
-    violations = engine.detect_violations(tree)
+    violations = await run_in_threadpool(engine.detect_violations, tree)
     actions = engine.plan_actions(violations)
-    executions = engine.execute(tree) if execute else []
+    executions = (await run_in_threadpool(engine.execute, tree)) if execute else []
 
     summary = PipelineSummary(
         documentId=result.document_id,
@@ -375,8 +379,9 @@ async def remediate(
         except Exception:
             pass
 
+    # CPU-bound parse/analyze/remediate runs in the threadpool (see analyze).
     try:
-        result = parse_to_tree(str(source_path))
+        result = await run_in_threadpool(parse_to_tree, str(source_path))
     except Exception as exc:
         logger.exception("remediate parse failed: %s", exc)
         raise HTTPException(
@@ -386,7 +391,7 @@ async def remediate(
 
     tree = result.tree
     engine = RemediationEngine()
-    violations = engine.detect_violations(tree)
+    violations = await run_in_threadpool(engine.detect_violations, tree)
     # This endpoint APPLIES the fixes the user explicitly approved (approved_ids),
     # so the user's approval IS the human review — use an apply policy that allows
     # every recommended action to run. The default RemediationPolicy() is the
@@ -409,7 +414,11 @@ async def remediate(
                 selected_plans.append(plan)
                 break
 
-    executions = execute_plans(tree, selected_plans) if selected_plans else []
+    executions = (
+        await run_in_threadpool(execute_plans, tree, selected_plans)
+        if selected_plans
+        else []
+    )
 
     # Persist rejected violations into the manual_review queue so teammates
     # can pick them up via GET /manual-review.  This is best-effort: if the
@@ -456,10 +465,13 @@ async def remediate(
                 exc,
             )
 
-    # Write the remediated artifact via the format-specific writer.
+    # Write the remediated artifact via the format-specific writer (CPU-bound —
+    # PDF tagging re-serializes content streams — so threadpool it too).
     output_name = _suffix_filename(safe_name, "-remediated")
     output_path = job_dir / output_name
-    write_result = write_remediated(source_path, tree, output_path, source_format=result.format)
+    write_result = await run_in_threadpool(
+        write_remediated, source_path, tree, output_path, source_format=result.format
+    )
 
     # Owner email comes from the CF Access middleware (when enabled).  We
     # persist it on the job manifest so /pipeline/files can compare against
@@ -659,6 +671,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # (plus /Alt on the XObject), so alt text genuinely persists for PDF.
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
+        # The writer reconstructs a full structure tree (headings, lists,
+        # tables, figures, artifacts + MarkInfo/ParentTree/XMP) on every
+        # untagged PDF — verified by smoke_pdf_structure/-artifacts/-ruling.
+        "TAG_PDF_STRUCTURE",
     },
 }
 

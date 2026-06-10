@@ -13,8 +13,9 @@ from app.analyzers.document_analyzer import (
     FormFieldLabelAnalyzer,
     ScannedDocumentAnalyzer,
     SlideTitleAnalyzer,
+    UntaggedPdfAnalyzer,
 )
-from app.analyzers.heading_analyzer import HeadingLevelJumpAnalyzer, SkippedHeadingLevelAnalyzer
+from app.analyzers.heading_analyzer import HeadingLevelJumpAnalyzer, TextStyledAsHeadingAnalyzer
 from app.analyzers.heading_text_analyzer import HeadingTextEmptyAnalyzer
 from app.analyzers.image_analyzer import (
     DecorativeImageAltAnalyzer,
@@ -24,8 +25,7 @@ from app.analyzers.image_analyzer import (
 from app.analyzers.link_analyzer import LinkTextAnalyzer
 from app.analyzers.link_target_analyzer import LinkTargetBrokenAnalyzer
 from app.analyzers.list_analyzer import ListStructureAnalyzer
-from app.analyzers.reading_order_analyzer import ReadingOrderAnalyzer
-from app.analyzers.table_analyzer import TableHeaderScopeAnalyzer, TableMissingHeadersAnalyzer
+from app.analyzers.table_analyzer import TableMissingHeadersAnalyzer
 from app.analyzers.table_caption_analyzer import TableCaptionMissingAnalyzer
 from app.models.accessibility import AccessibilityTree
 
@@ -36,10 +36,15 @@ def get_default_analyzers() -> List[Analyzer]:
         DecorativeImageAltAnalyzer(),
         NonDescriptiveAltTextAnalyzer(),
         HeadingLevelJumpAnalyzer(),
-        SkippedHeadingLevelAnalyzer(),
+        # SkippedHeadingLevelAnalyzer deliberately NOT registered: it was a
+        # condition-identical twin of HeadingLevelJumpAnalyzer, so every jump
+        # double-counted (one fix + one phantom "pending manual" duplicate).
+        TextStyledAsHeadingAnalyzer(),
         HeadingTextEmptyAnalyzer(),
         TableMissingHeadersAnalyzer(),
-        TableHeaderScopeAnalyzer(),
+        # TableHeaderScopeAnalyzer NOT registered: both OOXML parsers always
+        # assign COLUMN scope to header cells, so the NONE-scope condition is
+        # unreachable from parsed documents — the rule could never fire.
         TableCaptionMissingAnalyzer(),
         ListStructureAnalyzer(),
         LinkTextAnalyzer(),
@@ -47,11 +52,13 @@ def get_default_analyzers() -> List[Analyzer]:
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
         DocumentHeadingsAnalyzer(),
-        ReadingOrderAnalyzer(),
+        # ReadingOrderAnalyzer NOT registered: no parser populates the
+        # reading_order metadata it reads, so it could never fire either.
         ContrastAnalyzer(),
         FormFieldLabelAnalyzer(),
         SlideTitleAnalyzer(),
         ScannedDocumentAnalyzer(),
+        UntaggedPdfAnalyzer(),
     ]
 
 

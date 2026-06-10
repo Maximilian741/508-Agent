@@ -35,7 +35,12 @@ import {
 import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { clearDraft, loadDraft, saveDraft } from "../src/domain/auditDraft";
-import { appendHistory, findHistoryEntry } from "../src/domain/auditHistory";
+import { appendHistory, findHistoryEntry, loadHistory } from "../src/domain/auditHistory";
+import {
+  checkStreakFromHistory,
+  recordTriagedFinding,
+  unlockAchievement,
+} from "../src/domain/achievements";
 import { loadWeights } from "../src/domain/scoreWeights";
 import { lookupIssue } from "../src/domain/issueCatalog";
 import { IssuedCertificate, issueCertificate, loadAccount, loadToken, refreshAccount } from "../src/domain/account";
@@ -112,11 +117,17 @@ export default function AuditScreen() {
   const router = useRouter();
   const [signInOpen, setSignInOpen] = useState(false);
   const [signInReason, setSignInReason] = useState<string | null>(null);
+  // When an anonymous first upload hits the API's 401, we stash the file here,
+  // open the sign-in sheet, and re-run the audit automatically after sign-in —
+  // the funnel continues instead of dead-ending on a raw error.
+  const pendingFileRef = useRef<File | null>(null);
   const [confirmRemediateOpen, setConfirmRemediateOpen] = useState(false);
 
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
   const backendHealth = useAppStore((state) => state.backendHealth);
+  const backendUrlSource = useAppStore((state) => state.backendUrlSource);
+  const refreshBackendUrl = useAppStore((state) => state.refreshBackendUrl);
   const setMockMode = useAppStore((state) => state.setMockMode);
   const autoFixPolicy = useAppStore((state) => state.autoFixPolicy);
   const setAutoFixPolicy = useAppStore((state) => state.setAutoFixPolicy);
@@ -440,6 +451,16 @@ export default function AuditScreen() {
           rejected: 0,
           pending: response.violations.length,
         });
+        // Milestone badges — unlockAchievement is idempotent, fire blindly.
+        unlockAchievement("first_audit");
+        const fmt = (response.summary.sourceFormat || "").toLowerCase();
+        if (fmt === "docx") unlockAchievement("first_docx");
+        if (fmt === "pdf") unlockAchievement("first_pdf");
+        if (fmt === "pptx") unlockAchievement("first_pptx");
+        if (response.score.score >= 90) unlockAchievement("score_ninety_plus");
+        const past = loadHistory();
+        if (past.length >= 10) unlockAchievement("ten_audits");
+        checkStreakFromHistory(past.map((h) => h.ranAt));
         toast.success(`Audit complete — ${response.score.grade}`, {
           description: `${response.violations.length} finding${
             response.violations.length === 1 ? "" : "s"
@@ -448,7 +469,20 @@ export default function AuditScreen() {
         notify(`Audit complete — ${response.score.grade}`, file.name);
         playChime();
       } catch (e) {
-        const msg = (e as Error).message ?? "Couldn't analyze that file.";
+        const err = e as Error & { status?: number };
+        const msg = err.message ?? "Couldn't analyze that file.";
+        // Anonymous first touch: the API requires an account even for the
+        // first audit. Never surface the raw 401 — open the sign-in sheet
+        // with the welcome copy and auto-retry this same file afterwards.
+        if (err.status === 401 || msg.includes("authentication_required")) {
+          pendingFileRef.current = file;
+          setSignInReason(
+            "Create a free account to run your audit — it takes a few seconds, and your first audits are on us (25 free credits).",
+          );
+          setSignInOpen(true);
+          setError(null);
+          return;
+        }
         setError(msg);
         toast.error("Audit failed", { description: msg });
       } finally {
@@ -490,6 +524,9 @@ export default function AuditScreen() {
         toast.success(`Approved: ${catalog.title}`);
       } else if (next === "rejected") {
         toast.warning(`Rejected: ${catalog.title}`, { description: "Will queue for manual review." });
+      }
+      if (next !== "pending") {
+        recordTriagedFinding();
       }
     },
     [toast],
@@ -618,6 +655,7 @@ export default function AuditScreen() {
             : ""
         }`,
       });
+      unlockAchievement("first_fix_approved");
       // New balance shows on the AppNav chip on the next render.
       if (!mockMode) void refreshAccount();
       if (Platform.OS === "web") {
@@ -659,6 +697,7 @@ export default function AuditScreen() {
       // (looked up by documentId) — the client no longer supplies the numbers.
       const cert = await issueCertificate({ documentId: report.summary.documentId });
       _openReport(report, decisions, decisionLog, fname, cert);
+      unlockAchievement("first_certificate");
       toast.success("Remediation summary issued", {
         description: cert.paidWith === "subscription" ? "Included with your plan." : "2 credits used.",
       });
@@ -857,7 +896,25 @@ export default function AuditScreen() {
       <SignInModal
         open={signInOpen}
         reason={signInReason ?? undefined}
+        onSignedIn={() => {
+          setSignInOpen(false);
+          setSignInReason(null);
+          const pending = pendingFileRef.current;
+          pendingFileRef.current = null;
+          if (pending) {
+            // Resume the interrupted first audit with the fresh session.
+            void handleFile(pending);
+            return;
+          }
+          // No pending upload (gate path): reload on web so the nav account
+          // chip and credit balance reflect the new session — the historical
+          // behavior when no onSignedIn handler was provided.
+          if (Platform.OS === "web" && typeof window !== "undefined") {
+            window.location.reload();
+          }
+        }}
         onCancel={() => {
+          pendingFileRef.current = null;
           setSignInOpen(false);
           setSignInReason(null);
         }}
@@ -937,31 +994,53 @@ export default function AuditScreen() {
 
       {/* === Backend onboarding ================================================= */}
       {noBackend && !report ? (
-        <Card>
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
-            The analyzer service isn't running yet
-          </Text>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
-            Open a terminal in your project folder and run:
-          </Text>
-          <View
-            style={[
-              styles.codeBlock,
-              { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border },
-            ]}
-          >
-            <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
-              cd backend{"\n"}python dev_run.py
+        backendUrlSource === "env" ? (
+          /* Managed/hosted build: a service interruption, not a local setup
+             task — never show customers dev commands. */
+          <Card>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+              We're having trouble reaching the service
             </Text>
-          </View>
-          <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8 }]}>
-            That starts the analyzer on a free port and writes the URL where this UI looks for it.
-            When it says "Backend running at http://127.0.0.1:8000", come back here.
-          </Text>
-          <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
-            <Button title="Try with sample data" onPress={() => setMockMode(true)} variant="secondary" />
-          </View>
-        </Card>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+              This is usually momentary. Your work is saved locally — retry in a few seconds, and
+              if it persists for more than a couple of minutes, email support@508-agent.app.
+            </Text>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+              <Button
+                title="Retry connection"
+                onPress={() => {
+                  void refreshBackendUrl();
+                }}
+              />
+            </View>
+          </Card>
+        ) : (
+          <Card>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+              The analyzer service isn't running yet
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+              Open a terminal in your project folder and run:
+            </Text>
+            <View
+              style={[
+                styles.codeBlock,
+                { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border },
+              ]}
+            >
+              <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
+                cd backend{"\n"}python dev_run.py
+              </Text>
+            </View>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8 }]}>
+              That starts the analyzer on a free port and writes the URL where this UI looks for it.
+              When it says "Backend running at http://127.0.0.1:8000", come back here.
+            </Text>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+              <Button title="Try with sample data" onPress={() => setMockMode(true)} variant="secondary" />
+            </View>
+          </Card>
+        )
       ) : null}
 
       {/* === Step 1: Pick a file ============================================== */}
@@ -1267,7 +1346,13 @@ export default function AuditScreen() {
           <View style={styles.filterRow}>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Severity:</Text>
             {(["all", "error", "warning", "info"] as SeverityFilter[]).map((s) => (
-              <Pressable accessibilityRole="button" accessibilityLabel="Filter by severity" key={s} onPress={() => setSeverityFilter(s)}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Filter by severity: ${s === "all" ? "show all" : s}`}
+                accessibilityState={{ selected: severityFilter === s }}
+                key={s}
+                onPress={() => setSeverityFilter(s)}
+              >
                 <Chip
                   label={
                     s === "all"
@@ -1304,7 +1389,13 @@ export default function AuditScreen() {
                   { key: "rejected" as DecisionFilter, label: `Rejected (${decisionCounts.rejected})` },
                 ] as { key: DecisionFilter; label: string }[]
               ).map((opt) => (
-                <Pressable accessibilityRole="button" accessibilityLabel="Filter by decision" key={opt.key} onPress={() => setDecisionFilter(opt.key)}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Filter by status: ${opt.key === "all" ? "show all" : opt.key}`}
+                  accessibilityState={{ selected: decisionFilter === opt.key }}
+                  key={opt.key}
+                  onPress={() => setDecisionFilter(opt.key)}
+                >
                   <Chip
                     label={opt.label}
                     tone={decisionFilter === opt.key ? "info" : "default"}
@@ -1545,6 +1636,16 @@ export default function AuditScreen() {
                 applied={lastRemediation.applied}
                 skipped={lastRemediation.skipped}
               />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Open the manual review queue"
+                onPress={() => router.push("/manual-review" as any)}
+                style={({ hovered }: any) => [{ alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
+              >
+                <Text style={[theme.typography.body, { color: theme.colors.accent, fontWeight: "600", fontSize: 13 }]}>
+                  Rejected or manual items? Open the manual review queue →
+                </Text>
+              </Pressable>
             </View>
           ) : null}
 
@@ -1562,10 +1663,10 @@ export default function AuditScreen() {
           {showMoreOptions ? (
             <View style={[styles.row, { marginTop: 8 }]}>
               <Button
-                title="Issue conformance certificate"
+                title="Issue remediation certificate"
                 onPress={onIssueCertificate}
                 variant="secondary"
-                accessibilityHint="Issues a verifiable certificate (free on a plan, or a few credits) and opens the printable report."
+                accessibilityHint="Issues a verifiable remediation certificate (free on a plan, or a few credits) and opens the printable report."
               />
               <Button
                 title="Export JSON"
@@ -1678,7 +1779,8 @@ function ProgressBar(props: {
           <Pressable accessibilityRole="button"
             key={v.id}
             onPress={() => props.onJump(i)}
-            accessibilityLabel={`Jump to issue ${i + 1}`}
+            // Decision state must not be colour-only: announce it.
+            accessibilityLabel={`Jump to issue ${i + 1} of ${props.violations.length} (${decision})`}
             style={[styles.progressSegment, { backgroundColor: bg, opacity }]}
           />
         );
@@ -2235,7 +2337,7 @@ function _buildReportHtml(
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Accessibility Conformance Report — ${_escape(filename)}</title>
+<title>Accessibility Remediation Report — ${_escape(filename)}</title>
 <style>
   :root { color-scheme: light; --accent:#2D5BFF; --ok:#16A34A; --warn:#F59E0B; --err:#DC2626; --bg:#F6F7FB; --fg:#0F172A; --muted:#5B6475; --border:#E2E8F0; }
   * { box-sizing: border-box; }
@@ -2292,7 +2394,7 @@ function _buildReportHtml(
 
   <div class="page">
     <header class="hero">
-      <div class="eyebrow">Accessibility Conformance Report</div>
+      <div class="eyebrow">Accessibility Remediation Report</div>
       <h1>${_escape(report.summary.title || filename)}</h1>
       <div class="filename">${_escape(filename)}</div>
       <div class="hero-grid">
@@ -2322,14 +2424,15 @@ function _buildReportHtml(
 
       <div class="conformance-callout">
         <strong>Audit date:</strong> ${formattedDate}<br>
-        <strong>Automated checks performed:</strong> image alt text (incl. filename / placeholder alt that says nothing, 1.1.1), heading structure (incl. long documents with no headings at all, 2.4.6), table headers, list structure, slide titles, document title &amp; language, link text (incl. bare-URL link text, 2.4.4), colour contrast (WCAG 1.4.3 — explicit, theme &amp; PDF text colours, vs. white), form-field labels (3.3.2 / 4.1.2 — PDF &amp; Word), and scanned PDF / no-extractable-text detection (1.1.1 — OCR required before remediation).<br>
+        <strong>Automated checks performed:</strong> image alt text (incl. filename / placeholder alt that says nothing, 1.1.1), heading structure (Word &amp; PowerPoint; incl. long Word documents with no headings and text merely styled as a heading, 2.4.6 / 1.3.1), table headers (Word &amp; PowerPoint), list structure (Word &amp; PowerPoint), slide titles, document title &amp; language, link text (incl. bare-URL link text, 2.4.4), colour contrast (WCAG 1.4.3 — explicit, theme &amp; PDF text colours, vs. white), form-field labels (3.3.2 / 4.1.2 — PDF &amp; Word), untagged-PDF detection (1.3.1 / PDF-UA — remediation reconstructs the structure tree), and scanned PDF / no-extractable-text detection (1.1.1 — OCR required before remediation).<br>
+        <strong>PDF note:</strong> table/list/heading <em>findings</em> are not itemised for PDFs at analysis time; instead, untagged PDFs are flagged whole and the remediated file receives a reconstructed structure tree (headings, lists, tables, figures, artifacts).<br>
         <strong>Not evaluated — require manual review:</strong> colour contrast for inherited colours &amp; coloured-background pages, reading order (1.3.2), document parsing (4.1.1), and other success criteria.<br>
         <strong>Methodology:</strong> Deterministic structural analyzers + heuristic / vision-AI suggestions for human review. This is an automated pre-scan, <strong>not</strong> a formal WCAG 2.1 / Section 508 conformance determination.
       </div>
       ${
         cert
           ? `<div class="conformance-callout" style="background:#ECFDF5;border-left-color:var(--ok);margin-top:10px;">
-        <strong>&#10003; Certificate of Conformance &mdash; ${_escape(cert.certificateId)}</strong><br>
+        <strong>&#10003; Remediation Certificate &mdash; ${_escape(cert.certificateId)}</strong><br>
         Issued to ${_escape(cert.issuedTo || "—")} on ${_escape(new Date(cert.issuedAt).toLocaleString())}.<br>
         Independently verifiable at: <code>${_escape(cert.verifyUrl)}</code>
       </div>`

@@ -265,11 +265,19 @@ class DOCXParser:
                 body_section.children.append(image)
 
             if text and not link_nodes:
+                para_props = _text_color_props(paragraph, theme_colors)
+                if _looks_like_fake_heading(paragraph, style_name, text):
+                    # Visually a heading (Title/Subtitle style, or short
+                    # all-bold large text) but NOT a real Heading style —
+                    # invisible to screen-reader navigation. Flagged by
+                    # TextStyledAsHeadingAnalyzer.
+                    para_props = dict(para_props or {})
+                    para_props["looks_like_heading"] = True
                 body_section.children.append(
                     ParagraphNode(
                         id=ids("docx-p"),
                         content=NodeContent(kind=ContentKind.TEXT, text=text),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
+                        metadata=NodeMetadata(source_format="docx", properties=para_props),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -634,6 +642,46 @@ def _inline_images_in_paragraph(
                 )
             )
     return images
+
+
+def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
+    """True when a plain paragraph is visually presented as a heading.
+
+    The classic title-page failure: 24pt bold text typed as a normal paragraph
+    (or Word's Title/Subtitle styles, which are NOT Heading 1-9 and don't enter
+    the navigation outline). Conservative on purpose:
+
+    * Title / Subtitle styles always count — they're unambiguous.
+    * Otherwise the text must be SHORT (<= 60 chars, <= 8 words), not end like
+      a sentence, have every visible run bold, AND carry an explicit font size
+      >= 14pt on some run. Ordinary bold emphasis inside body text fails the
+      size requirement; bold labels fail nothing else often enough that the
+      size requirement is what keeps precision high.
+    """
+    sn = (style_name or "").strip().lower()
+    if sn in ("title", "subtitle"):
+        return True
+
+    t = (text or "").strip()
+    if not t or len(t) > 60 or len(t.split()) > 8:
+        return False
+    if t.endswith((".", "!", "?", ";", ":", ",")):
+        return False
+
+    saw_text_run = False
+    max_size_pt = 0.0
+    for run in paragraph.runs:
+        if not (run.text or "").strip():
+            continue
+        saw_text_run = True
+        if not run.bold:
+            return False
+        try:
+            if run.font.size is not None:
+                max_size_pt = max(max_size_pt, float(run.font.size.pt))
+        except Exception:
+            pass
+    return saw_text_run and max_size_pt >= 14.0
 
 
 def _cell_text_is_bold(cell) -> bool:

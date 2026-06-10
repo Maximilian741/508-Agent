@@ -105,9 +105,23 @@ means it can actually serve.
 
 ---
 
-## 5. Stripe webhook
+## 5. Stripe products + webhook
 
-In the Stripe dashboard, add a webhook endpoint:
+Create these **exact** Prices in the Stripe dashboard (the billing page
+advertises these amounts — a mismatch means the customer sees one number and
+is charged another):
+
+| Price id env var | Type | Amount | Grants |
+| --- | --- | --- | --- |
+| `STRIPE_PRICE_STARTER` | one-time | **$5.00** | 50 credits |
+| `STRIPE_PRICE_PRO` | one-time | **$15.00** | 250 credits |
+| `STRIPE_PRICE_STUDIO` | one-time | **$50.00** | 1,300 credits |
+| `STRIPE_PRICE_TEAM` | recurring monthly | **$99.00/mo** | 1,000 credits/mo |
+| `STRIPE_PRICE_TEAM_ANNUAL` | recurring yearly | **$990.00/yr** | 12,000 credits up front |
+| `STRIPE_PRICE_BUSINESS` | recurring monthly | **$499.00/mo** | 6,000 credits/mo |
+| `STRIPE_PRICE_BUSINESS_ANNUAL` | recurring yearly | **$4,990.00/yr** | 72,000 credits up front |
+
+Then add a webhook endpoint:
 
 - URL: `https://api.yourdomain.com/billing/webhook`
 - Events: `checkout.session.completed`, `invoice.payment_succeeded`,
@@ -138,10 +152,23 @@ credit balance updates and the webhook recorded the grant.
 
 ---
 
-## 7. Backups
+## 7. Backups, retention & alerting
 
-Add a nightly `pg_dump` cron (SHIP-CHECKLIST Step 10). Do this before you take
-real customers.
+- **Backups:** add a nightly `pg_dump` cron (SHIP-CHECKLIST Step 10). Do this
+  before you take real customers.
+- **R2 retention:** if using Cloudflare R2 for storage, add a **1-day object
+  lifecycle rule** on the bucket. The app's cleanup task sweeps the local
+  pipeline directory after `PIPELINE_ARTIFACT_TTL_SECONDS` (24h), and the
+  lifecycle rule makes the same guarantee hold for R2 objects — the privacy
+  page promises "deleted after ~24 hours", so this rule is required.
+- **Alerting (5 minutes, do not skip):** point a free uptime monitor
+  (UptimeRobot, Cloudflare Health Checks, etc.) at
+  `https://api.yourdomain.com/readyz` with an email/SMS alert. There is no
+  built-in alerting; without this, the first person to tell you the site is
+  down will be a customer.
+- **Support mailboxes:** create `support@`, `privacy@`, and `security@` on
+  your domain (aliases to your inbox are fine) — the Help, Privacy, Terms and
+  SECURITY.md pages reference them.
 
 ---
 

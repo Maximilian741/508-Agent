@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Optional
 
 from app.ai.semantic_inference import SemanticInferenceClient
+from app.analyzers.link_analyzer import (
+    NON_DESCRIPTIVE_LINK_TEXT,
+    _looks_like_url,
+    _normalize_text,
+)
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -18,18 +23,17 @@ from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 
-GENERIC_LABELS = {
-    "click here",
-    "here",
-    "read more",
-    "learn more",
-    "more",
-    "link",
-    "this",
-    "click",
-    "details",
-    "info",
-}
+# Single source of truth: the same phrase set the ANALYZER flags with. The
+# executor previously kept its own narrower 11-phrase list, so bare-URL link
+# text (and several generic phrases) were flagged by detection but then
+# refused by the approved fix — a customer-visible detect/fix disagreement.
+GENERIC_LABELS = NON_DESCRIPTIVE_LINK_TEXT
+
+
+def _is_non_descriptive(text: str) -> bool:
+    """Mirror LinkTextAnalyzer's predicate exactly (phrases OR bare URL)."""
+    normalized = _normalize_text(text or "")
+    return (not normalized) or normalized in NON_DESCRIPTIVE_LINK_TEXT or _looks_like_url(text or "")
 
 
 class ImproveLinkTextExecutor(RemediationExecutor):
@@ -66,8 +70,9 @@ class ImproveLinkTextExecutor(RemediationExecutor):
             )
 
         original = (target.content.text or "").strip() if target.content else ""
-        normalized = original.lower().strip(":.,!? ")
-        if normalized and normalized not in GENERIC_LABELS:
+        if not _is_non_descriptive(original):
+            # The text was edited since the flag was attached and now reads
+            # fine — don't clobber a human's words.
             return _result(
                 action_code,
                 plan,
@@ -77,7 +82,7 @@ class ImproveLinkTextExecutor(RemediationExecutor):
 
         result = self._client.suggest_link_text(text=original, target=target.target or "")
         suggestion = (result.text or "").strip()
-        if not suggestion or suggestion.lower() in GENERIC_LABELS:
+        if not suggestion or _is_non_descriptive(suggestion):
             return _result(
                 action_code,
                 plan,

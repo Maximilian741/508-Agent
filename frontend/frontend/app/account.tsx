@@ -416,9 +416,9 @@ export default function AccountScreen() {
           Security
         </Text>
         <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginBottom: 14 }}>
-          Add an optional password and verify your email. Both are scaffolds
-          for now - email verification logs the magic link to the server
-          console instead of sending real mail.
+          Change your password and verify your email address. Verifying your
+          email protects account recovery and unlocks the starter credit grant
+          on hosted deployments.
         </Text>
 
         {!pwOpen ? (
@@ -445,10 +445,10 @@ export default function AccountScreen() {
                     const queued = await requestEmailVerification();
                     if (queued) {
                       setVerifyHint(
-                        "Check your server logs for the link (look for '[email] verify link: ...').",
+                        "We sent a verification link to your email — click it to finish. (Self-hosted without SMTP: the link prints to the server console.)",
                       );
-                      toast.success("Verification queued", {
-                        description: "Magic link logged to the server console.",
+                      toast.success("Verification sent", {
+                        description: "Check your inbox for the link.",
                       });
                     } else {
                       toast.error("Could not request verification");
@@ -489,7 +489,7 @@ export default function AccountScreen() {
               onChangeText={setPwValue}
               secureTextEntry
               autoCapitalize="none"
-              placeholder="At least 4 characters"
+              placeholder="At least 8 characters"
               placeholderTextColor={theme.colors.textMuted}
               style={[
                 styles.input,

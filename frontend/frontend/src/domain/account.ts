@@ -688,10 +688,39 @@ export async function deleteAccount(): Promise<void> {
  * Set or change the signed-in user's password. Returns the fresh account.
  * Throws on failure.
  */
+/**
+ * Ask the backend to email a password-reset link. Always resolves true on a
+ * 2xx (the API never discloses whether the address has an account).
+ */
+export async function requestPasswordReset(email: string): Promise<boolean> {
+  const res = await apiFetch("/auth/request-password-reset", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) await _throwDetail(res, "Could not request a reset link");
+  const j = await _readJson(res);
+  return Boolean(j && j.queued);
+}
+
+/** Consume a reset token and set a new password. Throws on expired tokens. */
+export async function confirmPasswordReset(token: string, password: string): Promise<boolean> {
+  if (!password || password.length < 8) {
+    throw new Error("Password must be at least 8 characters.");
+  }
+  const res = await apiFetch("/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ token, password }),
+  });
+  if (!res.ok) await _throwDetail(res, "Could not reset the password");
+  const j = await _readJson(res);
+  return Boolean(j && j.reset);
+}
+
 export async function setPassword(password: string): Promise<Account> {
   if (!_readToken()) throw new Error("Not signed in.");
-  if (!password || password.length < 4) {
-    throw new Error("Password must be at least 4 characters.");
+  // Mirror the backend's minimum (8) so users aren't bounced server-side.
+  if (!password || password.length < 8) {
+    throw new Error("Password must be at least 8 characters.");
   }
   const res = await apiFetch("/auth/set-password", {
     method: "POST",
@@ -878,4 +907,27 @@ export async function getAdminMetrics(): Promise<AdminMetrics> {
   const res = await apiFetch("/admin/metrics");
   if (!res.ok) await _throwDetail(res, "Could not load metrics");
   return (await _readJson(res)) as AdminMetrics;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  at: string;
+  requestId?: string | null;
+  actorEmail?: string | null;
+  ip?: string | null;
+  event: string;
+  docId?: string | null;
+  jobId?: string | null;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Fetch the admin audit log (most recent first). Admin-gated like
+ * getAdminMetrics — throws with `.status` 401/403 for non-admins.
+ */
+export async function getAuditLog(limit = 200): Promise<AuditLogEntry[]> {
+  const res = await apiFetch(`/audit-log?limit=${encodeURIComponent(String(limit))}`);
+  if (!res.ok) await _throwDetail(res, "Could not load audit log");
+  const data = await _readJson(res);
+  return Array.isArray(data) ? (data as AuditLogEntry[]) : [];
 }
