@@ -52,6 +52,12 @@ corpus smoke + live HTTP against a running server).
     falls back to the field's /TU label); every /TH carries /A /Scope /Column;
     digit-ordinal lists carry /A /ListNumbering /Decimal (letters/romans left
     unset — ambiguous, precision first). smoke_pdf_links now 21 asserts.
+13a. Robustness lock (iteration 11): NEW smoke_malformed_inputs (29 asserts;
+    suite 50) — empty/garbage/truncated/renamed-extension/corrupted-zip-member
+    uploads in all formats produce structured 4xx JSON (never a 500, no
+    traceback text in any body), a valid file still analyzes after the abuse,
+    and 8 concurrent analyzes all return 200. Pure regression-lock: behavior
+    was already correct thanks to the earlier hardening passes.
 13. "Verify the fix" re-audit CTA (iteration 10, audit.tsx): after
     remediation, one click fetches the fixed file from its signed URL and
     runs a FREE analyze pass — InlineNotice shows "N issues → M" + new
