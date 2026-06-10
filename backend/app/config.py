@@ -63,6 +63,9 @@ class Settings:
     materialized_root: Path
     cors_allow_origins: List[str]
     max_upload_mb: int
+    # OCR for scanned PDFs: requires a host Tesseract install (see
+    # docs/LAUNCH.md). Off by default; the action degrades to manual review.
+    ocr_enabled: bool
     require_strict_cors: bool
     # Only trust client-supplied forwarded-IP headers (CF-Connecting-IP /
     # X-Forwarded-For) when actually behind a trusted proxy, otherwise an
@@ -153,6 +156,7 @@ def get_settings() -> Settings:
             ],
         ),
         max_upload_mb=_env_int("MAX_UPLOAD_MB", 25),
+        ocr_enabled=_env_bool("OCR_ENABLED", False),
         require_strict_cors=_env_bool("REQUIRE_STRICT_CORS", True),
         trust_proxy_headers=_env_bool("TRUST_PROXY_HEADERS", True),
         app_secret=raw_secret,

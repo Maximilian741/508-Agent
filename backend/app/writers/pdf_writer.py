@@ -27,6 +27,7 @@ from typing import Any, Dict, List
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (
     ArrayObject,
+    DecodedStreamObject,
     DictionaryObject,
     IndirectObject,
     NameObject,
@@ -169,6 +170,16 @@ def write_remediated_pdf(
         # tree added in step 4 makes the document tagged at page granularity;
         # the score honestly reports these as pending-manual for PDF.
 
+    # ------- 3.5 OCR text layer for scanned pages ----------------------
+    # Runs BEFORE tagging so the recognized text is real page content the
+    # structure tagger can wrap. Only when the executor recorded the request
+    # (which itself requires an available OCR provider).
+    if (tree.root.metadata.properties or {}).get("ocr_text_layer_requested"):
+        try:
+            _apply_ocr_text_layer(writer, applied, skipped)
+        except Exception as exc:  # pragma: no cover - defensive
+            skipped.append({"target_id": "document", "reason": f"ocr_layer_failed: {exc}"})
+
     # ------- 4. Basic PDF/UA structure tree + document metadata --------
     # Turns an untagged PDF into a tagged one (MarkInfo, StructTreeRoot,
     # DisplayDocTitle, XMP). Fidelity-preserving and never corrupts.
@@ -197,6 +208,128 @@ def _resolve(obj: Any) -> Any:
         except Exception:
             return None
     return obj
+
+
+# ---------------------------------------------------------------------------
+# OCR text layer for scanned pages
+# ---------------------------------------------------------------------------
+
+
+def _escape_pdf_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _apply_ocr_text_layer(writer: PdfWriter, applied: List[Dict[str, Any]], skipped: List[Dict[str, Any]]) -> None:
+    """Append an INVISIBLE (render mode 3) position-matched text layer to each
+    image-only page, using the active OCR provider.
+
+    The overlay is one BT..ET block per page appended as an EXTRA content
+    stream — original page bytes are never touched. Word positions map from
+    image pixels to page user space assuming a full-page scan (the dominant
+    real-world case; minor selection offset is acceptable and disclosed).
+    Runs before the structure tagger, which then wraps the new text into the
+    reconstructed tree.
+    """
+
+    from app.services.ocr import get_ocr_provider
+
+    provider = get_ocr_provider()
+    if provider is None:
+        skipped.append({"target_id": "document", "reason": "ocr_provider_unavailable"})
+        return
+
+    pages_done = 0
+    words_total = 0
+    for page_index, page in enumerate(writer.pages):
+        try:
+            existing_text = (page.extract_text() or "").strip()
+        except Exception:
+            existing_text = ""
+        if len(existing_text) >= 50:
+            continue  # not an image-only page
+
+        # Largest embedded image = the scan.
+        image_bytes = None
+        try:
+            best = None
+            for img in page.images:
+                data = getattr(img, "data", None)
+                if data and (best is None or len(data) > len(best)):
+                    best = data
+            image_bytes = best
+        except Exception:
+            image_bytes = None
+        if not image_bytes:
+            continue
+
+        result = provider.recognize(image_bytes)
+        if result is None or not result.words or result.width_px <= 0 or result.height_px <= 0:
+            continue
+
+        mb = page.mediabox
+        page_w = float(mb.width)
+        page_h = float(mb.height)
+        sx = page_w / result.width_px
+        sy = page_h / result.height_px
+
+        ops: List[str] = ["q", "BT", "3 Tr"]
+        for word in result.words:
+            if not word.text.strip():
+                continue
+            size = max(4.0, min(72.0, word.h * sy))
+            x = word.x * sx
+            y = page_h - (word.y + word.h) * sy
+            ops.append(f"/F508OCR {size:.2f} Tf")
+            ops.append(f"1 0 0 1 {x:.2f} {y:.2f} Tm")
+            ops.append(f"({_escape_pdf_text(word.text)}) Tj")
+        ops.extend(["ET", "Q"])
+        overlay = DecodedStreamObject()
+        overlay.set_data(("\n".join(ops)).encode("latin-1", "replace"))
+        overlay_ref = writer._add_object(overlay)  # noqa: SLF001
+
+        # Font resource for the overlay text.
+        font = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+        font_ref = writer._add_object(font)  # noqa: SLF001
+        resources = _resolve(page.get("/Resources"))
+        if not isinstance(resources, DictionaryObject):
+            resources = DictionaryObject()
+            page[NameObject("/Resources")] = resources
+        fonts = _resolve(resources.get("/Font")) if "/Font" in resources else None
+        if not isinstance(fonts, DictionaryObject):
+            fonts = DictionaryObject()
+            resources[NameObject("/Font")] = fonts
+        fonts[NameObject("/F508OCR")] = font_ref
+
+        # Append the overlay as an extra content stream (originals untouched).
+        raw_contents = page.raw_get("/Contents") if "/Contents" in page else None
+        resolved = _resolve(raw_contents)
+        if resolved is None:
+            page[NameObject("/Contents")] = overlay_ref
+        elif isinstance(resolved, ArrayObject):
+            new_arr = ArrayObject(list(resolved) + [overlay_ref])
+            page[NameObject("/Contents")] = new_arr
+        else:
+            page[NameObject("/Contents")] = ArrayObject([raw_contents, overlay_ref])
+
+        pages_done += 1
+        words_total += len(result.words)
+
+    if pages_done:
+        applied.append(
+            {
+                "kind": "ocr_text_layer",
+                "target_id": "document",
+                "summary": f"invisible OCR text layer on {pages_done} page(s), {words_total} word(s)",
+            }
+        )
+    else:
+        skipped.append({"target_id": "document", "reason": "ocr_no_recognizable_pages"})
 
 
 __all__ = ["write_remediated_pdf"]

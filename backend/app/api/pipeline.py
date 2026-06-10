@@ -682,6 +682,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # tables, figures, artifacts + MarkInfo/ParentTree/XMP) on every
         # untagged PDF — verified by smoke_pdf_structure/-artifacts/-ruling.
         "TAG_PDF_STRUCTURE",
+        # Invisible OCR text layer on scanned pages. The executor only
+        # succeeds when an OCR provider is actually available, so counting
+        # it is honest — verified by smoke_ocr_layer.
+        "ADD_OCR_TEXT_LAYER",
     },
 }
 

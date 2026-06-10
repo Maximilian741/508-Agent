@@ -579,6 +579,7 @@ class ActionCode(str, Enum):
     SET_DOCUMENT_TITLE = "SET_DOCUMENT_TITLE"
     RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
     TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
+    ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
     FLAG_FOR_MANUAL_REVIEW = "FLAG_FOR_MANUAL_REVIEW"
 
 
@@ -593,6 +594,29 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             supported_node_types=[NodeType.DOCUMENT],
             related_flag_code=AccessibilityFlagCode.PDF_UNTAGGED,
         )
+    ],
+    AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT: [
+        RemediationAction(
+            action_code=ActionCode.ADD_OCR_TEXT_LAYER,
+            description=(
+                "Recognize the scanned pages with OCR and add an invisible, "
+                "position-matched text layer (requires OCR enabled on the deployment)."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT,
+        ),
     ],
     AccessibilityFlagCode.MISSING_ALT_TEXT: [
         RemediationAction(

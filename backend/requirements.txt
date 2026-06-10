@@ -3,6 +3,9 @@ uvicorn==0.30.6
 pydantic==2.8.2
 pypdf==4.2.0
 python-docx==1.1.2
+# OCR wrapper for scanned-PDF text layers — needs a host Tesseract
+# install to activate (OCR_ENABLED=true); harmless when the binary is absent.
+pytesseract==0.3.13
 python-pptx==1.0.2
 SQLAlchemy==2.0.36
 boto3==1.35.66
