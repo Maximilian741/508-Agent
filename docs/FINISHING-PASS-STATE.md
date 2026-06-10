@@ -56,6 +56,19 @@
    iteration-1 parser change (harmless until paragraphs were indexed — which
    this feature does). smoke_fake_lists now 24 cases (8 pptx).
 
+9. Realistic-corpus end-to-end smoke (smoke_realistic_corpus, 30 asserts,
+   suite now 48): dirty DOCX report / PPTX deck / untagged PDF + clean
+   control. Pins the buyer invariants: pipeline never crashes on mixed
+   content; violations STRICTLY DECREASE after remediate-all; headline codes
+   (title/alt/lists/tables/PDF_UNTAGGED) GONE from outputs; NO new violation
+   codes appear post-fix; clean doc stays at zero before AND after.
+   Sweep verdict: engine correct everywhere it was probed (the one "failure"
+   was a fixture artifact — python-pptx stamps descr=filename, which the
+   engine rightly calls ALT_TEXT_NOT_DESCRIPTIVE and auto-fixes).
+10. Sales surfaces synced to reality: README "eight analyzers" -> the actual
+   19 with capability summary; landing "Fixes, not just findings" now names
+   typed-list conversion.
+
 ## Known remaining
 
 - PDF fake-list conversion via this action (PDF lists are already rebuilt by

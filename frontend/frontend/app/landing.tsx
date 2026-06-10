@@ -35,7 +35,7 @@ const STEPS = [
 const DIFFERENTIATORS = [
   {
     title: "Fixes, not just findings",
-    body: "Most checkers stop at a list of problems. 508 Agent writes the approved fixes back into your file — alt text, titles, language, link text, table headers.",
+    body: "Most checkers stop at a list of problems. 508 Agent writes the approved fixes back into your file — alt text, titles, language, link text, table headers, and typed “- item” lines converted into real Word and PowerPoint lists.",
   },
   {
     title: "Rebuilds PDF structure",
