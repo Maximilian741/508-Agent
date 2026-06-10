@@ -37,8 +37,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
+from docx.opc.constants import CONTENT_TYPE as OPC_CT
+from docx.opc.constants import RELATIONSHIP_TYPE as OPC_RT
+from docx.opc.packuri import PackURI
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.parts.numbering import NumberingPart
 
 from app.models.accessibility import (
     AccessibilityTree,
@@ -52,7 +56,12 @@ from app.models.accessibility import (
     TableNode,
     TableRowNode,
 )
-from app.parsers.docx_parser import DOCXParser, _IdCounter, _heading_level_from_style
+from app.parsers.docx_parser import (
+    DOCXParser,
+    _IdCounter,
+    _heading_level_from_style,
+    strip_fake_list_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +155,10 @@ def write_remediated_docx(
             _apply_link(node, hyperlink_by_id, applied, skipped)
         elif isinstance(node, HeadingNode):
             _apply_heading(node, paragraph_by_id, applied, skipped)
+        elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
+            # A typed fake-list paragraph the FIX_LIST_STRUCTURE executor
+            # approved for conversion — give it real Word list semantics.
+            _apply_list_conversion(doc, node, paragraph_by_id, applied, skipped)
         elif isinstance(node, TableCellNode):
             # Cells are only meaningful via their parent row; we mark the
             # row as a repeating header row whenever any cell in the first
@@ -714,3 +727,168 @@ def _insert_docx_header_row(docx_table, texts: List[str]) -> None:
         first_tr.addprevious(tr)
     else:
         tbl.append(tr)
+
+
+# ---------------------------------------------------------------------------
+# Typed fake-list -> real Word list (w:numPr + numbering.xml)
+# ---------------------------------------------------------------------------
+
+_NUMBERING_SKELETON = (
+    '<w:numbering xmlns:w='
+    '"http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
+).encode("utf-8")
+
+
+def _ensure_list_numbering(doc, kind: str) -> int:
+    """Return a ``w:numId`` for ``kind`` ("bullet"|"decimal"), creating the
+    numbering part and/or definitions on first use.
+
+    The numbering part is found via its package relationship; documents that
+    never contained a list get a fresh ``/word/numbering.xml``. Definitions
+    are appended with ids above the document's existing maximum so nothing
+    collides. Memoized per Document object so a whole run shares one num.
+    """
+
+    cache = getattr(doc, "_a508_list_num_ids", None)
+    if cache is None:
+        cache = {}
+        setattr(doc, "_a508_list_num_ids", cache)
+    if kind in cache:
+        return cache[kind]
+
+    try:
+        numbering_part = doc.part.part_related_by(OPC_RT.NUMBERING)
+    except KeyError:
+        numbering_part = NumberingPart.load(
+            PackURI("/word/numbering.xml"),
+            OPC_CT.WML_NUMBERING,
+            _NUMBERING_SKELETON,
+            doc.part.package,
+        )
+        doc.part.relate_to(numbering_part, OPC_RT.NUMBERING)
+
+    numbering_el = numbering_part.element
+
+    # Pick ids above anything already present.
+    max_abstract = -1
+    for el in numbering_el.findall(qn("w:abstractNum")):
+        try:
+            max_abstract = max(max_abstract, int(el.get(qn("w:abstractNumId"))))
+        except (TypeError, ValueError):
+            continue
+    max_num = 0
+    for el in numbering_el.findall(qn("w:num")):
+        try:
+            max_num = max(max_num, int(el.get(qn("w:numId"))))
+        except (TypeError, ValueError):
+            continue
+    abstract_id = max_abstract + 1
+    num_id = max_num + 1
+
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    mlt = OxmlElement("w:multiLevelType")
+    mlt.set(qn("w:val"), "singleLevel")
+    abstract.append(mlt)
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    lvl.append(start)
+    fmt = OxmlElement("w:numFmt")
+    fmt.set(qn("w:val"), "bullet" if kind == "bullet" else "decimal")
+    lvl.append(fmt)
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(qn("w:val"), "" if kind == "bullet" else "%1.")
+    lvl.append(lvl_text)
+    jc = OxmlElement("w:lvlJc")
+    jc.set(qn("w:val"), "left")
+    lvl.append(jc)
+    ppr = OxmlElement("w:pPr")
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "720")
+    ind.set(qn("w:hanging"), "360")
+    ppr.append(ind)
+    lvl.append(ppr)
+    if kind == "bullet":
+        rpr = OxmlElement("w:rPr")
+        fonts = OxmlElement("w:rFonts")
+        fonts.set(qn("w:ascii"), "Symbol")
+        fonts.set(qn("w:hAnsi"), "Symbol")
+        fonts.set(qn("w:hint"), "default")
+        rpr.append(fonts)
+        lvl.append(rpr)
+    abstract.append(lvl)
+
+    # Schema order: all w:abstractNum come before any w:num.
+    first_num = numbering_el.find(qn("w:num"))
+    if first_num is not None:
+        first_num.addprevious(abstract)
+    else:
+        numbering_el.append(abstract)
+
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    ref = OxmlElement("w:abstractNumId")
+    ref.set(qn("w:val"), str(abstract_id))
+    num.append(ref)
+    numbering_el.append(num)
+
+    cache[kind] = num_id
+    return num_id
+
+
+def _apply_list_conversion(doc, node, paragraph_by_id, applied, skipped) -> None:
+    """Persist a fake-list paragraph's conversion: add ``w:numPr`` and strip
+    the literal typed marker ("- ", "1. ") from the run text."""
+
+    paragraph = paragraph_by_id.get(node.id)
+    if paragraph is None:
+        skipped.append({
+            "target_id": node.id,
+            "reason": "paragraph not found in source for list conversion",
+        })
+        return
+
+    p = paragraph._p
+    pPr = p.get_or_add_pPr()
+    if pPr.find(qn("w:numPr")) is not None:
+        skipped.append({
+            "target_id": node.id,
+            "reason": "paragraph already carries numbering",
+        })
+        return
+
+    kind = (node.metadata.properties or {}).get("convert_to_list") or "bullet"
+    num_id = _ensure_list_numbering(doc, kind)
+
+    # python-docx's CT_PPr puts numPr in its correct schema slot for us.
+    numPr = pPr.get_or_add_numPr()
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), "0")
+    num_ref = OxmlElement("w:numId")
+    num_ref.set(qn("w:val"), str(num_id))
+    numPr.append(ilvl)
+    numPr.append(num_ref)
+
+    # Strip the typed marker from the first non-empty text run so the output
+    # doesn't render "• - item".  If the marker straddles runs unusually we
+    # leave the text alone — the list semantics still land.
+    stripped = False
+    for t in p.iter(qn("w:t")):
+        if t.text and t.text.strip():
+            new_text = strip_fake_list_prefix(t.text)
+            if new_text != t.text:
+                t.text = new_text
+                t.set(qn("xml:space"), "preserve")
+                stripped = True
+            break
+
+    applied.append({
+        "kind": "list_conversion",
+        "target_id": node.id,
+        "summary": (
+            f"converted typed paragraph to real {kind} list item "
+            f"(numId={num_id}, marker {'stripped' if stripped else 'left in place'})"
+        ),
+    })

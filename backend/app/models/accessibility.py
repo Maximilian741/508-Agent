@@ -696,7 +696,9 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
         requires_ai=False,
         requires_human_review=False,
         is_auto_applicable=True,
-        supported_node_types=[NodeType.LIST],
+        # LIST = malformed ListNode tree; PARAGRAPH = a typed fake-list run
+        # ("- item" paragraphs) being converted into a real Word list.
+        supported_node_types=[NodeType.LIST, NodeType.PARAGRAPH],
         related_flag_code=AccessibilityFlagCode.LIST_STRUCTURE_INVALID,
         )
     ],

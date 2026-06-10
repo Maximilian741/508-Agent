@@ -27,10 +27,21 @@
    flags over the wire (slides 2/3/4), DOCX analyze → approve → remediate →
    signed download → derived title verified IN the output bytes, unsigned +
    tampered-signature downloads rejected (403). Evidence-only; no code change.
+5. DOCX fake-list conversion (closed the oldest disclosed writer gap) — typed
+   "- item" / "1. item" paragraph runs are detected (LIST_STRUCTURE_INVALID,
+   one per typed list; precision guards for prose/years/stray lines/real
+   lists), FIX_LIST_STRUCTURE converts them, and the writer persists REAL
+   Word lists: w:numPr per paragraph + numbering.xml (created if absent, ids
+   above existing max), literal markers stripped. FIX_LIST_STRUCTURE added to
+   _PERSISTED_ACTIONS["docx"]; smoke_fake_lists (16 cases incl. byte-level +
+   idempotency proofs); smoke_score_honesty re-pinned (suite now 47).
 
 ## Known remaining
 
-(list empty — next iteration starts with a fresh self-audit)
+- In-cell DOCX hyperlinks + w:fldSimple links not remediated (disclosed).
+- PPTX/PDF fake-list conversion (DOCX-only for now; PDF tagger already
+  handles real bullet glyphs when tagging untagged PDFs).
+- PDF coloured-background contrast false-positive (disclosed).
 
 ## Verification gates (run before every push)
 

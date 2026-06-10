@@ -12,6 +12,7 @@ Two complementary entry points are exposed:
 from __future__ import annotations
 
 import base64
+import re
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -273,6 +274,14 @@ class DOCXParser:
                     # TextStyledAsHeadingAnalyzer.
                     para_props = dict(para_props or {})
                     para_props["looks_like_heading"] = True
+                fake_sig = _fake_list_signature(text)
+                if fake_sig:
+                    kind, char, ordinal = fake_sig
+                    para_props = dict(para_props or {})
+                    para_props["fake_list_kind"] = kind
+                    para_props["fake_list_char"] = char
+                    if ordinal is not None:
+                        para_props["fake_list_ordinal"] = ordinal
                 body_section.children.append(
                     ParagraphNode(
                         id=ids("docx-p"),
@@ -285,6 +294,9 @@ class DOCXParser:
 
         if list_collector:
             body_section.children.append(_finalize_list(ids, list_collector, list_marker))
+
+        # Group consecutive fake-list paragraphs into runs (one flag each).
+        _group_fake_list_runs(body_section.children)
 
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
         for table in doc.tables:
@@ -642,6 +654,99 @@ def _inline_images_in_paragraph(
                 )
             )
     return images
+
+
+# ----- Fake-list detection ----------------------------------------------------
+#
+# Plain paragraphs typed as "- item" / "1. item" with no Word numbering are
+# read by screen readers as disconnected prose — no list semantics, no item
+# count, no nesting.  The parser marks candidates here; a post-pass groups
+# consecutive candidates into runs; ListStructureAnalyzer flags each run; and
+# the FIX_LIST_STRUCTURE executor + docx writer convert them into REAL Word
+# lists (w:numPr + numbering.xml).  Precision over recall: en/em dashes are
+# excluded (dialogue), alpha ordinals are excluded ("A. Smith"), and numbered
+# runs must count 1, 2, 3… from 1.
+
+_FAKE_BULLET_RE = re.compile(r"^([-*•·])\s+\S")
+_FAKE_DECIMAL_RE = re.compile(r"^(\d{1,3})[.)]\s+\S")
+
+
+def _fake_list_signature(text: str) -> Optional[Tuple[str, str, Optional[int]]]:
+    """Return ``(kind, prefix_char, ordinal)`` when ``text`` is typed like a
+    list item, else None. ``kind`` is "bullet" or "decimal"."""
+
+    m = _FAKE_BULLET_RE.match(text)
+    if m:
+        return ("bullet", m.group(1), None)
+    m = _FAKE_DECIMAL_RE.match(text)
+    if m:
+        return ("decimal", m.group(1), int(m.group(1)))
+    return None
+
+
+def strip_fake_list_prefix(text: str) -> str:
+    """Remove the literal typed marker ("- ", "1. ", "2) "…) from ``text``.
+
+    Shared with the executor and the docx writer so the three stay in
+    lockstep about what counts as a marker.
+    """
+
+    out = re.sub(r"^[-*•·]\s+", "", text, count=1)
+    if out != text:
+        return out
+    return re.sub(r"^\d{1,3}[.)]\s+", "", text, count=1)
+
+
+def _group_fake_list_runs(body_children: List[Any]) -> None:
+    """Mark runs of >=2 consecutive same-kind fake-list ParagraphNodes.
+
+    The FIRST node of each run gets ``fake_list_run_ids`` (all member ids,
+    itself included) — the analyzer flags that node, so one issue surfaces
+    per typed list. Numbered runs must be sequential starting at 1, which
+    keeps prose like "1986. It was…" or stray numbered sentences out.
+    """
+
+    run: List[Any] = []
+    run_kind: Optional[str] = None
+    run_char: Optional[str] = None
+    next_ordinal: Optional[int] = None
+
+    def flush() -> None:
+        nonlocal run, run_kind, run_char, next_ordinal
+        if len(run) >= 2:
+            first = run[0]
+            props = dict(first.metadata.properties or {})
+            props["fake_list_run_ids"] = [n.id for n in run]
+            first.metadata.properties = props
+        run = []
+        run_kind = None
+        run_char = None
+        next_ordinal = None
+
+    for child in body_children:
+        sig = None
+        if isinstance(child, ParagraphNode):
+            props = child.metadata.properties or {}
+            kind = props.get("fake_list_kind")
+            if kind:
+                sig = (kind, props.get("fake_list_char"), props.get("fake_list_ordinal"))
+        if sig is None:
+            flush()
+            continue
+        kind, char, ordinal = sig
+        if run and (kind != run_kind or (kind == "bullet" and char != run_char)):
+            flush()
+        if kind == "decimal":
+            expected = 1 if not run else next_ordinal
+            if ordinal != expected:
+                flush()
+                if ordinal != 1:
+                    continue  # mid-sequence stray ("1986. …") — not a list start
+            next_ordinal = (ordinal or 0) + 1
+        if not run:
+            run_kind, run_char = kind, char
+        run.append(child)
+    flush()
 
 
 def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:

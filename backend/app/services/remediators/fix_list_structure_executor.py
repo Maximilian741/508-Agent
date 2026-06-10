@@ -1,4 +1,13 @@
-"""Executor for fixing list structure."""
+"""Executor for fixing list structure.
+
+Two modes:
+1. Malformed ListNode — wrap stray children in ListItemNodes (tree-only).
+2. FAKE list — a run of plain paragraphs typed as "- item" / "1. item"
+   (parser records ``fake_list_run_ids`` on the run's first paragraph).
+   Each member paragraph gets ``convert_to_list`` set and its literal
+   marker stripped from the tree text; the docx writer then persists the
+   conversion as a REAL Word list (w:numPr + numbering.xml).
+"""
 
 from __future__ import annotations
 
@@ -10,8 +19,10 @@ from app.models.accessibility import (
     ActionCode,
     ListItemNode,
     ListNode,
+    ParagraphNode,
     iter_reading_order,
 )
+from app.parsers.docx_parser import strip_fake_list_prefix
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
@@ -29,6 +40,40 @@ class FixListStructureExecutor(RemediationExecutor):
                 status=ExecutionStatus.SKIPPED,
                 notes="No accessibility tree provided; action not executed.",
             )
+
+        # Mode 2: typed fake-list run targeting a ParagraphNode.
+        fake_target = _find_node(tree, plan.target_node_id)
+        if isinstance(fake_target, ParagraphNode):
+            run_ids = (fake_target.metadata.properties or {}).get("fake_list_run_ids") or []
+            if not run_ids:
+                return ExecutionResult(
+                    action_code=action_code,
+                    target_node_id=plan.target_node_id,
+                    status=ExecutionStatus.SKIPPED,
+                    notes="Paragraph carries no fake-list run; no changes applied.",
+                )
+            kind = (fake_target.metadata.properties or {}).get("fake_list_kind") or "bullet"
+            converted = 0
+            for member_id in run_ids:
+                member = _find_node(tree, member_id)
+                if member is None:
+                    continue
+                props = dict(member.metadata.properties or {})
+                props["convert_to_list"] = kind
+                member.metadata.properties = props
+                if member.content and member.content.text:
+                    member.content.text = strip_fake_list_prefix(member.content.text)
+                converted += 1
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SUCCESS,
+                notes=(
+                    f"Converted {converted} typed '{kind}' paragraphs into a real list; "
+                    "markers stripped, numbering persisted by the writer."
+                ),
+            )
+
         target = _find_list_node(tree, plan.target_node_id)
         if target is None:
             return ExecutionResult(
@@ -90,11 +135,16 @@ class FixListStructureExecutor(RemediationExecutor):
         )
 
 
-def _find_list_node(tree: AccessibilityTree, target_node_id: str) -> Optional[ListNode]:
+def _find_node(tree: AccessibilityTree, target_node_id: str):
     for node in iter_reading_order(tree.root):
-        if node.id == target_node_id and isinstance(node, ListNode):
+        if node.id == target_node_id:
             return node
     return None
+
+
+def _find_list_node(tree: AccessibilityTree, target_node_id: str) -> Optional[ListNode]:
+    node = _find_node(tree, target_node_id)
+    return node if isinstance(node, ListNode) else None
 
 
 def _has_list_structure_flag(plan: RemediationPlan, target: ListNode) -> bool:

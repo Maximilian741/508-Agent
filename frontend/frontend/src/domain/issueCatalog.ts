@@ -149,14 +149,14 @@ const C: Record<string, IssueCatalogEntry> = {
 
   LIST_STRUCTURE_INVALID: {
     ruleId: "LIST_STRUCTURE_INVALID",
-    title: "List is structurally broken",
-    summary: "Items in a list aren't tagged as list items.",
+    title: "List is typed as plain text, not a real list",
+    summary: "Lines typed like \"- item\" or \"1. item\" carry no list semantics.",
     why:
-      "Screen readers announce \"List of 5 items\" before reading a list, then count down each one. Without proper list-item tagging, users hear loose paragraphs and lose count.",
+      "Screen readers announce \"List of 5 items\" before reading a list, then count down each one. Lines typed with a literal dash or number are read as disconnected paragraphs — no list, no item count, no structure.",
     autoFix:
-      "We flag this for review — restructuring list markup in the file isn't supported yet, so this finding is queued for manual remediation rather than silently claimed as fixed.",
+      "Word documents: fixed automatically and saved into your download — we convert the typed run into a real Word list (proper numbering definitions) and strip the literal markers. PDF and PowerPoint list rebuilds are queued for manual remediation instead of being silently claimed.",
     manualJudgment:
-      "In the source document, make every item a real list item (Word: apply the list style; PDF: tag items as LI/LBody) so screen readers announce \"list of N items\".",
+      "Check the converted list reads in the right order. In PDFs, tag items as LI/LBody; in PowerPoint, retype the lines using the placeholder's bullet formatting.",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],

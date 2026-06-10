@@ -654,6 +654,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "REMOVE_DECORATIVE_ALT_TEXT",
         "ADD_TABLE_HEADERS",
         "IMPROVE_LINK_TEXT",
+        # Typed fake-list runs ("- item" paragraphs) are converted into real
+        # Word lists: w:numPr per paragraph + numbering.xml definitions, with
+        # the literal markers stripped — verified by smoke_fake_lists.
+        "FIX_LIST_STRUCTURE",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",
