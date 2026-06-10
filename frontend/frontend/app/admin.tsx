@@ -135,6 +135,24 @@ export default function AdminScreen() {
                 <Stat theme={theme} label="Overage rev." value={_money(metrics.overage.revenueUsd)} sub={`${metrics.overage.charges} charges`} />
               </View>
 
+              {metrics.deployment ? (
+                <View style={styles.statGrid}>
+                  <Stat theme={theme} label="Environment" value={metrics.deployment.environment} sub={`v${metrics.deployment.appVersion || "?"}`} />
+                  <Stat
+                    theme={theme}
+                    label="OCR (scanned PDFs)"
+                    value={
+                      metrics.deployment.ocrAvailable
+                        ? "Active"
+                        : metrics.deployment.ocrEnabled
+                          ? "Enabled, no Tesseract"
+                          : "Off"
+                    }
+                    sub={metrics.deployment.ocrAvailable ? "scans auto-fixable" : "scans -> manual queue"}
+                  />
+                </View>
+              ) : null}
+
               <View style={styles.twoCol}>
                 <Card style={styles.colCard}>
                   <Text style={[theme.typography.h2, { color: theme.colors.text, marginBottom: 8 }]}>Subscriptions by plan</Text>

@@ -1136,6 +1136,7 @@ export interface AdminMetrics {
   certificates: { total: number; last30d: number; bySubscription: number; byCredits: number };
   teams: { count: number; seatsTotal: number; seatsUsed: number };
   overage: { charges: number; revenueUsd: number };
+  deployment?: { environment: string; appVersion: string; ocrEnabled: boolean; ocrAvailable: boolean };
   recentCertificates: Array<{ id: string; issuedTo?: string | null; filename: string; paidWith: string; issuedAt: string }>;
   recentSubscriptions: Array<{ plan: string; status: string; createdAt: string }>;
   generatedAt: string;

@@ -91,6 +91,16 @@ class RecentSubscriptionDTO(BaseModel):
     createdAt: str
 
 
+class DeploymentMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    environment: str = "development"
+    appVersion: str = ""
+    # OCR for scanned PDFs: enabled = the env flag; available = the flag AND
+    # a working Tesseract install (what remediation will actually do).
+    ocrEnabled: bool = False
+    ocrAvailable: bool = False
+
+
 class AdminMetricsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     users: UsersMetrics
@@ -99,6 +109,7 @@ class AdminMetricsResponse(BaseModel):
     certificates: CertificatesMetrics
     teams: TeamsMetrics
     overage: OverageMetrics
+    deployment: DeploymentMetrics = Field(default_factory=DeploymentMetrics)
     recentCertificates: List[RecentCertificateDTO] = Field(default_factory=list)
     recentSubscriptions: List[RecentSubscriptionDTO] = Field(default_factory=list)
     generatedAt: str
@@ -223,6 +234,16 @@ async def admin_metrics(_: UserRow = Depends(require_admin)) -> AdminMetricsResp
             for s in recent_sub_rows
         ]
 
+        from app.config import get_settings as _gs
+        from app.services.ocr import get_ocr_provider as _gop
+
+        _settings = _gs()
+        deployment = DeploymentMetrics(
+            environment=_settings.environment,
+            appVersion=_settings.app_version,
+            ocrEnabled=bool(getattr(_settings, "ocr_enabled", False)),
+            ocrAvailable=_gop() is not None,
+        )
         return AdminMetricsResponse(
             users=users,
             subscriptions=subs,
@@ -230,6 +251,7 @@ async def admin_metrics(_: UserRow = Depends(require_admin)) -> AdminMetricsResp
             certificates=certs,
             teams=teams,
             overage=overage,
+            deployment=deployment,
             recentCertificates=recent_certificates,
             recentSubscriptions=recent_subscriptions,
             generatedAt=now.isoformat(),

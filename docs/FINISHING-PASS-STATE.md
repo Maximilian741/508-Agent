@@ -53,6 +53,12 @@
      "3 Tr" invisible overlay, original /Im0 Do intact, re-parse shows
      scanned flag GONE + pdf_tagged True.
 
+2. Ops surfacing for OCR (iteration 17): /admin/metrics gains a deployment
+   block (environment, appVersion, ocrEnabled flag vs ocrAvailable = flag AND
+   working Tesseract); admin dashboard shows "OCR (scanned PDFs): Active /
+   Enabled, no Tesseract / Off" so Max can verify the host setup at a glance.
+   smoke_admin_metrics +2 asserts.
+
 ## Known remaining
 
 - Host-side once Max enables OCR: install tesseract, set OCR_ENABLED=true,

@@ -97,6 +97,12 @@ def main() -> int:
     check("teams.seatsUsed >= 1", m["teams"]["seatsUsed"] >= 1)
     check("recentCertificates non-empty", len(m["recentCertificates"]) >= 1)
     check("generatedAt present", bool(m.get("generatedAt")))
+    dep = m.get("deployment") or {}
+    check("deployment block present", bool(dep.get("environment")))
+    check(
+        "deployment reports OCR off by default",
+        dep.get("ocrEnabled") is False and dep.get("ocrAvailable") is False,
+    )
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
