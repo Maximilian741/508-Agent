@@ -25,6 +25,7 @@ from app.analyzers.image_analyzer import (
 from app.analyzers.link_analyzer import LinkTextAnalyzer
 from app.analyzers.link_target_analyzer import LinkTargetBrokenAnalyzer
 from app.analyzers.list_analyzer import ListStructureAnalyzer
+from app.analyzers.reading_order_analyzer import ReadingOrderAnalyzer
 from app.analyzers.table_analyzer import TableMissingHeadersAnalyzer
 from app.analyzers.table_caption_analyzer import TableCaptionMissingAnalyzer
 from app.models.accessibility import AccessibilityTree
@@ -52,8 +53,10 @@ def get_default_analyzers() -> List[Analyzer]:
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
         DocumentHeadingsAnalyzer(),
-        # ReadingOrderAnalyzer NOT registered: no parser populates the
-        # reading_order metadata it reads, so it could never fire either.
+        # Re-registered: the PPTX parser now marks slides whose text shapes
+        # are stacked bottom-before-top (reading_order_inverted), so the
+        # analyzer has a real signal to fire on.
+        ReadingOrderAnalyzer(),
         ContrastAnalyzer(),
         FormFieldLabelAnalyzer(),
         SlideTitleAnalyzer(),

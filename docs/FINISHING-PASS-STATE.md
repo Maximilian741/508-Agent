@@ -52,6 +52,19 @@ corpus smoke + live HTTP against a running server).
     falls back to the field's /TU label); every /TH carries /A /Scope /Column;
     digit-ordinal lists carry /A /ListNumbering /Decimal (letters/romans left
     unset — ambiguous, precision first). smoke_pdf_links now 21 asserts.
+14. PPTX reading-order detection (iteration 12, WCAG 1.3.2): the 20th check.
+    _slide_reading_order_inverted flags slides whose substantial text shapes
+    (>=12 chars, top-level only — group children carry relative geometry)
+    are stacked vertically but appear bottom-before-top in the shape tree.
+    Side-by-side columns (vertical overlap) and tiny labels never flag.
+    ReadingOrderAnalyzer re-registered (now has a real signal); action def
+    accepts SECTION; flag lands per-slide; detect-only (RESOLVE_READING_ORDER
+    stays out of _PERSISTED_ACTIONS — honest pendingManual). Report
+    disclosure updated ("slide reading order" moved into checks-performed;
+    PDF note now lists links + form fields). Privacy copy nit fixed
+    (delete account lives on the Account page). smoke_reading_order
+    (5 asserts; suite 51). Verified delete-account claim is real end-to-end
+    (auth.py GDPR section + account.tsx wiring).
 13a. Robustness lock (iteration 11): NEW smoke_malformed_inputs (29 asserts;
     suite 50) — empty/garbage/truncated/renamed-extension/corrupted-zip-member
     uploads in all formats produce structured 4xx JSON (never a 500, no

@@ -221,11 +221,24 @@ class PPTXParser:
             if not slide_title:
                 slides_missing_titles += 1
 
+            # python-pptx builds a fresh proxy per access, so identity (`is`)
+            # is unreliable — match the title placeholder by shape id.
+            title_shape_id = None
+            if slide_title and title_shape is not None:
+                try:
+                    title_shape_id = title_shape.shape_id
+                except Exception:
+                    title_shape_id = None
+
             section_props: dict = {"slide_number": slide_index}
             if not slide_title:
                 # Per-slide marker so the analyzer can flag THIS slide (the
                 # issue count then reflects how many slides lack titles).
                 section_props["missing_title"] = True
+            if _slide_reading_order_inverted(slide, title_shape_id):
+                # Tree order != visual order: a screen reader would read this
+                # slide bottom-then-top. Flagged by ReadingOrderAnalyzer.
+                section_props["reading_order_inverted"] = True
             section = SectionNode(
                 id=ids(f"slide-{slide_index}-section"),
                 content=NodeContent(kind=ContentKind.TEXT, text=slide_title or f"Slide {slide_index}"),
@@ -239,14 +252,7 @@ class PPTXParser:
             )
             root.children.append(section)
 
-            # python-pptx builds a fresh proxy per access, so identity (`is`)
-            # is unreliable — match the title placeholder by shape id.
-            title_shape_id = None
             if slide_title:
-                try:
-                    title_shape_id = title_shape.shape_id
-                except Exception:
-                    title_shape_id = None
                 _h_props: dict = {
                     "order_hint": (
                         float(getattr(title_shape, "top", 0) or 0),
@@ -413,6 +419,52 @@ def _shape_bg_hex(shape) -> Optional[str]:
 
 
 _A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+_RO_MARGIN_EMU = 182880  # 0.2 inch — vertical gap before "stacked" counts
+
+
+def _slide_reading_order_inverted(slide, title_shape_id) -> bool:
+    """True when the slide's text shapes are stacked vertically but appear in
+    REVERSE order in the shape tree — screen readers follow tree order, so the
+    slide reads bottom-then-top (WCAG 1.3.2).
+
+    Precision guards: top-level shapes only (group children carry
+    group-relative geometry); substantial text only (>=12 chars, so page
+    numbers and tiny labels never count); and only NON-overlapping vertical
+    separation flags — side-by-side columns overlap vertically, and column
+    order is a legitimate authoring choice."""
+
+    geo: List[Tuple[float, float]] = []
+    try:
+        shapes = list(slide.shapes)
+    except Exception:
+        return False
+    for sh in shapes:
+        if title_shape_id is not None and getattr(sh, "shape_id", None) == title_shape_id:
+            continue
+        if not (hasattr(sh, "text_frame") and getattr(sh, "has_text_frame", False)):
+            continue
+        try:
+            txt = (sh.text or "").strip()
+        except Exception:
+            continue
+        if len(txt) < 12:
+            continue
+        try:
+            top = float(sh.top or 0)
+            height = float(sh.height or 0)
+        except (TypeError, ValueError):
+            continue
+        if height <= 0:
+            continue
+        geo.append((top, height))
+    for i in range(len(geo)):
+        for j in range(i + 1, len(geo)):
+            # Earlier-in-tree shape sits ENTIRELY below a later one.
+            if geo[i][0] > geo[j][0] + geo[j][1] + _RO_MARGIN_EMU:
+                return True
+    return False
 
 
 def _paragraph_has_real_bullet(paragraph) -> bool:

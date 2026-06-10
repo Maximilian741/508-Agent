@@ -54,7 +54,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "Your controls",
     body: [
-      "Export your account data or delete your account entirely from Settings — deletion removes your account record, credit ledger, history, and any stored artifacts. Email privacy@508-agent.app for anything else; we respond within 7 days.",
+      "Export your account data or delete your account entirely from your Account page — deletion removes your account record, credit ledger, history, and any stored artifacts. Email privacy@508-agent.app for anything else; we respond within 7 days.",
     ],
   },
   {

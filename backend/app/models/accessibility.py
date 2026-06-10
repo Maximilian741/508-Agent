@@ -769,7 +769,8 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
         requires_ai=False,
         requires_human_review=True,
         is_auto_applicable=False,
-        supported_node_types=[NodeType.DOCUMENT],
+        # SECTION = a slide whose text shapes are stacked bottom-before-top.
+        supported_node_types=[NodeType.DOCUMENT, NodeType.SECTION],
         related_flag_code=AccessibilityFlagCode.READING_ORDER_AMBIGUOUS,
         ),
         RemediationAction(
