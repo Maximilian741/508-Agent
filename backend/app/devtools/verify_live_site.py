@@ -40,6 +40,9 @@ def _build_fixture_docx() -> bytes:
     doc.add_heading("Quarterly Report", level=1)
     doc.add_paragraph("Body text so the document has content to analyse.")
     doc.add_paragraph().add_run().add_picture(io.BytesIO(img.getvalue()))
+    # Typed fake list -> the engine's signature LIST_STRUCTURE_INVALID check.
+    doc.add_paragraph("- first typed item in the fake list")
+    doc.add_paragraph("- second typed item in the fake list")
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
@@ -108,6 +111,11 @@ def main() -> int:
             check(
                 "analyze surfaces the expected issues (missing alt / no title)",
                 "MISSING_ALT_TEXT" in rule_ids or "DOCUMENT_TITLE_MISSING" in rule_ids,
+                f"got {rule_ids}",
+            )
+            check(
+                "analyze detects the typed fake list (signature check)",
+                "LIST_STRUCTURE_INVALID" in rule_ids,
                 f"got {rule_ids}",
             )
 

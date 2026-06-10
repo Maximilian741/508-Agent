@@ -118,6 +118,119 @@ def main() -> int:
                 sx += z.read(nm)
     check("pptx: split-run rewrite not duplicated", sx.count(_NEW.encode()) == 1)
 
+    # --- DOCX fldSimple HYPERLINK field: detected + rewritten -----------------
+    fp = tmp / "fld.docx"
+    d3 = Document()
+    para = d3.add_paragraph("Field link: ")
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), ' HYPERLINK "https://example.gov/report" ')
+    fr = OxmlElement("w:r"); ft = OxmlElement("w:t"); ft.text = "click here"
+    fr.append(ft); fld.append(fr); para._p.append(fld)
+    d3.save(str(fp))
+    res, links = _links(fp)
+    check("docx: fldSimple link detected", len(links) == 1 and links[0].content.text == "click here")
+    check("docx: fldSimple target parsed from instr", bool(links) and links[0].target == "https://example.gov/report")
+    if links:
+        links[0].content = NodeContent(kind=ContentKind.TEXT, text=_NEW)
+    fo = tmp / "fld_out.docx"; write_remediated(fp, res.tree, fo, source_format=res.format)
+    _, links2 = _links(fo)
+    check("docx: fldSimple text rewritten in output", bool(links2) and links2[0].content.text == _NEW)
+    check("docx: fldSimple instr target preserved", bool(links2) and links2[0].target == "https://example.gov/report")
+
+    # --- DOCX in-cell hyperlink: detected + rewritten -------------------------
+    cp = tmp / "cell.docx"
+    d4 = Document()
+    d4.add_paragraph("Intro paragraph.")
+    tbl = d4.add_table(rows=2, cols=2)
+    cell = tbl.cell(1, 1)
+    cell_para = cell.paragraphs[0]
+    cell_para.add_run("See ")
+    rid = d4.part.relate_to(
+        "https://example.com/cell-target",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hl = OxmlElement("w:hyperlink"); hl.set(qn("r:id"), rid)
+    r = OxmlElement("w:r"); t = OxmlElement("w:t"); t.text = "click here"; r.append(t); hl.append(r)
+    cell_para._p.append(hl)
+    d4.save(str(cp))
+    res, links = _links(cp)
+    check("docx: in-cell hyperlink detected", len(links) == 1 and links[0].content.text == "click here")
+    if links:
+        links[0].content = NodeContent(kind=ContentKind.TEXT, text=_NEW)
+    co = tmp / "cell_out.docx"; write_remediated(cp, res.tree, co, source_format=res.format)
+    _, links2 = _links(co)
+    check("docx: in-cell link text rewritten in output", bool(links2) and links2[0].content.text == _NEW)
+    check(
+        "docx: in-cell link target preserved",
+        bool(links2) and links2[0].target == "https://example.com/cell-target",
+    )
+
+    # --- DOCX merged cell: link emitted exactly ONCE ---------------------------
+    mp2 = tmp / "merged.docx"
+    d5 = Document()
+    tbl2 = d5.add_table(rows=2, cols=2)
+    merged = tbl2.cell(0, 0).merge(tbl2.cell(0, 1))
+    mpar = merged.paragraphs[0]
+    rid = d5.part.relate_to(
+        "https://example.com/merged",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hl = OxmlElement("w:hyperlink"); hl.set(qn("r:id"), rid)
+    r = OxmlElement("w:r"); t = OxmlElement("w:t"); t.text = "merged link"; r.append(t); hl.append(r)
+    mpar._p.append(hl)
+    d5.save(str(mp2))
+    _, links = _links(mp2)
+    check("docx: merged-cell link emitted exactly once", len(links) == 1)
+
+    # --- DOCX id-alignment torture: anchor-only link + heading link + mix -----
+    # A text-less anchor used to desync the writer's paragraph index (it
+    # skipped the paragraph; the parser minted docx-p). A hyperlink inside a
+    # Heading paragraph is never emitted by the parser (heading branch first)
+    # and must not be counted by the writer either.
+    tp = tmp / "torture.docx"
+    d6 = Document()
+    p_anchor = d6.add_paragraph("Anchor paragraph keeps its docx-p id ")
+    bare = OxmlElement("w:hyperlink"); bare.set(qn("w:anchor"), "top")
+    p_anchor._p.append(bare)  # no runs, no text
+    h = d6.add_heading("Heading with ", level=1)
+    rid = d6.part.relate_to(
+        "https://example.com/heading",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hh = OxmlElement("w:hyperlink"); hh.set(qn("r:id"), rid)
+    r = OxmlElement("w:r"); t = OxmlElement("w:t"); t.text = "a link inside"; r.append(t); hh.append(r)
+    h._p.append(hh)
+    para = d6.add_paragraph("Body: ")
+    rid = d6.part.relate_to(
+        "https://example.com/body",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hb = OxmlElement("w:hyperlink"); hb.set(qn("r:id"), rid)
+    r = OxmlElement("w:r"); t = OxmlElement("w:t"); t.text = "click here"; r.append(t); hb.append(r)
+    para._p.append(hb)
+    fld = OxmlElement("w:fldSimple"); fld.set(qn("w:instr"), ' HYPERLINK "https://example.com/fld" ')
+    fr = OxmlElement("w:r"); ft = OxmlElement("w:t"); ft.text = "field link"
+    fr.append(ft); fld.append(fr)
+    d6.add_paragraph("Field: ")._p.append(fld)
+    d6.save(str(tp))
+    res, links = _links(tp)
+    check(
+        "docx: torture doc emits exactly body+fld links (anchor + heading excluded)",
+        [l.content.text for l in links] == ["click here", "field link"],
+    )
+    for i, ln in enumerate(links):
+        ln.content = NodeContent(kind=ContentKind.TEXT, text=f"FIXED-{i}")
+    to = tmp / "torture_out.docx"; write_remediated(tp, res.tree, to, source_format=res.format)
+    _, links2 = _links(to)
+    check(
+        "docx: torture rewrite lands on the right links (no drift)",
+        [l.content.text for l in links2] == ["FIXED-0", "FIXED-1"],
+    )
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

@@ -37,8 +37,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
+from docx.opc.constants import CONTENT_TYPE as OPC_CT
+from docx.opc.constants import RELATIONSHIP_TYPE as OPC_RT
+from docx.opc.packuri import PackURI
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.parts.numbering import NumberingPart
+from lxml import etree as lxml_etree
 
 from app.models.accessibility import (
     AccessibilityTree,
@@ -52,7 +57,16 @@ from app.models.accessibility import (
     TableNode,
     TableRowNode,
 )
-from app.parsers.docx_parser import DOCXParser, _IdCounter, _heading_level_from_style
+from app.parsers.docx_parser import (
+    DOCXParser,
+    _IdCounter,
+    _heading_level_from_style,
+    _iter_note_parts,
+    _iter_text_box_paragraphs,
+    _link_elements_in_paragraph,
+    _note_paragraphs,
+    strip_fake_list_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +148,8 @@ def write_remediated_docx(
     table_cells_by_id = _index_table_cells_by_parser_id(doc)
     tables_by_id = _index_tables_by_parser_id(doc)
     hyperlink_by_id = _index_hyperlinks_by_parser_id(doc)
+    note_links, note_parts = _index_note_links(doc)
+    hyperlink_by_id.update(note_links)
 
     # Step 4: walk the mutated tree and apply each supported mutation.  Order
     # is intentional — document-level metadata first, then per-node updates.
@@ -146,6 +162,10 @@ def write_remediated_docx(
             _apply_link(node, hyperlink_by_id, applied, skipped)
         elif isinstance(node, HeadingNode):
             _apply_heading(node, paragraph_by_id, applied, skipped)
+        elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
+            # A typed fake-list paragraph the FIX_LIST_STRUCTURE executor
+            # approved for conversion — give it real Word list semantics.
+            _apply_list_conversion(doc, node, paragraph_by_id, applied, skipped)
         elif isinstance(node, TableCellNode):
             # Cells are only meaningful via their parent row; we mark the
             # row as a repeating header row whenever any cell in the first
@@ -166,6 +186,19 @@ def write_remediated_docx(
             # source element, so insert a real <w:tr> (tblHeader + bold cells)
             # into the source table — otherwise the "fix" never reaches the file.
             _apply_synthetic_table_header(node, tables_by_id, applied, skipped)
+
+    # Footnote/endnote rewrites happened on trees parsed from the note
+    # parts' blobs — write them back so the changes reach the file.
+    if note_links and any(
+        str(a.get("target_id", "")).startswith("docx-fnlink") for a in applied
+    ):
+        for note_part, note_root in note_parts:
+            try:
+                note_part._blob = lxml_etree.tostring(  # noqa: SLF001
+                    note_root, xml_declaration=True, encoding="UTF-8", standalone=True
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("failed to re-serialize note part: %s", exc)
 
     # Step 5: persist.
     doc.save(str(output_path))
@@ -230,12 +263,10 @@ def _index_paragraphs_by_parser_id(doc) -> Dict[str, Any]:
             continue
 
         # The parser only mints a `docx-p` id when the paragraph has text and
-        # no hyperlink runs.  We mirror that condition exactly so the
-        # counter advances in lock-step.
-        has_hyperlink = paragraph._p.find(
-            f".//{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}hyperlink"
-        ) is not None
-        if text and not has_hyperlink:
+        # emitted no link nodes.  Use the parser's own link predicate (visible
+        # text required; HYPERLINK fldSimple counts; bare anchors don't) so
+        # the counter advances in lock-step.
+        if text and not _link_elements_in_paragraph(paragraph._p):
             out[ids("docx-p")] = paragraph
     return out
 
@@ -483,21 +514,72 @@ def _apply_image(
 
 
 def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-link-N`` ids to their ``<w:hyperlink>`` element.
+    """Map ``docx-link-N`` ids to their link element (``<w:hyperlink>`` or a
+    HYPERLINK ``<w:fldSimple>``).
 
-    Mirrors the parser walk exactly (``doc.paragraphs`` then ``.//w:hyperlink``,
-    skipping hyperlinks with no visible text) so ids align.
+    Mirrors the parser walk exactly via the shared
+    :func:`_link_elements_in_paragraph` helper: body paragraphs first
+    (heading-styled paragraphs emit no links, matching the parser's early
+    ``continue``), then table cells in grid order with merged cells deduped.
     """
     out: Dict[str, Any] = {}
     n = 0
-    for para in doc.paragraphs:
-        for hyperlink in para._p.iterfind(f".//{qn('w:hyperlink')}"):
-            text = "".join((t.text or "") for t in hyperlink.iterfind(f".//{qn('w:t')}")).strip()
-            if not text:
-                continue
+
+    def take(p_element) -> None:
+        nonlocal n
+        for _kind, el in _link_elements_in_paragraph(p_element):
             n += 1
-            out[f"docx-link-{n}"] = hyperlink
+            out[f"docx-link-{n}"] = el
+
+    for para in doc.paragraphs:
+        style_name = (para.style.name or "") if para.style else ""
+        if _heading_level_from_style(style_name):
+            continue  # parser's heading branch short-circuits before links
+        pPr = para._p.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            continue  # list paragraphs likewise never reach link emission
+        take(para._p)
+
+    for table in doc.tables:
+        seen_tc: set = set()
+        for row in table.rows:
+            for cell in row.cells:
+                tc_key = id(cell._tc)
+                if tc_key in seen_tc:
+                    continue
+                seen_tc.add(tc_key)
+                for cell_para in cell.paragraphs:
+                    take(cell_para._p)
+
+    # Text-box links mint their own id space (docx-tblink-N) via the same
+    # shared walk the parser uses, so rewrites inside sidebars/callouts
+    # genuinely persist.
+    n_tb = 0
+    for tb_p in _iter_text_box_paragraphs(doc.element.body):
+        for _kind, el in _link_elements_in_paragraph(tb_p):
+            n_tb += 1
+            out[f"docx-tblink-{n_tb}"] = el
     return out
+
+
+def _index_note_links(doc) -> Tuple[Dict[str, Any], List[Tuple[Any, Any]]]:
+    """``(link_map, [(part, root)])`` for footnote/endnote links.
+
+    Note parts load as plain blob Parts, so the writer parses each blob once,
+    rewrites the returned elements in place, and (when anything changed)
+    re-serializes the root back into ``part._blob`` before save — mirroring
+    the parser's ``_iter_note_parts`` walk so ``docx-fnlink-N`` ids align.
+    """
+    link_map: Dict[str, Any] = {}
+    parts: List[Tuple[Any, Any]] = []
+    n = 0
+    for part, root in _iter_note_parts(doc):
+        parts.append((part, root))
+        for p_el in _note_paragraphs(root):
+            for _kind, el in _link_elements_in_paragraph(p_el):
+                n += 1
+                link_map[f"docx-fnlink-{n}"] = el
+    return link_map, parts
 
 
 def _apply_link(
@@ -714,3 +796,168 @@ def _insert_docx_header_row(docx_table, texts: List[str]) -> None:
         first_tr.addprevious(tr)
     else:
         tbl.append(tr)
+
+
+# ---------------------------------------------------------------------------
+# Typed fake-list -> real Word list (w:numPr + numbering.xml)
+# ---------------------------------------------------------------------------
+
+_NUMBERING_SKELETON = (
+    '<w:numbering xmlns:w='
+    '"http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
+).encode("utf-8")
+
+
+def _ensure_list_numbering(doc, kind: str) -> int:
+    """Return a ``w:numId`` for ``kind`` ("bullet"|"decimal"), creating the
+    numbering part and/or definitions on first use.
+
+    The numbering part is found via its package relationship; documents that
+    never contained a list get a fresh ``/word/numbering.xml``. Definitions
+    are appended with ids above the document's existing maximum so nothing
+    collides. Memoized per Document object so a whole run shares one num.
+    """
+
+    cache = getattr(doc, "_a508_list_num_ids", None)
+    if cache is None:
+        cache = {}
+        setattr(doc, "_a508_list_num_ids", cache)
+    if kind in cache:
+        return cache[kind]
+
+    try:
+        numbering_part = doc.part.part_related_by(OPC_RT.NUMBERING)
+    except KeyError:
+        numbering_part = NumberingPart.load(
+            PackURI("/word/numbering.xml"),
+            OPC_CT.WML_NUMBERING,
+            _NUMBERING_SKELETON,
+            doc.part.package,
+        )
+        doc.part.relate_to(numbering_part, OPC_RT.NUMBERING)
+
+    numbering_el = numbering_part.element
+
+    # Pick ids above anything already present.
+    max_abstract = -1
+    for el in numbering_el.findall(qn("w:abstractNum")):
+        try:
+            max_abstract = max(max_abstract, int(el.get(qn("w:abstractNumId"))))
+        except (TypeError, ValueError):
+            continue
+    max_num = 0
+    for el in numbering_el.findall(qn("w:num")):
+        try:
+            max_num = max(max_num, int(el.get(qn("w:numId"))))
+        except (TypeError, ValueError):
+            continue
+    abstract_id = max_abstract + 1
+    num_id = max_num + 1
+
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    mlt = OxmlElement("w:multiLevelType")
+    mlt.set(qn("w:val"), "singleLevel")
+    abstract.append(mlt)
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    lvl.append(start)
+    fmt = OxmlElement("w:numFmt")
+    fmt.set(qn("w:val"), "bullet" if kind == "bullet" else "decimal")
+    lvl.append(fmt)
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(qn("w:val"), "" if kind == "bullet" else "%1.")
+    lvl.append(lvl_text)
+    jc = OxmlElement("w:lvlJc")
+    jc.set(qn("w:val"), "left")
+    lvl.append(jc)
+    ppr = OxmlElement("w:pPr")
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "720")
+    ind.set(qn("w:hanging"), "360")
+    ppr.append(ind)
+    lvl.append(ppr)
+    if kind == "bullet":
+        rpr = OxmlElement("w:rPr")
+        fonts = OxmlElement("w:rFonts")
+        fonts.set(qn("w:ascii"), "Symbol")
+        fonts.set(qn("w:hAnsi"), "Symbol")
+        fonts.set(qn("w:hint"), "default")
+        rpr.append(fonts)
+        lvl.append(rpr)
+    abstract.append(lvl)
+
+    # Schema order: all w:abstractNum come before any w:num.
+    first_num = numbering_el.find(qn("w:num"))
+    if first_num is not None:
+        first_num.addprevious(abstract)
+    else:
+        numbering_el.append(abstract)
+
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    ref = OxmlElement("w:abstractNumId")
+    ref.set(qn("w:val"), str(abstract_id))
+    num.append(ref)
+    numbering_el.append(num)
+
+    cache[kind] = num_id
+    return num_id
+
+
+def _apply_list_conversion(doc, node, paragraph_by_id, applied, skipped) -> None:
+    """Persist a fake-list paragraph's conversion: add ``w:numPr`` and strip
+    the literal typed marker ("- ", "1. ") from the run text."""
+
+    paragraph = paragraph_by_id.get(node.id)
+    if paragraph is None:
+        skipped.append({
+            "target_id": node.id,
+            "reason": "paragraph not found in source for list conversion",
+        })
+        return
+
+    p = paragraph._p
+    pPr = p.get_or_add_pPr()
+    if pPr.find(qn("w:numPr")) is not None:
+        skipped.append({
+            "target_id": node.id,
+            "reason": "paragraph already carries numbering",
+        })
+        return
+
+    kind = (node.metadata.properties or {}).get("convert_to_list") or "bullet"
+    num_id = _ensure_list_numbering(doc, kind)
+
+    # python-docx's CT_PPr puts numPr in its correct schema slot for us.
+    numPr = pPr.get_or_add_numPr()
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), "0")
+    num_ref = OxmlElement("w:numId")
+    num_ref.set(qn("w:val"), str(num_id))
+    numPr.append(ilvl)
+    numPr.append(num_ref)
+
+    # Strip the typed marker from the first non-empty text run so the output
+    # doesn't render "• - item".  If the marker straddles runs unusually we
+    # leave the text alone — the list semantics still land.
+    stripped = False
+    for t in p.iter(qn("w:t")):
+        if t.text and t.text.strip():
+            new_text = strip_fake_list_prefix(t.text)
+            if new_text != t.text:
+                t.text = new_text
+                t.set(qn("xml:space"), "preserve")
+                stripped = True
+            break
+
+    applied.append({
+        "kind": "list_conversion",
+        "target_id": node.id,
+        "summary": (
+            f"converted typed paragraph to real {kind} list item "
+            f"(numId={num_id}, marker {'stripped' if stripped else 'left in place'})"
+        ),
+    })

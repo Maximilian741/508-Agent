@@ -60,6 +60,52 @@ def main() -> int:
     check("PPTX all-titled deck not flagged", not _has(pt, "SLIDE_TITLE_MISSING"))
     check("PPTX missing-title deck flagged", _has(pm, "SLIDE_TITLE_MISSING"))
 
+    # --- Magnitude: one issue PER untitled slide (not one per deck) ---
+    def _count(path: Path, rule: str) -> int:
+        res = parse_to_tree(str(path))
+        run_analyzers(res.tree)
+        return sum(1 for v in RemediationEngine().detect_violations(res.tree) if v.rule_id == rule)
+
+    multi = Presentation()
+    sm = multi.slides.add_slide(multi.slide_layouts[5]); sm.shapes.title.text = "Only titled slide"
+    multi.slides.add_slide(multi.slide_layouts[6])  # blank
+    multi.slides.add_slide(multi.slide_layouts[6])  # blank
+    multi.slides.add_slide(multi.slide_layouts[6])  # blank
+    pmu = tmp / "multi_missing.pptx"; multi.save(str(pmu))
+    check("3 untitled slides -> exactly 3 SLIDE_TITLE_MISSING issues", _count(pmu, "SLIDE_TITLE_MISSING") == 3)
+    check("1 untitled slide -> exactly 1 issue", _count(pm, "SLIDE_TITLE_MISSING") == 1)
+
+    # --- Title double-emit: title text appears in exactly ONE node ---
+    res_t = parse_to_tree(str(pt))
+
+    def _texts(node, acc):
+        if node.content and node.content.text:
+            acc.append(node.content.text.strip())
+        for ch in node.children:
+            _texts(ch, acc)
+        return acc
+
+    all_texts = _texts(res_t.tree.root, [])
+    # Each titled slide contributes its SectionNode label + ONE HeadingNode —
+    # the title placeholder must not ALSO surface as a ParagraphNode.
+    check(
+        "slide title not double-emitted as paragraph",
+        all_texts.count("A title") == 2 * 2,  # 2 slides x (section label + heading)
+    )
+    from app.models.accessibility import ParagraphNode as _PN
+
+    def _paras(node, acc):
+        if isinstance(node, _PN):
+            acc.append(node.content.text if node.content else "")
+        for ch in node.children:
+            _paras(ch, acc)
+        return acc
+
+    check(
+        "no ParagraphNode carries the title text",
+        all("A title" not in (t or "") for t in _paras(res_t.tree.root, [])),
+    )
+
     # --- DOCX content controls ---
     def build_cc(path: Path, labeled: bool) -> None:
         d = Document(); d.add_paragraph("Body.")

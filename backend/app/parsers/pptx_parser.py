@@ -210,21 +210,42 @@ class PPTXParser:
 
         for slide_index, slide in enumerate(prs.slides, start=1):
             slide_title = ""
+            title_shape = None
             try:
-                if slide.shapes.title and slide.shapes.title.text:
-                    slide_title = slide.shapes.title.text.strip()
+                title_shape = slide.shapes.title
+                if title_shape is not None and title_shape.text:
+                    slide_title = title_shape.text.strip()
             except Exception:
+                title_shape = None
                 slide_title = ""
             if not slide_title:
                 slides_missing_titles += 1
 
+            # python-pptx builds a fresh proxy per access, so identity (`is`)
+            # is unreliable — match the title placeholder by shape id.
+            title_shape_id = None
+            if slide_title and title_shape is not None:
+                try:
+                    title_shape_id = title_shape.shape_id
+                except Exception:
+                    title_shape_id = None
+
+            section_props: dict = {"slide_number": slide_index}
+            if not slide_title:
+                # Per-slide marker so the analyzer can flag THIS slide (the
+                # issue count then reflects how many slides lack titles).
+                section_props["missing_title"] = True
+            if _slide_reading_order_inverted(slide, title_shape_id):
+                # Tree order != visual order: a screen reader would read this
+                # slide bottom-then-top. Flagged by ReadingOrderAnalyzer.
+                section_props["reading_order_inverted"] = True
             section = SectionNode(
                 id=ids(f"slide-{slide_index}-section"),
                 content=NodeContent(kind=ContentKind.TEXT, text=slide_title or f"Slide {slide_index}"),
                 metadata=NodeMetadata(
                     page=slide_index,
                     source_format="pptx",
-                    properties={"slide_number": slide_index},
+                    properties=section_props,
                 ),
                 children=[],
                 accessibility_flags=[],
@@ -232,18 +253,38 @@ class PPTXParser:
             root.children.append(section)
 
             if slide_title:
+                _h_props: dict = {
+                    "order_hint": (
+                        float(getattr(title_shape, "top", 0) or 0),
+                        float(getattr(title_shape, "left", 0) or 0),
+                    )
+                }
+                _h_cc = _contrast_props_for_shape(title_shape, theme_colors)
+                if _h_cc:
+                    _h_props.update(_h_cc)
                 section.children.append(
                     HeadingNode(
                         id=ids(f"slide-{slide_index}-h"),
                         level=1,
                         content=NodeContent(kind=ContentKind.TEXT, text=slide_title),
-                        metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                        metadata=NodeMetadata(
+                            page=slide_index,
+                            source_format="pptx",
+                            properties=_h_props,
+                        ),
                         children=[],
                         accessibility_flags=[],
                     )
                 )
 
             for shape in _iter_shapes_recursive(slide.shapes):
+                # The title placeholder already became the slide's HeadingNode;
+                # emitting its text again as a ParagraphNode would double-count
+                # it (its hyperlinks, if any, are still collected below).
+                is_title_shape = (
+                    title_shape_id is not None
+                    and getattr(shape, "shape_id", None) == title_shape_id
+                )
                 top = float(getattr(shape, "top", 0) or 0)
                 left = float(getattr(shape, "left", 0) or 0)
                 shape_meta_props = {"order_hint": (top, left)}
@@ -257,23 +298,33 @@ class PPTXParser:
                     text = (shape.text or "").strip()
                     if not text:
                         continue
-                    _props = dict(shape_meta_props)
-                    _cc = _contrast_props_for_shape(shape, theme_colors)
-                    if _cc:
-                        _props.update(_cc)
-                    section.children.append(
-                        ParagraphNode(
-                            id=ids(f"slide-{slide_index}-p"),
-                            content=NodeContent(kind=ContentKind.TEXT, text=text),
-                            metadata=NodeMetadata(
-                                page=slide_index,
-                                source_format="pptx",
-                                properties=_props,
-                            ),
-                            children=[],
-                            accessibility_flags=[],
+                    if not is_title_shape:
+                        _props = dict(shape_meta_props)
+                        _cc = _contrast_props_for_shape(shape, theme_colors)
+                        if _cc:
+                            _props.update(_cc)
+                        pid = ids(f"slide-{slide_index}-p")
+                        fake_kind = _fake_list_kind_for_shape(shape, text)
+                        if fake_kind:
+                            # Typed "- item" lines in a plain text box (no real
+                            # bullet formatting). ListStructureAnalyzer flags it;
+                            # FIX_LIST_STRUCTURE + the pptx writer convert the
+                            # lines to real a:buChar/a:buAutoNum bullets.
+                            _props["fake_list_run_ids"] = [pid]
+                            _props["fake_list_kind"] = fake_kind
+                        section.children.append(
+                            ParagraphNode(
+                                id=pid,
+                                content=NodeContent(kind=ContentKind.TEXT, text=text),
+                                metadata=NodeMetadata(
+                                    page=slide_index,
+                                    source_format="pptx",
+                                    properties=_props,
+                                ),
+                                children=[],
+                                accessibility_flags=[],
+                            )
                         )
-                    )
                     # Hyperlinks within runs get their own LinkNode (adjacent
                     # same-address runs are coalesced so the text isn't doubled).
                     for paragraph in shape.text_frame.paragraphs:
@@ -368,6 +419,120 @@ def _shape_bg_hex(shape) -> Optional[str]:
 
 
 _A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+_RO_MARGIN_EMU = 182880  # 0.2 inch — vertical gap before "stacked" counts
+
+
+def _slide_reading_order_inverted(slide, title_shape_id) -> bool:
+    """True when the slide's text shapes are stacked vertically but appear in
+    REVERSE order in the shape tree — screen readers follow tree order, so the
+    slide reads bottom-then-top (WCAG 1.3.2).
+
+    Precision guards: top-level shapes only (group children carry
+    group-relative geometry); substantial text only (>=12 chars, so page
+    numbers and tiny labels never count); and only NON-overlapping vertical
+    separation flags — side-by-side columns overlap vertically, and column
+    order is a legitimate authoring choice."""
+
+    geo: List[Tuple[float, float]] = []
+    try:
+        shapes = list(slide.shapes)
+    except Exception:
+        return False
+    for sh in shapes:
+        if title_shape_id is not None and getattr(sh, "shape_id", None) == title_shape_id:
+            continue
+        if not (hasattr(sh, "text_frame") and getattr(sh, "has_text_frame", False)):
+            continue
+        try:
+            txt = (sh.text or "").strip()
+        except Exception:
+            continue
+        if len(txt) < 12:
+            continue
+        try:
+            top = float(sh.top or 0)
+            height = float(sh.height or 0)
+        except (TypeError, ValueError):
+            continue
+        if height <= 0:
+            continue
+        geo.append((top, height))
+    for i in range(len(geo)):
+        for j in range(i + 1, len(geo)):
+            # Earlier-in-tree shape sits ENTIRELY below a later one.
+            if geo[i][0] > geo[j][0] + geo[j][1] + _RO_MARGIN_EMU:
+                return True
+    return False
+
+
+def _paragraph_has_real_bullet(paragraph) -> bool:
+    """True when the a:pPr explicitly carries bullet formatting."""
+    pPr = paragraph._p.find(f"{_A_NS}pPr")
+    if pPr is None:
+        return False
+    return (
+        pPr.find(f"{_A_NS}buChar") is not None
+        or pPr.find(f"{_A_NS}buAutoNum") is not None
+    )
+
+
+def _fake_list_kind_for_shape(shape, text: str) -> Optional[str]:
+    """Return "bullet"/"decimal" when a plain TEXT BOX contains a typed
+    fake-list run (>=2 consecutive lines like "- item" / sequential "1. item").
+
+    Scoped to non-placeholder shapes: placeholders inherit bullet formatting
+    from the layout/master (invisible at paragraph level), so typed markers
+    there can't be judged safely. Paragraphs that already carry explicit
+    bullet formatting never count.
+    """
+
+    from app.parsers.docx_parser import _fake_list_signature  # shared predicate
+
+    try:
+        if getattr(shape, "is_placeholder", False):
+            return None
+    except Exception:
+        return None
+    try:
+        paragraphs = list(shape.text_frame.paragraphs)
+    except Exception:
+        return None
+
+    run_len = 0
+    run_kind: Optional[str] = None
+    run_char: Optional[str] = None
+    next_ord: Optional[int] = None
+    for p in paragraphs:
+        line = "".join((r.text or "") for r in p.runs).strip() or (p.text or "").strip()
+        sig = _fake_list_signature(line) if line else None
+        if sig is None or _paragraph_has_real_bullet(p):
+            if run_len >= 2:
+                return run_kind
+            run_len = 0
+            run_kind = run_char = next_ord = None
+            continue
+        kind, char, ordinal = sig
+        if run_len and (kind != run_kind or (kind == "bullet" and char != run_char)):
+            if run_len >= 2:
+                return run_kind
+            run_len = 0
+            run_kind = run_char = next_ord = None
+        if kind == "decimal":
+            expected = 1 if not run_len else next_ord
+            if ordinal != expected:
+                if run_len >= 2:
+                    return run_kind
+                run_len = 0
+                run_kind = run_char = next_ord = None
+                if ordinal != 1:
+                    continue
+            next_ord = (ordinal or 0) + 1
+        if not run_len:
+            run_kind, run_char = kind, char
+        run_len += 1
+    return run_kind if run_len >= 2 else None
 
 # a:schemeClr val -> theme clrScheme element name (standard colour map).
 _PPTX_SCHEME_MAP = {

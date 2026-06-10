@@ -12,6 +12,7 @@ Two complementary entry points are exposed:
 from __future__ import annotations
 
 import base64
+import re
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -273,6 +274,14 @@ class DOCXParser:
                     # TextStyledAsHeadingAnalyzer.
                     para_props = dict(para_props or {})
                     para_props["looks_like_heading"] = True
+                fake_sig = _fake_list_signature(text)
+                if fake_sig:
+                    kind, char, ordinal = fake_sig
+                    para_props = dict(para_props or {})
+                    para_props["fake_list_kind"] = kind
+                    para_props["fake_list_char"] = char
+                    if ordinal is not None:
+                        para_props["fake_list_ordinal"] = ordinal
                 body_section.children.append(
                     ParagraphNode(
                         id=ids("docx-p"),
@@ -285,6 +294,64 @@ class DOCXParser:
 
         if list_collector:
             body_section.children.append(_finalize_list(ids, list_collector, list_marker))
+
+        # Group consecutive fake-list paragraphs into runs (one flag each).
+        _group_fake_list_runs(body_section.children)
+
+        # Text boxes: w:txbxContent is invisible to doc.paragraphs, so
+        # sidebar/callout content (very common in government documents) would
+        # otherwise never be analyzed. Paragraphs mint a distinct docx-tbp /
+        # docx-tblink id space so the body's docx-p / docx-link counters (and
+        # the writer's id-alignment) are untouched. Links here ARE remediable
+        # — the writer indexes docx-tblink ids through the same shared walk.
+        for tb_p in _iter_text_box_paragraphs(doc.element.body):
+            tb_links = _link_nodes_from_p(
+                tb_p, doc.part, ids, prefix="docx-tblink", extra_props={"in_text_box": True}
+            )
+            body_section.children.extend(tb_links)
+            tb_text = "".join(
+                (t.text or "") for t in tb_p.iterfind(f".//{_DOCX_NS}t")
+            ).strip()
+            if tb_text and not tb_links:
+                body_section.children.append(
+                    ParagraphNode(
+                        id=ids("docx-tbp"),
+                        content=NodeContent(kind=ContentKind.TEXT, text=tb_text),
+                        metadata=NodeMetadata(
+                            source_format="docx",
+                            properties={"in_text_box": True},
+                        ),
+                        children=[],
+                        accessibility_flags=[],
+                    )
+                )
+
+        # Footnotes / endnotes: separate package parts, also invisible to
+        # doc.paragraphs. Same distinct-id-space pattern as text boxes
+        # (docx-fnp / docx-fnlink); link targets resolve against the NOTE
+        # part's own relationships.
+        for note_part, note_root in _iter_note_parts(doc):
+            for n_p in _note_paragraphs(note_root):
+                fn_links = _link_nodes_from_p(
+                    n_p, note_part, ids, prefix="docx-fnlink", extra_props={"in_footnote": True}
+                )
+                body_section.children.extend(fn_links)
+                fn_text = "".join(
+                    (t.text or "") for t in n_p.iterfind(f".//{_DOCX_NS}t")
+                ).strip()
+                if fn_text and not fn_links:
+                    body_section.children.append(
+                        ParagraphNode(
+                            id=ids("docx-fnp"),
+                            content=NodeContent(kind=ContentKind.TEXT, text=fn_text),
+                            metadata=NodeMetadata(
+                                source_format="docx",
+                                properties={"in_footnote": True},
+                            ),
+                            children=[],
+                            accessibility_flags=[],
+                        )
+                    )
 
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
         for table in doc.tables:
@@ -559,28 +626,129 @@ def _collect_image_blobs(doc) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     return blobs
 
 
-def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
-    nodes: List[LinkNode] = []
-    for hyperlink in paragraph._p.iterfind(f".//{_DOCX_NS}hyperlink"):
-        runs = hyperlink.iterfind(f".//{_DOCX_NS}t")
-        text = "".join((node.text or "") for node in runs).strip()
+_FLD_HYPERLINK_RE = re.compile(r"HYPERLINK\s+(?:\"([^\"]+)\"|(\S+))")
+
+
+def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
+    """Return ``[(kind, element), …]`` for every link the parser emits from a
+    ``<w:p>``: ``w:hyperlink`` with visible text, plus HYPERLINK
+    ``w:fldSimple`` fields with visible text — in document order.
+
+    This is the single source of truth for "what counts as a link"; the docx
+    writer indexes links (and decides which paragraphs consumed a ``docx-p``
+    id) through this same helper, so parser/writer id minting cannot drift.
+    """
+
+    out: List[Tuple[str, Any]] = []
+    for el in p.iter(f"{_DOCX_NS}hyperlink", f"{_DOCX_NS}fldSimple"):
+        # A link nested inside a TEXT BOX below this paragraph belongs to the
+        # text-box walk (docx-tblink id space) — emitting it here too would
+        # double-count it and desync both id spaces. (When ``p`` itself lives
+        # inside a text box, the ancestor walk stops at ``p`` before reaching
+        # the txbxContent above it, so text-box paragraphs still match.)
+        anc = el.getparent()
+        nested_in_tb = False
+        while anc is not None and anc is not p:
+            if anc.tag == f"{_DOCX_NS}txbxContent":
+                nested_in_tb = True
+                break
+            anc = anc.getparent()
+        if nested_in_tb:
+            continue
+        text = "".join(
+            (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
+        ).strip()
         if not text:
             continue
-        rid = hyperlink.get(f"{_DOCX_REL_NS}id")
-        target = ""
-        if rid and rid in paragraph.part.rels:
-            target = str(paragraph.part.rels[rid].target_ref or "")
+        if el.tag == f"{_DOCX_NS}hyperlink":
+            out.append(("hyperlink", el))
+        else:
+            instr = el.get(f"{_DOCX_NS}instr") or ""
+            if "HYPERLINK" in instr:
+                out.append(("fldsimple", el))
+    return out
+
+
+def _link_nodes_from_p(p_el, part, ids: _IdCounter, prefix: str = "docx-link", extra_props: Optional[Dict[str, Any]] = None) -> List[LinkNode]:
+    """Build LinkNodes from a raw ``<w:p>`` element (body, cell or text box)."""
+    nodes: List[LinkNode] = []
+    for kind, el in _link_elements_in_paragraph(p_el):
+        text = "".join(
+            (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
+        ).strip()
+        if kind == "hyperlink":
+            rid = el.get(f"{_DOCX_REL_NS}id")
+            target = ""
+            if rid and rid in part.rels:
+                target = str(part.rels[rid].target_ref or "")
+        else:
+            m = _FLD_HYPERLINK_RE.search(el.get(f"{_DOCX_NS}instr") or "")
+            target = (m.group(1) or m.group(2)) if m else ""
+        props: Dict[str, Any] = {"link_kind": kind}
+        if extra_props:
+            props.update(extra_props)
         nodes.append(
             LinkNode(
-                id=ids("docx-link"),
+                id=ids(prefix),
                 target=target or None,
                 content=NodeContent(kind=ContentKind.TEXT, text=text),
-                metadata=NodeMetadata(source_format="docx"),
+                metadata=NodeMetadata(source_format="docx", properties=props),
                 children=[],
                 accessibility_flags=[],
             )
         )
     return nodes
+
+
+def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
+    return _link_nodes_from_p(paragraph._p, paragraph.part, ids)
+
+
+def _iter_text_box_paragraphs(body_el) -> List[Any]:
+    """All ``<w:p>`` elements living inside text boxes (``w:txbxContent``),
+    in document order. Text boxes are invisible to ``doc.paragraphs`` —
+    sidebars and callouts would otherwise never be analyzed. Shared with the
+    docx writer so text-box link ids (``docx-tblink-N``) mint identically."""
+    out: List[Any] = []
+    for tx in body_el.iter(f"{_DOCX_NS}txbxContent"):
+        out.extend(tx.iterfind(f"{_DOCX_NS}p"))
+    return out
+
+
+_NOTE_TYPE_SKIP = {"separator", "continuationSeparator", "continuationNotice"}
+
+
+def _iter_note_parts(doc) -> List[Tuple[Any, Any]]:
+    """``[(part, parsed_root)]`` for the footnotes and endnotes parts (in
+    that fixed order) when present. Notes live in separate package parts that
+    ``doc.paragraphs`` never opens — their content was previously invisible.
+    Shared with the docx writer so note link ids (``docx-fnlink-N``) mint
+    identically; the writer re-serializes the parsed root back into the
+    part's blob after rewriting."""
+    from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+
+    out: List[Tuple[Any, Any]] = []
+    for rt in (_RT.FOOTNOTES, _RT.ENDNOTES):
+        try:
+            part = doc.part.part_related_by(rt)
+        except KeyError:
+            continue
+        try:
+            root = etree.fromstring(part.blob)
+        except Exception:
+            continue
+        out.append((part, root))
+    return out
+
+
+def _note_paragraphs(root) -> List[Any]:
+    """Real note ``<w:p>`` elements; separator/continuation stubs skipped."""
+    out: List[Any] = []
+    for note in root.iter(f"{_DOCX_NS}footnote", f"{_DOCX_NS}endnote"):
+        if (note.get(f"{_DOCX_NS}type") or "") in _NOTE_TYPE_SKIP:
+            continue
+        out.extend(note.iterfind(f".//{_DOCX_NS}p"))
+    return out
 
 
 def _inline_images_in_paragraph(
@@ -642,6 +810,99 @@ def _inline_images_in_paragraph(
                 )
             )
     return images
+
+
+# ----- Fake-list detection ----------------------------------------------------
+#
+# Plain paragraphs typed as "- item" / "1. item" with no Word numbering are
+# read by screen readers as disconnected prose — no list semantics, no item
+# count, no nesting.  The parser marks candidates here; a post-pass groups
+# consecutive candidates into runs; ListStructureAnalyzer flags each run; and
+# the FIX_LIST_STRUCTURE executor + docx writer convert them into REAL Word
+# lists (w:numPr + numbering.xml).  Precision over recall: en/em dashes are
+# excluded (dialogue), alpha ordinals are excluded ("A. Smith"), and numbered
+# runs must count 1, 2, 3… from 1.
+
+_FAKE_BULLET_RE = re.compile(r"^([-*•·])\s+\S")
+_FAKE_DECIMAL_RE = re.compile(r"^(\d{1,3})[.)]\s+\S")
+
+
+def _fake_list_signature(text: str) -> Optional[Tuple[str, str, Optional[int]]]:
+    """Return ``(kind, prefix_char, ordinal)`` when ``text`` is typed like a
+    list item, else None. ``kind`` is "bullet" or "decimal"."""
+
+    m = _FAKE_BULLET_RE.match(text)
+    if m:
+        return ("bullet", m.group(1), None)
+    m = _FAKE_DECIMAL_RE.match(text)
+    if m:
+        return ("decimal", m.group(1), int(m.group(1)))
+    return None
+
+
+def strip_fake_list_prefix(text: str) -> str:
+    """Remove the literal typed marker ("- ", "1. ", "2) "…) from ``text``.
+
+    Shared with the executor and the docx writer so the three stay in
+    lockstep about what counts as a marker.
+    """
+
+    out = re.sub(r"^[-*•·]\s+", "", text, count=1)
+    if out != text:
+        return out
+    return re.sub(r"^\d{1,3}[.)]\s+", "", text, count=1)
+
+
+def _group_fake_list_runs(body_children: List[Any]) -> None:
+    """Mark runs of >=2 consecutive same-kind fake-list ParagraphNodes.
+
+    The FIRST node of each run gets ``fake_list_run_ids`` (all member ids,
+    itself included) — the analyzer flags that node, so one issue surfaces
+    per typed list. Numbered runs must be sequential starting at 1, which
+    keeps prose like "1986. It was…" or stray numbered sentences out.
+    """
+
+    run: List[Any] = []
+    run_kind: Optional[str] = None
+    run_char: Optional[str] = None
+    next_ordinal: Optional[int] = None
+
+    def flush() -> None:
+        nonlocal run, run_kind, run_char, next_ordinal
+        if len(run) >= 2:
+            first = run[0]
+            props = dict(first.metadata.properties or {})
+            props["fake_list_run_ids"] = [n.id for n in run]
+            first.metadata.properties = props
+        run = []
+        run_kind = None
+        run_char = None
+        next_ordinal = None
+
+    for child in body_children:
+        sig = None
+        if isinstance(child, ParagraphNode):
+            props = child.metadata.properties or {}
+            kind = props.get("fake_list_kind")
+            if kind:
+                sig = (kind, props.get("fake_list_char"), props.get("fake_list_ordinal"))
+        if sig is None:
+            flush()
+            continue
+        kind, char, ordinal = sig
+        if run and (kind != run_kind or (kind == "bullet" and char != run_char)):
+            flush()
+        if kind == "decimal":
+            expected = 1 if not run else next_ordinal
+            if ordinal != expected:
+                flush()
+                if ordinal != 1:
+                    continue  # mid-sequence stray ("1986. …") — not a list start
+            next_ordinal = (ordinal or 0) + 1
+        if not run:
+            run_kind, run_char = kind, char
+        run.append(child)
+    flush()
 
 
 def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
@@ -721,6 +982,10 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
     first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
     treat_row0_as_header = first_is_header or not looks_like_data_table
 
+    # Merged cells repeat the same underlying <w:tc> across the grid; links
+    # inside it must only be emitted once (the writer dedupes identically).
+    seen_tc_ids: set = set()
+
     rows: List[TableRowNode] = []
     for row_index, row in enumerate(table.rows):
         cells: List[TableCellNode] = []
@@ -728,6 +993,14 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
             text = (cell.text or "").strip()
             is_header_cell = row_index == 0 and bool(text) and treat_row0_as_header
             cell_type = TableCellType.HEADER if is_header_cell else TableCellType.DATA
+            cell_children: List[Any] = []
+            tc_key = id(cell._tc)
+            if tc_key not in seen_tc_ids:
+                seen_tc_ids.add(tc_key)
+                # Hyperlinks (incl. fldSimple fields) inside the cell get their
+                # own LinkNodes so link-text analysis/remediation reaches them.
+                for cell_paragraph in cell.paragraphs:
+                    cell_children.extend(_hyperlink_nodes_in_paragraph(cell_paragraph, ids))
             cells.append(
                 TableCellNode(
                     id=ids("docx-cell"),
@@ -735,7 +1008,7 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
                     header_scope=TableHeaderScope.COLUMN if cell_type == TableCellType.HEADER else TableHeaderScope.NONE,
                     content=NodeContent(kind=ContentKind.TEXT, text=text or " "),
                     metadata=NodeMetadata(source_format="docx"),
-                    children=[],
+                    children=cell_children,
                     accessibility_flags=[],
                 )
             )
