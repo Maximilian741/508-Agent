@@ -60,6 +60,7 @@ from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
     _heading_level_from_style,
+    _link_elements_in_paragraph,
     strip_fake_list_prefix,
 )
 
@@ -243,12 +244,10 @@ def _index_paragraphs_by_parser_id(doc) -> Dict[str, Any]:
             continue
 
         # The parser only mints a `docx-p` id when the paragraph has text and
-        # no hyperlink runs.  We mirror that condition exactly so the
-        # counter advances in lock-step.
-        has_hyperlink = paragraph._p.find(
-            f".//{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}hyperlink"
-        ) is not None
-        if text and not has_hyperlink:
+        # emitted no link nodes.  Use the parser's own link predicate (visible
+        # text required; HYPERLINK fldSimple counts; bare anchors don't) so
+        # the counter advances in lock-step.
+        if text and not _link_elements_in_paragraph(paragraph._p):
             out[ids("docx-p")] = paragraph
     return out
 
@@ -496,20 +495,42 @@ def _apply_image(
 
 
 def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-link-N`` ids to their ``<w:hyperlink>`` element.
+    """Map ``docx-link-N`` ids to their link element (``<w:hyperlink>`` or a
+    HYPERLINK ``<w:fldSimple>``).
 
-    Mirrors the parser walk exactly (``doc.paragraphs`` then ``.//w:hyperlink``,
-    skipping hyperlinks with no visible text) so ids align.
+    Mirrors the parser walk exactly via the shared
+    :func:`_link_elements_in_paragraph` helper: body paragraphs first
+    (heading-styled paragraphs emit no links, matching the parser's early
+    ``continue``), then table cells in grid order with merged cells deduped.
     """
     out: Dict[str, Any] = {}
     n = 0
-    for para in doc.paragraphs:
-        for hyperlink in para._p.iterfind(f".//{qn('w:hyperlink')}"):
-            text = "".join((t.text or "") for t in hyperlink.iterfind(f".//{qn('w:t')}")).strip()
-            if not text:
-                continue
+
+    def take(p_element) -> None:
+        nonlocal n
+        for _kind, el in _link_elements_in_paragraph(p_element):
             n += 1
-            out[f"docx-link-{n}"] = hyperlink
+            out[f"docx-link-{n}"] = el
+
+    for para in doc.paragraphs:
+        style_name = (para.style.name or "") if para.style else ""
+        if _heading_level_from_style(style_name):
+            continue  # parser's heading branch short-circuits before links
+        pPr = para._p.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            continue  # list paragraphs likewise never reach link emission
+        take(para._p)
+
+    for table in doc.tables:
+        seen_tc: set = set()
+        for row in table.rows:
+            for cell in row.cells:
+                tc_key = id(cell._tc)
+                if tc_key in seen_tc:
+                    continue
+                seen_tc.add(tc_key)
+                for cell_para in cell.paragraphs:
+                    take(cell_para._p)
     return out
 
 

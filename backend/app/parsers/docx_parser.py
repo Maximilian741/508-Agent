@@ -571,23 +571,55 @@ def _collect_image_blobs(doc) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     return blobs
 
 
-def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
-    nodes: List[LinkNode] = []
-    for hyperlink in paragraph._p.iterfind(f".//{_DOCX_NS}hyperlink"):
-        runs = hyperlink.iterfind(f".//{_DOCX_NS}t")
-        text = "".join((node.text or "") for node in runs).strip()
+_FLD_HYPERLINK_RE = re.compile(r"HYPERLINK\s+(?:\"([^\"]+)\"|(\S+))")
+
+
+def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
+    """Return ``[(kind, element), …]`` for every link the parser emits from a
+    ``<w:p>``: ``w:hyperlink`` with visible text, plus HYPERLINK
+    ``w:fldSimple`` fields with visible text — in document order.
+
+    This is the single source of truth for "what counts as a link"; the docx
+    writer indexes links (and decides which paragraphs consumed a ``docx-p``
+    id) through this same helper, so parser/writer id minting cannot drift.
+    """
+
+    out: List[Tuple[str, Any]] = []
+    for el in p.iter(f"{_DOCX_NS}hyperlink", f"{_DOCX_NS}fldSimple"):
+        text = "".join(
+            (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
+        ).strip()
         if not text:
             continue
-        rid = hyperlink.get(f"{_DOCX_REL_NS}id")
-        target = ""
-        if rid and rid in paragraph.part.rels:
-            target = str(paragraph.part.rels[rid].target_ref or "")
+        if el.tag == f"{_DOCX_NS}hyperlink":
+            out.append(("hyperlink", el))
+        else:
+            instr = el.get(f"{_DOCX_NS}instr") or ""
+            if "HYPERLINK" in instr:
+                out.append(("fldsimple", el))
+    return out
+
+
+def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
+    nodes: List[LinkNode] = []
+    for kind, el in _link_elements_in_paragraph(paragraph._p):
+        text = "".join(
+            (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
+        ).strip()
+        if kind == "hyperlink":
+            rid = el.get(f"{_DOCX_REL_NS}id")
+            target = ""
+            if rid and rid in paragraph.part.rels:
+                target = str(paragraph.part.rels[rid].target_ref or "")
+        else:
+            m = _FLD_HYPERLINK_RE.search(el.get(f"{_DOCX_NS}instr") or "")
+            target = (m.group(1) or m.group(2)) if m else ""
         nodes.append(
             LinkNode(
                 id=ids("docx-link"),
                 target=target or None,
                 content=NodeContent(kind=ContentKind.TEXT, text=text),
-                metadata=NodeMetadata(source_format="docx"),
+                metadata=NodeMetadata(source_format="docx", properties={"link_kind": kind}),
                 children=[],
                 accessibility_flags=[],
             )
@@ -826,6 +858,10 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
     first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
     treat_row0_as_header = first_is_header or not looks_like_data_table
 
+    # Merged cells repeat the same underlying <w:tc> across the grid; links
+    # inside it must only be emitted once (the writer dedupes identically).
+    seen_tc_ids: set = set()
+
     rows: List[TableRowNode] = []
     for row_index, row in enumerate(table.rows):
         cells: List[TableCellNode] = []
@@ -833,6 +869,14 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
             text = (cell.text or "").strip()
             is_header_cell = row_index == 0 and bool(text) and treat_row0_as_header
             cell_type = TableCellType.HEADER if is_header_cell else TableCellType.DATA
+            cell_children: List[Any] = []
+            tc_key = id(cell._tc)
+            if tc_key not in seen_tc_ids:
+                seen_tc_ids.add(tc_key)
+                # Hyperlinks (incl. fldSimple fields) inside the cell get their
+                # own LinkNodes so link-text analysis/remediation reaches them.
+                for cell_paragraph in cell.paragraphs:
+                    cell_children.extend(_hyperlink_nodes_in_paragraph(cell_paragraph, ids))
             cells.append(
                 TableCellNode(
                     id=ids("docx-cell"),
@@ -840,7 +884,7 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
                     header_scope=TableHeaderScope.COLUMN if cell_type == TableCellType.HEADER else TableHeaderScope.NONE,
                     content=NodeContent(kind=ContentKind.TEXT, text=text or " "),
                     metadata=NodeMetadata(source_format="docx"),
-                    children=[],
+                    children=cell_children,
                     accessibility_flags=[],
                 )
             )

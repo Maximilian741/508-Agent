@@ -36,9 +36,15 @@
    _PERSISTED_ACTIONS["docx"]; smoke_fake_lists (16 cases incl. byte-level +
    idempotency proofs); smoke_score_honesty re-pinned (suite now 47).
 
+6. In-cell DOCX hyperlinks + w:fldSimple field links — parser now emits
+   LinkNodes for both (shared _link_elements_in_paragraph helper drives
+   parser AND writer, killing two latent id-drift bugs: text-less anchors
+   desynced the paragraph index; heading-embedded links were counted by the
+   writer but never emitted by the parser). Merged cells dedupe by w:tc.
+   smoke_link_text_writer grew 10 assertions incl. an alignment torture doc.
+
 ## Known remaining
 
-- In-cell DOCX hyperlinks + w:fldSimple links not remediated (disclosed).
 - PPTX/PDF fake-list conversion (DOCX-only for now; PDF tagger already
   handles real bullet glyphs when tagging untagged PDFs).
 - PDF coloured-background contrast false-positive (disclosed).
