@@ -188,3 +188,19 @@ credit balance updates and the webhook recorded the grant.
 See also: [`deploy/SHIP-CHECKLIST.md`](../deploy/SHIP-CHECKLIST.md) (full steps),
 [`deploy/cloudflare-tunnel.md`](../deploy/cloudflare-tunnel.md),
 [`docs/deploy.md`](deploy.md), [`docs/OPERATIONS.md`](OPERATIONS.md).
+
+## OCR for scanned PDFs (optional feature)
+
+Scanned, image-only PDFs are detected out of the box (SCANNED_DOCUMENT_NO_TEXT)
+and queued for manual remediation. To let the pipeline FIX them automatically
+(invisible position-matched text layer + structure tagging):
+
+1. Install Tesseract on the backend host/image: `apt-get install -y tesseract-ocr`
+   (the `pytesseract` wrapper ships in requirements.txt already).
+2. Set `OCR_ENABLED=true` in the backend environment.
+3. Verify: upload a scanned PDF, approve the OCR fix, download — the output is
+   searchable and tagged; re-uploading it shows the scanned flag resolved.
+
+Without the binary the feature degrades gracefully: the action is skipped with
+an explicit note and the score never claims it.
+

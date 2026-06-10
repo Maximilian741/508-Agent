@@ -363,9 +363,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "When a PDF is just images of pages (scanned paper, photos of slides), the words you see are pixels — assistive technology cannot extract or read them. This is the single most-common reason a PDF that 'looks fine' is completely inaccessible. WCAG 1.1.1 requires a text alternative; WCAG 1.4.5 prefers real text over images of text.",
     autoFix:
-      "We cannot fix this from inside the document — it needs Optical Character Recognition (OCR) first to convert the page images into selectable text. After OCR, re-upload and the rest of the engine can do its work.",
+      "On deployments with OCR enabled, approving this fix recognizes each scanned page and adds an invisible, position-matched text layer — the output becomes searchable and the structure tagger then organizes the recognized text. Where OCR isn't enabled, this is honestly queued for manual remediation instead of being claimed.",
     manualJudgment:
-      "Run OCR on the PDF (Adobe Acrobat: Tools → Scan & OCR → Recognize Text; or any OCR tool like Tesseract). Verify the recognized text matches the original, then re-upload the OCR'd version here.",
+      "Always proofread OCR output — recognition errors on low-quality scans are common. If OCR isn't enabled here, run it yourself (Adobe Acrobat: Tools → Scan & OCR; or Tesseract), verify the text, and re-upload.",
     severity: "error",
     standards: {
       wcag: ["1.1.1 Non-text Content", "1.4.5 Images of Text"],
