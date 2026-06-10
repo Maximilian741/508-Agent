@@ -298,6 +298,34 @@ class DOCXParser:
         # Group consecutive fake-list paragraphs into runs (one flag each).
         _group_fake_list_runs(body_section.children)
 
+        # Text boxes: w:txbxContent is invisible to doc.paragraphs, so
+        # sidebar/callout content (very common in government documents) would
+        # otherwise never be analyzed. Paragraphs mint a distinct docx-tbp /
+        # docx-tblink id space so the body's docx-p / docx-link counters (and
+        # the writer's id-alignment) are untouched. Links here ARE remediable
+        # — the writer indexes docx-tblink ids through the same shared walk.
+        for tb_p in _iter_text_box_paragraphs(doc.element.body):
+            tb_links = _link_nodes_from_p(
+                tb_p, doc.part, ids, prefix="docx-tblink", extra_props={"in_text_box": True}
+            )
+            body_section.children.extend(tb_links)
+            tb_text = "".join(
+                (t.text or "") for t in tb_p.iterfind(f".//{_DOCX_NS}t")
+            ).strip()
+            if tb_text and not tb_links:
+                body_section.children.append(
+                    ParagraphNode(
+                        id=ids("docx-tbp"),
+                        content=NodeContent(kind=ContentKind.TEXT, text=tb_text),
+                        metadata=NodeMetadata(
+                            source_format="docx",
+                            properties={"in_text_box": True},
+                        ),
+                        children=[],
+                        accessibility_flags=[],
+                    )
+                )
+
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
         for table in doc.tables:
             body_section.children.append(_table_to_node(table, ids))
@@ -586,6 +614,20 @@ def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
 
     out: List[Tuple[str, Any]] = []
     for el in p.iter(f"{_DOCX_NS}hyperlink", f"{_DOCX_NS}fldSimple"):
+        # A link nested inside a TEXT BOX below this paragraph belongs to the
+        # text-box walk (docx-tblink id space) — emitting it here too would
+        # double-count it and desync both id spaces. (When ``p`` itself lives
+        # inside a text box, the ancestor walk stops at ``p`` before reaching
+        # the txbxContent above it, so text-box paragraphs still match.)
+        anc = el.getparent()
+        nested_in_tb = False
+        while anc is not None and anc is not p:
+            if anc.tag == f"{_DOCX_NS}txbxContent":
+                nested_in_tb = True
+                break
+            anc = anc.getparent()
+        if nested_in_tb:
+            continue
         text = "".join(
             (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
         ).strip()
@@ -600,31 +642,50 @@ def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
     return out
 
 
-def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
+def _link_nodes_from_p(p_el, part, ids: _IdCounter, prefix: str = "docx-link", extra_props: Optional[Dict[str, Any]] = None) -> List[LinkNode]:
+    """Build LinkNodes from a raw ``<w:p>`` element (body, cell or text box)."""
     nodes: List[LinkNode] = []
-    for kind, el in _link_elements_in_paragraph(paragraph._p):
+    for kind, el in _link_elements_in_paragraph(p_el):
         text = "".join(
             (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
         ).strip()
         if kind == "hyperlink":
             rid = el.get(f"{_DOCX_REL_NS}id")
             target = ""
-            if rid and rid in paragraph.part.rels:
-                target = str(paragraph.part.rels[rid].target_ref or "")
+            if rid and rid in part.rels:
+                target = str(part.rels[rid].target_ref or "")
         else:
             m = _FLD_HYPERLINK_RE.search(el.get(f"{_DOCX_NS}instr") or "")
             target = (m.group(1) or m.group(2)) if m else ""
+        props: Dict[str, Any] = {"link_kind": kind}
+        if extra_props:
+            props.update(extra_props)
         nodes.append(
             LinkNode(
-                id=ids("docx-link"),
+                id=ids(prefix),
                 target=target or None,
                 content=NodeContent(kind=ContentKind.TEXT, text=text),
-                metadata=NodeMetadata(source_format="docx", properties={"link_kind": kind}),
+                metadata=NodeMetadata(source_format="docx", properties=props),
                 children=[],
                 accessibility_flags=[],
             )
         )
     return nodes
+
+
+def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
+    return _link_nodes_from_p(paragraph._p, paragraph.part, ids)
+
+
+def _iter_text_box_paragraphs(body_el) -> List[Any]:
+    """All ``<w:p>`` elements living inside text boxes (``w:txbxContent``),
+    in document order. Text boxes are invisible to ``doc.paragraphs`` —
+    sidebars and callouts would otherwise never be analyzed. Shared with the
+    docx writer so text-box link ids (``docx-tblink-N``) mint identically."""
+    out: List[Any] = []
+    for tx in body_el.iter(f"{_DOCX_NS}txbxContent"):
+        out.extend(tx.iterfind(f"{_DOCX_NS}p"))
+    return out
 
 
 def _inline_images_in_paragraph(

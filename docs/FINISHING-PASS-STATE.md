@@ -52,6 +52,18 @@ corpus smoke + live HTTP against a running server).
     falls back to the field's /TU label); every /TH carries /A /Scope /Column;
     digit-ordinal lists carry /A /ListNumbering /Decimal (letters/romans left
     unset — ambiguous, precision first). smoke_pdf_links now 21 asserts.
+15. DOCX text-box extraction (iteration 13): w:txbxContent was invisible to
+    doc.paragraphs — sidebars/callouts were never analyzed. Parser now emits
+    ParagraphNodes (docx-tbp, marked in_text_box) + LinkNodes (docx-tblink)
+    from text boxes via shared _iter_text_box_paragraphs; the writer indexes
+    docx-tblink through the same walk so IMPROVE_LINK_TEXT inside text boxes
+    genuinely persists. Critical fix found during this: the shared link
+    predicate used .iter() which DESCENDED into nested text boxes, so the
+    body pass double-emitted tb links (two ids per element, last-write-wins
+    corruption risk) — links nested in a txbxContent below the scanned
+    paragraph are now excluded. Fake-list/heading detection deliberately NOT
+    applied to tb paragraphs (no writer support -> would break honesty).
+    smoke_textbox_content (8 asserts; suite 52).
 14. PPTX reading-order detection (iteration 12, WCAG 1.3.2): the 20th check.
     _slide_reading_order_inverted flags slides whose substantial text shapes
     (>=12 chars, top-level only — group children carry relative geometry)

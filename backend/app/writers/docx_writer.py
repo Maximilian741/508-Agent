@@ -60,6 +60,7 @@ from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
     _heading_level_from_style,
+    _iter_text_box_paragraphs,
     _link_elements_in_paragraph,
     strip_fake_list_prefix,
 )
@@ -531,6 +532,15 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
                 seen_tc.add(tc_key)
                 for cell_para in cell.paragraphs:
                     take(cell_para._p)
+
+    # Text-box links mint their own id space (docx-tblink-N) via the same
+    # shared walk the parser uses, so rewrites inside sidebars/callouts
+    # genuinely persist.
+    n_tb = 0
+    for tb_p in _iter_text_box_paragraphs(doc.element.body):
+        for _kind, el in _link_elements_in_paragraph(tb_p):
+            n_tb += 1
+            out[f"docx-tblink-{n_tb}"] = el
     return out
 
 
