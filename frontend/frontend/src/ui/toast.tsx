@@ -115,7 +115,15 @@ export function ToastHost() {
   useEffect(() => bus.subscribe(setToasts), []);
   if (toasts.length === 0) return null;
   return (
-    <View pointerEvents="box-none" style={styles.host}>
+    <View
+      pointerEvents="box-none"
+      style={styles.host}
+      // Screen readers must hear toast feedback — the approve/reject/error
+      // workflow is toast-driven. Polite live region on web (aria-live),
+      // accessibilityLiveRegion for native.
+      accessibilityLiveRegion="polite"
+      {...(Platform.OS === "web" ? ({ "aria-live": "polite", role: "status" } as any) : {})}
+    >
       {toasts.map((t) => (
         <ToastView key={t.id} record={t} onDismiss={() => bus.dismiss(t.id)} />
       ))}

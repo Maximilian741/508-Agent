@@ -92,15 +92,39 @@ def main() -> int:
     NO_TH = AccessibilityFlagCode.TABLE_MISSING_HEADERS.value
 
     # --- 1. PDF no-headings (constructed trees mimic pypdf's collapsed output) ---
-    # 2 big paragraphs, ~2400 chars, no heading -> NOW flagged (was a false-negative).
-    check("long heading-less PDF (2 paras, 2400 chars) -> DOCUMENT_NO_HEADINGS",
-          NO_H in _codes(run_analyzers(_pdf_tree(2, 1200, with_heading=False))))
-    # same length but WITH a heading -> not flagged
-    check("PDF with a heading -> no DOCUMENT_NO_HEADINGS",
-          NO_H not in _codes(run_analyzers(_pdf_tree(2, 1200, with_heading=True))))
-    # short PDF (under the 2000-char bar) -> not flagged
-    check("short PDF (2 paras, 600 chars) -> no DOCUMENT_NO_HEADINGS",
-          NO_H not in _codes(run_analyzers(_pdf_tree(2, 300, with_heading=False))))
+    # PDFs are now covered by PDF_UNTAGGED rather than the text-shape
+    # DOCUMENT_NO_HEADINGS heuristic (which cannot see structure tags and
+    # would contradict our own tagged output). Assert the new contract:
+    UNTAGGED = AccessibilityFlagCode.PDF_UNTAGGED.value
+
+    def _pdf_props(tree, *, tagged: bool, pages: int = 2, chars: int = 2400):
+        tree.root.metadata.properties.update(
+            {
+                "pdf_tagged": tagged,
+                "page_count": pages,
+                "total_text_chars": chars,
+                "image_only_pages": 0,
+            }
+        )
+        return tree
+
+    # Untagged text PDF -> PDF_UNTAGGED fires; the no-headings heuristic stays
+    # quiet for PDFs (it is DOCX-only now).
+    t = _pdf_props(_pdf_tree(2, 1200, with_heading=False), tagged=False)
+    codes = _codes(run_analyzers(t))
+    check("untagged text PDF -> PDF_UNTAGGED fires", UNTAGGED in codes)
+    check("PDF never gets DOCUMENT_NO_HEADINGS (covered by PDF_UNTAGGED)", NO_H not in codes)
+
+    # Tagged PDF (e.g. our own remediated output) -> neither flag.
+    t = _pdf_props(_pdf_tree(2, 1200, with_heading=False), tagged=True)
+    codes = _codes(run_analyzers(t))
+    check("tagged PDF -> no PDF_UNTAGGED", UNTAGGED not in codes)
+    check("tagged PDF -> no DOCUMENT_NO_HEADINGS", NO_H not in codes)
+
+    # Near-empty PDF (not enough text to structure) -> no PDF_UNTAGGED noise.
+    t = _pdf_props(_pdf_tree(1, 80, with_heading=False), tagged=False, chars=80)
+    check("near-empty untagged PDF -> no PDF_UNTAGGED (below text floor)",
+          UNTAGGED not in _codes(run_analyzers(t)))
 
     # --- 2. DOCX table headers ---
     def _save(doc) -> Path:

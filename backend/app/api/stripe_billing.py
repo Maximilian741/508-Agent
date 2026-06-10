@@ -64,12 +64,14 @@ _SUB_PLANS: Dict[str, Dict[str, Any]] = {
 }
 
 # Display-only monthly list price (USD) per plan, used for the admin MRR
-# estimate. Override via STRIPE_PRICE_<PLAN>_USD if your real prices differ.
+# estimate. MUST match the public pricing on the billing page (Team $99/mo or
+# $990/yr; Business $499/mo or $4,990/yr — annual shown as monthly-equivalent
+# for MRR). Override via STRIPE_PRICE_<PLAN>_USD if your real prices differ.
 _PLAN_PRICE_USD: Dict[str, int] = {
-    "team": 49,
-    "team_annual": 49,
-    "business": 299,
-    "business_annual": 299,
+    "team": 99,
+    "team_annual": 99,
+    "business": 499,
+    "business_annual": 499,
 }
 
 
@@ -478,18 +480,31 @@ def ensure_balance_for(user_id: str, needed: int) -> None:
     if needed <= 0:
         return
     with session_scope() as session:
+        # Postgres: take a per-user advisory lock for the duration of this
+        # transaction so two workers can't both see "balance short" and each
+        # fire a real Stripe charge. No-op on SQLite (single-writer anyway).
+        try:
+            if session.get_bind().dialect.name == "postgresql":
+                from sqlalchemy import text as _sql_text
+
+                session.execute(
+                    _sql_text("SELECT pg_advisory_xact_lock(hashtext(:uid))"),
+                    {"uid": str(user_id)},
+                )
+        except Exception:  # pragma: no cover - lock is belt-and-braces
+            logger.debug("advisory lock unavailable", exc_info=True)
         user = session.execute(select(UserRow).where(UserRow.id == user_id)).scalar_one_or_none()
         balance = int(user.credits_balance or 0) if user else 0
-    if balance >= needed:
-        return
-    customer_id = _overage_eligible(user_id)
-    if not customer_id:
-        return
-    try:
-        charge_id = _charge_overage(customer_id, user_id)
-    except Exception as exc:  # never block the request on overage failure
-        logger.warning("overage charge failed for %s: %s", user_id, exc)
-        return
+        if balance >= needed:
+            return
+        customer_id = _overage_eligible(user_id)
+        if not customer_id:
+            return
+        try:
+            charge_id = _charge_overage(customer_id, user_id)
+        except Exception as exc:  # never block the request on overage failure
+            logger.warning("overage charge failed for %s: %s", user_id, exc)
+            return
     if charge_id:
         _grant_credits_idempotent(user_id, _OVERAGE_CREDITS, "overage", f"overage_{charge_id}")
 

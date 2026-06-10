@@ -47,10 +47,12 @@ interface Tier {
   highlight?: boolean;
 }
 
+// Every feature line below must be TRUE in the product today. Credits per
+// remediation: PDF 5 · DOCX 3 · PPTX 4 (analysis is always free).
 const TIERS: Tier[] = [
-  { key: "starter", name: "Starter", priceCents: 500, baseCredits: 50, bonusCredits: 0, features: ["50 audit credits", "All exporters and tools", "Email support"] },
-  { key: "pro", name: "Pro", priceCents: 1500, baseCredits: 200, bonusCredits: 50, features: ["200 credits + 50 bonus", "Priority queue", "Batch mode unlocked", "Priority support"], highlight: true },
-  { key: "studio", name: "Studio", priceCents: 5000, baseCredits: 1000, bonusCredits: 300, features: ["1000 credits + 300 bonus", "Multi-workspace seats", "Custom severity weights", "Direct line to remediators"] },
+  { key: "starter", name: "Starter", priceCents: 500, baseCredits: 50, bonusCredits: 0, features: ["50 credits — about 10 PDF remediations", "Analysis is always free", "Email support"] },
+  { key: "pro", name: "Pro", priceCents: 1500, baseCredits: 250, bonusCredits: 0, features: ["250 credits — about 50 PDFs", "Best per-credit value under $50", "Credits never expire", "Email support"], highlight: true },
+  { key: "studio", name: "Studio", priceCents: 5000, baseCredits: 1300, bonusCredits: 0, features: ["1,300 credits — about 260 PDFs", "Bulk rate for big backlogs", "Credits never expire", "Email support"] },
 ];
 
 interface PlanFamily {
@@ -64,12 +66,20 @@ interface PlanFamily {
 }
 
 // Annual is billed at 10x the monthly price (two months free ≈ 17% off).
+// Seats below mirror the backend's enforced limits (Team 3, Business 10).
 const PLAN_FAMILIES: PlanFamily[] = [
   {
     family: "team",
     name: "Team",
     blurb: "For small compliance teams",
-    features: ["1,000 credits / month", "~200 PDFs or 330 DOCX monthly", "Conformance certificates included", "Priority queue", "Cancel anytime"],
+    features: [
+      "1,000 credits / month",
+      "~200 PDFs or 330 DOCX monthly",
+      "3 seats with a shared credit wallet",
+      "Certificates included (no per-cert credits)",
+      "Optional auto top-up when you run low",
+      "Cancel anytime",
+    ],
     highlight: true,
     monthly: { key: "team", priceCents: 9900 },
     annual: { key: "team_annual", priceCents: 99000 },
@@ -78,7 +88,13 @@ const PLAN_FAMILIES: PlanFamily[] = [
     family: "business",
     name: "Business",
     blurb: "High-volume remediation",
-    features: ["6,000 credits / month", "~1,200 PDFs monthly", "Everything in Team", "Batch mode + multi-seat", "Direct support"],
+    features: [
+      "6,000 credits / month",
+      "~1,200 PDFs monthly",
+      "10 seats with a shared credit wallet",
+      "Everything in Team",
+      "Email support — support@508-agent.app",
+    ],
     monthly: { key: "business", priceCents: 49900 },
     annual: { key: "business_annual", priceCents: 499000 },
   },
@@ -263,6 +279,33 @@ export default function BillingScreen() {
           Stripe is not configured in this build - credit packs add local test credits, and subscriptions need Stripe keys.
         </Text>
       ) : null}
+
+      {/* Refunds + legal — Stripe live mode expects these to be visible at the
+          point of sale, and the promises here mirror the Terms page. */}
+      <Text style={{ color: theme.colors.textMuted, fontSize: 12, textAlign: "center", marginTop: 24, paddingHorizontal: 16, lineHeight: 18 }}>
+        Refunds: unused credit packs are refundable within 14 days — email support@508-agent.app.
+        Subscriptions can be cancelled anytime from the billing portal and keep access through the
+        paid period. Credits are non-transferable and never expire.
+      </Text>
+      <View style={{ flexDirection: "row", gap: 12, justifyContent: "center", marginTop: 10, paddingBottom: 8 }}>
+        <Text
+          accessibilityRole="button"
+          accessibilityLabel="Terms of service"
+          onPress={() => router.push("/terms" as any)}
+          style={{ color: theme.colors.accent, fontWeight: "600", fontSize: 13 }}
+        >
+          Terms of service
+        </Text>
+        <Text style={{ color: theme.colors.textMuted, opacity: 0.5 }}>·</Text>
+        <Text
+          accessibilityRole="button"
+          accessibilityLabel="Privacy policy"
+          onPress={() => router.push("/privacy" as any)}
+          style={{ color: theme.colors.accent, fontWeight: "600", fontSize: 13 }}
+        >
+          Privacy
+        </Text>
+      </View>
 
       <SignInModal open={signInOpen} onCancel={() => setSignInOpen(false)} />
     </Screen>

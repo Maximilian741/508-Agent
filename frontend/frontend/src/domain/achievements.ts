@@ -67,10 +67,10 @@ export const ACHIEVEMENT_DEFS: AchievementDef[] = [
     icon: "🎯",
   },
   {
-    id: "first_share_link",
-    title: "First Share Link",
-    description: "You shared an audit publicly with a teammate.",
-    icon: "🔗",
+    id: "first_certificate",
+    title: "First Certificate",
+    description: "You issued a verifiable remediation certificate.",
+    icon: "🔏",
   },
   {
     id: "first_docx",
@@ -174,6 +174,66 @@ export function loadAchievements(): Achievement[] {
 
 export function unlockedCount(): number {
   return Object.keys(_readUnlocked()).length;
+}
+
+const TRIAGE_COUNT_KEY = "508-triage-count-v1";
+
+/**
+ * Bump the persistent count of findings the user has triaged (approved,
+ * rejected, or edited) and unlock the 100-issues badge when it crosses the
+ * line. Counter survives reloads on web; in-memory on native.
+ */
+let memoryTriageCount = 0;
+export function recordTriagedFinding(): void {
+  let count: number;
+  if (_isWeb()) {
+    try {
+      count = (parseInt(window.localStorage.getItem(TRIAGE_COUNT_KEY) || "0", 10) || 0) + 1;
+      window.localStorage.setItem(TRIAGE_COUNT_KEY, String(count));
+    } catch {
+      count = ++memoryTriageCount;
+    }
+  } else {
+    count = ++memoryTriageCount;
+  }
+  if (count >= 100) {
+    unlockAchievement("hundred_issues");
+  }
+}
+
+/**
+ * Unlock the 3-day-streak badge when the audit history shows runs on three
+ * consecutive calendar days (local time). Call after appending history.
+ */
+export function checkStreakFromHistory(ranAtIsoDates: string[]): void {
+  if (isUnlocked("three_day_streak")) return;
+  const days = new Set(
+    ranAtIsoDates
+      .map((iso) => {
+        const d = new Date(iso);
+        return Number.isFinite(d.getTime())
+          ? `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+          : null;
+      })
+      .filter(Boolean) as string[],
+  );
+  if (days.size < 3) return;
+  // Check for any 3 consecutive days among the run dates.
+  const stamps = [...days]
+    .map((k) => {
+      const [y, m, d] = k.split("-").map(Number);
+      return new Date(y, m, d).getTime();
+    })
+    .sort((a, b) => a - b);
+  const DAY = 24 * 60 * 60 * 1000;
+  let run = 1;
+  for (let i = 1; i < stamps.length; i++) {
+    run = stamps[i] - stamps[i - 1] === DAY ? run + 1 : 1;
+    if (run >= 3) {
+      unlockAchievement("three_day_streak");
+      return;
+    }
+  }
 }
 
 export function isUnlocked(id: string): boolean {

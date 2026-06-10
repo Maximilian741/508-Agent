@@ -52,7 +52,7 @@ export default function VerifyScreen() {
         shader="ember"
         eyebrow="VERIFICATION"
         title="Certificate verification"
-        subtitle="Confirm that a 508 Agent accessibility conformance certificate is genuine."
+        subtitle="Confirm that a 508 Agent remediation certificate is genuine. A certificate records what was detected and fixed — it is not a formal conformance determination."
       />
 
       <View style={{ marginTop: 16 }}>

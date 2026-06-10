@@ -24,7 +24,7 @@ interface Step {
 const STEPS: Step[] = [
   {
     title: "Welcome to 508 Agent",
-    body: "We will walk through four quick stops so you know where everything lives. You can replay this tour from Settings any time.",
+    body: "We will walk through four quick stops so you know where everything lives. This takes about twenty seconds.",
   },
   {
     title: "Drop a doc, get a score",
@@ -36,7 +36,7 @@ const STEPS: Step[] = [
   },
   {
     title: "Top nav goes everywhere",
-    body: "Audit, Batch, Contrast, Help, About, and Settings are one click away. Sharing? Workspaces? All up there.",
+    body: "Audit, Batch, Contrast, Help, Achievements, and Settings are one click away — and your credits balance lives in the top-right corner.",
   },
 ];
 

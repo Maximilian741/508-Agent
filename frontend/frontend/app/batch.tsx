@@ -310,7 +310,17 @@ export default function BatchScreen() {
           ),
         );
       } catch (e) {
-        const msg = (e as Error).message ?? "Analyzer failed";
+        const err = e as Error & { status?: number };
+        let msg = err.message ?? "Analyzer failed";
+        // Anonymous batch runs hit the API's auth requirement — show a human
+        // sentence instead of raw 401 JSON, and prompt sign-in once.
+        if (err.status === 401 || msg.includes("authentication_required")) {
+          msg = "Sign in to run batch audits — use the Sign in button in the top right.";
+          toast.info("Create a free account to run batches", {
+            description: "Your first audits are on us (25 free credits).",
+            dedupeKey: "batch-auth-required",
+          });
+        }
         setItems((prev) =>
           prev.map((it) =>
             it.id === id

@@ -31,9 +31,9 @@ export default function SecurityScreen() {
 
       <Card>
         <Section title="1. Authentication">
-          <Para text="Managed-mode access is gated by Cloudflare Access (CF Access). Cloudflare authenticates users via SSO (Google / Microsoft / etc.) and signs a short-lived JWT into the Cf-Access-Jwt-Assertion header on every request." />
-          <Para text="The backend's CFAccessAuthMiddleware verifies that JWT against your team's signing keys before any handler runs. We never see your password — Cloudflare proves identity for us." />
-          <Para text="When CF Access is misconfigured, every request returns 401 and the failure is recorded in the audit log under the auth_fail event so operators can spot brute-force or token-tampering attempts." />
+          <Para text="You sign in with an email address and password handled by our own backend. Passwords are hashed with salted scrypt (N=2^15) before they touch the database — we store and compare only the hash, never the plaintext, and passwords never appear in logs." />
+          <Para text="A successful sign-in issues an HS256-signed session JWT with issuer/audience checks and a 7-day lifetime. Every API request is authenticated against that token; your documents are owned by your account, and requests for someone else's records return 404." />
+          <Para text="Cloudflare sits in front of the application for TLS termination and WAF/edge protection. Failed sign-ins and admin actions are recorded in the audit log so operators can spot brute-force attempts. (Private/internal deployments can additionally enable Cloudflare Access SSO; the public service uses app-native accounts.)" />
         </Section>
       </Card>
 
@@ -54,8 +54,8 @@ export default function SecurityScreen() {
 
       <Card>
         <Section title="4. Audit logging">
-          <Para text="An append-only audit_log table records every analyze, remediate, share-create, share-view, download, manual-review-resolve, and auth-fail event." />
-          <Para text="Every entry stores the request id (cross-referencable with application logs), the actor's email and CF Access subject, the source IP, the doc / job id, and a small JSON metadata blob — never filenames, content, or user-supplied text." />
+          <Para text="An append-only audit_log table records analyze, remediate, credit-grant, certificate, download, manual-review-resolve, and auth-fail events." />
+          <Para text="Every entry stores the request id (cross-referencable with application logs), the actor's email, the source IP, the doc / job id, and a small JSON metadata blob — never document content or user-supplied text." />
           <Para text="The only mutation path is purge-older-than, gated to operator-defined admin emails, and that purge itself is audited." />
         </Section>
       </Card>
@@ -63,11 +63,11 @@ export default function SecurityScreen() {
       <Card>
         <Section title="5. Retention">
           <View style={styles.retentionGrid}>
-            <Retention label="Source documents" body="Deleted after 24 hours from R2." />
-            <Retention label="Remediated artifacts" body="Deleted after 24 hours from R2." />
-            <Retention label="Signed download URLs" body="HMAC-signed, 1-hour TTL. Tampering or expiry returns 403/410." />
-            <Retention label="Share links" body="Caller-chosen TTL between 1 and 30 days; default 7." />
-            <Retention label="Audit log" body="Retained for the operator-configured retention window. Admins can purge older entries via the Admin screen." />
+            <Retention label="Source documents" body="Swept from pipeline storage after ~24 hours (PIPELINE_ARTIFACT_TTL); object storage carries a matching 1-day lifecycle rule." />
+            <Retention label="Remediated artifacts" body="Same ~24-hour window — download your file promptly; re-upload the source to regenerate it later." />
+            <Retention label="Signed download URLs" body="HMAC-signed with an expiry. Tampering or expiry returns 403/410." />
+            <Retention label="Account data" body="Email, credit ledger, history metadata — kept until you delete your account from Settings." />
+            <Retention label="Audit log" body="Retained for the operator-configured retention window. Admins can purge older entries, and the purge itself is audited." />
           </View>
         </Section>
       </Card>
@@ -75,7 +75,8 @@ export default function SecurityScreen() {
       <Card>
         <Section title="6. Vendors">
           <View style={styles.vendorRow}>
-            <VendorChip name="Cloudflare" subtitle="Edge network, TLS termination, Access (SSO), R2 storage" />
+            <VendorChip name="Cloudflare" subtitle="Edge network, TLS termination, WAF, R2 storage" />
+            <VendorChip name="Stripe" subtitle="Payment processing. Card numbers never touch our servers; we store only Stripe's customer/subscription identifiers." />
             <VendorChip name="Anthropic" subtitle="OPTIONAL. Used only when AI alt-text / link-text is enabled. Receives only the snippet the request needs." />
             <VendorChip name="OpenAI" subtitle="OPTIONAL. Same scope as Anthropic. Disabled unless OPENAI_API_KEY is configured." />
           </View>

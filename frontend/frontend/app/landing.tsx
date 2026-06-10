@@ -18,7 +18,7 @@ const STEPS = [
   {
     n: "1",
     title: "Drop a doc",
-    body: "Upload a PDF, Word, or PowerPoint file. Nothing leaves your machine in self-hosted mode.",
+    body: "Upload a PDF, Word, or PowerPoint file. Analysis is free, hosted files are deleted after 24 hours, and we never train AI on your documents.",
   },
   {
     n: "2",
@@ -29,6 +29,25 @@ const STEPS = [
     n: "3",
     title: "Approve and ship",
     body: "Approve the AI suggestions you trust, edit the rest, and download a remediated file.",
+  },
+];
+
+const DIFFERENTIATORS = [
+  {
+    title: "Fixes, not just findings",
+    body: "Most checkers stop at a list of problems. 508 Agent writes the approved fixes back into your file — alt text, titles, language, link text, table headers.",
+  },
+  {
+    title: "Rebuilds PDF structure",
+    body: "Untagged PDF? The engine reconstructs a real PDF/UA structure tree from the page content — headings, lists, tables, figures, and header/footer artifacts.",
+  },
+  {
+    title: "Catches scanned PDFs",
+    body: "A scanned document looks fine and reads as nothing. We flag image-only PDFs as a hard error with OCR guidance instead of waving them through.",
+  },
+  {
+    title: "Honest scoring & verifiable certificates",
+    body: "The score only counts fixes that genuinely persist into the file, and every certificate has a public verification link auditors can check themselves.",
   },
 ];
 
@@ -83,24 +102,48 @@ export default function LandingScreen() {
       </Card>
 
       <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>What makes this different</Text>
+        <View style={styles.steps}>
+          {DIFFERENTIATORS.map((d) => (
+            <View
+              key={d.title}
+              style={[
+                styles.step,
+                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+              ]}
+            >
+              <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>
+                {d.title}
+              </Text>
+              <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>
+                {d.body}
+              </Text>
+            </View>
+          ))}
+        </View>
+      </Card>
+
+      <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards covered</Text>
         <View style={styles.chipRow}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the WCAG 2.1 specification (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
             <Chip label="WCAG 2.1" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.access-board.gov" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the Section 508 standards (external link)" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>
       </Card>
 
       <View style={styles.footer}>
+        <FooterLink label="Pricing" onPress={() => router.push("/billing" as any)} />
         <FooterLink label="About" onPress={() => router.push("/about" as any)} />
         <FooterLink label="Help" onPress={() => router.push("/help" as any)} />
-        <FooterLink label="Settings" onPress={() => router.push("/settings" as any)} />
+        <FooterLink label="Terms" onPress={() => router.push("/terms" as any)} />
+        <FooterLink label="Privacy" onPress={() => router.push("/privacy" as any)} />
       </View>
     </Screen>
   );

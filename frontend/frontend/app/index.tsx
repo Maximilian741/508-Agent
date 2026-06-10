@@ -390,8 +390,9 @@ function FirstRun({
           },
         ]}
       >
-        Your first audit is free — no account needed to start. After that, credit packs start at
-        $5, or subscribe for a monthly allowance with conformance certificates included.
+        Free to start — create an account in seconds and your first audits are on us (25 free
+        credits). After that, credit packs start at $5, or subscribe for a monthly allowance
+        with certificates included.
       </Text>
       <View style={styles.firstRunLinks}>
         <Pressable
@@ -452,15 +453,18 @@ function RecentRow({
       ]}
     >
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text
-          style={[
-            theme.typography.body,
-            { color: theme.colors.text, fontSize: 16, fontWeight: "600" },
-          ]}
-          numberOfLines={1}
-        >
-          {entry.filename}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text
+            style={[
+              theme.typography.body,
+              { color: theme.colors.text, fontSize: 16, fontWeight: "600", flexShrink: 1 },
+            ]}
+            numberOfLines={1}
+          >
+            {entry.filename}
+          </Text>
+          {entry.id.startsWith("demo:") ? <Chip label="Sample" tone="warning" /> : null}
+        </View>
         <Text
           style={[
             theme.typography.caption,

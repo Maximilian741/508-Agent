@@ -284,13 +284,26 @@ async def grant_starter(
     request: Request,
     user_id: str = Depends(require_user_id),
 ) -> GrantStarterResponse:
-    """Grant 25 credits exactly once per user (idempotent)."""
+    """Grant 25 credits exactly once per user (idempotent).
+
+    Abuse guard: when an email pipeline is configured (SMTP_HOST set), the
+    grant requires a VERIFIED email — otherwise throwaway addresses can farm
+    25 free credits per signup. In dev (no SMTP) the gate is off so local
+    flows and tests keep working unchanged.
+    """
     GRANT_AMOUNT = 25
     GRANT_KIND = "grant"
     GRANT_DESC = "starter_grant"
 
+    import os as _os
+
+    smtp_configured = bool((_os.environ.get("SMTP_HOST") or "").strip())
+
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
+
+        if smtp_configured and not row.email_verified_at:
+            raise HTTPException(status_code=403, detail="verify_email_first")
 
         existing = session.execute(
             select(CreditLedgerRow).where(
@@ -552,6 +565,10 @@ async def verify_email(token: str) -> VerifyResultResponse:
     """Consume a verification token, mark the user verified, return ok."""
     if not token or len(token) > 64:
         raise HTTPException(status_code=410, detail="token_expired")
+    # Password-reset tokens live in the same table under a "pr_" prefix; they
+    # must never be usable to verify an email address.
+    if token.startswith("pr_"):
+        raise HTTPException(status_code=410, detail="token_expired")
     with session_scope() as session:
         row = session.execute(
             select(EmailVerifyTokenRow).where(EmailVerifyTokenRow.token == token)
@@ -581,3 +598,131 @@ async def verify_email(token: str) -> VerifyResultResponse:
             )
         )
     return VerifyResultResponse(verified=True)
+
+
+# ---------------------------------------------------------------------------
+# Password reset (forgot password)
+#
+# Reuses the email-verify token table; reset tokens are namespaced with a
+# "pr_" prefix so neither token kind can be consumed by the other endpoint
+# (verify_email rejects pr_ tokens via the exact-match + the guard below;
+# reset endpoints REQUIRE the prefix). Reset links expire after 1 hour and
+# are single-use; requesting a new one invalidates older ones.
+# ---------------------------------------------------------------------------
+
+_RESET_PREFIX = "pr_"
+_RESET_TTL = timedelta(hours=1)
+
+
+class PasswordResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+
+
+class PasswordResetQueuedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    queued: bool
+
+
+class PasswordResetConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=8, max_length=64)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class PasswordResetResultResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reset: bool
+
+
+@router.post("/request-password-reset", response_model=PasswordResetQueuedResponse)
+async def request_password_reset(payload: PasswordResetRequest) -> PasswordResetQueuedResponse:
+    """Email a single-use password-reset link.
+
+    Always returns ``{"queued": true}`` regardless of whether the address has
+    an account — anything else is an account-enumeration oracle. Unauthenticated
+    by design (the caller has forgotten their password); covered by the /auth
+    rate limit.
+    """
+    email = payload.email.strip().lower()
+    token: Optional[str] = None
+    to_email: Optional[str] = None
+    with session_scope() as session:
+        user = session.execute(
+            select(UserRow).where(UserRow.email == email)
+        ).scalar_one_or_none()
+        if user is not None:
+            # One outstanding reset link at a time.
+            session.execute(
+                delete(EmailVerifyTokenRow).where(
+                    EmailVerifyTokenRow.user_id == user.id,
+                    EmailVerifyTokenRow.token.like(f"{_RESET_PREFIX}%"),
+                )
+            )
+            token = _RESET_PREFIX + secrets.token_hex(16)
+            session.add(
+                EmailVerifyTokenRow(
+                    token=token,
+                    user_id=user.id,
+                    created_at=datetime.utcnow(),
+                )
+            )
+            to_email = user.email
+
+    if token and to_email:
+        base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+        link = f"{base}/reset-password?token={token}" if base else f"/reset-password?token={token}"
+        send_email(
+            to=to_email,
+            subject="Reset your 508 Agent password",
+            body=(
+                "Someone (hopefully you) asked to reset the password for this "
+                "account. Open this link to choose a new password:\n\n"
+                f"{link}\n\n"
+                "The link expires in 1 hour and can be used once. If you did "
+                "not request this, you can ignore this email — your password "
+                "is unchanged."
+            ),
+        )
+    return PasswordResetQueuedResponse(queued=True)
+
+
+@router.post("/reset-password", response_model=PasswordResetResultResponse)
+async def reset_password(payload: PasswordResetConfirm) -> PasswordResetResultResponse:
+    """Consume a reset token and set the new password (single-use, 1h TTL)."""
+    token = payload.token.strip()
+    if not token.startswith(_RESET_PREFIX):
+        raise HTTPException(status_code=410, detail="token_expired")
+    with session_scope() as session:
+        row = session.execute(
+            select(EmailVerifyTokenRow).where(EmailVerifyTokenRow.token == token)
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=410, detail="token_expired")
+        if row.created_at is None or (datetime.utcnow() - row.created_at) > _RESET_TTL:
+            session.execute(
+                delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.token == token)
+            )
+            raise HTTPException(status_code=410, detail="token_expired")
+        user = session.execute(
+            select(UserRow).where(UserRow.id == row.user_id)
+        ).scalar_one_or_none()
+        if user is None:
+            session.execute(
+                delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.token == token)
+            )
+            raise HTTPException(status_code=410, detail="token_expired")
+        user.password_hash = _hash_password(payload.password)
+        user.last_seen_at = datetime.utcnow()
+        # Single-use: clear every outstanding reset token for this user.
+        session.execute(
+            delete(EmailVerifyTokenRow).where(
+                EmailVerifyTokenRow.user_id == user.id,
+                EmailVerifyTokenRow.token.like(f"{_RESET_PREFIX}%"),
+            )
+        )
+    return PasswordResetResultResponse(reset=True)

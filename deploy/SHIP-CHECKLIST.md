@@ -279,29 +279,37 @@ From your laptop:
 
 ```bash
 curl -i https://api.yourdomain.com/healthz
+curl -i https://api.yourdomain.com/readyz
 ```
 
-Expected: HTTP 302 to a `cloudflareaccess.com` login URL. That confirms
-Access is enforcing.
+Expected (public launch, Access skipped per Step 3): **HTTP 200** with
+`{"ok":true}` / `{"ready":true}`. (Only a private instance that enabled
+Access in Step 3 should see a 302 to `cloudflareaccess.com` here.)
 
-Now sign in via the browser:
+Or run the automated post-deploy check, which also exercises sign-in and a
+real analyze:
+
+```bash
+cd backend
+python -m app.devtools.verify_live_site --api-url https://api.yourdomain.com
+```
+
+Now use the app like a customer:
 
 1. Open `https://app.yourdomain.com`.
-2. Cloudflare Access prompts for your email; enter the allowed address.
-3. Enter the 6-digit PIN from the email.
-4. The 508-agent UI loads. Upload `samples/sample.docx` (or any small
-   `.docx`) and run a full audit.
-5. Confirm the audit completes, issues render, and `Download remediated
+2. Create an account with email + password (the app's own sign-in sheet).
+3. Upload `samples/sample.docx` (or any small `.docx`) and run a full audit.
+4. Confirm the audit completes, issues render, and `Download remediated
    file` works.
 
 ### What could go wrong
 
-- **`/healthz` returns 200 with no Access prompt.** Access app does not
-  cover `api.yourdomain.com`. Add it under
-  `Access -> Applications -> 508-agent -> Edit -> Application domains`.
-- **UI loads but API calls return 401.** `CORS_ALLOW_ORIGINS` does not
-  match the actual frontend origin. Set it to the exact URL including
-  scheme: `https://app.yourdomain.com`. Restart `backend`.
+- **Customers / webhook / cert links get 401 or a Cloudflare login.**
+  `CLOUDFLARE_ACCESS_AUD` is set. Clear it for a public launch (Step 3) and
+  restart `backend`.
+- **UI loads but API calls return 401/403 CORS errors.** `CORS_ALLOW_ORIGINS`
+  does not match the actual frontend origin. Set it to the exact URL
+  including scheme: `https://app.yourdomain.com`. Restart `backend`.
 - **Audit hangs or returns `provider_error`.** `ANTHROPIC_API_KEY` is wrong
   or out of credit. Check
   https://console.anthropic.com/settings/billing.

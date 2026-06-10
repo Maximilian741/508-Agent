@@ -1,26 +1,26 @@
 /**
- * SignInModal - welcoming, two-step local sign in.
+ * SignInModal - welcoming single-form sign in / sign up.
  *
- * Step 1 (Welcome): just email + display name. This is all most users see.
- * Submitting calls signIn, shows a brief in-modal success state, then
- * dismisses (or reloads the page if no onSignedIn handler is provided).
+ * Welcome step: email + optional display name + password (8+ chars, required —
+ * the backend creates the account on first sign-in with these credentials).
+ * A "Forgot password?" link under the password field emails a single-use
+ * reset link (always shows the same neutral confirmation — no account
+ * enumeration).
  *
- * Step 2 (Optional password): the user explicitly clicked "lock my account
- * with a password". They can skip back to step 1 or skip the password and
- * still finish sign-in.
+ * Success step: a celebratory beat ("Welcome, X!") shown for ~800ms before
+ * the modal hands off to onSignedIn (or reloads the page on web when no
+ * handler is provided).
  *
- * Step 3 (Success): a celebratory beat ("Welcome, X!") shown for ~800ms
- * before the modal hands off to onSignedIn.
- *
- * This delegates the network call to domain/account.signIn and respects the
- * "Keep me signed in" toggle by passing remember through to that function,
- * which stores the JWT in localStorage (true) or sessionStorage (false).
+ * This delegates the network calls to domain/account (signIn,
+ * requestPasswordReset) and respects the "Keep me signed in" toggle by
+ * passing remember through, which stores the JWT in localStorage (true) or
+ * sessionStorage (false).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
-import { signIn } from "../../domain/account";
+import { requestPasswordReset, signIn } from "../../domain/account";
 import { useTheme } from "../useTheme";
 import { Button } from "./Button";
 import { PixelIcon } from "./PixelIcon";
@@ -110,6 +110,8 @@ export function SignInModal({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [signedInName, setSignedInName] = useState<string>("");
+  const [forgotBusy, setForgotBusy] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
   const emailRef = useRef<TextInput | null>(null);
 
   // Reset every time the modal opens.
@@ -124,6 +126,8 @@ export function SignInModal({
     setError(null);
     setSubmitting(false);
     setSignedInName("");
+    setForgotBusy(false);
+    setForgotSent(false);
     const t = setTimeout(() => {
       try {
         emailRef.current?.focus();
@@ -174,6 +178,26 @@ export function SignInModal({
         }
       }
     }, 800);
+  };
+
+  const requestReset = async () => {
+    const trimmed = email.trim();
+    setEmailTouched(true);
+    if (!isValidEmail(trimmed)) {
+      setError("Enter your account email above first, then tap Forgot password.");
+      return;
+    }
+    setForgotBusy(true);
+    setError(null);
+    try {
+      await requestPasswordReset(trimmed);
+      setForgotSent(true);
+    } catch {
+      // Even failures show the same neutral copy — no account enumeration.
+      setForgotSent(true);
+    } finally {
+      setForgotBusy(false);
+    }
   };
 
   const submit = async () => {
@@ -268,6 +292,9 @@ export function SignInModal({
             onCancel={onCancel}
             onMaybeLater={onMaybeLater}
             onSubmit={() => submit()}
+            onForgotPassword={() => void requestReset()}
+            forgotBusy={forgotBusy}
+            forgotSent={forgotSent}
           />
         ) : null}
 
@@ -299,6 +326,9 @@ interface WelcomeStepProps {
   onCancel: () => void;
   onMaybeLater?: () => void;
   onSubmit: () => void;
+  onForgotPassword: () => void;
+  forgotBusy: boolean;
+  forgotSent: boolean;
 }
 
 function WelcomeStep(props: WelcomeStepProps) {
@@ -321,6 +351,9 @@ function WelcomeStep(props: WelcomeStepProps) {
     onCancel,
     onMaybeLater,
     onSubmit,
+    onForgotPassword,
+    forgotBusy,
+    forgotSent,
   } = props;
 
   return (
@@ -478,6 +511,24 @@ function WelcomeStep(props: WelcomeStepProps) {
         onSubmitEditing={onSubmit}
         returnKeyType="go"
       />
+
+      {forgotSent ? (
+        <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 6 }}>
+          If that address has an account, a reset link is on its way (valid for 1 hour).
+        </Text>
+      ) : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Forgot password — email me a reset link"
+          onPress={onForgotPassword}
+          disabled={forgotBusy}
+          style={({ hovered }: any) => [{ alignSelf: "flex-start", marginTop: 6 }, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
+            {forgotBusy ? "Sending reset link…" : "Forgot password?"}
+          </Text>
+        </Pressable>
+      )}
 
       <RememberCheckbox
         theme={theme}

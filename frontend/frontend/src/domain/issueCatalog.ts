@@ -78,7 +78,7 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Headings build a navigable outline of the document. When levels skip, screen reader users can't tell whether they've moved deeper into a sub-section or jumped past content. Always step one level at a time.",
     autoFix:
-      "We'll renumber the heading to one level deeper than the previous heading. Subsequent headings stay where they are unless they also skip.",
+      "Word documents: we'll renumber the heading to one level deeper than the previous heading and write it into the file. PDF and PowerPoint: the renumbering is queued for manual remediation in the source document.",
     manualJudgment:
       "Skim the renumbered section to make sure the new level reflects the document's actual structure.",
     severity: "warning",
@@ -96,7 +96,8 @@ const C: Record<string, IssueCatalogEntry> = {
     summary: "A heading level is missing in the outline (e.g. H1 → H3 with no H2).",
     why:
       "Same problem as a heading jump: the outline becomes unparseable for assistive technology. People who navigate by heading lose their place.",
-    autoFix: "We'll insert the missing intermediate level so the outline reads cleanly.",
+    autoFix:
+      "Word documents: we'll renumber the out-of-sequence heading so the outline steps one level at a time (we renumber rather than invent new headings). PDF and PowerPoint: queued for manual remediation.",
     manualJudgment:
       "If the gap is intentional (e.g. you skipped a section), reject the auto-fix and address the source document instead.",
     severity: "warning",
@@ -115,7 +116,7 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen readers announce a header cell whenever the user moves to a data cell underneath it (\"Total — $4,200\"). Without headers, users hear only \"$4,200\" with no context about which column.",
     autoFix:
-      "If your table's first row already looks like labels (short, no trailing punctuation), we'll promote it to header cells with column scope. Otherwise we'll insert a synthetic header row labeled \"Column 1, Column 2…\" so you can rename it.",
+      "Word and PowerPoint: if your table's first row already looks like labels (short, no trailing punctuation), we'll promote it to a real header row in the file. Otherwise we'll insert a synthetic header row labeled \"Column 1, Column 2…\" so you can rename it. PDF tables are queued for manual remediation.",
     manualJudgment:
       "If we synthesized headers, replace the placeholder labels with real ones. This is the most common manual edit.",
     severity: "error",
@@ -134,9 +135,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Without scope=\"col\" or scope=\"row\", screen readers have to guess which header to announce for each data cell. They often guess wrong.",
     autoFix:
-      "We'll set scope=col on cells in the first row, scope=row on cells in the first column, and propagate the rest based on position.",
+      "We flag this for review — writing per-cell scope back into the file isn't supported yet, so this finding is queued for manual remediation rather than silently claimed as fixed.",
     manualJudgment:
-      "Cells that span multiple rows and columns may need the rare scope=both — review tables with merged header cells.",
+      "In the source document, set scope=col on first-row headers and scope=row on first-column headers. Cells spanning rows and columns may need the rare scope=both.",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],
@@ -152,8 +153,10 @@ const C: Record<string, IssueCatalogEntry> = {
     summary: "Items in a list aren't tagged as list items.",
     why:
       "Screen readers announce \"List of 5 items\" before reading a list, then count down each one. Without proper list-item tagging, users hear loose paragraphs and lose count.",
-    autoFix: "We'll wrap any non-list-item children in proper <li> nodes so the list reads as a list.",
-    manualJudgment: "",
+    autoFix:
+      "We flag this for review — restructuring list markup in the file isn't supported yet, so this finding is queued for manual remediation rather than silently claimed as fixed.",
+    manualJudgment:
+      "In the source document, make every item a real list item (Word: apply the list style; PDF: tag items as LI/LBody) so screen readers announce \"list of N items\".",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],
@@ -170,7 +173,7 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Many screen reader users navigate by pulling up a list of every link on the page. \"Click here\" links become a wall of identical entries — useless. Each link should make sense out of context.",
     autoFix:
-      "We'll suggest a descriptive replacement based on the link's destination URL or surrounding text. For example, \"click here\" pointing to docs.example.com becomes \"Read the example.com docs.\"",
+      "Word and PowerPoint: we'll rewrite the link's display text in the file with a descriptive replacement based on its destination or surrounding text — \"click here\" pointing at docs.example.com becomes \"Read the example.com docs.\" PDF link text is queued for manual remediation.",
     manualJudgment:
       "AI rewrites are guesses. Verify the new text actually describes where the link goes before approving.",
     severity: "warning",
@@ -227,9 +230,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen readers read content in the order it appears in the file's structure tree, not the visual order. If a sidebar comes after the main text in the tree but is visually placed first, the screen reader user will hear them out of order.",
     autoFix:
-      "Where we have positional data (top/left coordinates from PPTX or DOCX), we'll re-sort siblings by position. Where we don't, we leave the structure alone.",
+      "We flag this for review — automatically re-sorting content order is risky enough to do more harm than good, so it is queued for manual remediation rather than silently claimed as fixed.",
     manualJudgment:
-      "Visually rearranged docs (newsletters, infographics) often need manual structure-tree work in the source app — auto-fix is a starting point, not a finish.",
+      "Reorder the content in the source application so the logical (tab/tag) order matches the visual order. Newsletters and infographics usually need structure-tree work in the source app.",
     severity: "warning",
     standards: {
       wcag: ["1.3.2 Meaningful Sequence"],
@@ -313,6 +316,44 @@ const C: Record<string, IssueCatalogEntry> = {
       pdfUa: ["7.1-4"],
     },
     learnMoreUrl: "https://www.w3.org/WAI/tutorials/images/",
+  },
+
+  TEXT_STYLED_AS_HEADING: {
+    ruleId: "TEXT_STYLED_AS_HEADING",
+    title: "Text looks like a heading but isn't one",
+    summary: "Large/bold text (or Word's Title style) that never entered the heading outline.",
+    why:
+      "Screen-reader users navigate by pulling up the document's heading list and jumping to a section. Text that is merely styled big and bold — the classic title page — looks like a heading to sighted readers but is invisible in that list, so whole sections effectively disappear from navigation (WCAG 1.3.1).",
+    autoFix:
+      "We flag this for review — promoting text to a heading requires choosing the right level (H1? H2?), which depends on the document's structure, so we don't guess.",
+    manualJudgment:
+      "In Word, select the text and apply a real heading style (Home → Styles → Heading 1/2/3) instead of manual bold/size formatting. Word's Title style is also not a navigational heading — use Heading 1 for the document title.",
+    severity: "warning",
+    standards: {
+      wcag: ["1.3.1 Info and Relationships"],
+      section508: ["E207.2"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/tutorials/page-structure/headings/",
+  },
+
+  PDF_UNTAGGED: {
+    ruleId: "PDF_UNTAGGED",
+    title: "PDF has no structure tags",
+    summary: "The text is readable, but screen readers get no headings, lists, or tables.",
+    why:
+      "An untagged PDF is the most common real-world PDF accessibility failure. The words are extractable, so it 'looks fine' — but assistive technology receives one undifferentiated text stream: no heading navigation, no list announcements, no table semantics, no reading structure (WCAG 1.3.1, PDF/UA). Most checkers don't even look.",
+    autoFix:
+      "We reconstruct a real structure tree directly into the remediated file: headings by font hierarchy, lists, tables (from text geometry and ruling lines), figures with alt text, and running headers/footers marked as artifacts — plus the MarkInfo, ParentTree, and XMP metadata PDF/UA expects.",
+    manualJudgment:
+      "Heuristic reconstruction is conservative — spot-check the remediated file's reading order and heading levels, especially for complex multi-column layouts.",
+    severity: "error",
+    standards: {
+      wcag: ["1.3.1 Info and Relationships"],
+      section508: ["E205.4"],
+      pdfUa: ["7.1-2"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Techniques/pdf/PDF2",
   },
 
   SCANNED_DOCUMENT_NO_TEXT: {

@@ -45,7 +45,10 @@ export function useKeyboardShortcuts(shortcuts: Shortcut[], deps: any[] = []) {
         if (shortcut.ctrlOrCmd && !(event.metaKey || event.ctrlKey)) continue;
         if (!shortcut.ctrlOrCmd && (event.metaKey || event.ctrlKey)) continue;
         if (shortcut.shift && !event.shiftKey) continue;
-        if (!shortcut.shift && event.shiftKey && !shortcut.ctrlOrCmd) continue;
+        // Keys that REQUIRE Shift to type (e.g. "?") arrive with shiftKey set;
+        // don't reject them just because the binding didn't say shift:true.
+        const keyNeedsShift = shortcut.key.length === 1 && /[?!@#$%^&*()_+{}|:"<>~]/.test(shortcut.key);
+        if (!shortcut.shift && event.shiftKey && !shortcut.ctrlOrCmd && !keyNeedsShift) continue;
         if (isEditable && guardEditable(shortcut)) continue;
         event.preventDefault();
         shortcut.run();

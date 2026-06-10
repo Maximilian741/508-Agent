@@ -32,10 +32,10 @@ Screenshots live under `docs/screenshots/`:
 | Frontend | Expo Router (React Native Web), TypeScript, Vite-style web build |
 | UI accents | Custom WebGL fragment shaders (smoke / pixel-art) |
 | AI fallback | Anthropic Claude (vision) primary, OpenAI GPT-4o-mini secondary, deterministic heuristics by default |
-| Billing | Stripe Checkout + Webhooks (credit packs, no subscriptions required) |
+| Billing | Stripe Checkout + Webhooks (one-time credit packs and Team/Business subscriptions) |
 | Storage | Local filesystem in dev, S3-compatible in prod (configurable) |
 | Database | SQLite in dev, Postgres in prod |
-| Edge | Cloudflare Tunnel + Cloudflare Access in production |
+| Edge | Cloudflare Tunnel in production (Cloudflare Access optional, for private instances only) |
 | Reverse proxy | nginx serves the static web bundle; `api.*` tunnels straight to uvicorn |
 
 ---
@@ -120,13 +120,20 @@ Full step-by-step deploy guide, env-var matrix, secret-rotation runbook, and a p
 
 ## Pricing model
 
-Three pre-paid credit tiers. No subscriptions, no expiry games -- credits stay on the account until used.
+One-time credit packs (no expiry games — credits stay on the account until
+used) plus optional Team/Business subscriptions with monthly allowances,
+seats, and included certificates.
 
-| Tier    | Price | Credits |
+| Pack    | Price | Credits |
 |---------|-------|---------|
 | Starter | $5    | 50      |
 | Pro     | $15   | 250     |
 | Studio  | $50   | 1300    |
+
+| Plan     | Price | Monthly credits | Seats |
+|----------|-------|-----------------|-------|
+| Team     | $99/mo ($990/yr) | 1,000 | 3 |
+| Business | $499/mo ($4,990/yr) | 6,000 | 10 |
 
 Each remediation deducts credits based on format:
 

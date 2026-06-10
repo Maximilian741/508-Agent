@@ -56,7 +56,15 @@ export function Hero({
 
       <View style={[styles.content, { gap: 6 }]}>
         {eyebrow ? <Text style={styles.eyebrow}>{eyebrow}</Text> : null}
-        <Text style={styles.title}>{title}</Text>
+        <Text
+          style={styles.title}
+          // Page title = the h1 of every screen. We sell heading structure;
+          // the app must have it too.
+          accessibilityRole="header"
+          {...(Platform.OS === "web" ? ({ "aria-level": 1 } as any) : {})}
+        >
+          {title}
+        </Text>
         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
         {children}
       </View>

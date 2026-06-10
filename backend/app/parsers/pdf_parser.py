@@ -229,8 +229,31 @@ def _resolve(obj: Any) -> Any:
     return obj
 
 
-def _iter_image_xobjects(page: Any) -> List[Tuple[str, Dict[str, Any]]]:
-    """Return ``(name, xobject_dict)`` pairs for image XObjects on ``page``."""
+def _names_drawn_on_page(page: Any, reader: Any) -> Optional[set]:
+    """XObject names actually painted by the page's content stream (`Do` ops).
+
+    Returns ``None`` when the content stream can't be parsed — callers should
+    then fall back to resource listing. Restricting images to names that are
+    really DRAWN avoids a classic false-positive multiplier: merged/optimized
+    PDFs often share one resource dictionary across every page, which would
+    otherwise yield one MISSING_ALT_TEXT per page per listed-but-unused image.
+    """
+    try:
+        contents = page.get_contents()
+        if contents is None:
+            return set()
+        ops = ContentStream(contents, reader).operations
+    except Exception:
+        return None
+    drawn: set = set()
+    for operands, op in ops:
+        if op == b"Do" and operands:
+            drawn.add(str(operands[0]).lstrip("/"))
+    return drawn
+
+
+def _iter_image_xobjects(page: Any, reader: Any = None) -> List[Tuple[str, Dict[str, Any]]]:
+    """Return ``(name, xobject_dict)`` pairs for image XObjects DRAWN on ``page``."""
 
     results: List[Tuple[str, Dict[str, Any]]] = []
     try:
@@ -242,12 +265,16 @@ def _iter_image_xobjects(page: Any) -> List[Tuple[str, Dict[str, Any]]]:
     xobjects = _resolve(resources.get("/XObject")) if "/XObject" in resources else None
     if not isinstance(xobjects, DictionaryObject):
         return results
+    drawn = _names_drawn_on_page(page, reader) if reader is not None else None
     for name, ref in xobjects.items():
         obj = _resolve(ref)
         if not isinstance(obj, DictionaryObject):
             continue
-        if obj.get("/Subtype") == "/Image":
-            results.append((str(name), obj))
+        if obj.get("/Subtype") != "/Image":
+            continue
+        if drawn is not None and str(name).lstrip("/") not in drawn:
+            continue  # listed in resources but never painted on this page
+        results.append((str(name), obj))
     return results
 
 
@@ -452,7 +479,7 @@ class PDFParser:
 
             # --- Images ------------------------------------------------------
             page_image_count = 0
-            for image_idx, (name, xobject) in enumerate(_iter_image_xobjects(page), start=1):
+            for image_idx, (name, xobject) in enumerate(_iter_image_xobjects(page, reader), start=1):
                 page_image_count += 1
                 alt_text, decorative = _alt_for_xobject(xobject)
                 image_b64, image_mime = _extract_image_bytes(xobject)
@@ -493,6 +520,20 @@ class PDFParser:
         root.metadata.properties["page_count"] = page_count
         root.metadata.properties["total_text_chars"] = total_text_chars
         root.metadata.properties["image_only_pages"] = image_only_pages
+
+        # Is this a TAGGED PDF (has a structure tree)? Untagged PDFs are the
+        # single most common real-world accessibility failure — and the thing
+        # our remediation genuinely fixes (the writer reconstructs a full
+        # struct tree). UntaggedPdfAnalyzer flags it; DocumentHeadingsAnalyzer
+        # also uses this to avoid contradicting our own tagged output.
+        try:
+            catalog = reader.trailer["/Root"]
+            struct = catalog.get("/StructTreeRoot")
+            root.metadata.properties["pdf_tagged"] = bool(
+                struct.get_object() if hasattr(struct, "get_object") else struct
+            )
+        except Exception:
+            root.metadata.properties["pdf_tagged"] = False
 
         raw_metadata: Dict[str, Any] = {
             "page_count": page_count,

@@ -864,12 +864,55 @@ def _collect_artifact_sigs(pdf: PdfWriter, pages) -> tuple:
     return (frozenset(text_keys), frozenset(pagenum_positions))
 
 
+def _collect_doc_heading_levels(pdf: PdfWriter, pages, artifact_info: tuple) -> Dict[float, int]:
+    """Compute ONE document-wide font-size → heading-level map.
+
+    Per-page maps produce inconsistent levels: a 20pt title on page 1 makes a
+    14pt section heading H2 there, but on pages 2-4 (no 20pt block) the same
+    14pt headings became H1 — wrong navigation order for screen readers.
+    Collect sizes across all pages (excluding pagination artifacts so a
+    repeating 10pt running head can't masquerade as the body size).
+    """
+    text_keys, pagenum_positions = artifact_info
+    sizes: List[float] = []
+    for page in pages:
+        height = _page_height(page)
+        try:
+            ops = ContentStream(page.get_contents(), pdf).operations
+        except Exception:
+            continue
+        block = None
+        for operands, op in ops:
+            if op == b"BT":
+                block = [(operands, op)]
+            elif op == b"ET" and block is not None:
+                block.append((operands, op))
+                size = _block_font_size(block)
+                if size and size > 0:
+                    is_artifact = False
+                    bx, by = _block_origin(block)
+                    if bx is not None and by is not None and _in_artifact_band(by, height):
+                        sig = _artifact_sig(bx, by)
+                        t = _block_text(block).strip()
+                        if (sig, t.casefold()) in text_keys or (
+                            sig in pagenum_positions and _is_page_number(t)
+                        ):
+                            is_artifact = True
+                    if not is_artifact:
+                        sizes.append(size)
+                block = None
+            elif block is not None:
+                block.append((operands, op))
+    return _heading_levels(sizes)
+
+
 def _tag_page_elements(
     pdf: PdfWriter,
     page,
     alt_by_xobject: Dict[str, str],
     artifact_info: tuple = (frozenset(), frozenset()),
     counters: Optional[Dict[str, int]] = None,
+    doc_heading_levels: Optional[Dict[float, int]] = None,
 ):
     """Per-element marked content for one page.
 
@@ -877,8 +920,9 @@ def _tag_page_elements(
     tags each text block ``/H1``..``/H6`` (by relative font size) or ``/P``, and
     each image ``/Figure`` with ``/Alt``. Repeated header/footer/page-number
     blocks (``artifact_sigs``) are wrapped as ``/Artifact`` and kept OUT of the
-    structure tree. Returns specs (mcid = list index) or ``None`` to signal the
-    caller to fall back to safe page-level wrapping.
+    structure tree. ``doc_heading_levels`` (document-wide size→level map) keeps
+    heading ranks consistent across pages. Returns specs (mcid = list index) or
+    ``None`` to signal the caller to fall back to safe page-level wrapping.
     """
     try:
         contents = page.get_contents()
@@ -965,8 +1009,12 @@ def _tag_page_elements(
             if (sig, t.casefold()) in text_keys or (sig in pagenum_positions and _is_page_number(t)):
                 artifact_idxs.add(idx)
 
-    levels = _heading_levels(
-        [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs]
+    levels = (
+        doc_heading_levels
+        if doc_heading_levels is not None
+        else _heading_levels(
+            [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs]
+        )
     )
 
     # Pass 1.5b — find runs of >=2 consecutive list-item text blocks. Raw ops
@@ -1219,6 +1267,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
 
         alt_by_xobject = _build_alt_by_xobject(tree)
         artifact_info = _collect_artifact_sigs(writer, taggable)
+        doc_levels = _collect_doc_heading_levels(writer, taggable, artifact_info)
         page_counters: Dict[str, int] = {"artifacts": 0}
         elem_refs: List[IndirectObject] = []  # all struct elems, reading order
         nums = ArrayObject()
@@ -1227,7 +1276,9 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         lists_tagged = 0
         tables_tagged = 0
         for key, page in enumerate(taggable):
-            specs = _tag_page_elements(writer, page, alt_by_xobject, artifact_info, page_counters)
+            specs = _tag_page_elements(
+                writer, page, alt_by_xobject, artifact_info, page_counters, doc_levels
+            )
             if specs is None:
                 # Safe fallback: page-level single /P (original bytes untouched).
                 _wrap_page_marked_content(writer, page, mcid=0)

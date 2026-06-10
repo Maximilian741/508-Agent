@@ -86,6 +86,8 @@ class AccessibilityFlagCode(str, Enum):
     ALT_TEXT_NOT_DESCRIPTIVE = "ALT_TEXT_NOT_DESCRIPTIVE"
     DOCUMENT_NO_HEADINGS = "DOCUMENT_NO_HEADINGS"
     SCANNED_DOCUMENT_NO_TEXT = "SCANNED_DOCUMENT_NO_TEXT"
+    PDF_UNTAGGED = "PDF_UNTAGGED"
+    TEXT_STYLED_AS_HEADING = "TEXT_STYLED_AS_HEADING"
 
 
 class StandardReference(BaseModel):
@@ -307,6 +309,32 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["1.1.1", "1.4.5"],
             section_508=["E205.1"],
             pdf_ua=["7.1-2"],
+        ),
+    ),
+    AccessibilityFlagCode.PDF_UNTAGGED: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.PDF_UNTAGGED,
+        severity=Severity.ERROR,
+        message=(
+            "PDF has no structure tags — screen readers see undifferentiated text "
+            "with no headings, lists, or tables."
+        ),
+        standards=StandardReference(
+            wcag_2_1=["1.3.1"],
+            section_508=["E205.4"],
+            pdf_ua=["7.1-2"],
+        ),
+    ),
+    AccessibilityFlagCode.TEXT_STYLED_AS_HEADING: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.TEXT_STYLED_AS_HEADING,
+        severity=Severity.WARNING,
+        message=(
+            "Text is visually styled as a heading (large/bold or Title style) "
+            "but is not a real heading, so it is missing from the navigation outline."
+        ),
+        standards=StandardReference(
+            wcag_2_1=["1.3.1"],
+            section_508=["E207.2"],
+            pdf_ua=[],
         ),
     ),
 }
@@ -550,10 +578,22 @@ class ActionCode(str, Enum):
     SET_DOCUMENT_LANGUAGE = "SET_DOCUMENT_LANGUAGE"
     SET_DOCUMENT_TITLE = "SET_DOCUMENT_TITLE"
     RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
+    TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
     FLAG_FOR_MANUAL_REVIEW = "FLAG_FOR_MANUAL_REVIEW"
 
 
 REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]] = {
+    AccessibilityFlagCode.PDF_UNTAGGED: [
+        RemediationAction(
+            action_code=ActionCode.TAG_PDF_STRUCTURE,
+            description="Reconstruct a PDF/UA structure tree (headings, lists, tables, figures, artifacts).",
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.PDF_UNTAGGED,
+        )
+    ],
     AccessibilityFlagCode.MISSING_ALT_TEXT: [
         RemediationAction(
         action_code=ActionCode.GENERATE_ALT_TEXT,

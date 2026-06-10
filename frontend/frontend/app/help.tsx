@@ -44,12 +44,17 @@ const FAQ: { question: string; answer: string }[] = [
   {
     question: "What does the remediated file actually contain?",
     answer:
-      "When you click Download remediated file, the backend re-runs the executors against the original file and produces a copy with deterministic fixes applied - set alt text, heading-level normalization, header-cell scope, document-language, and so on. Items that need your judgement (link rewrites, AI alt-text) are queued for manual review and not silently overwritten.",
+      "When you click Download remediated file, the backend applies every fix you approved and writes a new copy of your document: alt text, document title and language, heading renumbering and link-text rewrites (Word/PowerPoint), table header rows (Word/PowerPoint), and for PDFs a full structure tree — headings, lists, tables, figures with alt, and header/footer artifacts. The score only counts fixes that genuinely persist into the file; anything else is honestly listed as pending manual work.",
   },
   {
-    question: "Can I configure custom rules or severities?",
+    question: "What does a remediation cost?",
     answer:
-      "Policy packs let teams override which actions are allowed (auto-applicable, AI-required, manual-review-required) per rule. See the Settings screen and the docs/POLICIES.md file for the schema.",
+      "Analysis is always free — upload as many documents as you like and read every finding. Writing a remediated file costs credits by format: PDF 5 credits, Word (DOCX) 3 credits, PowerPoint (PPTX) 4 credits. Certificates cost 2 credits, or are included free on Team and Business plans. New accounts start with 25 free credits.",
+  },
+  {
+    question: "How do I get help?",
+    answer:
+      "Email support@508-agent.app and a human will get back to you. For privacy requests use privacy@508-agent.app; for security reports use security@508-agent.app (see SECURITY.md in the repository for our disclosure policy).",
   },
 ];
 
@@ -294,7 +299,7 @@ function TocLink({ href, label }: { href: string; label: string }) {
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel="Activate link"
+    <Pressable accessibilityRole="button" accessibilityLabel={`Jump to ${label}`}
       onPress={onPress}
       style={({ hovered }: any) => [
         styles.tocLink,
