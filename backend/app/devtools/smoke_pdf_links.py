@@ -179,6 +179,101 @@ def main() -> int:
     check("no-annot doc has no /Link elems", "/Link" not in kinds2, str(kinds2))
     check("no-annot ParentTreeNextKey == pages", int(st2["/ParentTreeNextKey"]) == 1)
 
+    # --- Widget annotation -> /Form StructElem with /TU Contents fallback ----
+    w = PdfWriter()
+    res = _font_res(w)
+    page_w = w.add_blank_page(width=460, height=560)
+    cs = DecodedStreamObject()
+    cs.set_data(b"BT /F1 12 Tf 40 520 Td (Application form) Tj ET")
+    page_w[NameObject("/Contents")] = w._add_object(cs)
+    page_w[NameObject("/Resources")] = res
+    widget = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Widget"),
+            NameObject("/FT"): NameObject("/Tx"),
+            NameObject("/T"): TextStringObject("full_name"),
+            NameObject("/TU"): TextStringObject("Full name"),
+            NameObject("/Rect"): ArrayObject([FloatObject(v) for v in (40, 460, 220, 482)]),
+        }
+    )
+    w_ref = w._add_object(widget)
+    page_w[NameObject("/Annots")] = ArrayObject([w_ref])
+    tree_w = AccessibilityTree(
+        root=DocumentNode(
+            id="d",
+            content=NodeContent(kind=ContentKind.NONE),
+            metadata=NodeMetadata(source_format="pdf", language="en", properties={"title": "T"}),
+        )
+    )
+    report_w = tag_pdf(w, tree_w)
+    buf = io.BytesIO(); w.write(buf); buf.seek(0)
+    rw = PdfReader(buf)
+    check("widget doc reports 1 form widget", report_w.get("formWidgets") == 1, str(report_w))
+    stw = rw.trailer["/Root"]["/StructTreeRoot"].get_object()
+    docw = stw["/K"][0].get_object()
+    kindsw = [str(k.get_object().get("/S")) for k in docw["/K"]]
+    check("/Form StructElem present", "/Form" in kindsw, str(kindsw))
+    annot_w = rw.pages[0]["/Annots"][0].get_object()
+    check("widget got /StructParent", annot_w.get("/StructParent") is not None)
+    check("widget /Contents falls back to /TU", str(annot_w.get("/Contents")) == "Full name")
+
+    # --- TH /Scope + numbered-list /ListNumbering ----------------------------
+    w2 = PdfWriter()
+    res2 = _font_res(w2)
+    page2 = w2.add_blank_page(width=460, height=620)
+    rows = []
+    # 3x3 aligned data grid (short cells) -> /Table with TH row 0.
+    ys = (560, 540, 520)
+    for r_i, y in enumerate(ys):
+        for c_i, x in enumerate((40, 160, 280)):
+            label = ("Name", "Unit", "Qty")[c_i] if r_i == 0 else f"v{r_i}{c_i}"
+            rows.append(f"BT /F1 10 Tf {x} {y} Td ({label}) Tj ET".encode())
+    # Numbered list (sequential from 1).
+    rows.append(b"BT /F1 11 Tf 40 470 Td (1. prepare the draft) Tj ET")
+    rows.append(b"BT /F1 11 Tf 40 452 Td (2. circulate for review) Tj ET")
+    rows.append(b"BT /F1 11 Tf 40 434 Td (3. publish the final) Tj ET")
+    cs2 = DecodedStreamObject()
+    cs2.set_data(b"\n".join(rows))
+    page2[NameObject("/Contents")] = w2._add_object(cs2)
+    page2[NameObject("/Resources")] = res2
+    tree2 = AccessibilityTree(
+        root=DocumentNode(
+            id="d",
+            content=NodeContent(kind=ContentKind.NONE),
+            metadata=NodeMetadata(source_format="pdf", language="en", properties={"title": "T"}),
+        )
+    )
+    report2b = tag_pdf(w2, tree2)
+    buf2 = io.BytesIO(); w2.write(buf2); buf2.seek(0)
+    r2b = PdfReader(buf2)
+    st2b = r2b.trailer["/Root"]["/StructTreeRoot"].get_object()
+
+    def _walk(elem, acc):
+        acc.append(elem)
+        k = elem.get("/K")
+        k = k.get_object() if hasattr(k, "get_object") else k
+        if isinstance(k, ArrayObject):
+            for kid in k:
+                ko = kid.get_object() if hasattr(kid, "get_object") else kid
+                if isinstance(ko, DictionaryObject) and ko.get("/Type") == "/StructElem":
+                    _walk(ko, acc)
+        return acc
+
+    all_elems = _walk(st2b["/K"][0].get_object(), [])
+    ths = [e for e in all_elems if str(e.get("/S")) == "/TH"]
+    check("tagged table has TH cells", len(ths) >= 2, str(report2b))
+    scope_ok = all(
+        str((e.get("/A") or {}).get("/Scope")) == "/Column" for e in ths
+    )
+    check("every TH carries /A /Scope /Column", scope_ok)
+    lists = [e for e in all_elems if str(e.get("/S")) == "/L"]
+    check("numbered list tagged as /L", len(lists) >= 1, str(report2b))
+    ln_ok = any(
+        str((e.get("/A") or {}).get("/ListNumbering")) == "/Decimal" for e in lists
+    )
+    check("numbered /L carries /ListNumbering /Decimal", ln_ok)
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

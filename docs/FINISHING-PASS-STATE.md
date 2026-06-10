@@ -47,6 +47,11 @@ corpus smoke + live HTTP against a running server).
     accessible description falls back to the URI action (28-012); explicit
     Contents preserved; non-link annots + no-annot docs untouched.
     smoke_pdf_links (13 asserts; suite 49).
+12. PDF/UA attributes batch (iteration 9): form WIDGET annotations nested in
+    /Form StructElems (same OBJR/StructParent/ParentTree machinery; /Contents
+    falls back to the field's /TU label); every /TH carries /A /Scope /Column;
+    digit-ordinal lists carry /A /ListNumbering /Decimal (letters/romans left
+    unset — ambiguous, precision first). smoke_pdf_links now 21 asserts.
 
 ## Engine capability statement (all verified in suite)
 
