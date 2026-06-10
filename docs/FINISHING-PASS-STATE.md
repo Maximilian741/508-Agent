@@ -52,6 +52,16 @@ corpus smoke + live HTTP against a running server).
     falls back to the field's /TU label); every /TH carries /A /Scope /Column;
     digit-ordinal lists carry /A /ListNumbering /Decimal (letters/romans left
     unset — ambiguous, precision first). smoke_pdf_links now 21 asserts.
+16. DOCX footnotes/endnotes extraction (iteration 14): notes live in
+    separate package parts doc.paragraphs never opens. Parser walks
+    footnotes.xml + endnotes.xml (shared _iter_note_parts/_note_paragraphs;
+    separator/continuation stubs skipped), emits docx-fnp ParagraphNodes +
+    docx-fnlink LinkNodes (targets resolve via the NOTE part's own rels);
+    writer indexes docx-fnlink through the same walk, rewrites in the parsed
+    tree, and re-serializes the note part blobs on change — so "click here"
+    in a footnote is detected AND genuinely fixed in the bytes.
+    smoke_footnotes (11 asserts; suite 53). README synced to 20 analyzers +
+    invisible-content coverage (tables/text boxes/footnotes).
 15. DOCX text-box extraction (iteration 13): w:txbxContent was invisible to
     doc.paragraphs — sidebars/callouts were never analyzed. Parser now emits
     ParagraphNodes (docx-tbp, marked in_text_box) + LinkNodes (docx-tblink)

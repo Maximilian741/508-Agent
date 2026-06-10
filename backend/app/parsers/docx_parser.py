@@ -326,6 +326,33 @@ class DOCXParser:
                     )
                 )
 
+        # Footnotes / endnotes: separate package parts, also invisible to
+        # doc.paragraphs. Same distinct-id-space pattern as text boxes
+        # (docx-fnp / docx-fnlink); link targets resolve against the NOTE
+        # part's own relationships.
+        for note_part, note_root in _iter_note_parts(doc):
+            for n_p in _note_paragraphs(note_root):
+                fn_links = _link_nodes_from_p(
+                    n_p, note_part, ids, prefix="docx-fnlink", extra_props={"in_footnote": True}
+                )
+                body_section.children.extend(fn_links)
+                fn_text = "".join(
+                    (t.text or "") for t in n_p.iterfind(f".//{_DOCX_NS}t")
+                ).strip()
+                if fn_text and not fn_links:
+                    body_section.children.append(
+                        ParagraphNode(
+                            id=ids("docx-fnp"),
+                            content=NodeContent(kind=ContentKind.TEXT, text=fn_text),
+                            metadata=NodeMetadata(
+                                source_format="docx",
+                                properties={"in_footnote": True},
+                            ),
+                            children=[],
+                            accessibility_flags=[],
+                        )
+                    )
+
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
         for table in doc.tables:
             body_section.children.append(_table_to_node(table, ids))
@@ -685,6 +712,42 @@ def _iter_text_box_paragraphs(body_el) -> List[Any]:
     out: List[Any] = []
     for tx in body_el.iter(f"{_DOCX_NS}txbxContent"):
         out.extend(tx.iterfind(f"{_DOCX_NS}p"))
+    return out
+
+
+_NOTE_TYPE_SKIP = {"separator", "continuationSeparator", "continuationNotice"}
+
+
+def _iter_note_parts(doc) -> List[Tuple[Any, Any]]:
+    """``[(part, parsed_root)]`` for the footnotes and endnotes parts (in
+    that fixed order) when present. Notes live in separate package parts that
+    ``doc.paragraphs`` never opens — their content was previously invisible.
+    Shared with the docx writer so note link ids (``docx-fnlink-N``) mint
+    identically; the writer re-serializes the parsed root back into the
+    part's blob after rewriting."""
+    from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+
+    out: List[Tuple[Any, Any]] = []
+    for rt in (_RT.FOOTNOTES, _RT.ENDNOTES):
+        try:
+            part = doc.part.part_related_by(rt)
+        except KeyError:
+            continue
+        try:
+            root = etree.fromstring(part.blob)
+        except Exception:
+            continue
+        out.append((part, root))
+    return out
+
+
+def _note_paragraphs(root) -> List[Any]:
+    """Real note ``<w:p>`` elements; separator/continuation stubs skipped."""
+    out: List[Any] = []
+    for note in root.iter(f"{_DOCX_NS}footnote", f"{_DOCX_NS}endnote"):
+        if (note.get(f"{_DOCX_NS}type") or "") in _NOTE_TYPE_SKIP:
+            continue
+        out.extend(note.iterfind(f".//{_DOCX_NS}p"))
     return out
 
 

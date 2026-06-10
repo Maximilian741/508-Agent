@@ -43,6 +43,7 @@ from docx.opc.packuri import PackURI
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.parts.numbering import NumberingPart
+from lxml import etree as lxml_etree
 
 from app.models.accessibility import (
     AccessibilityTree,
@@ -60,8 +61,10 @@ from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
     _heading_level_from_style,
+    _iter_note_parts,
     _iter_text_box_paragraphs,
     _link_elements_in_paragraph,
+    _note_paragraphs,
     strip_fake_list_prefix,
 )
 
@@ -145,6 +148,8 @@ def write_remediated_docx(
     table_cells_by_id = _index_table_cells_by_parser_id(doc)
     tables_by_id = _index_tables_by_parser_id(doc)
     hyperlink_by_id = _index_hyperlinks_by_parser_id(doc)
+    note_links, note_parts = _index_note_links(doc)
+    hyperlink_by_id.update(note_links)
 
     # Step 4: walk the mutated tree and apply each supported mutation.  Order
     # is intentional — document-level metadata first, then per-node updates.
@@ -181,6 +186,19 @@ def write_remediated_docx(
             # source element, so insert a real <w:tr> (tblHeader + bold cells)
             # into the source table — otherwise the "fix" never reaches the file.
             _apply_synthetic_table_header(node, tables_by_id, applied, skipped)
+
+    # Footnote/endnote rewrites happened on trees parsed from the note
+    # parts' blobs — write them back so the changes reach the file.
+    if note_links and any(
+        str(a.get("target_id", "")).startswith("docx-fnlink") for a in applied
+    ):
+        for note_part, note_root in note_parts:
+            try:
+                note_part._blob = lxml_etree.tostring(  # noqa: SLF001
+                    note_root, xml_declaration=True, encoding="UTF-8", standalone=True
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("failed to re-serialize note part: %s", exc)
 
     # Step 5: persist.
     doc.save(str(output_path))
@@ -542,6 +560,26 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
             n_tb += 1
             out[f"docx-tblink-{n_tb}"] = el
     return out
+
+
+def _index_note_links(doc) -> Tuple[Dict[str, Any], List[Tuple[Any, Any]]]:
+    """``(link_map, [(part, root)])`` for footnote/endnote links.
+
+    Note parts load as plain blob Parts, so the writer parses each blob once,
+    rewrites the returned elements in place, and (when anything changed)
+    re-serializes the root back into ``part._blob`` before save — mirroring
+    the parser's ``_iter_note_parts`` walk so ``docx-fnlink-N`` ids align.
+    """
+    link_map: Dict[str, Any] = {}
+    parts: List[Tuple[Any, Any]] = []
+    n = 0
+    for part, root in _iter_note_parts(doc):
+        parts.append((part, root))
+        for p_el in _note_paragraphs(root):
+            for _kind, el in _link_elements_in_paragraph(p_el):
+                n += 1
+                link_map[f"docx-fnlink-{n}"] = el
+    return link_map, parts
 
 
 def _apply_link(
