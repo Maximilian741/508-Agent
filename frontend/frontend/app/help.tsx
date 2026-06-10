@@ -44,7 +44,7 @@ const FAQ: { question: string; answer: string }[] = [
   {
     question: "What does the remediated file actually contain?",
     answer:
-      "When you click Download remediated file, the backend applies every fix you approved and writes a new copy of your document: alt text, document title and language, heading renumbering and link-text rewrites (Word/PowerPoint), table header rows (Word/PowerPoint), and for PDFs a full structure tree — headings, lists, tables, figures with alt, and header/footer artifacts. The score only counts fixes that genuinely persist into the file; anything else is honestly listed as pending manual work.",
+      "When you click Download remediated file, the backend applies every fix you approved and writes a new copy of your document: alt text, document title and language, heading renumbering, link-text rewrites (Word/PowerPoint — including links inside tables, text boxes and footnotes), table header rows (Word/PowerPoint), typed \"- item\" lines converted into real lists (Word numbering / PowerPoint bullets), and for PDFs a full structure tree — headings, lists, tables, figures with alt, link and form-field tagging, and header/footer artifacts. The score only counts fixes that genuinely persist into the file; anything else is honestly listed as pending manual work. Use \"Verify the fix\" after downloading to re-audit the fixed file for free.",
   },
   {
     question: "What does a remediation cost?",
