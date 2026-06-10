@@ -1,8 +1,27 @@
-# Launch finishing loop — state (post-#25)
+# Launch finishing loop — state (post-#26)
 
-> Work queue for the self-paced finishing loop. PR #24 and PR #25 are MERGED
-> (launch report for that era lives in the #25 history of this file).
-> Current working branch: feat/launch-polish-3 (PR #26).
+> Work queue for the self-paced finishing loop. PRs #24, #25, #26 are MERGED.
+> Current working branch: feat/launch-polish-4 (PR #27).
+
+## Done in PR #27 so far
+
+1. Tagged-PDF structure analysis (iteration 18) — tagged-but-badly-tagged
+   PDFs (gov archives are full of them) no longer coast:
+   - NEW app/pdf/tag_reader.py: walks the EXISTING StructTreeRoot
+     (RoleMap-resolved, one hop), recovers heading text from MCID spans,
+     maps Figure /Alt to the XObject drawn inside the figure's MCID, and
+     itemises tagged tables (TR/TH/TD names per row).
+   - pdf_parser: when the tree declares headings, tags are AUTHORITATIVE
+     (text heuristic suppressed); HeadingNodes carry tag levels + MCID text
+     -> HEADING_LEVEL_JUMP now fires on tag-level jumps. Tagged tables emit
+     typed TableNodes -> TABLE_MISSING_HEADERS fires when no TH exists.
+   - FP FIX: a Figure whose /Alt lives on the StructElem (the standards-
+     correct place) was falsely flagged missing-alt because only the
+     XObject dict was consulted; tree alt now honoured (name-normalized).
+   - Report disclosure updated (tagged-PDF analysis described).
+   - smoke_tagged_pdf_analysis (9 asserts; suite 55) incl. a DOGFOOD case:
+     a PDF tagged by our own ua_tagger re-parses through the tag reader
+     with correct headings and zero false jumps.
 
 ## Done in PR #26 so far
 

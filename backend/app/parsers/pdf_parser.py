@@ -50,6 +50,11 @@ from app.models.accessibility import (
     ParagraphNode,
     ParserResult,
     SectionNode,
+    TableCellNode,
+    TableCellType,
+    TableHeaderScope,
+    TableNode,
+    TableRowNode,
 )
 
 
@@ -462,6 +467,25 @@ class PDFParser:
         page_count = len(reader.pages)
         next_id = _IdCounter()
 
+        # Tagged-PDF structure info: headings + tables read from the EXISTING
+        # tree (RoleMap-resolved), and Figure /Alt mapped back to the drawn
+        # XObject — fixing the false positive where a properly tagged figure
+        # (alt on the StructElem, the standards-correct place) was flagged as
+        # missing alt because only the XObject dictionary was consulted.
+        struct_info = None
+        try:
+            from app.pdf.tag_reader import read_struct_info
+
+            struct_info = read_struct_info(reader)
+        except Exception:
+            struct_info = None
+        tree_alt_by_xobject = (struct_info or {}).get("figure_alt_by_xobject", {})
+        struct_headings = (struct_info or {}).get("headings", [])
+        struct_tables = (struct_info or {}).get("tables", [])
+        # When the tree declares headings, the tags are authoritative — the
+        # text-shape heuristic stays for untagged documents only.
+        use_tag_headings = bool(struct_headings)
+
         # Aggregate signals for the "scanned PDF / image-only" detector.
         total_text_chars = 0
         image_only_pages = 0  # pages with image XObject(s) and <50 chars of text
@@ -485,7 +509,7 @@ class PDFParser:
             page_text_chars = len((raw_text or "").strip())
             total_text_chars += page_text_chars
             for para_index, paragraph in enumerate(_split_paragraphs(raw_text), start=1):
-                heading_level = _classify_paragraph(paragraph)
+                heading_level = None if use_tag_headings else _classify_paragraph(paragraph)
                 if heading_level is not None:
                     section.children.append(
                         HeadingNode(
@@ -508,11 +532,71 @@ class PDFParser:
                         )
                     )
 
+            # --- Headings from the EXISTING structure tree (tagged PDFs) ----
+            if use_tag_headings:
+                for h_idx, h in enumerate(
+                    (h for h in struct_headings if h.get("page") == page_index), start=1
+                ):
+                    section.children.append(
+                        HeadingNode(
+                            id=next_id(f"{page_label}-th{h_idx}"),
+                            level=max(1, min(6, int(h.get("level") or 1))),
+                            content=NodeContent(kind=ContentKind.TEXT, text=h.get("text") or ""),
+                            metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
+                            children=[],
+                            accessibility_flags=[],
+                        )
+                    )
+
+            # --- Tables from the EXISTING structure tree (tagged PDFs) ------
+            for t_idx, t in enumerate(
+                (t for t in struct_tables if (t.get("page") or 0) == page_index), start=1
+            ):
+                rows: List[TableRowNode] = []
+                for cell_tags in t.get("rows", []):
+                    cells = [
+                        TableCellNode(
+                            id=next_id(f"{page_label}-tcell"),
+                            cell_type=TableCellType.HEADER if s == "TH" else TableCellType.DATA,
+                            header_scope=TableHeaderScope.COLUMN if s == "TH" else TableHeaderScope.NONE,
+                            content=NodeContent(kind=ContentKind.TEXT, text=" "),
+                            metadata=_node_metadata(page_index=page_index + 1),
+                            children=[],
+                            accessibility_flags=[],
+                        )
+                        for s in cell_tags
+                    ]
+                    rows.append(
+                        TableRowNode(
+                            id=next_id(f"{page_label}-trow"),
+                            content=NodeContent(kind=ContentKind.NONE),
+                            metadata=_node_metadata(page_index=page_index + 1),
+                            children=cells,
+                            accessibility_flags=[],
+                        )
+                    )
+                if rows:
+                    section.children.append(
+                        TableNode(
+                            id=next_id(f"{page_label}-ttable"),
+                            content=NodeContent(kind=ContentKind.NONE),
+                            metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
+                            children=rows,
+                            accessibility_flags=[],
+                        )
+                    )
+
             # --- Images ------------------------------------------------------
             page_image_count = 0
             for image_idx, (name, xobject) in enumerate(_iter_image_xobjects(page, reader), start=1):
                 page_image_count += 1
                 alt_text, decorative = _alt_for_xobject(xobject)
+                if alt_text is None and not decorative:
+                    # Properly tagged PDFs keep alt on the Figure StructElem —
+                    # honour it instead of false-flagging the image.
+                    tree_alt = tree_alt_by_xobject.get(str(name).lstrip("/"))
+                    if tree_alt:
+                        alt_text = tree_alt
                 image_b64, image_mime = _extract_image_bytes(xobject)
                 section.children.append(
                     _build_image_node(
