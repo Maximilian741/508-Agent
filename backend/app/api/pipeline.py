@@ -639,6 +639,98 @@ async def remediate(
     return response_meta
 
 
+class BatchZipJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    jobId: str
+    filename: str
+
+
+class BatchZipRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    jobs: List[BatchZipJob] = Field(default_factory=list)
+
+
+@router.post("/batch-zip")
+async def batch_zip(
+    request: Request,
+    payload: BatchZipRequest,
+    user_id: str = Depends(require_user_id),
+):
+    """Bundle several remediated files into a single ZIP download.
+
+    Each job must be one the caller produced via /pipeline/remediate. We
+    validate that the job directory + file exist and — when CF Access
+    recorded an owner on the job's meta.json — that it matches the requester,
+    mirroring the per-file download authz. Jobs that don't validate are
+    silently skipped; a ZIP with at least one file streams, else 404.
+    """
+    import io
+    import zipfile
+
+    from fastapi.responses import StreamingResponse
+
+    settings = get_settings()
+    if not payload.jobs:
+        raise HTTPException(status_code=400, detail="no_jobs")
+    if len(payload.jobs) > 200:
+        raise HTTPException(status_code=400, detail="too_many_jobs")
+
+    requester_email = None
+    user = getattr(request.state, "user", None)
+    if isinstance(user, dict):
+        requester_email = user.get("email")
+
+    buf = io.BytesIO()
+    added = 0
+    used_names: set = set()
+    seen_jobs: set = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for job in payload.jobs:
+            safe_id = "".join(c for c in job.jobId if c.isalnum() or c in "-_")[:64]
+            safe_name = Path(job.filename).name
+            if not safe_id or not safe_name:
+                continue
+            if (safe_id, safe_name) in seen_jobs:
+                continue  # exact-duplicate job passed twice — bundle once
+            seen_jobs.add((safe_id, safe_name))
+            job_dir = settings.materialized_root / "pipeline" / safe_id
+            target = job_dir / safe_name
+            if not target.exists():
+                continue
+            meta_path = job_dir / "meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+                owner_email = (meta or {}).get("ownerEmail")
+                if owner_email and (
+                    not requester_email or requester_email.lower() != str(owner_email).lower()
+                ):
+                    continue
+            # De-duplicate names inside the archive (two "report-remediated.pdf").
+            arc = safe_name
+            n = 1
+            while arc in used_names:
+                arc = f"{Path(safe_name).stem} ({n}){Path(safe_name).suffix}"
+                n += 1
+            used_names.add(arc)
+            try:
+                zf.write(str(target), arcname=arc)
+                added += 1
+            except Exception:
+                continue
+
+    if added == 0:
+        raise HTTPException(status_code=404, detail="no_files_available")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="508-remediated-batch.zip"'},
+    )
+
+
 @router.get("/files/{job_id}/{filename}")
 async def download_remediated_file(
     job_id: str,

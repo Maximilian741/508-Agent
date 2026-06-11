@@ -27,11 +27,13 @@ import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
 import { PipelineResponse, createApiClient } from "../src/api/client";
-import { appendHistory } from "../src/domain/auditHistory";
+import { loadAccount, loadToken, refreshAccount } from "../src/domain/account";
+import { appendHistory, findHistoryEntry } from "../src/domain/auditHistory";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
+import { Dialog } from "../src/ui/components/Dialog";
 import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
@@ -39,6 +41,17 @@ import { Screen } from "../src/ui/components/Screen";
 import { PixelSpinner } from "../src/ui/components/PixelSpinner";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
+
+// Per-format remediation credit cost — mirrors the backend DOC_FORMAT_COSTS
+// (pipeline.py). Used to show the batch total before charging.
+const FORMAT_CREDIT_COST: Record<string, number> = { pdf: 5, docx: 3, pptx: 4 };
+function _formatOf(filename: string): string {
+  const m = /\.([a-z0-9]+)$/i.exec(filename || "");
+  return (m ? m[1] : "").toLowerCase();
+}
+function _costFor(filename: string): number {
+  return FORMAT_CREDIT_COST[_formatOf(filename)] ?? 5;
+}
 
 const ACCEPTED_FILE_TYPES = [
   ".pdf",
@@ -68,6 +81,14 @@ interface QueueItem {
   errorMessage?: string;
   /** ISO timestamp of state transition — used only for the "ranAt" history field. */
   finishedAt?: string;
+  /** Bulk-remediation state (the file must still be in memory to remediate). */
+  remediateStatus?: "idle" | "remediating" | "remediated" | "error";
+  remediateError?: string;
+  appliedCount?: number;
+  /** The produced remediated file, for ZIP bundling + individual download. */
+  jobId?: string;
+  remediatedFilename?: string;
+  downloadUrl?: string;
 }
 
 interface PersistedBatch {
@@ -84,6 +105,94 @@ function _newBatchId(): string {
   return (
     Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8)
   );
+}
+
+function _saveBlob(blob: Blob, name: string): void {
+  if (typeof document === "undefined") return;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function _esc(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string),
+  );
+}
+
+/**
+ * Build a printable, branded multi-document Accessibility Assessment Report —
+ * the consolidated deliverable an agency (e.g. Sunriver) hands a client after
+ * running their document set. Self-contained HTML, no backend call.
+ */
+function _buildBatchReportHtml(
+  items: Array<{
+    filename: string;
+    status: string;
+    score?: number;
+    grade?: string;
+    totalIssues?: number;
+    sourceFormat?: string;
+    remediateStatus?: string;
+    appliedCount?: number;
+  }>,
+  stats: { done: number; total: number; avgScore: number; totalIssues: number },
+  totalApplied: number,
+): string {
+  const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  const done = items.filter((i) => i.status === "done");
+  const rows = done
+    .map((i) => {
+      const score = i.score ?? 0;
+      const tone = score >= 90 ? "#15803D" : score >= 70 ? "#B45309" : "#B91C1C";
+      const rem =
+        i.remediateStatus === "remediated"
+          ? `<span style="color:#15803D">Remediated · ${i.appliedCount ?? 0} fix(es)</span>`
+          : i.remediateStatus === "error"
+            ? `<span style="color:#B91C1C">Not remediated</span>`
+            : `<span style="color:#6B7280">Analyzed only</span>`;
+      return `<tr>
+        <td>${_esc(i.filename)}</td>
+        <td style="text-transform:uppercase">${_esc(i.sourceFormat || _formatOf(i.filename))}</td>
+        <td style="text-align:center;font-weight:700;color:${tone}">${score} ${_esc(i.grade || "")}</td>
+        <td style="text-align:center">${i.totalIssues ?? 0}</td>
+        <td>${rem}</td>
+      </tr>`;
+    })
+    .join("");
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>Accessibility Assessment Report</title>
+<style>
+  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1A1A1A;max-width:920px;margin:40px auto;padding:0 24px;line-height:1.5}
+  h1{font-size:28px;margin:0 0 4px} .sub{color:#6B7280;margin:0 0 24px}
+  .grid{display:flex;gap:16px;flex-wrap:wrap;margin:24px 0}
+  .tile{flex:1;min-width:160px;border:1px solid #E5E7EB;border-radius:12px;padding:16px}
+  .tile .n{font-size:30px;font-weight:800;color:#C2410C} .tile .l{color:#6B7280;font-size:13px}
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #E5E7EB}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6B7280}
+  .foot{margin-top:32px;color:#6B7280;font-size:12px;border-top:1px solid #E5E7EB;padding-top:16px}
+  @media print{body{margin:0}}
+</style></head><body>
+  <h1>Accessibility Assessment Report</h1>
+  <p class="sub">${done.length} document${done.length === 1 ? "" : "s"} assessed · ${_esc(date)}</p>
+  <div class="grid">
+    <div class="tile"><div class="n">${done.length}</div><div class="l">Documents assessed</div></div>
+    <div class="tile"><div class="n">${stats.totalIssues}</div><div class="l">Accessibility issues found</div></div>
+    <div class="tile"><div class="n">${stats.done > 0 ? stats.avgScore.toFixed(1) : "—"}</div><div class="l">Average score / 100</div></div>
+    <div class="tile"><div class="n">${totalApplied}</div><div class="l">Fixes applied</div></div>
+  </div>
+  <table>
+    <thead><tr><th>File</th><th>Type</th><th>Score</th><th>Issues</th><th>Remediation</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <p class="foot">Generated by 508 Agent. This is an automated remediation summary checked against WCAG 2.1, Section 508, and PDF/UA structural criteria — not a formal conformance determination. Items requiring human judgment (colour contrast in complex layouts, reading order, image meaning) are listed for manual review where applicable.</p>
+</body></html>`;
 }
 
 function _loadBatch(batchId: string): PersistedBatch | null {
@@ -185,10 +294,18 @@ export default function BatchScreen() {
   // Pending files keyed by item id — File objects are not serializable so
   // they live in a ref rather than state.  The processor pulls from here.
   const pendingFilesRef = useRef<Map<string, File>>(new Map());
+  // RETAINED files (not deleted after analyze) so the bulk-remediate step can
+  // re-submit the originals. In-memory only — they don't survive a reload.
+  const keepFilesRef = useRef<Map<string, File>>(new Map());
 
   // Track in-flight analyses so we can throttle to MAX_CONCURRENCY.
   const inFlightRef = useRef(0);
   const processingRef = useRef(false);
+
+  // Bulk-remediation state.
+  const [confirmRemediateOpen, setConfirmRemediateOpen] = useState(false);
+  const [remediatingAll, setRemediatingAll] = useState(false);
+  const [downloadingZip, setDownloadingZip] = useState(false);
 
   /* ---- Persistence ------------------------------------------------------- */
   useEffect(() => {
@@ -222,6 +339,121 @@ export default function BatchScreen() {
       totalIssues,
     };
   }, [items]);
+
+  /* ---- Bulk remediation derived values ---------------------------------- */
+  const bulk = useMemo(() => {
+    // A done item is remediatable only if we still hold its File in memory.
+    const remediatable = items.filter(
+      (i) => i.status === "done" && keepFilesRef.current.has(i.id),
+    );
+    const pendingRemediate = remediatable.filter(
+      (i) => i.remediateStatus === "idle" || i.remediateStatus === "error",
+    );
+    const remediated = items.filter((i) => i.remediateStatus === "remediated");
+    const totalCost = pendingRemediate.reduce((s, i) => s + _costFor(i.filename), 0);
+    const totalApplied = remediated.reduce((s, i) => s + (i.appliedCount ?? 0), 0);
+    return { remediatable, pendingRemediate, remediated, totalCost, totalApplied };
+  }, [items]);
+
+  /* ---- Bulk actions ------------------------------------------------------ */
+  const remediateAll = useCallback(async () => {
+    const token = loadToken();
+    if (!token) {
+      toast.warning("Sign in to remediate", {
+        description: "Bulk remediation spends credits. Use the Sign in button, top right.",
+        dedupeKey: "batch-remediate-auth",
+      });
+      return;
+    }
+    setConfirmRemediateOpen(false);
+    setRemediatingAll(true);
+    const queue = items.filter(
+      (i) => i.status === "done" && keepFilesRef.current.has(i.id) &&
+        (i.remediateStatus === "idle" || i.remediateStatus === "error"),
+    );
+    setItems((prev) =>
+      prev.map((it) =>
+        queue.find((q) => q.id === it.id)
+          ? { ...it, remediateStatus: "remediating" as const, remediateError: undefined }
+          : it,
+      ),
+    );
+
+    const worker = async (item: QueueItem) => {
+      const file = keepFilesRef.current.get(item.id);
+      if (!file) {
+        setItems((prev) => prev.map((it) => it.id === item.id ? { ...it, remediateStatus: "error" as const, remediateError: "File no longer in memory — re-add it." } : it));
+        return;
+      }
+      try {
+        const snap = findHistoryEntry(item.id);
+        const approvedIds: string[] = snap?.snapshot?.report?.violations?.map((v: any) => v.id) ?? [];
+        const result = await client.runPipelineRemediate(file, approvedIds, [], token);
+        setItems((prev) => prev.map((it) => it.id === item.id ? {
+          ...it,
+          remediateStatus: "remediated" as const,
+          appliedCount: result.writer?.applied?.length ?? 0,
+          jobId: result.jobId,
+          remediatedFilename: result.filename,
+          downloadUrl: result.downloadUrl,
+        } : it));
+      } catch (e) {
+        const err = e as Error & { status?: number };
+        const msg = err.status === 402 ? "Out of credits" : (err.message || "Remediation failed");
+        setItems((prev) => prev.map((it) => it.id === item.id ? { ...it, remediateStatus: "error" as const, remediateError: msg } : it));
+      }
+    };
+
+    // Concurrency-capped runner.
+    let idx = 0;
+    const runNext = async () => {
+      while (idx < queue.length) {
+        const i = idx++;
+        await worker(queue[i]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENCY, queue.length) }, runNext));
+
+    setRemediatingAll(false);
+    if (!mockMode) void refreshAccount();
+    toast.success("Batch remediation complete", {
+      description: "Download all as a ZIP, or grab individual files below.",
+    });
+  }, [items, client, mockMode, toast]);
+
+  const downloadAllZip = useCallback(async () => {
+    const jobs = items
+      .filter((i) => i.remediateStatus === "remediated" && i.jobId && i.remediatedFilename)
+      .map((i) => ({ jobId: i.jobId as string, filename: i.remediatedFilename as string }));
+    if (!jobs.length) {
+      toast.info("Nothing to download yet", { description: "Remediate the batch first." });
+      return;
+    }
+    setDownloadingZip(true);
+    try {
+      const blob = await client.batchZip(jobs, loadToken() ?? undefined);
+      _saveBlob(blob, "508-remediated-batch.zip");
+      toast.success(`Downloaded ${jobs.length} remediated file${jobs.length === 1 ? "" : "s"}`);
+    } catch (e) {
+      toast.error("Couldn't build the ZIP", { description: (e as Error).message });
+    } finally {
+      setDownloadingZip(false);
+    }
+  }, [items, client, toast]);
+
+  const openConsolidatedReport = useCallback(() => {
+    const html = _buildBatchReportHtml(items, stats, bulk.totalApplied);
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      const w = window.open("", "_blank");
+      if (w) {
+        w.document.write(html);
+        w.document.close();
+      } else {
+        // Popup blocked — fall back to a downloaded HTML file.
+        _saveBlob(new Blob([html], { type: "text/html" }), "508-assessment-report.html");
+      }
+    }
+  }, [items, stats, bulk.totalApplied]);
 
   /* ---- Concurrency-bounded processor ------------------------------------- */
   // Walks the queue, kicks off up to MAX_CONCURRENCY analyses at a time, and
@@ -367,11 +599,13 @@ export default function BatchScreen() {
           .toString(36)
           .slice(2, 8)}-${file.name}`;
         pendingFilesRef.current.set(id, file);
+        keepFilesRef.current.set(id, file); // retained for bulk remediate
         accepted.push({
           id,
           filename: file.name,
           sizeBytes: file.size,
           status: "queued",
+          remediateStatus: "idle",
         });
       }
       if (rejected > 0) {
@@ -606,6 +840,44 @@ export default function BatchScreen() {
             style={[styles.divider, { backgroundColor: theme.colors.border }]}
           />
 
+          {/* --- Bulk actions (remediate / download / report) --- */}
+          {stats.done > 0 ? (
+            <View style={[styles.bulkBar, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+              <View style={{ flex: 1, minWidth: 200 }}>
+                <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>
+                  Bulk remediation
+                </Text>
+                <Text style={[theme.typography.body, { color: theme.colors.textMuted, fontSize: 13, marginTop: 2 }]}>
+                  {bulk.remediated.length > 0
+                    ? `${bulk.remediated.length} remediated · ${bulk.totalApplied} fix(es) applied${bulk.pendingRemediate.length > 0 ? ` · ${bulk.pendingRemediate.length} left` : ""}`
+                    : keepFilesRef.current.size === 0
+                      ? "Re-add the files (reload cleared them) to remediate."
+                      : `Apply fixes to all ${bulk.pendingRemediate.length} document(s) · ${bulk.totalCost} credits`}
+                </Text>
+              </View>
+              <View style={styles.bulkBtns}>
+                <Button
+                  title={remediatingAll ? "Remediating…" : `Remediate all (${bulk.totalCost} cr)`}
+                  onPress={() => setConfirmRemediateOpen(true)}
+                  loading={remediatingAll}
+                  disabled={remediatingAll || bulk.pendingRemediate.length === 0 || mockMode}
+                />
+                <Button
+                  title={downloadingZip ? "Zipping…" : "Download all (ZIP)"}
+                  onPress={downloadAllZip}
+                  loading={downloadingZip}
+                  disabled={bulk.remediated.length === 0}
+                  variant="secondary"
+                />
+                <Button
+                  title="Assessment report"
+                  onPress={openConsolidatedReport}
+                  variant="ghost"
+                />
+              </View>
+            </View>
+          ) : null}
+
           {/* --- Rows --- */}
           <View style={styles.queueList}>
             {items.map((item) => (
@@ -622,6 +894,18 @@ export default function BatchScreen() {
           </View>
         </Card>
       )}
+
+      <Dialog
+        open={confirmRemediateOpen}
+        title="Remediate the whole batch?"
+        message={
+          `This applies the available auto-fixes to ${bulk.pendingRemediate.length} document(s) and produces a remediated copy of each. It spends ${bulk.totalCost} credits (PDF 5, Word 3, PowerPoint 4 per file). Findings that need human judgment are queued for manual review, not silently claimed.`
+        }
+        confirmLabel={`Charge ${bulk.totalCost} & remediate`}
+        cancelLabel="Cancel"
+        onConfirm={remediateAll}
+        onCancel={() => setConfirmRemediateOpen(false)}
+      />
     </Screen>
   );
 }
@@ -699,6 +983,37 @@ function BatchRow({
               }`}
               tone="default"
             />
+            {item.remediateStatus === "remediating" ? (
+              <Chip label="remediating…" tone="info" />
+            ) : item.remediateStatus === "remediated" ? (
+              <Chip label={`fixed · ${item.appliedCount ?? 0}`} tone="success" />
+            ) : item.remediateStatus === "error" ? (
+              <Chip label={item.remediateError || "fix failed"} tone="danger" />
+            ) : null}
+            {item.remediateStatus === "remediated" && item.downloadUrl ? (
+              <Pressable
+                onPress={() => {
+                  if (Platform.OS === "web" && item.downloadUrl) {
+                    const a = document.createElement("a");
+                    a.href = item.downloadUrl;
+                    if (item.remediatedFilename) a.download = item.remediatedFilename;
+                    a.rel = "noopener";
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={`Download remediated ${item.filename}`}
+                style={({ hovered }: any) => [
+                  styles.openButton,
+                  { backgroundColor: "transparent", borderWidth: 1, borderColor: theme.colors.border },
+                  hovered ? { opacity: 0.8 } : null,
+                ]}
+              >
+                <Text style={[styles.openButtonText, { color: theme.colors.text }]}>Download</Text>
+              </Pressable>
+            ) : null}
             <Pressable
               onPress={onOpen}
               accessibilityRole="button"
@@ -800,6 +1115,22 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       height: 1,
       width: "100%",
       marginVertical: theme.spacing.md,
+    },
+    bulkBar: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: 12,
+      borderWidth: 1,
+      borderRadius: 12,
+      padding: 14,
+      marginBottom: theme.spacing.md,
+    },
+    bulkBtns: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      alignItems: "center",
     },
     queueList: {
       gap: theme.spacing.sm,
