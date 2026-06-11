@@ -353,6 +353,7 @@ export interface ApiClient {
         accountId?: string,
     ) => Promise<PipelineRemediateResult>;
     getPipelineFileUrl: (jobId: string, filename: string) => string;
+    batchZip: (jobs: Array<{ jobId: string; filename: string }>, token?: string) => Promise<Blob>;
     manualReview: (docId?: string) => Promise<ManualReviewItem[]>;
     clearManualReview: () => Promise<{ cleared: number }>;
     updateManualReview: (itemId: string, payload: { status: "pending" | "approved" | "rejected"; approvedText?: string }) => Promise<ManualReviewItem>;
@@ -560,6 +561,26 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
 
     const getPipelineFileUrl = (jobId: string, filename: string) =>
         `${baseUrl}/pipeline/files/${jobId}/${filename}`;
+
+    const batchZip = async (
+        jobs: Array<{ jobId: string; filename: string }>,
+        token?: string,
+    ): Promise<Blob> => {
+        const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
+        if (token) headers["Authorization"] = "Bearer " + token;
+        const response = await fetch(`${baseUrl}/pipeline/batch-zip`, {
+            method: "POST",
+            body: JSON.stringify({ jobs }),
+            headers,
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            const err = new Error(message || "Batch download failed") as Error & { status?: number };
+            err.status = response.status;
+            throw err;
+        }
+        return await response.blob();
+    };
 
     const remediate = async (payload: RemediateRequest): Promise<RemediateResponse> => {
         if (mockMode) {
@@ -869,6 +890,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         runPipeline,
         runPipelineRemediate,
         getPipelineFileUrl,
+        batchZip,
         manualReview,
         clearManualReview,
         updateManualReview,
