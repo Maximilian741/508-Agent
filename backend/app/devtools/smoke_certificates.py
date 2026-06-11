@@ -76,6 +76,13 @@ def main() -> int:
     check("paidWith=credits", cert.get("paidWith") == "credits")
     check("balance dropped by cost", bal(a_auth) == start - 2)
     check("cert has id + verifyUrl", bool(cert.get("certificateId")) and "/verify?cert=" in cert.get("verifyUrl", ""))
+    # Idempotency: a rapid re-issue (double-click / retry) for the SAME
+    # document+numbers must return the existing cert and NOT charge again.
+    _after_first = bal(a_auth)
+    r_dup = client.post("/billing/issue-certificate", headers=a_auth, json=_PAYLOAD)
+    check("re-issue -> 200", r_dup.status_code == 200)
+    check("re-issue returns the SAME certificate id", r_dup.json().get("certificateId") == cert.get("certificateId"))
+    check("re-issue did NOT charge again (no double-charge)", bal(a_auth) == _after_first)
     # Numbers come from the SERVER record, not the client.
     check("score from server analysis (96)", cert.get("score") == 96 and cert.get("fixedCount") == 5)
     # Honesty: the claim is server-generated and must NOT assert formal conformance.

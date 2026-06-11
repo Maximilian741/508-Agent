@@ -23,7 +23,7 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -687,6 +687,40 @@ async def issue_certificate(
         score_val = int(rec.score)
         fixed_val = int(rec.fixed_automatically)
         remaining_val = int(rec.pending_manual)
+
+    # 1b. Idempotency: a double-click / retry / second tab must not mint a
+    # second certificate AND charge twice. If an identical certificate (same
+    # owner, document, and server numbers) was issued in the last few minutes,
+    # return it unchanged instead of charging again.
+    _DEDUP_WINDOW = timedelta(minutes=10)
+    with session_scope() as session:
+        recent = (
+            session.execute(
+                select(CertificateRow)
+                .where(CertificateRow.user_id == user_id)
+                .where(CertificateRow.filename == str(filename)[:400])
+                .where(CertificateRow.score == score_val)
+                .where(CertificateRow.fixed_count == fixed_val)
+                .where(CertificateRow.remaining_count == remaining_val)
+                .where(CertificateRow.issued_at >= datetime.utcnow() - _DEDUP_WINDOW)
+                .order_by(CertificateRow.issued_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        if recent is not None:
+            return CertificateDTO(
+                certificateId=recent.id,
+                issuedAt=recent.issued_at.isoformat(),
+                issuedTo=recent.issued_email,
+                filename=str(recent.filename),
+                conformanceClaim=recent.conformance_claim,
+                score=int(recent.score),
+                fixedCount=int(recent.fixed_count),
+                remainingCount=int(recent.remaining_count),
+                paidWith=recent.paid_with,
+                verifyUrl=_verify_url_for(recent.id),
+            )
 
     # 2. Gate on subscription / credits (team members use the owner's wallet).
     holder = resolve_credit_user_id(user_id)
