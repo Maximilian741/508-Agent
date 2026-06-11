@@ -68,6 +68,7 @@ import { PdfPreview } from "../src/ui/components/PdfPreview";
 import { Skeleton, SkeletonBlock } from "../src/ui/components/Skeleton";
 import { PixelSpinner } from "../src/ui/components/PixelSpinner";
 import { Hero } from "../src/ui/components/Hero";
+import { openHowItWorks } from "../src/ui/components/OnboardingTour";
 import { LetterFromCurb } from "../src/ui/components/LetterFromCurb";
 import { UncertaintyChip } from "../src/ui/components/UncertaintyChip";
 import { useToast } from "../src/ui/toast";
@@ -1021,6 +1022,17 @@ export default function AuditScreen() {
                 }
               />
             )}
+            <Pressable accessibilityRole="button"
+              onPress={openHowItWorks}
+              accessibilityLabel="How it works"
+              style={({ hovered }: any) => [
+                styles.howButton,
+                { borderColor: theme.colors.border, backgroundColor: "rgba(255,255,255,0.12)" },
+                hovered ? { backgroundColor: "rgba(255,255,255,0.2)" } : null,
+              ]}
+            >
+              <Text style={[styles.howButtonText, { color: "rgba(255,255,255,0.9)" }]}>How it works</Text>
+            </Pressable>
             <Pressable accessibilityRole="button"
               onPress={() => setShowHelp(true)}
               accessibilityLabel="Show keyboard shortcuts"
@@ -2654,6 +2666,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   helpButtonText: { fontSize: 16, fontWeight: "800" },
+  howButton: {
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  howButtonText: { fontSize: 12, fontWeight: "700" },
   row: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 12, flexWrap: "wrap" },
   stepHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
   stepNumber: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center" },

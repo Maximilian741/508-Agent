@@ -11,19 +11,28 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
 
 import { Account, loadAccount, refreshAccount } from "../src/domain/account";
-import { AuditHistoryEntry, loadHistory } from "../src/domain/auditHistory";
+import {
+  AuditHistoryEntry,
+  clearHistory,
+  deleteHistoryEntry,
+  loadHistory,
+} from "../src/domain/auditHistory";
+import { fuzzyFilter } from "../src/domain/fuzzy";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
+import { Dialog } from "../src/ui/components/Dialog";
 import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
+import { openHowItWorks } from "../src/ui/components/OnboardingTour";
 import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Screen } from "../src/ui/components/Screen";
+import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -94,9 +103,14 @@ function chipToneForScore(score: number): "success" | "info" | "warning" | "dang
 export default function DashboardScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const toast = useToast();
   const [history, setHistory] = useState<AuditHistoryEntry[]>([]);
   const [account, setAccount] = useState<Account | null>(() => loadAccount());
   const [authChecked, setAuthChecked] = useState(false);
+  const [query, setQuery] = useState("");
+  // Pending delete target (single row) or the "clear all" sentinel.
+  const [pendingDelete, setPendingDelete] = useState<AuditHistoryEntry | null>(null);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
 
   // On mount: refresh the account from the backend (in case the token
   // is stale or the user just signed in on another tab) and load the
@@ -121,7 +135,35 @@ export default function DashboardScreen() {
   }, []);
 
   const stats = useMemo(() => computeStats(history), [history]);
-  const recent = useMemo(() => history.slice(0, 12), [history]);
+  // Fuzzy-filter by filename (and format) when searching; otherwise show the
+  // 12 most recent. When a query is present, search the FULL history so an
+  // older audit isn't hidden by the 12-row cap.
+  const filtered = useMemo(() => {
+    if (query.trim()) {
+      return fuzzyFilter(
+        history,
+        query,
+        (e) => `${e.filename || ""} ${(e.sourceFormat || "")}`,
+      );
+    }
+    return history.slice(0, 12);
+  }, [history, query]);
+
+  const handleDelete = (entry: AuditHistoryEntry) => {
+    const next = deleteHistoryEntry(entry.id);
+    setHistory(next);
+    setPendingDelete(null);
+    toast.success("Audit removed", {
+      description: `"${entry.filename || "untitled"}" was removed from your history.`,
+    });
+  };
+
+  const handleClearAll = () => {
+    clearHistory();
+    setHistory([]);
+    setConfirmClearAll(false);
+    toast.success("History cleared", { description: "All saved audits were removed." });
+  };
 
   // Auth gate. While we're checking, render a quiet placeholder so the
   // unauthenticated CTA does not flash for users who actually are signed in.
@@ -227,17 +269,59 @@ export default function DashboardScreen() {
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
             Recent audits
           </Text>
-          <Button
-            title="Run a new audit"
-            onPress={() => router.push("/audit" as any)}
-          />
+          <View style={styles.headerActions}>
+            <Button title="How it works" variant="ghost" onPress={openHowItWorks} />
+            {history.length > 0 ? (
+              <Button
+                title="Clear all"
+                variant="ghost"
+                onPress={() => setConfirmClearAll(true)}
+              />
+            ) : null}
+            <Button
+              title="Run a new audit"
+              onPress={() => router.push("/audit" as any)}
+            />
+          </View>
         </View>
 
-        {recent.length === 0 ? (
+        {history.length > 0 ? (
+          <View style={[styles.searchRow, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+            <Text style={{ color: theme.colors.textMuted, fontSize: 14 }}>🔍</Text>
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search by file name…"
+              placeholderTextColor={theme.colors.textMuted}
+              accessibilityLabel="Search audits by file name"
+              style={[styles.searchInput, { color: theme.colors.text }]}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {query ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Clear search"
+                onPress={() => setQuery("")}
+                style={({ hovered }: any) => [{ padding: 4 }, hovered ? { opacity: 0.6 } : null]}
+              >
+                <Text style={{ color: theme.colors.textMuted, fontSize: 16 }}>✕</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+
+        {history.length === 0 ? (
           <EmptyState
             icon="doc"
             title="No audits yet"
             body="Drop a document on the audit screen to run your first audit. Past scans show up here so you can pick one back up."
+          />
+        ) : filtered.length === 0 ? (
+          <EmptyState
+            icon="doc"
+            title="No matches"
+            body={`No saved audit matches "${query}". Try fewer letters, or clear the search.`}
           />
         ) : (
           <View style={styles.list}>
@@ -255,22 +339,49 @@ export default function DashboardScreen() {
                 Status
               </Text>
               <Text style={[styles.colHeader, styles.colAction, { color: theme.colors.textMuted }]}>
-                Open
+                Actions
               </Text>
             </View>
-            {recent.map((entry, idx) => (
+            {filtered.map((entry, idx) => (
               <AuditRow
                 key={entry.id}
                 entry={entry}
-                isLast={idx === recent.length - 1}
+                isLast={idx === filtered.length - 1}
                 onOpen={() =>
                   router.push(("/audit?historyId=" + encodeURIComponent(entry.id)) as any)
                 }
+                onDelete={() => setPendingDelete(entry)}
               />
             ))}
           </View>
         )}
       </Card>
+
+      <Dialog
+        open={!!pendingDelete}
+        title="Remove this audit?"
+        message={
+          pendingDelete
+            ? `"${pendingDelete.filename || "untitled"}" will be removed from your saved history on this device. This does not affect any file you already downloaded.`
+            : ""
+        }
+        confirmLabel="Remove"
+        cancelLabel="Keep"
+        destructive
+        onConfirm={() => pendingDelete && handleDelete(pendingDelete)}
+        onCancel={() => setPendingDelete(null)}
+      />
+
+      <Dialog
+        open={confirmClearAll}
+        title="Clear all saved audits?"
+        message={`This removes all ${history.length} saved ${history.length === 1 ? "audit" : "audits"} from your history on this device. Downloaded files are not affected.`}
+        confirmLabel="Clear all"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={handleClearAll}
+        onCancel={() => setConfirmClearAll(false)}
+      />
     </Screen>
   );
 }
@@ -306,9 +417,10 @@ interface AuditRowProps {
   entry: AuditHistoryEntry;
   isLast: boolean;
   onOpen: () => void;
+  onDelete: () => void;
 }
 
-function AuditRow({ entry, isLast, onOpen }: AuditRowProps) {
+function AuditRow({ entry, isLast, onOpen, onDelete }: AuditRowProps) {
   const theme = useTheme();
   const pending = entry.pending ?? 0;
   const status = pending > 0 ? "In review" : "Done";
@@ -369,8 +481,24 @@ function AuditRow({ entry, isLast, onOpen }: AuditRowProps) {
         <Chip label={status} tone={statusTone} />
       </View>
 
-      <View style={[styles.cell, styles.colAction]}>
+      <View style={[styles.cell, styles.colAction, styles.actionCell]}>
         <Button title="Open" variant="ghost" onPress={onOpen} />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={"Remove audit for " + (entry.filename || "untitled")}
+          onPress={(e: any) => {
+            if (e?.stopPropagation) e.stopPropagation();
+            onDelete();
+          }}
+          style={({ hovered, pressed }: any) => [
+            styles.deleteBtn,
+            { borderColor: theme.colors.border },
+            hovered ? { borderColor: theme.colors.danger, opacity: 1 } : null,
+            pressed ? { opacity: 0.7 } : null,
+          ]}
+        >
+          <Text style={{ color: theme.colors.danger, fontSize: 13, fontWeight: "700" }}>✕</Text>
+        </Pressable>
       </View>
     </Pressable>
   );
@@ -412,6 +540,23 @@ const styles = StyleSheet.create({
     gap: 12,
     flexWrap: "wrap",
   },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 12,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    // RN-Web: kill the default focus outline; the border conveys focus.
+    ...(Platform.OS === "web" ? ({ outlineStyle: "none" } as any) : null),
+  },
   list: { marginTop: 12 },
   listHeaderRow: {
     flexDirection: "row",
@@ -430,7 +575,17 @@ const styles = StyleSheet.create({
   colScore: { flexBasis: 110, flexGrow: 1 },
   colDate: { flexBasis: 90, flexGrow: 1 },
   colStatus: { flexBasis: 110, flexGrow: 1 },
-  colAction: { flexBasis: 90, flexGrow: 0, alignItems: "flex-end" },
+  colAction: { flexBasis: 130, flexGrow: 0, alignItems: "flex-end" },
+  actionCell: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 6 },
+  deleteBtn: {
+    width: 32,
+    height: 32,
+    borderWidth: 1,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    opacity: 0.75,
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",

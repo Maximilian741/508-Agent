@@ -12,6 +12,7 @@ import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useTheme } from "../useTheme";
 import { Button } from "./Button";
+import { Portal } from "./Portal";
 
 export interface DialogProps {
   open: boolean;
@@ -56,6 +57,7 @@ export function Dialog({
   if (!open) return null;
 
   return (
+    <Portal>
     <Pressable
       onPress={onCancel}
       // @ts-ignore — ARIA dialog
@@ -97,6 +99,7 @@ export function Dialog({
         </Text>
       </Pressable>
     </Pressable>
+    </Portal>
   );
 }
 
