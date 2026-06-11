@@ -341,11 +341,23 @@ export async function purchaseTier(tier: Tier): Promise<Account> {
     const detail = (body && (body.detail || body.message)) || ("HTTP " + res.status);
     throw new Error(typeof detail === "string" ? detail : "Purchase failed");
   }
+  // The backend returns { newBalance, purchased, tier } — NOT a user object.
+  // (The old code expected { user } and threw on every successful purchase,
+  // turning a real credit grant into a failure toast.) Merge the new balance
+  // into the cached account if we have one; otherwise pull a fresh /auth/me.
   const body = await _readJson(res);
-  const next = _coerceAccount(body && (body.user || body));
-  if (!next) throw new Error("Purchase succeeded but response was malformed.");
-  _writeCache(next);
-  return next;
+  const newBalance =
+    body && typeof body.newBalance === "number" ? body.newBalance : null;
+  const cached = _readCache();
+  if (cached && newBalance != null) {
+    const next: Account = { ...cached, credits: newBalance };
+    _writeCache(next);
+    return next;
+  }
+  const fresh = await refreshAccount();
+  if (fresh) return fresh;
+  if (cached) return cached;
+  throw new Error("Purchase succeeded but the account could not be refreshed.");
 }
 
 // ---------------------------------------------------------------------------
@@ -532,10 +544,12 @@ export async function spendCredits(
   try {
     const res = await apiFetch("/credits/spend", {
       method: "POST",
+      // Backend SpendRequest is camelCase with extra="forbid" — sending
+      // related_doc_id (snake_case) 422s before the handler runs.
       body: JSON.stringify({
         amount,
         description,
-        related_doc_id: relatedDocId ?? null,
+        relatedDocId: relatedDocId ?? null,
       }),
     });
     if (res.status === 402) return false; // insufficient funds
@@ -543,9 +557,13 @@ export async function spendCredits(
       console.warn("[account] /credits/spend", res.status);
       return false;
     }
+    // Response is { newBalance, spent } — not a user object. Merge the new
+    // balance into the cache if present.
     const body = await _readJson(res);
-    const next = _coerceAccount(body && (body.user || body));
-    if (next) _writeCache(next);
+    if (body && typeof body.newBalance === "number") {
+      const cached = _readCache();
+      if (cached) _writeCache({ ...cached, credits: body.newBalance });
+    }
     return true;
   } catch (e) {
     console.warn("[account] spendCredits failed", e);

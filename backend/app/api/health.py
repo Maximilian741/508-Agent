@@ -130,7 +130,78 @@ async def diagnostics() -> Dict[str, Any]:
             {"name": "parsers", "ok": False, "ms": _ms_since(t0), "detail": str(exc)}
         )
 
-    # 4) AI provider probe — exercise alt_text with a trivial payload.
+    # 4) Real pipeline self-test — build a tiny DOCX in memory with a KNOWN
+    #    defect, run the actual parse -> analyze -> detect path, and confirm
+    #    the engine flags it. This proves the whole pipeline genuinely works
+    #    on THIS running server, not just that modules import. Deterministic
+    #    (no AI), so it's cheap to call.
+    t0 = time.perf_counter()
+    try:
+        import os as _os
+        import tempfile as _tf
+
+        from docx import Document as _Docx
+
+        from app.analyzers.registry import run_analyzers as _run
+        from app.parsers import parse_to_tree as _parse
+        from app.services.remediation_engine import RemediationEngine as _Engine
+
+        _tmp = _tf.mkdtemp(prefix="508_selftest_")
+        _path = _os.path.join(_tmp, "selftest.docx")
+        _d = _Docx()  # deliberately NO title
+        _d.add_paragraph("A tiny self-test document with a deliberate defect.")
+        _d.save(_path)
+        _res = _parse(_path)
+        _run(_res.tree)
+        _viol = _Engine().detect_violations(_res.tree)
+        _codes = {v.rule_id for v in _viol}
+        _ok = "DOCUMENT_TITLE_MISSING" in _codes
+        try:
+            _os.remove(_path)
+            _os.rmdir(_tmp)
+        except Exception:
+            pass
+        payload["checks"].append(
+            {
+                "name": "pipeline",
+                "ok": _ok,
+                "ms": _ms_since(t0),
+                "detail": (
+                    "End-to-end self-test passed (parsed a document and detected its issue)"
+                    if _ok
+                    else "Self-test ran but did not detect the expected issue"
+                ),
+            }
+        )
+        if not _ok:
+            payload["status"] = "degraded"
+    except Exception as exc:
+        payload["status"] = "degraded"
+        payload["checks"].append(
+            {"name": "pipeline", "ok": False, "ms": _ms_since(t0), "detail": str(exc)}
+        )
+
+    # 5) Deployment configuration flags (booleans only — no secrets). Lets the
+    #    in-app System Check tell the owner what's wired up.
+    try:
+        from app.config import get_settings as _gs
+        from app.services.ocr import get_ocr_provider as _gop
+
+        _s = _gs()
+        _stripe_cfg = bool(_os.environ.get("STRIPE_SECRET_KEY"))
+        _smtp_cfg = bool(_os.environ.get("SMTP_HOST"))
+        payload["deployment"] = {
+            "environment": _s.environment,
+            "appVersion": getattr(_s, "app_version", ""),
+            "ocrEnabled": bool(getattr(_s, "ocr_enabled", False)),
+            "ocrAvailable": _gop() is not None,
+            "stripeConfigured": _stripe_cfg,
+            "emailConfigured": _smtp_cfg,
+        }
+    except Exception as exc:  # never fail diagnostics on the config read
+        payload["deployment"] = {"error": str(exc)}
+
+    # 6) AI provider probe — exercise alt_text with a trivial payload.
     t0 = time.perf_counter()
     try:
         from app.ai.semantic_inference import build_default_provider

@@ -321,6 +321,63 @@ def _charge_credits(user_id: str, doc_format: str, doc_id: str | None = None) ->
     except InsufficientCreditsError:
         raise HTTPException(status_code=402, detail="Insufficient credits")
 
+
+def _precheck_credits(user_id: str, doc_format: str) -> int:
+    """Read-only affordability check BEFORE doing any work.
+
+    Returns the per-format cost. Raises 401 (no account) or 402 (can't
+    afford). Does NOT spend or trigger an overage charge — the real debit
+    happens only after the remediated file is successfully produced, so a
+    parse/write failure never charges the user (the cardinal billing bug:
+    paying for a 422 on exactly the corrupt/exotic documents this tool
+    targets). If the balance can't be read we proceed and let the real
+    post-success spend be the source of truth.
+    """
+    if not user_id:
+        raise HTTPException(status_code=401, detail="missing_account")
+    fmt = (doc_format or "").lstrip(".").lower()
+    cost = DOC_FORMAT_COSTS.get(fmt) or 5
+    try:
+        from app.api.teams import resolve_credit_user_id
+
+        target_id = resolve_credit_user_id(user_id)
+    except Exception:
+        target_id = user_id
+    try:
+        from app.db.models import UserRow as _UserRow
+        from app.db.session_sqlalchemy import session_scope as _scope
+        from sqlalchemy import select as _select
+
+        with _scope() as session:
+            row = session.execute(
+                _select(_UserRow).where(_UserRow.id == target_id)
+            ).scalar_one_or_none()
+            balance = int(row.credits_balance or 0) if row else 0
+        if balance >= cost:
+            return cost
+        # Short on credits — only OK if overage auto-top-up is available.
+        try:
+            from app.api.stripe_billing import _overage_eligible
+
+            if _overage_eligible(target_id):
+                return cost
+        except Exception:
+            pass
+        raise HTTPException(status_code=402, detail="Insufficient credits")
+    except HTTPException:
+        raise
+    except Exception:
+        # Balance unreadable — don't block; the post-success spend will 402
+        # if truly insufficient (and that path never delivered a file).
+        return cost
+
+
+def _cleanup_job_dir(job_dir: Path) -> None:
+    try:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except Exception:
+        pass
+
 @router.post("/remediate")
 async def remediate(
     request: Request,
@@ -351,9 +408,11 @@ async def remediate(
     except Exception:
         raise HTTPException(status_code=400, detail="rejected_violations must be a JSON array of strings.")
 
-    # Charge credits up front - analyze stays free, remediate costs.
+    # Affordability check ONLY (no spend yet). The real debit happens after
+    # the remediated file is successfully written, so a parse/write failure
+    # never charges the user. A broke user still gets a fast 402 here.
     fmt = suffix.lstrip(".")
-    _charge_credits(user_id=user_id, doc_format=fmt)
+    _precheck_credits(user_id=user_id, doc_format=fmt)
 
     settings = get_settings()
     upload_result = await stream_to_tempfile(
@@ -380,10 +439,12 @@ async def remediate(
             pass
 
     # CPU-bound parse/analyze/remediate runs in the threadpool (see analyze).
+    # On ANY failure here the job dir is removed and NO credit is charged.
     try:
         result = await run_in_threadpool(parse_to_tree, str(source_path))
     except Exception as exc:
         logger.exception("remediate parse failed: %s", exc)
+        _cleanup_job_dir(job_dir)
         raise HTTPException(
             status_code=422,
             detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF/DOCX/PPTX.",
@@ -469,9 +530,43 @@ async def remediate(
     # PDF tagging re-serializes content streams — so threadpool it too).
     output_name = _suffix_filename(safe_name, "-remediated")
     output_path = job_dir / output_name
-    write_result = await run_in_threadpool(
-        write_remediated, source_path, tree, output_path, source_format=result.format
+    try:
+        write_result = await run_in_threadpool(
+            write_remediated, source_path, tree, output_path, source_format=result.format
+        )
+    except Exception as exc:
+        logger.exception("remediate write failed: %s", exc)
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail="Failed to write the remediated file. The document may be encrypted or malformed.",
+        )
+
+    # Hard-failure guard: if the writer couldn't open the document it copies
+    # the source through UNCHANGED (e.g. encrypted PDF). Returning that as a
+    # success would charge the user for their own untouched file — treat it
+    # as a 422 with no charge instead.
+    _skipped = write_result.get("skipped") if isinstance(write_result, dict) else []
+    _applied = write_result.get("applied") if isinstance(write_result, dict) else []
+    _hard_fail = isinstance(_skipped, list) and any(
+        isinstance(s, dict) and str(s.get("reason", "")).startswith(("failed_to_open", "copy_failed"))
+        for s in _skipped
     )
+    if _hard_fail and not _applied:
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail="Could not remediate this file — it may be encrypted or corrupted. You were not charged.",
+        )
+
+    # Success: NOW charge credits (never before the file exists). On the rare
+    # race where the wallet was drained since the precheck, this 402s and we
+    # clean up without delivering a file.
+    try:
+        _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
+    except HTTPException:
+        _cleanup_job_dir(job_dir)
+        raise
 
     # Owner email comes from the CF Access middleware (when enabled).  We
     # persist it on the job manifest so /pipeline/files can compare against

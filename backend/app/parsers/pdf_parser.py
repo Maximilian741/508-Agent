@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -63,6 +64,14 @@ from app.models.accessibility import (
 # ---------------------------------------------------------------------------
 # Heading detection
 # ---------------------------------------------------------------------------
+
+# Max PDF pages analyzed per document — a guard against a single huge upload
+# tying up a worker (each page is tokenized several times across parser +
+# tagger). Overridable via env for hosts with more headroom.
+try:
+    _MAX_PDF_PAGES = max(1, int(os.environ.get("MAX_PDF_PAGES", "400")))
+except (TypeError, ValueError):
+    _MAX_PDF_PAGES = 400
 
 _HEADING_RE = re.compile(r"^(?P<num>\d+(?:\.\d+){0,5})\s+(?P<text>.+)$")
 _ALL_CAPS_RE = re.compile(r"^[A-Z0-9][A-Z0-9 \-:&,'\".]+$")
@@ -493,7 +502,18 @@ class PDFParser:
         total_text_chars = 0
         image_only_pages = 0  # pages with image XObject(s) and <50 chars of text
 
-        for page_index in range(page_count):
+        # Page cap: real-world government PDFs can be hundreds of pages, and
+        # every page is tokenized multiple times (text colours, struct tree,
+        # text extract, then the writer's tagger re-tokenizes). Without a
+        # ceiling one huge upload ties up a worker for minutes and can blow
+        # the request timeout. Analyze the first N pages and disclose the
+        # truncation honestly rather than hanging.
+        pages_to_process = min(page_count, _MAX_PDF_PAGES)
+        if page_count > _MAX_PDF_PAGES:
+            properties["pages_truncated"] = True
+            properties["pages_processed"] = pages_to_process
+
+        for page_index in range(pages_to_process):
             page = reader.pages[page_index]
             page_label = f"page-{page_index + 1}"
             section = SectionNode(

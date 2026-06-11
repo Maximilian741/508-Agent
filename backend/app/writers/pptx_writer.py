@@ -809,7 +809,17 @@ def _apply_pptx_list_conversion(node, text_by_node_id, applied, skipped) -> None
             bu = pPr.makeelement(qn("a:buChar"), {"char": "•"})
         else:
             bu = pPr.makeelement(qn("a:buAutoNum"), {"type": "arabicPeriod"})
-        pPr.append(bu)
+        # OOXML CT_TextParagraphProperties requires the bullet group to come
+        # BEFORE a:tabLst / a:defRPr / a:extLst. A real PowerPoint paragraph
+        # usually already has an a:defRPr, so a naive append produces an
+        # out-of-order child that PowerPoint refuses to open. Insert before
+        # the first trailing element instead.
+        _trailing = (qn("a:tabLst"), qn("a:defRPr"), qn("a:extLst"))
+        anchor = next((c for c in pPr if c.tag in _trailing), None)
+        if anchor is not None:
+            anchor.addprevious(bu)
+        else:
+            pPr.append(bu)
 
         # Strip the typed marker from the first non-empty run.
         for run in paragraph.runs:

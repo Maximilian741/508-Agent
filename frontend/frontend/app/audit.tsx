@@ -69,6 +69,7 @@ import { Skeleton, SkeletonBlock } from "../src/ui/components/Skeleton";
 import { PixelSpinner } from "../src/ui/components/PixelSpinner";
 import { Hero } from "../src/ui/components/Hero";
 import { openHowItWorks } from "../src/ui/components/OnboardingTour";
+import { Portal } from "../src/ui/components/Portal";
 import { LetterFromCurb } from "../src/ui/components/LetterFromCurb";
 import { UncertaintyChip } from "../src/ui/components/UncertaintyChip";
 import { useToast } from "../src/ui/toast";
@@ -144,6 +145,10 @@ export default function AuditScreen() {
   const [restoredFromDraft, setRestoredFromDraft] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const lastScoreRef = useRef<number>(0);
+  // One stable history id per audit session so the upload row and the live
+  // auto-save update the SAME row (instead of leaving two: a snapshot-less
+  // upload row and a separate "-live" row).
+  const auditIdRef = useRef<string | null>(null);
   const [downloadingFixed, setDownloadingFixed] = useState(false);
   const [fixedDownloadUrl, setFixedDownloadUrl] = useState<string | null>(null);
   // "Verify the fix" re-audit of the remediated file (free analyze pass).
@@ -363,7 +368,7 @@ export default function AuditScreen() {
     const handle = window.setTimeout(() => {
       try {
         appendHistory({
-          id: `${filename}-${reviewIndex < 0 ? "new" : "live"}`,
+          id: auditIdRef.current ?? `${filename}-live`,
           filename,
           ranAt: new Date().toISOString(),
           score: liveScore.score,
@@ -399,6 +404,14 @@ export default function AuditScreen() {
       setDecisionLog([]);
       setReviewIndex(0);
       setEditing(false);
+      // Reset the full document context (mirrors handleFile) so a previous
+      // real audit's source file, remediation diff, download link and
+      // re-audit comparison don't bleed into this sample.
+      setSourceFile(null);
+      setFixedDownloadUrl(null);
+      setReaudit(null);
+      setLastRemediation(null);
+      auditIdRef.current = `sample-${sample.title}`;
       const response = sample.buildResponse();
       setPreviousScore(report?.score.score ?? 0);
       setReport(response);
@@ -449,8 +462,9 @@ export default function AuditScreen() {
         // already signed in this still increments harmlessly; the gate
         // checks the token first, so signed-in users never get blocked.
         setFreeScansUsed(freeScansUsed + 1);
+        auditIdRef.current = `audit-${Date.now()}-${file.name}`;
         appendHistory({
-          id: `${file.name}-${Date.now()}`,
+          id: auditIdRef.current,
           filename: file.name,
           ranAt: new Date().toISOString(),
           score: response.score.score,
@@ -550,32 +564,33 @@ export default function AuditScreen() {
     ) => {
       if (!report) return;
       const at = new Date().toISOString();
-      let count = 0;
-      const newLog: DecisionLogItem[] = [];
-      setDecisions((prev) => {
-        const result = { ...prev };
-        for (const v of report.violations) {
-          if (!filterFn(v)) continue;
-          const previous = prev[v.id] ?? { decision: "pending" as Decision };
-          if (previous.decision === next) continue;
-          result[v.id] = { decision: next, decidedAt: at };
-          count += 1;
-          const catalog = lookupIssue(v.ruleId);
-          newLog.unshift({
-            violationId: v.id,
-            title: catalog.title,
-            decision: next,
-            at,
-            previous,
-          });
-        }
-        return result;
-      });
+      // Compute the changes PURELY (outside any setState updater). Mutating
+      // closure vars inside a setState updater double-counts under React
+      // StrictMode (the updater runs twice) — the source of "Approved 6"
+      // when 3 were approved + duplicated undo-log rows.
+      const changes: Record<string, IssueState> = {};
+      const logEntries: DecisionLogItem[] = [];
+      for (const v of report.violations) {
+        if (!filterFn(v)) continue;
+        const previous = decisions[v.id] ?? { decision: "pending" as Decision };
+        if (previous.decision === next) continue;
+        changes[v.id] = { decision: next, decidedAt: at };
+        const catalog = lookupIssue(v.ruleId);
+        logEntries.push({
+          violationId: v.id,
+          title: catalog.title,
+          decision: next,
+          at,
+          previous,
+        });
+      }
+      const count = Object.keys(changes).length;
       if (count === 0) {
         toast.info(`Nothing to ${next}`, { description: label });
         return;
       }
-      setDecisionLog((prev) => [...newLog.reverse(), ...prev].slice(0, 25));
+      setDecisions((prev) => ({ ...prev, ...changes }));
+      setDecisionLog((prev) => [...logEntries, ...prev].slice(0, 25));
       toast.success(
         next === "approved"
           ? `Approved ${count} item${count === 1 ? "" : "s"}`
@@ -583,7 +598,7 @@ export default function AuditScreen() {
         { description: label + " · undo with Ctrl+Z (one step at a time)" },
       );
     },
-    [report, toast],
+    [report, decisions, toast],
   );
 
   const resetDecisions = useCallback(() => {
@@ -669,9 +684,14 @@ export default function AuditScreen() {
       unlockAchievement("first_fix_approved");
       // New balance shows on the AppNav chip on the next render.
       if (!mockMode) void refreshAccount();
-      if (Platform.OS === "web") {
-        window.open(fullUrl, "_blank");
-      }
+      // Trigger the download. window.open() AFTER an await is treated as a
+      // non-gesture popup and gets blocked in every major browser — which
+      // would leave a PAID remediation with no file. A same-tab anchor
+      // navigation is not popup-blocked, and the file endpoint serves
+      // Content-Disposition: attachment so the browser downloads in place
+      // without navigating away. The signed URL is also shown in the UI as a
+      // visible fallback.
+      triggerFileDownload(fullUrl, result.filename);
     } catch (e) {
       const err = e as Error & { status?: number };
       if (err.status === 402) {
@@ -2127,6 +2147,7 @@ function Section(props: {
 function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
   const theme = useTheme();
   return (
+    <Portal>
     <Pressable accessibilityRole="button"
       onPress={onClose}
       accessibilityLabel="Close keyboard shortcuts overlay"
@@ -2169,6 +2190,7 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
         </Text>
       </View>
     </Pressable>
+    </Portal>
   );
 }
 
@@ -2371,6 +2393,31 @@ function _saveBlob(blob: Blob, name: string) {
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Trigger a download of a server URL reliably. Unlike window.open() — which
+ * browsers block when called after an await (no longer a "user gesture") —
+ * a same-tab anchor navigation is never popup-blocked. The remediated-file
+ * endpoint serves Content-Disposition: attachment, so the browser downloads
+ * the file in place without navigating away from the audit screen.
+ */
+function triggerFileDownload(url: string, filename?: string) {
+  if (Platform.OS !== "web" || typeof document === "undefined") {
+    try {
+      window.open(url, "_blank");
+    } catch {
+      // no-op on native
+    }
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = url;
+  if (filename) a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 function _safeFilename(s: string): string {

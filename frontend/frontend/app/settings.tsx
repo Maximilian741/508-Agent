@@ -25,6 +25,7 @@ import {
 } from "../src/domain/notifications";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
+import { openSystemCheck } from "../src/ui/components/SystemCheckWizard";
 import { Card } from "../src/ui/components/Card";
 import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Chip } from "../src/ui/components/Chip";
@@ -370,9 +371,13 @@ export default function SettingsScreen() {
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Diagnostics</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Run a quick health check to confirm the analyzer is reachable and what AI provider is
-          active. The result appears below.
+          Not sure if everything's working? Run the System check — it confirms the backend, the
+          database, and a real end-to-end engine self-test, and shows what's configured (OCR,
+          Stripe, email). The raw operator probe is below.
         </Text>
+        <View style={{ marginTop: 10, marginBottom: 4 }}>
+          <Button title="Run system check" onPress={openSystemCheck} />
+        </View>
         <DiagnosticsPanel apiBaseUrl={apiBaseUrl} />
       </Card>
 
