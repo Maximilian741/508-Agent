@@ -178,6 +178,13 @@ export function findHistoryEntry(id: string): AuditHistoryEntry | null {
   return loadHistory().find((e) => e.id === id) ?? null;
 }
 
+/** Remove a single audit from history by id. Returns the remaining list. */
+export function deleteHistoryEntry(id: string): AuditHistoryEntry[] {
+  const next = loadHistory().filter((e) => e.id !== id);
+  saveHistory(next);
+  return next;
+}
+
 export function clearHistory(): void {
   if (Platform.OS !== "web") {
     memoryStore[_activeKey()] = [];
