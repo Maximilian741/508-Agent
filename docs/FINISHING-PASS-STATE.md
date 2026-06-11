@@ -1,7 +1,9 @@
-# Launch finishing loop — state (post-#26)
+# Launch finishing loop — state (post-#27)
 
-> Work queue for the self-paced finishing loop. PRs #24, #25, #26 are MERGED.
-> Current working branch: feat/launch-polish-4 (PR #27).
+> PRs #24-#27 are MERGED. Current branch: feat/launch-handoff (PR #28) —
+> the wrap-up batch: owner handoff guide + Sunriver go-to-market plan.
+> STANDING USER PREFERENCE: bigger batches — bundle MULTIPLE features per
+> PR; he will merge larger, less often.
 
 ## Done in PR #27 so far
 
