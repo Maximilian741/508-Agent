@@ -30,6 +30,7 @@ import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { openHowItWorks } from "../src/ui/components/OnboardingTour";
+import { openSystemCheck } from "../src/ui/components/SystemCheckWizard";
 import { PixelIcon } from "../src/ui/components/PixelIcon";
 import { Screen } from "../src/ui/components/Screen";
 import { useToast } from "../src/ui/toast";
@@ -270,6 +271,7 @@ export default function DashboardScreen() {
             Recent audits
           </Text>
           <View style={styles.headerActions}>
+            <Button title="System check" variant="ghost" onPress={openSystemCheck} />
             <Button title="How it works" variant="ghost" onPress={openHowItWorks} />
             {history.length > 0 ? (
               <Button

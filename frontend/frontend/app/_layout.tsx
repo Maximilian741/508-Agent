@@ -4,6 +4,7 @@ import { View } from "react-native";
 import { AppNav } from "../src/ui/components/AppNav";
 import { ErrorBoundary } from "../src/ui/components/ErrorBoundary";
 import { OnboardingTour } from "../src/ui/components/OnboardingTour";
+import { SystemCheckWizard } from "../src/ui/components/SystemCheckWizard";
 import { ShaderCanvas } from "../src/ui/components/ShaderCanvas";
 import { SkipToContent } from "../src/ui/components/SkipToContent";
 import { ToastHost } from "../src/ui/toast";
@@ -46,6 +47,7 @@ export default function RootLayout() {
           <AppNav />
           <Stack screenOptions={{ headerShown: false }} />
           <OnboardingTour />
+          <SystemCheckWizard />
           <ToastHost />
         </View>
       </View>
