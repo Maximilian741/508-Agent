@@ -150,6 +150,7 @@ export default function AuditScreen() {
   // upload row and a separate "-live" row).
   const auditIdRef = useRef<string | null>(null);
   const [downloadingFixed, setDownloadingFixed] = useState(false);
+  const [issuingCert, setIssuingCert] = useState(false);
   const [fixedDownloadUrl, setFixedDownloadUrl] = useState<string | null>(null);
   // "Verify the fix" re-audit of the remediated file (free analyze pass).
   const [reaudit, setReaudit] = useState<{
@@ -751,11 +752,13 @@ export default function AuditScreen() {
 
   const onIssueCertificate = async () => {
     if (!report) return;
+    if (issuingCert) return; // guard against a double-click charging twice
     const fname = filename ?? "document";
     if (mockMode) {
       _openReport(report, decisions, decisionLog, fname);
       return;
     }
+    setIssuingCert(true);
     try {
       // The certificate is bound to the SERVER's analysis of this document
       // (looked up by documentId) — the client no longer supplies the numbers.
@@ -783,6 +786,8 @@ export default function AuditScreen() {
       } else {
         toast.error("Couldn't issue certificate", { description: e?.message || "Try again." });
       }
+    } finally {
+      setIssuingCert(false);
     }
   };
 
@@ -1768,8 +1773,10 @@ export default function AuditScreen() {
           {showMoreOptions ? (
             <View style={[styles.row, { marginTop: 8 }]}>
               <Button
-                title="Issue remediation certificate"
+                title={issuingCert ? "Issuing…" : "Issue remediation certificate"}
                 onPress={onIssueCertificate}
+                loading={issuingCert}
+                disabled={issuingCert}
                 variant="secondary"
                 accessibilityHint="Issues a verifiable remediation certificate (free on a plan, or a few credits) and opens the printable report."
               />

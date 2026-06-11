@@ -237,12 +237,9 @@ export default function AccountScreen() {
               title="Delete account"
               variant="danger"
               onPress={() => {
-                if (Platform.OS === "web" && typeof window !== "undefined") {
-                  const ok = window.confirm(
-                    "Delete your account?\n\nThis permanently removes your profile and credit history. This cannot be undone.",
-                  );
-                  if (!ok) return;
-                }
+                // Opens the in-card "type DELETE to confirm" box — that IS the
+                // confirmation. (A separate window.confirm here was a redundant
+                // double-prompt.)
                 setDeleteConfirm("");
                 setDeleteOpen(true);
               }}
