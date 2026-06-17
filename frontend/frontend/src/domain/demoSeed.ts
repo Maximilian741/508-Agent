@@ -280,7 +280,7 @@ function fixtureContrastFlyer(): PipelineResponse {
     violations: [
       {
         id: "demo-fl-contrast-1",
-        ruleId: "INSUFFICIENT_COLOR_CONTRAST",
+        ruleId: "LOW_CONTRAST_TEXT",
         severity: "error",
         description: "Text color contrast is below the 4.5:1 minimum.",
         nodeId: "docx-p-7",

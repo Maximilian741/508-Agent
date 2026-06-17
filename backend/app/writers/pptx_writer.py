@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from lxml import etree
 
 from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.oxml.ns import qn
 
 from app.models.accessibility import (
@@ -50,6 +50,7 @@ from app.models.accessibility import (
     ImageNode,
     LinkNode,
     ParagraphNode,
+    SectionNode,
     TableCellNode,
     TableCellType,
     TableNode,
@@ -146,6 +147,7 @@ def write_remediated_pptx(
         link_by_node_id,
         table_by_node_id,
         text_by_node_id,
+        section_by_node_id,
     ) = _index_shapes_by_parser_id(prs)
 
     # Step 4 — document-level metadata (title, language) first.
@@ -155,7 +157,11 @@ def write_remediated_pptx(
     # this writer supports; everything else passes silently (it is not an
     # error for the tree to contain unsupported node types).
     for node in mutated_index.values():
-        if isinstance(node, ImageNode):
+        if isinstance(node, SectionNode) and (node.metadata.properties or {}).get("set_slide_title"):
+            # An untitled slide the SET_SLIDE_TITLE executor approved — insert a
+            # real title placeholder carrying the derived text.
+            _apply_slide_title(node, section_by_node_id, applied, skipped)
+        elif isinstance(node, ImageNode):
             _apply_image(node, image_by_node_id, applied, skipped)
         elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
             # A typed fake-list text box the FIX_LIST_STRUCTURE executor
@@ -258,6 +264,7 @@ def _index_shapes_by_parser_id(
     Dict[str, Any],
     Dict[str, Any],
     Dict[str, Any],
+    Dict[str, Any],
 ]:
     """Walk ``prs`` exactly the way :func:`PPTXParser.parse_to_tree` does and
     pair each minted id with the underlying python-pptx object.
@@ -270,6 +277,7 @@ def _index_shapes_by_parser_id(
     * ``link_by_node_id`` — ``{node_id: run}`` for hyperlink runs.
     * ``table_by_node_id`` — ``{table_node_id: table_shape}`` for tables.
     * ``text_by_node_id`` — ``{paragraph_node_id: shape}`` for text shapes.
+    * ``section_by_node_id`` — ``{section_node_id: slide}`` for slides.
     """
 
     image_by_node_id: Dict[str, Any] = {}
@@ -277,13 +285,14 @@ def _index_shapes_by_parser_id(
     link_by_node_id: Dict[str, Any] = {}
     table_by_node_id: Dict[str, Any] = {}
     text_by_node_id: Dict[str, Any] = {}
+    section_by_node_id: Dict[str, Any] = {}
 
     ids = _IdCounter()
 
     for slide_index, slide in enumerate(prs.slides, start=1):
         # The parser mints a section + (optional) heading id BEFORE iterating
         # shapes.  We mirror that to keep the counter in lock-step.
-        ids(f"slide-{slide_index}-section")
+        section_by_node_id[ids(f"slide-{slide_index}-section")] = slide
         slide_title = ""
         title_shape_id = None
         try:
@@ -342,7 +351,14 @@ def _index_shapes_by_parser_id(
                         "skip_text_frame_walk slide=%s", slide_index, exc_info=True
                     )
 
-    return image_by_node_id, cell_by_node_id, link_by_node_id, table_by_node_id, text_by_node_id
+    return (
+        image_by_node_id,
+        cell_by_node_id,
+        link_by_node_id,
+        table_by_node_id,
+        text_by_node_id,
+        section_by_node_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +389,111 @@ def _set_pptx_run_langs(prs, language: str) -> int:
             except Exception:
                 continue
     return count
+
+
+def _layout_title_placeholder(slide):
+    """Return the slide layout's title placeholder, or None.
+
+    The title is idx 0 by convention; we also accept it by placeholder type so
+    a layout that numbers things unusually still matches.
+    """
+    try:
+        layout = slide.slide_layout
+        placeholders = list(layout.placeholders)
+    except Exception:
+        return None
+    for ph in placeholders:
+        try:
+            if ph.placeholder_format.idx == 0:
+                return ph
+        except Exception:
+            continue
+    for ph in placeholders:
+        try:
+            if ph.placeholder_format.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+                return ph
+        except Exception:
+            continue
+    return None
+
+
+def _ensure_slide_title(slide, text: str) -> Optional[str]:
+    """Make ``slide`` carry a real title placeholder containing ``text``.
+
+    Three tiers, so this essentially never fails (keeping the executor's
+    SUCCESS honest — a fix that's always written, never just claimed):
+      1. A title placeholder already on the slide (e.g. present but empty) —
+         just set its text.
+      2. Clone the layout's title placeholder onto the slide.
+      3. No layout title placeholder (e.g. a Blank layout) — build a title
+         placeholder (idx 0) from scratch.
+    Returns a short tag on success, or None if every tier failed.
+    """
+    try:
+        existing = slide.shapes.title
+    except Exception:
+        existing = None
+    if existing is not None:
+        try:
+            existing.text = text
+            return "set_existing"
+        except Exception:
+            return None
+
+    layout_title = _layout_title_placeholder(slide)
+    if layout_title is not None:
+        try:
+            slide.shapes.clone_placeholder(layout_title)
+            title = slide.shapes.title
+            if title is not None:
+                title.text = text
+                return "cloned_from_layout"
+        except Exception:
+            logger.debug("clone_placeholder failed; falling back to scratch title", exc_info=True)
+
+    # Tier 3 — construct a title placeholder directly.
+    try:
+        shapes = slide.shapes
+        id_ = shapes._next_shape_id  # noqa: SLF001 - mirrors clone_placeholder
+        name = f"Title {id_}"
+        # orient/sz must be valid ST strings ("horz"/"full") — new_placeholder_sp
+        # assigns them unconditionally and rejects None.
+        shapes._spTree.add_placeholder(id_, name, PP_PLACEHOLDER.TITLE, "horz", "full", 0)  # noqa: SLF001
+        title = slide.shapes.title
+        if title is not None:
+            title.text = text
+            return "built_from_scratch"
+    except Exception:
+        logger.debug("scratch title placeholder build failed", exc_info=True)
+    return None
+
+
+def _apply_slide_title(
+    section: SectionNode,
+    section_by_node_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Insert/set a real title placeholder on the slide for ``section``."""
+    slide = section_by_node_id.get(section.id)
+    if slide is None:
+        skipped.append({"target_id": section.id, "reason": "slide_not_found_for_section"})
+        return
+    title = (section.metadata.properties or {}).get("set_slide_title")
+    if not title:
+        skipped.append({"target_id": section.id, "reason": "no_title_text"})
+        return
+    result = _ensure_slide_title(slide, str(title))
+    if result is None:
+        skipped.append({"target_id": section.id, "reason": "could_not_create_title_placeholder"})
+        return
+    applied.append(
+        {
+            "kind": "slide_title",
+            "target_id": section.id,
+            "summary": f"slide title = {str(title)!r} ({result})",
+        }
+    )
 
 
 def _apply_document_metadata(

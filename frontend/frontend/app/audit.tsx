@@ -43,6 +43,11 @@ import {
 } from "../src/domain/achievements";
 import { loadWeights } from "../src/domain/scoreWeights";
 import { lookupIssue } from "../src/domain/issueCatalog";
+import {
+  computeConformance,
+  conformanceTotals,
+  type CriterionVerdict,
+} from "../src/domain/wcagCriteria";
 import { IssuedCertificate, issueCertificate, loadAccount, loadToken, refreshAccount } from "../src/domain/account";
 import { costFor, formatForFile } from "../src/domain/creditCosts";
 import { SignInModal } from "../src/ui/components/SignInModal";
@@ -149,8 +154,15 @@ export default function AuditScreen() {
   // auto-save update the SAME row (instead of leaving two: a snapshot-less
   // upload row and a separate "-live" row).
   const auditIdRef = useRef<string | null>(null);
+  // Monotonic id per analyze request, so a stale (e.g. rapidly double-uploaded)
+  // call can't clobber the latest result — fixes a stale error banner showing
+  // next to a successful audit.
+  const analyzeSeqRef = useRef(0);
   const [downloadingFixed, setDownloadingFixed] = useState(false);
   const [issuingCert, setIssuingCert] = useState(false);
+  // The most recently issued certificate, so the conformance report can cite a
+  // verifiable reference if the user issued one.
+  const [lastIssuedCert, setLastIssuedCert] = useState<IssuedCertificate | null>(null);
   const [fixedDownloadUrl, setFixedDownloadUrl] = useState<string | null>(null);
   // "Verify the fix" re-audit of the remediated file (free analyze pass).
   const [reaudit, setReaudit] = useState<{
@@ -158,6 +170,9 @@ export default function AuditScreen() {
     afterIssues: number;
     afterScore: number;
     afterGrade: string;
+    // The fixed file's own findings, so the conformance report can reflect the
+    // REMEDIATED document (not just the original) once "Verify the fix" is run.
+    afterViolations?: PipelineViolation[];
   } | null>(null);
   const [reauditBusy, setReauditBusy] = useState(false);
   const [lastRemediation, setLastRemediation] = useState<
@@ -273,6 +288,8 @@ export default function AuditScreen() {
 
   const currentViolation: PipelineViolation | null = filteredViolations[reviewIndex] ?? null;
   const totalIssues = report?.violations.length ?? 0;
+  // How many findings we can actually auto-fix (drives the one-click CTA copy).
+  const fixableCount = useMemo(() => _countFixable(report), [report]);
   const reviewedCount = useMemo(
     () =>
       Object.values(decisions).filter(
@@ -438,6 +455,8 @@ export default function AuditScreen() {
       ) {
         return;
       }
+      const seq = ++analyzeSeqRef.current;
+      const isStale = () => seq !== analyzeSeqRef.current;
       setBusy(true);
       setError(null);
       setFilename(file.name);
@@ -452,6 +471,9 @@ export default function AuditScreen() {
       setEditing(false);
       try {
         const response = await client.runPipeline(file, true);
+        // A newer upload superseded this one — drop this result so it can't
+        // overwrite the latest (or leave a stale error/report behind).
+        if (isStale()) return;
         setPreviousScore(report?.score.score ?? 0);
         setReport(response);
         // Apply the user's auto-fix policy to the fresh report.
@@ -494,6 +516,7 @@ export default function AuditScreen() {
         notify(`Audit complete — ${response.score.grade}`, file.name);
         playChime();
       } catch (e) {
+        if (isStale()) return; // a newer upload owns the UI now
         const err = e as Error & { status?: number };
         const msg = err.message ?? "Couldn't analyze that file.";
         // Anonymous first touch: the API requires an account even for the
@@ -511,7 +534,8 @@ export default function AuditScreen() {
         setError(msg);
         toast.error("Audit failed", { description: msg });
       } finally {
-        setBusy(false);
+        // Only the latest request controls the busy spinner.
+        if (!isStale()) setBusy(false);
       }
     },
     [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy],
@@ -738,6 +762,7 @@ export default function AuditScreen() {
         afterIssues: after.violations.length,
         afterScore: after.score.score,
         afterGrade: after.score.grade,
+        afterViolations: after.violations,
       });
       toast.success("Re-audit complete", {
         description: `${report.violations.length} issue(s) before → ${after.violations.length} after.`,
@@ -763,6 +788,7 @@ export default function AuditScreen() {
       // The certificate is bound to the SERVER's analysis of this document
       // (looked up by documentId) — the client no longer supplies the numbers.
       const cert = await issueCertificate({ documentId: report.summary.documentId });
+      setLastIssuedCert(cert);
       _openReport(report, decisions, decisionLog, fname, cert);
       unlockAchievement("first_certificate");
       toast.success("Remediation summary issued", {
@@ -790,6 +816,49 @@ export default function AuditScreen() {
       setIssuingCert(false);
     }
   };
+
+  /**
+   * Download a procurement-grade Accessibility Conformance Report (VPAT-style):
+   * every WCAG 2.1 A/AA criterion with a Supports / Partially Supports / Does
+   * Not Support / Not Evaluated verdict. If "Verify the fix" has been run, the
+   * report reflects the REMEDIATED document (its re-scanned findings); otherwise
+   * it reflects the document as analyzed. Honest by construction — criteria the
+   * engine doesn't test are marked "Not Evaluated", never silently "Supports".
+   */
+  const onDownloadConformanceReport = useCallback(() => {
+    if (!report) {
+      toast.warning("No audit yet", {
+        description: "Run an audit first so we can build the conformance report.",
+        dedupeKey: "no-audit-yet",
+      });
+      return;
+    }
+    if (Platform.OS !== "web") return;
+    const fname = filename ?? "document";
+    const usingFixed = !!reaudit?.afterViolations;
+    const findings = (usingFixed ? reaudit!.afterViolations! : report.violations).map((v) => ({
+      ruleId: v.ruleId,
+      severity: v.severity,
+    }));
+    const html = _buildConformanceReportHtml({
+      report,
+      filename: fname,
+      findings,
+      assessedFixedFile: usingFixed,
+      cert: lastIssuedCert,
+      // Print the score of the version the verdicts describe.
+      scoreNum: usingFixed ? reaudit!.afterScore : report.score.score,
+      scoreGrade: usingFixed ? reaudit!.afterGrade : report.score.grade,
+    });
+    const blob = new Blob([html], { type: "text/html" });
+    _saveBlob(blob, _safeFilename(fname) + "-conformance-report.html");
+    unlockAchievement("first_certificate");
+    toast.success("Conformance report downloaded", {
+      description: usingFixed
+        ? "Reflects your remediated file. Open it and Print → Save as PDF to share."
+        : "Tip: click \"Verify the fix\" first so the report reflects your fixed file.",
+    });
+  }, [report, filename, reaudit, lastIssuedCert, toast]);
 
   const downloadRemediated = useCallback(async () => {
     // Free-scan gate fires before any of the existing branches so the user
@@ -839,6 +908,36 @@ export default function AuditScreen() {
     // Show the cost-confirm dialog. The dialog drives _runRemediateNow.
     setConfirmRemediateOpen(true);
   }, [gateFreeScan, handlePick, mockMode, report, sourceFile, toast]);
+
+  /**
+   * One-click "Fix everything": approve every finding that has a real fix
+   * (including AI-written alt text), then run the same remediate-and-download
+   * flow. This is the zero-effort path — the user never has to triage issues
+   * one by one. The credit-cost confirm still appears (it's money), and the
+   * per-issue review queue remains available for anyone who wants it.
+   */
+  const fixEverythingAndDownload = useCallback(() => {
+    if (!report) {
+      toast.warning("No audit yet", {
+        description: "Run an audit first so we know what to fix.",
+        dedupeKey: "no-audit-yet",
+      });
+      return;
+    }
+    const all = _approveAllFixable(report);
+    if (Object.keys(all).length === 0) {
+      toast.info("Nothing we can auto-fix here", {
+        description:
+          "Every remaining issue needs a human judgment call. Review them below — we explain each one.",
+      });
+      return;
+    }
+    setDecisions(all);
+    // downloadRemediated runs the free-scan + sign-in gates and opens the
+    // credit-cost confirm; _runRemediateNow reads the freshly-approved
+    // decisions after the user confirms (a re-render happens in between).
+    void downloadRemediated();
+  }, [report, downloadRemediated, toast]);
 
   /* ---- Keyboard shortcuts ------------------------------------------------- */
   useKeyboardShortcuts(
@@ -1204,7 +1303,7 @@ export default function AuditScreen() {
           <InlineNotice title="Couldn't analyze that file" message={error} tone="danger" />
         ) : null}
 
-        {/* Auto-fix policy selector */}
+        {/* Auto-fix mode selector */}
         <View style={styles.policyBlock}>
           <Text
             style={[
@@ -1212,29 +1311,29 @@ export default function AuditScreen() {
               { color: theme.colors.textMuted, marginBottom: 6 },
             ]}
           >
-            Auto-fix policy
+            How much should we do for you?
           </Text>
           <View style={styles.policyRow}>
             {(
               [
                 {
-                  key: "conservative" as const,
-                  label: "Conservative",
-                  desc: "Only fix things I am 95%+ certain about.",
-                },
-                {
                   key: "balanced" as const,
-                  label: "Balanced",
-                  desc: "Fix common issues, leave judgment calls for me.",
+                  label: "Fix it for me (recommended)",
+                  desc: "We apply every fix we can — including AI-written alt text — then you just download. Nothing's permanent: re-audit, edit, or undo anytime.",
                 },
                 {
-                  key: "aggressive" as const,
-                  label: "Aggressive",
-                  desc: "Fix everything you can - I will review the output.",
+                  key: "conservative" as const,
+                  label: "Let me review each fix",
+                  desc: "We suggest a fix for every issue, but apply nothing until you approve it.",
                 },
               ]
             ).map((opt) => {
-              const selected = autoFixPolicy === opt.key;
+              // "balanced" and the legacy "aggressive" both mean "fix it all",
+              // so the recommended tile stays selected for either stored value.
+              const selected =
+                opt.key === "conservative"
+                  ? autoFixPolicy === "conservative"
+                  : autoFixPolicy !== "conservative";
               return (
                 <Pressable
                   key={opt.key}
@@ -1403,6 +1502,54 @@ export default function AuditScreen() {
 
           <SeverityHeatmap errors={buckets.errors} warnings={buckets.warnings} infos={buckets.infos} />
         </Card>
+      ) : null}
+
+      {/* === One-click "Fix everything" — the zero-effort path ================ */}
+      {report && fixableCount > 0 && !fixedDownloadUrl && !mockMode ? (
+        (() => {
+          const fmt = formatForFile(sourceFile) ?? (report.summary.sourceFormat?.toLowerCase() as any);
+          const cost = costFor(fmt);
+          const fileLabel = (report.summary.sourceFormat || "file").toUpperCase();
+          return (
+            <Card>
+              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+                <Text style={{ fontSize: 30, lineHeight: 34 }}>✨</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+                    Let us fix it for you
+                  </Text>
+                  <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>
+                    We'll apply all {fixableCount} automatic fix{fixableCount === 1 ? "" : "es"} —
+                    including writing the alt text for your images and repairing the
+                    structure — and hand you back a fixed {fileLabel}. You don't have to
+                    write or decide anything.
+                  </Text>
+                </View>
+              </View>
+              <Button
+                title={
+                  downloadingFixed
+                    ? "Fixing your document..."
+                    : `Fix all ${fixableCount} issue${fixableCount === 1 ? "" : "s"} & download`
+                }
+                onPress={fixEverythingAndDownload}
+                loading={downloadingFixed}
+                variant="primary"
+                accessibilityLabel={`Fix all ${fixableCount} issues automatically and download the corrected file`}
+                accessibilityHint="Applies every automatic fix, including AI-written alt text, then downloads the corrected document."
+              />
+              <Text
+                style={[
+                  theme.typography.caption,
+                  { color: theme.colors.textMuted, marginTop: 8, textAlign: "center" },
+                ]}
+              >
+                Costs {cost} credit{cost === 1 ? "" : "s"}. Want to check each fix first?
+                You can review them one by one below.
+              </Text>
+            </Card>
+          );
+        })()
       ) : null}
 
       {/* === Letter from Curb: warm prose summary ============================= */}
@@ -1709,6 +1856,31 @@ export default function AuditScreen() {
 
           {lastRemediation ? (
             <View style={{ marginTop: 12, gap: 8 }}>
+              {(() => {
+                const fixed = lastRemediation.applied.length;
+                const needsHuman = decisionCounts.pending + decisionCounts.rejected;
+                const fmt = (report?.summary.sourceFormat || "file").toUpperCase();
+                return (
+                  <InlineNotice
+                    tone="success"
+                    title={"✓ You're all set — your accessible " + fmt + " downloaded"}
+                    message={
+                      "We applied " +
+                      fixed +
+                      " fix" +
+                      (fixed === 1 ? "" : "es") +
+                      " and saved the corrected file to your computer." +
+                      (needsHuman > 0
+                        ? " " +
+                          needsHuman +
+                          " item" +
+                          (needsHuman === 1 ? "" : "s") +
+                          " still need a human decision — we don't auto-fix those because a wrong fix is worse than none. They're listed below and in your manual-review queue."
+                        : " Nothing else needs your attention. Tip: click “Verify the fix” to confirm, or download a conformance report for your records.")
+                    }
+                  />
+                );
+              })()}
               <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>
                 Changes baked into the remediated file
               </Text>
@@ -1756,6 +1928,24 @@ export default function AuditScreen() {
                   accessibilityHint="Downloads your remediated file and runs a free analysis so you can see the before and after issue counts."
                 />
               )}
+            </View>
+          ) : null}
+
+          {/* Procurement deliverable: a VPAT-style conformance report. */}
+          {Platform.OS === "web" ? (
+            <View style={{ marginTop: 10 }}>
+              <Button
+                title="Download conformance report (VPAT-style)"
+                onPress={onDownloadConformanceReport}
+                variant="secondary"
+                accessibilityHint="Generates a per-WCAG-criterion Accessibility Conformance Report you can hand to procurement or legal. Reflects your fixed file once you run Verify the fix."
+              />
+              <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 6 }]}>
+                A per-criterion WCAG 2.1 AA report for procurement & legal.
+                {reaudit?.afterViolations
+                  ? " Reflects your remediated file."
+                  : " Tip: run “Verify the fix” first so it reflects your fixed file."}
+              </Text>
             </View>
           ) : null}
 
@@ -2217,41 +2407,48 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
  *   - aggressive: pre-approves every violation that has at least one
  *     non-manual-review recommended action.
  */
+/**
+ * Decide which findings to pre-approve based on the user's auto-fix policy.
+ *
+ * Two real behaviors (the third enum value is a back-compat alias):
+ *   - "conservative" → approve nothing; the user reviews every fix by hand.
+ *   - "balanced" / "aggressive" → approve EVERYTHING we can actually fix,
+ *     including AI-written alt text and link text. The whole value of the
+ *     product is "we do the work for you" — approval IS the review, and the
+ *     user can still re-audit, edit, or undo any fix afterward. Only findings
+ *     whose sole action is manual review are left for the user.
+ */
 function _preDecideFromPolicy(
   report: PipelineResponse,
   policy: "conservative" | "balanced" | "aggressive",
 ): Record<string, IssueState> {
   if (policy === "conservative") return {};
+  return _approveAllFixable(report);
+}
+
+/**
+ * Approve every finding that has a real, automatable fix — i.e. anything whose
+ * recommended actions are not *only* "flag for manual review". Used both by the
+ * default auto-fix policy and by the one-click "Fix everything" button, so the
+ * two paths can never disagree about what counts as auto-fixable.
+ */
+function _approveAllFixable(report: PipelineResponse): Record<string, IssueState> {
   const at = new Date().toISOString();
   const out: Record<string, IssueState> = {};
-  const judgmentActions = new Set([
-    "FLAG_FOR_MANUAL_REVIEW",
-    "GENERATE_ALT_TEXT",
-    "IMPROVE_LINK_TEXT",
-  ]);
-  const aiProvider = (report.aiProvider || "").toLowerCase();
   for (const v of report.violations) {
     const actions = v.recommendedActions ?? [];
     if (actions.length === 0) continue;
-    if (actions.includes("FLAG_FOR_MANUAL_REVIEW") && actions.length === 1) {
-      // Pure manual-review items are never pre-approved by policy.
-      continue;
-    }
-    const hasDeterministic = actions.some((a) => !judgmentActions.has(a));
-    if (policy === "aggressive") {
-      // Approve anything that has a fix at all. AI-suggested or heuristic
-      // both count - the user opted in to "review the output".
-      out[v.id] = { decision: "approved", decidedAt: at };
-      continue;
-    }
-    // Balanced: pre-approve heuristic high-confidence patterns that have
-    // a deterministic action. Non-heuristic AI providers still defer to
-    // the user under balanced.
-    if (hasDeterministic && (aiProvider === "heuristic" || aiProvider === "")) {
-      out[v.id] = { decision: "approved", decidedAt: at };
-    }
+    // Pure manual-review items have no automatable fix — leave them pending.
+    if (actions.every((a) => a === "FLAG_FOR_MANUAL_REVIEW")) continue;
+    out[v.id] = { decision: "approved", decidedAt: at };
   }
   return out;
+}
+
+/** Count findings that have a real automatable fix (drives the one-click CTA). */
+function _countFixable(report: PipelineResponse | null): number {
+  if (!report) return 0;
+  return Object.keys(_approveAllFixable(report)).length;
 }
 
 function _extractProvenance(notes: string): { provider: string; confidence?: number } | null {
@@ -2628,6 +2825,183 @@ function _buildReportHtml(
   </div>
 </body></html>`;
 }
+
+function _buildConformanceReportHtml(opts: {
+  report: PipelineResponse;
+  filename: string;
+  findings: { ruleId: string; severity: string }[];
+  assessedFixedFile: boolean;
+  cert?: IssuedCertificate | null;
+  // Score of the version actually assessed (the remediated file's score when
+  // assessedFixedFile, else the original). Keeps the printed score coherent
+  // with the verdicts.
+  scoreNum?: number;
+  scoreGrade?: string;
+}): string {
+  const { report, filename, findings, assessedFixedFile, cert } = opts;
+  const scoreNum = typeof opts.scoreNum === "number" ? opts.scoreNum : report.score.score;
+  const scoreGrade = opts.scoreGrade || report.score.grade;
+  const verdicts = computeConformance(findings);
+  const totals = conformanceTotals(verdicts);
+  const today = new Date().toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  const statusClass = (s: CriterionVerdict["status"]) =>
+    s === "Supports"
+      ? "ok"
+      : s === "Partially Supports"
+      ? "warn"
+      : s === "Does Not Support"
+      ? "err"
+      : "na";
+
+  const rows = verdicts
+    .map((v) => {
+      // A clean partial-coverage criterion shows "Supports†" so the green pill
+      // is never mistaken for a full-criterion attestation (the remark explains).
+      const label =
+        v.status === "Supports" && v.partialCoverage ? "Supports&#8224;" : _escape(v.status);
+      return `<tr>
+        <td class="num">${_escape(v.num)}</td>
+        <td>${_escape(v.title)}</td>
+        <td class="lvl">${_escape(v.level)}</td>
+        <td><span class="pill pill-${statusClass(v.status)}">${label}</span></td>
+        <td class="remark">${_escape(v.remark)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const totalCriteria = totals.evaluatedTotal + totals.notEvaluated;
+  // The single-sentence headline conformance statement, honest by construction.
+  // Both branches lead with "X of N evaluated" so an all-clear result can never
+  // read as a full clean bill of health when 39 criteria were never tested.
+  const headline =
+    totals.unsupported === 0 && totals.partial === 0 && totals.evaluatedTotal > 0
+      ? `Automated testing evaluated ${totals.evaluatedTotal} of ${totalCriteria} WCAG 2.1 A/AA success criteria and detected no failures in them. ` +
+        `The remaining ${totals.notEvaluated} criteria were not tested by this tool and require manual review by a qualified assessor.`
+      : `Automated testing evaluated ${totals.evaluatedTotal} of ${totalCriteria} WCAG 2.1 A/AA criteria: ` +
+        `${totals.supports} Supports, ${totals.partial} Partially Supports, ${totals.unsupported} Does Not Support. ` +
+        `The remaining ${totals.notEvaluated} criteria were not tested and require manual review.`;
+
+  const versionLabel = assessedFixedFile
+    ? "Remediated file (re-scanned after fixes)"
+    : "As submitted (before remediation)";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Accessibility Conformance Report — ${_escape(filename)}</title>
+<style>
+  :root { color-scheme: light; --accent:#2D5BFF; --ok:#16A34A; --warn:#F59E0B; --err:#DC2626; --na:#64748B; --bg:#F6F7FB; --fg:#0F172A; --muted:#5B6475; --border:#E2E8F0; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); margin: 0; padding: 32px 16px; }
+  .page { max-width: 980px; margin: 0 auto; background: white; border-radius: 16px; box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08); overflow: hidden; }
+  .hero { background: linear-gradient(135deg, var(--accent) 0%, #1E3A8A 100%); color: white; padding: 32px 40px; }
+  .hero .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; opacity: 0.85; }
+  .hero h1 { font-size: 30px; margin: 6px 0 4px; letter-spacing: -0.5px; }
+  .hero .filename { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; opacity: 0.85; }
+  .hero .headline { margin-top: 16px; font-size: 15px; line-height: 1.5; max-width: 680px; }
+  .body { padding: 32px 40px; }
+  .body h2 { font-size: 20px; border-bottom: 2px solid var(--border); padding-bottom: 6px; margin-top: 32px; margin-bottom: 12px; }
+  .body h2:first-child { margin-top: 0; }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
+  .tile { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .tile .label { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted); }
+  .tile .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+  .tally { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  .tally .cell { border-radius: 10px; padding: 14px; text-align: center; border: 1px solid var(--border); }
+  .tally .n { font-size: 28px; font-weight: 800; }
+  .tally .k { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+  .tally .ok { color: var(--ok); } .tally .warn { color: var(--warn); } .tally .err { color: var(--err); } .tally .na { color: var(--na); }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--bg); font-weight: 700; font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted); }
+  td.num { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+  td.lvl { font-weight: 700; color: var(--muted); }
+  td.remark { color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .pill-ok { background: #DCFCE7; color: var(--ok); }
+  .pill-warn { background: #FEF3C7; color: #B45309; }
+  .pill-err { background: #FEE2E2; color: var(--err); }
+  .pill-na { background: #F1F5F9; color: var(--na); }
+  .callout { background: #EFF6FF; border-left: 4px solid var(--accent); padding: 12px 16px; border-radius: 6px; margin-top: 12px; line-height: 1.55; font-size: 13px; }
+  .footer { background: var(--bg); padding: 16px 40px; font-size: 11px; color: var(--muted); text-align: center; }
+  .print-btn { position: fixed; top: 16px; right: 16px; padding: 10px 16px; border-radius: 999px; border: none; background: var(--accent); color: white; cursor: pointer; font-weight: 700; box-shadow: 0 4px 12px rgba(45, 91, 255, 0.4); }
+  @media print { body { background: white; padding: 0; } .page { box-shadow: none; border-radius: 0; max-width: none; } .print-btn { display: none; } h2 { page-break-after: avoid; } tr { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+  <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+  <div class="page">
+    <header class="hero">
+      <div class="eyebrow">Accessibility Conformance Report · VPAT®-style</div>
+      <h1>${_escape(report.summary.title || filename)}</h1>
+      <div class="filename">${_escape(filename)}</div>
+      <div class="headline">${_escape(headline)}</div>
+    </header>
+    <div class="body">
+      <h2>Report information</h2>
+      <div class="meta-grid">
+        <div class="tile"><div class="label">Standard</div><div class="value">WCAG 2.1 AA</div></div>
+        <div class="tile"><div class="label">Format</div><div class="value">${_escape(report.summary.sourceFormat.toUpperCase())}</div></div>
+        <div class="tile"><div class="label">Report date</div><div class="value" style="font-size:15px;">${_escape(today)}</div></div>
+        <div class="tile"><div class="label">Automated score</div><div class="value">${scoreNum.toFixed(0)}/100 · ${_escape(scoreGrade)}</div></div>
+      </div>
+      <div class="callout"><strong>Document version assessed:</strong> ${_escape(versionLabel)}.${
+        assessedFixedFile
+          ? ""
+          : ` To certify the corrected document, run “Verify the fix” first, then re-download this report.`
+      }</div>
+
+      <h2>Conformance summary</h2>
+      <div class="tally">
+        <div class="cell"><div class="n ok">${totals.supports}</div><div class="k ok">Supports</div></div>
+        <div class="cell"><div class="n warn">${totals.partial}</div><div class="k warn">Partially</div></div>
+        <div class="cell"><div class="n err">${totals.unsupported}</div><div class="k err">Does Not Support</div></div>
+        <div class="cell"><div class="n na">${totals.notEvaluated}</div><div class="k na">Not Evaluated</div></div>
+      </div>
+      ${
+        cert && assessedFixedFile
+          ? `<div class="callout" style="background:#ECFDF5;border-left-color:var(--ok);">
+        <strong>&#10003; Verifiable remediation certificate — ${_escape(cert.certificateId)}</strong><br>
+        Issued ${_escape(new Date(cert.issuedAt).toLocaleString())}. Independently verifiable at <code>${_escape(cert.verifyUrl)}</code>.
+      </div>`
+          : ""
+      }
+
+      <h2>WCAG 2.1 Level A &amp; AA — criterion by criterion</h2>
+      <div class="callout" style="background:#FFFBEB;border-left-color:var(--warn);">
+        <strong>How to read this table.</strong> A <strong>“Supports”</strong> verdict means automated testing
+        detected no issue for that criterion — it is <strong>not</strong> a guarantee of full conformance.
+        Criteria marked <strong>“Not Evaluated”</strong> were not tested by this tool at all. A dagger
+        (&#8224;) marks criteria where automated testing covers only part of the requirement (the remark says
+        what was checked). Only ${totals.evaluatedTotal} of ${totalCriteria} criteria are evaluated automatically;
+        the rest require manual review by a qualified assessor.
+      </div>
+      <table>
+        <thead><tr><th>Criterion</th><th>Name</th><th>Level</th><th>Conformance</th><th>Remarks</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Methodology &amp; scope.</strong> This report is produced by automated testing of the document's
+        structure. It reports a verdict only for the success criteria this tool evaluates (alt text, headings,
+        reading structure, tables, lists, titles, language, link text, colour contrast and form-field labels);
+        every other criterion is marked <em>“Not Evaluated”</em> and requires manual review by a qualified
+        assessor. “Supports” means no issue was detected by automated testing for that criterion — it is not a
+        guarantee of full conformance. This document is an automated assessment and an aid to remediation; it is
+        <strong>not</strong> a substitute for a formal manual WCAG 2.1 / Section 508 audit.
+      </div>
+    </div>
+    <div class="footer">Generated by 508 Agent · Automated accessibility assessment · ${_escape(today)}</div>
+  </div>
+</body>
+</html>`;
+}
+
 
 function _findingsTable(
   violations: PipelineResponse["violations"],

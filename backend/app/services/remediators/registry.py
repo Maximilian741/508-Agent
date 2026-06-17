@@ -10,14 +10,17 @@ from app.services.remediators.dispatcher import RemediationDispatcher
 from app.services.remediators.add_table_headers_executor import AddTableHeadersExecutor
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 from app.services.remediators.flag_for_manual_review_executor import FlagForManualReviewExecutor
+from app.services.remediators.fill_form_field_labels_executor import FillFormFieldLabelsExecutor
 from app.services.remediators.fix_list_structure_executor import FixListStructureExecutor
 from app.services.remediators.generate_alt_text_executor import GenerateAltTextExecutor
 from app.services.remediators.improve_link_text_executor import ImproveLinkTextExecutor
 from app.services.remediators.normalize_heading_level_executor import NormalizeHeadingLevelExecutor
+from app.services.remediators.promote_heading_executor import PromoteHeadingExecutor
 from app.services.remediators.remove_decorative_alt_text_executor import RemoveDecorativeAltTextExecutor
 from app.services.remediators.resolve_reading_order_executor import ResolveReadingOrderExecutor
 from app.services.remediators.set_document_language_executor import SetDocumentLanguageExecutor
 from app.services.remediators.set_document_title_executor import SetDocumentTitleExecutor
+from app.services.remediators.set_slide_title_executor import SetSlideTitleExecutor
 from app.services.remediators.set_table_header_scope_executor import SetTableHeaderScopeExecutor
 from app.services.remediators.add_ocr_text_layer_executor import AddOcrTextLayerExecutor
 from app.services.remediators.tag_pdf_structure_executor import TagPdfStructureExecutor
@@ -28,12 +31,15 @@ def get_default_executors() -> List[RemediationExecutor]:
         GenerateAltTextExecutor(),
         RemoveDecorativeAltTextExecutor(),
         NormalizeHeadingLevelExecutor(),
+        PromoteHeadingExecutor(),
         AddTableHeadersExecutor(),
         SetTableHeaderScopeExecutor(),
         FixListStructureExecutor(),
+        FillFormFieldLabelsExecutor(),
         ImproveLinkTextExecutor(),
         SetDocumentLanguageExecutor(),
         SetDocumentTitleExecutor(),
+        SetSlideTitleExecutor(),
         ResolveReadingOrderExecutor(),
         TagPdfStructureExecutor(),
         AddOcrTextLayerExecutor(),

@@ -14,6 +14,7 @@ from app.models.accessibility import (
     HeadingNode,
     iter_reading_order,
 )
+from app.analyzers.helpers import is_placeholder_title
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
@@ -88,12 +89,30 @@ class SetDocumentTitleExecutor(RemediationExecutor):
             )
         before_title = target.metadata.properties.get("title")
         after_title = _derive_title(tree, target)
-        if isinstance(before_title, str) and before_title.strip():
+        filename = (target.metadata.properties or {}).get("filename")
+        filename = filename if isinstance(filename, str) else None
+        before_set = isinstance(before_title, str) and bool(before_title.strip())
+        before_placeholder = before_set and is_placeholder_title(before_title, filename)
+        # A real, non-placeholder title is left alone.
+        if before_set and not before_placeholder:
             return ExecutionResult(
                 action_code=action_code,
                 target_node_id=plan.target_node_id,
                 status=ExecutionStatus.SKIPPED,
                 notes=f"Title already set; no changes applied. Title={before_title!r}.",
+            )
+        # A placeholder title is only replaced if we can derive something better
+        # — never swap one junk title for an equivalent one (keeps the score honest).
+        if before_placeholder and (
+            not after_title
+            or after_title.strip().lower() == str(before_title).strip().lower()
+            or is_placeholder_title(after_title, filename)
+        ):
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=f"Title {before_title!r} is a placeholder but no better title could be derived.",
             )
         if target.metadata.properties is None:
             target.metadata.properties = {}

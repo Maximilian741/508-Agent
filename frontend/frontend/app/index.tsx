@@ -224,6 +224,17 @@ export default function HomeScreen() {
             WCAG ratios, side-by-side
           </Text>
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to accessibility statement generator"
+          onPress={() => router.push("/tools/accessibility-statement")}
+          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
+            Statement generator
+          </Text>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+            Publish-ready, in seconds
+          </Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
           onPress={() => router.push("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}

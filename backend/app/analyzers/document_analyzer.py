@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.analyzers.base import Analyzer
-from app.analyzers.helpers import attach_flag, iter_nodes
+from app.analyzers.helpers import attach_flag, is_placeholder_title, iter_nodes
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -32,8 +32,16 @@ class DocumentTitleAnalyzer(Analyzer):
     name = "document_title_missing"
 
     def analyze(self, tree: AccessibilityTree) -> None:
-        title = tree.root.metadata.properties.get("title")
+        props = tree.root.metadata.properties or {}
+        title = props.get("title")
+        filename = props.get("filename")
         if not isinstance(title, str) or not title.strip():
+            # Truly missing.
+            attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_TITLE_MISSING)
+        elif is_placeholder_title(title, filename if isinstance(filename, str) else None):
+            # Set, but to a generic placeholder ("Document1", the filename,
+            # "PowerPoint Presentation") — announced verbatim by a screen reader,
+            # so just as inaccessible. SetDocumentTitleExecutor will replace it.
             attach_flag(tree.root, AccessibilityFlagCode.DOCUMENT_TITLE_MISSING)
 
 

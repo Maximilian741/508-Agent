@@ -206,12 +206,12 @@ const C: Record<string, IssueCatalogEntry> = {
 
   DOCUMENT_TITLE_MISSING: {
     ruleId: "DOCUMENT_TITLE_MISSING",
-    title: "Document has no title",
-    summary: "The document's metadata title is empty.",
+    title: "Document has no real title",
+    summary: "The document's metadata title is empty — or a generic placeholder.",
     why:
-      "When users open a document, screen readers announce the title before anything else. Without it, users hear the file name (often a meaningless ID like \"Q3-final-v7.pdf\") or nothing at all.",
+      "When users open a document, screen readers announce the title before anything else. Without it — or with a leftover placeholder like \"Document1\", \"PowerPoint Presentation\", or the bare filename — users hear something meaningless instead of what the document is.",
     autoFix:
-      "We'll suggest a title based on the document's first heading, or the filename if there's no heading.",
+      "We set a real title for you, derived from the document's first heading. We also catch generic placeholder titles (\"Document1\", \"Microsoft Word - …\", the filename) and replace them — but only when we can derive something genuinely better, so we never swap one junk title for another.",
     manualJudgment:
       "Confirm the suggested title actually describes the document — auto-suggestions can be too generic.",
     severity: "warning",
@@ -325,9 +325,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen-reader users navigate by pulling up the document's heading list and jumping to a section. Text that is merely styled big and bold — the classic title page — looks like a heading to sighted readers but is invisible in that list, so whole sections effectively disappear from navigation (WCAG 1.3.1).",
     autoFix:
-      "We flag this for review — promoting text to a heading requires choosing the right level (H1? H2?), which depends on the document's structure, so we don't guess.",
+      "We promote it to a real heading for you. We pick a level that keeps the outline valid — the same level as the nearest heading above it, or Heading 1 when it sits at the top with nothing above — so it never creates a new level jump. The remediated file gets a genuine Heading style (it shows up in Word's Navigation pane and the screen-reader heading list).",
     manualJudgment:
-      "In Word, select the text and apply a real heading style (Home → Styles → Heading 1/2/3) instead of manual bold/size formatting. Word's Title style is also not a navigational heading — use Heading 1 for the document title.",
+      "Optional: if you want a different level than the one we chose, open the remediated file in Word, click the heading, and pick Heading 1/2/3 from Home → Styles.",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],
@@ -401,9 +401,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen-reader users move through a presentation by slide title, and the title placeholder is what assistive tech announces when a slide opens. A slide with no title (or with text typed into a stray text box instead of the title placeholder) leaves users unsure where they are. WCAG 2.4.2 / 1.3.1.",
     autoFix:
-      "We flag this for review — a meaningful slide title depends on the slide's content, so it needs human input rather than an automatic guess.",
+      "We give the slide a real title for you. We take the slide's topmost line of text (skipping footers, dates and page numbers — the line you most likely meant as the title) and insert it into a proper Title placeholder — even on a blank layout — so it shows up in PowerPoint's Outline view and the screen-reader slide list. On a slide with no usable text we fall back to \"Slide N\".",
     manualJudgment:
-      "Add a title in the slide's Title placeholder (PowerPoint's Outline view is the fastest way). If a slide is intentionally title-less, give it a title and hide it off-canvas only as a last resort.",
+      "Optional: if our derived title isn't ideal, edit it in PowerPoint's Outline view (View → Outline) — it's already a real title placeholder, so just retype it.",
     severity: "error",
     standards: {
       wcag: ["2.4.2 Page Titled", "1.3.1 Info and Relationships"],
@@ -420,9 +420,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "When a screen reader lands on an unlabeled field it announces something like \"edit text, blank\" — the user has no idea what to type. Every input needs a programmatically associated label so its purpose is clear. WCAG 3.3.2 (Labels or Instructions) and 4.1.2 (Name, Role, Value).",
     autoFix:
-      "We flag this for review — the correct label depends on what the field is for, which can't be inferred reliably.",
+      "For Word content controls, we label them for you when the intent is unambiguous — we read the field's adjacent text (an inline \"Full Name: [ ]\" prompt or the label cell to its left in a form table) and write it as the control's accessible name. Fields with no clear nearby label are left for you, because a wrong label is worse than none. (PDF form fields are still manual for now.)",
     manualJudgment:
-      "Give the field an accessible name: in a PDF set the field's tooltip (TU); in Word give the content control a Title/Tag in its properties.",
+      "For the controls we couldn't confidently label: give each an accessible name — in Word, set the content control's Title in its properties; in a PDF, set the field's tooltip (TU).",
     severity: "error",
     standards: {
       wcag: ["3.3.2 Labels or Instructions", "4.1.2 Name, Role, Value"],

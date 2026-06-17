@@ -571,12 +571,15 @@ class ActionCode(str, Enum):
     GENERATE_ALT_TEXT = "GENERATE_ALT_TEXT"
     REMOVE_DECORATIVE_ALT_TEXT = "REMOVE_DECORATIVE_ALT_TEXT"
     NORMALIZE_HEADING_LEVEL = "NORMALIZE_HEADING_LEVEL"
+    PROMOTE_HEADING = "PROMOTE_HEADING"
     ADD_TABLE_HEADERS = "ADD_TABLE_HEADERS"
     SET_TABLE_HEADER_SCOPE = "SET_TABLE_HEADER_SCOPE"
     FIX_LIST_STRUCTURE = "FIX_LIST_STRUCTURE"
     IMPROVE_LINK_TEXT = "IMPROVE_LINK_TEXT"
     SET_DOCUMENT_LANGUAGE = "SET_DOCUMENT_LANGUAGE"
     SET_DOCUMENT_TITLE = "SET_DOCUMENT_TITLE"
+    SET_SLIDE_TITLE = "SET_SLIDE_TITLE"
+    FILL_FORM_FIELD_LABELS = "FILL_FORM_FIELD_LABELS"
     RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
     TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
     ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
@@ -671,6 +674,58 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=True,
             supported_node_types=[NodeType.HEADING],
             related_flag_code=AccessibilityFlagCode.SKIPPED_HEADING_LEVEL,
+        )
+    ],
+    AccessibilityFlagCode.FORM_FIELD_UNLABELED: [
+        RemediationAction(
+            action_code=ActionCode.FILL_FORM_FIELD_LABELS,
+            description=(
+                "Give unlabeled form controls an accessible name, derived from "
+                "their adjacent label text (controls with no clear nearby label "
+                "are left for manual review)."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.FORM_FIELD_UNLABELED,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.FORM_FIELD_UNLABELED,
+        ),
+    ],
+    AccessibilityFlagCode.SLIDE_TITLE_MISSING: [
+        RemediationAction(
+            action_code=ActionCode.SET_SLIDE_TITLE,
+            description=(
+                "Give the slide a real title (derived from its most prominent "
+                "text) so it appears in the slide-title navigation list."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.SECTION],
+            related_flag_code=AccessibilityFlagCode.SLIDE_TITLE_MISSING,
+        )
+    ],
+    AccessibilityFlagCode.TEXT_STYLED_AS_HEADING: [
+        RemediationAction(
+            action_code=ActionCode.PROMOTE_HEADING,
+            description=(
+                "Promote text that only looks like a heading into a real heading "
+                "so screen-reader users can navigate to it."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.PARAGRAPH],
+            related_flag_code=AccessibilityFlagCode.TEXT_STYLED_AS_HEADING,
         )
     ],
     AccessibilityFlagCode.TABLE_MISSING_HEADERS: [

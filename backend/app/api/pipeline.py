@@ -837,6 +837,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "SET_DOCUMENT_TITLE",
         "SET_DOCUMENT_LANGUAGE",
         "NORMALIZE_HEADING_LEVEL",
+        # Paragraphs only *styled* as headings are promoted to real Heading
+        # styles (w:pStyle) so they enter the navigation outline — verified by
+        # smoke_promote_heading (re-parse sees a real HeadingNode).
+        "PROMOTE_HEADING",
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         "ADD_TABLE_HEADERS",
@@ -845,10 +849,17 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # Word lists: w:numPr per paragraph + numbering.xml definitions, with
         # the literal markers stripped — verified by smoke_fake_lists.
         "FIX_LIST_STRUCTURE",
+        # Unlabeled content controls with a confident nearby label get a
+        # w:alias (accessible name) — verified by smoke_form_field_labels.
+        "FILL_FORM_FIELD_LABELS",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",
         "SET_DOCUMENT_LANGUAGE",
+        # Untitled slides get a real title placeholder (cloned from the layout)
+        # carrying derived text — verified by smoke_slide_title (re-parse sees a
+        # titled slide and the flag clears).
+        "SET_SLIDE_TITLE",
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         "IMPROVE_LINK_TEXT",
