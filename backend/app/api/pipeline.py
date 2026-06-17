@@ -849,6 +849,9 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # Word lists: w:numPr per paragraph + numbering.xml definitions, with
         # the literal markers stripped — verified by smoke_fake_lists.
         "FIX_LIST_STRUCTURE",
+        # Unlabeled content controls with a confident nearby label get a
+        # w:alias (accessible name) — verified by smoke_form_field_labels.
+        "FILL_FORM_FIELD_LABELS",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",

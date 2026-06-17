@@ -579,6 +579,7 @@ class ActionCode(str, Enum):
     SET_DOCUMENT_LANGUAGE = "SET_DOCUMENT_LANGUAGE"
     SET_DOCUMENT_TITLE = "SET_DOCUMENT_TITLE"
     SET_SLIDE_TITLE = "SET_SLIDE_TITLE"
+    FILL_FORM_FIELD_LABELS = "FILL_FORM_FIELD_LABELS"
     RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
     TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
     ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
@@ -674,6 +675,30 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             supported_node_types=[NodeType.HEADING],
             related_flag_code=AccessibilityFlagCode.SKIPPED_HEADING_LEVEL,
         )
+    ],
+    AccessibilityFlagCode.FORM_FIELD_UNLABELED: [
+        RemediationAction(
+            action_code=ActionCode.FILL_FORM_FIELD_LABELS,
+            description=(
+                "Give unlabeled form controls an accessible name, derived from "
+                "their adjacent label text (controls with no clear nearby label "
+                "are left for manual review)."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.FORM_FIELD_UNLABELED,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.FORM_FIELD_UNLABELED,
+        ),
     ],
     AccessibilityFlagCode.SLIDE_TITLE_MISSING: [
         RemediationAction(

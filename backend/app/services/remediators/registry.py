@@ -10,6 +10,7 @@ from app.services.remediators.dispatcher import RemediationDispatcher
 from app.services.remediators.add_table_headers_executor import AddTableHeadersExecutor
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 from app.services.remediators.flag_for_manual_review_executor import FlagForManualReviewExecutor
+from app.services.remediators.fill_form_field_labels_executor import FillFormFieldLabelsExecutor
 from app.services.remediators.fix_list_structure_executor import FixListStructureExecutor
 from app.services.remediators.generate_alt_text_executor import GenerateAltTextExecutor
 from app.services.remediators.improve_link_text_executor import ImproveLinkTextExecutor
@@ -34,6 +35,7 @@ def get_default_executors() -> List[RemediationExecutor]:
         AddTableHeadersExecutor(),
         SetTableHeaderScopeExecutor(),
         FixListStructureExecutor(),
+        FillFormFieldLabelsExecutor(),
         ImproveLinkTextExecutor(),
         SetDocumentLanguageExecutor(),
         SetDocumentTitleExecutor(),

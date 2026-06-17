@@ -179,10 +179,13 @@ class DOCXParser:
         properties: Dict[str, Any] = {"filename": path.name}
         if title:
             properties["title"] = title
-        ff_total, ff_unlabeled = _docx_form_field_counts(doc)
+        ff_total, ff_unlabeled, ff_derivable = _docx_form_field_counts(doc)
         if ff_total:
             properties["form_fields_total"] = ff_total
             properties["form_fields_unlabeled"] = ff_unlabeled
+            # How many unlabeled controls we can confidently auto-label from
+            # nearby text (drives FILL_FORM_FIELD_LABELS; the rest stay manual).
+            properties["form_fields_derivable"] = ff_derivable
         root = DocumentNode(
             id="doc-1",
             content=NodeContent(kind=ContentKind.NONE),
@@ -530,15 +533,144 @@ def _text_color_props(paragraph, theme_colors: Optional[Dict[str, str]] = None) 
     return props
 
 
-def _docx_form_field_counts(doc) -> "tuple[int, int]":
-    """Return ``(total, unlabeled)`` content controls (``w:sdt``).
+def _text_excluding_controls(el) -> str:
+    """Visible ``w:t`` text under ``el``, EXCLUDING any nested ``w:sdt`` content.
+
+    A field label must come from real label text, never from another content
+    control's value/placeholder (which is what hijacked the 2nd field's label
+    in a "Name: [ctrl] Date: [ctrl]" paragraph or a table cell that itself
+    contains a control).
+    """
+    parts: List[str] = []
+
+    def _walk(node) -> None:
+        for child in node:
+            local = etree.QName(child).localname
+            if local == "sdt":
+                continue  # skip a nested control's own text
+            if local == "t":
+                if child.text:
+                    parts.append(child.text)
+            else:
+                _walk(child)
+
+    try:
+        _walk(el)
+    except Exception:
+        return ""
+    return "".join(parts)
+
+
+_GENERIC_SDT_PROMPTS = {
+    "click or tap here to enter text",
+    "click here to enter text",
+    "choose an item",
+    "enter text",
+    "select an item",
+    "choose a date",
+}
+# Short tokens that are field artifacts, not names.
+_LABEL_STOPWORDS = {"n/a", "na", "tbd", "required", "optional", "yes", "no"}
+_HEADING_PREFIX_RE = re.compile(r"^(section|part|chapter|article|step|appendix)\b", re.IGNORECASE)
+
+
+def _clean_form_label(text: str, max_len: int = 60) -> Optional[str]:
+    """Normalize candidate label text, or None if it isn't label-like.
+
+    A real field label is a short noun phrase, optionally ending in a colon —
+    not a sentence, question, instruction, heading or generic prompt.
+    Deliberately conservative: a wrong label is worse than none.
+    """
+    t = (text or "").strip()
+    # Strip leading bullet/asterisk/dash/colon artifacts ("* Required", "- Name").
+    t = re.sub(r"^[\s•\*\-–—·:]+", "", t)
+    # Strip a single trailing colon and surrounding space.
+    t = t.rstrip().rstrip(":").strip()
+    if not t or len(t) > max_len:
+        return None
+    if not any(c.isalpha() for c in t):
+        return None
+    low = t.lower()
+    if low in _GENERIC_SDT_PROMPTS or low in _LABEL_STOPWORDS:
+        return None
+    # Sentences / questions / instructions are not labels.
+    if t.endswith((".", "?", "!")):
+        return None
+    if "." in t and " " in t:  # an internal period with spaces reads as prose
+        return None
+    if _HEADING_PREFIX_RE.match(t):  # "Section 4 Employment" is a heading
+        return None
+    if len(t.split()) > 6:  # a field label is short
+        return None
+    return t
+
+
+def _derive_sdt_label(sdt) -> Optional[str]:
+    """Best-confidence accessible label for an unlabeled content control.
+
+    Two high-precision sources, in order:
+      1. Inline — the label text in the SAME paragraph immediately before this
+         control, i.e. only text SINCE the previous control boundary (so the
+         2nd control in "Name: [ ] Date: [ ]" derives "Date", not "Name ...").
+      2. Table — the text of the cell immediately left of the control's cell,
+         excluding any control content living in that cell.
+    Returns None (leave for manual review) when neither yields a clean label,
+    so we never invent a misleading name.
+    """
+    try:
+        parent = sdt.getparent()
+        if parent is None:
+            return None
+        # 1. Inline preceding text in the same paragraph, since the last control.
+        if etree.QName(parent).localname == "p":
+            preceding: List[str] = []
+            for child in parent:
+                if child is sdt:
+                    break
+                if etree.QName(child).localname == "sdt":
+                    preceding = []  # an earlier control ends the previous label
+                    continue
+                txt = _text_excluding_controls(child)
+                if txt:
+                    preceding.append(txt)
+            label = _clean_form_label("".join(preceding))
+            if label:
+                return label
+        # 2. Table: the cell to the left in the same row.
+        cell = sdt
+        while cell is not None and etree.QName(cell).localname != "tc":
+            cell = cell.getparent()
+        if cell is not None:
+            row = cell.getparent()
+            if row is not None and etree.QName(row).localname == "tr":
+                prev_cell = None
+                for tc in row:
+                    if etree.QName(tc).localname != "tc":
+                        continue
+                    if tc is cell:
+                        break
+                    prev_cell = tc
+                if prev_cell is not None:
+                    label = _clean_form_label(_text_excluding_controls(prev_cell))
+                    if label:
+                        return label
+    except Exception:
+        return None
+    return None
+
+
+def _docx_form_field_counts(doc) -> "tuple[int, int, int]":
+    """Return ``(total, unlabeled, derivable)`` content controls (``w:sdt``).
 
     A content control's accessible label is its ``w:alias`` (the title). One
-    with no alias has no accessible name. Reuses the same root-metadata keys as
-    the PDF AcroForm check so a single analyzer flags both.
+    with no alias has no accessible name. ``derivable`` is how many of the
+    unlabeled ones we can confidently auto-label from nearby text (the rest
+    stay manual). Reuses the same root-metadata keys as the PDF AcroForm check
+    so a single analyzer flags both.
     """
     total = 0
     unlabeled = 0
+    derivable = 0
     try:
         body = doc.element.body
         for sdt in body.iter(f"{_DOCX_NS}sdt"):
@@ -547,9 +679,11 @@ def _docx_form_field_counts(doc) -> "tuple[int, int]":
             val = alias.get(f"{_DOCX_NS}val") if alias is not None else None
             if not val or not str(val).strip():
                 unlabeled += 1
+                if _derive_sdt_label(sdt):
+                    derivable += 1
     except Exception:
-        return (total, unlabeled)
-    return (total, unlabeled)
+        return (total, unlabeled, derivable)
+    return (total, unlabeled, derivable)
 _REL_IMAGE_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 

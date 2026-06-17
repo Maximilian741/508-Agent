@@ -60,6 +60,7 @@ from app.models.accessibility import (
 from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
+    _derive_sdt_label,
     _heading_level_from_style,
     _iter_note_parts,
     _iter_text_box_paragraphs,
@@ -154,6 +155,7 @@ def write_remediated_docx(
     # Step 4: walk the mutated tree and apply each supported mutation.  Order
     # is intentional — document-level metadata first, then per-node updates.
     _apply_document_metadata(doc, tree.root, applied, skipped)
+    _apply_form_field_labels(doc, tree.root, applied, skipped)
 
     for node in mutated_index.values():
         if isinstance(node, ImageNode):
@@ -456,6 +458,73 @@ def _apply_document_metadata(
             skipped.append(
                 {"target_id": root.id, "reason": f"failed_to_set_title: {exc}"}
             )
+
+
+def _apply_form_field_labels(
+    doc,
+    root,
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Write a ``w:alias`` (accessible name) on each unlabeled content control
+    that has a confident nearby label.
+
+    Walks ``w:sdt`` elements in the SAME order the parser counted them and
+    re-uses the parser's ``_derive_sdt_label`` so the number labeled equals the
+    ``form_fields_derivable`` count the executor claimed (honest scoring).
+    Controls with no clear label are left untouched for manual review.
+    """
+    if not (root.metadata.properties or {}).get("apply_form_field_labels"):
+        return
+    try:
+        body = doc.element.body
+    except Exception as exc:  # pragma: no cover - defensive
+        skipped.append({"target_id": root.id, "reason": f"no_body_for_form_fields:{exc}"})
+        return
+
+    labeled = 0
+    for sdt in body.iter(qn("w:sdt")):
+        try:
+            sdtPr = sdt.find(qn("w:sdtPr"))
+            alias = sdtPr.find(qn("w:alias")) if sdtPr is not None else None
+            existing = alias.get(qn("w:val")) if alias is not None else None
+            if existing and str(existing).strip():
+                continue  # already has a real accessible name
+            label = _derive_sdt_label(sdt)
+            if not label:
+                continue  # no confident label — leave for manual review
+            if alias is not None:
+                # An empty/whitespace alias element already exists — OVERWRITE its
+                # value. Appending a second <w:alias> would be schema-invalid
+                # (maxOccurs=1) and real consumers (LibreOffice) drop both.
+                alias.set(qn("w:val"), label)
+            else:
+                if sdtPr is None:
+                    sdtPr = OxmlElement("w:sdtPr")
+                    sdt.insert(0, sdtPr)  # sdtPr is the first child of w:sdt
+                alias_el = OxmlElement("w:alias")
+                alias_el.set(qn("w:val"), label)
+                # In CT_SdtPr, <w:alias> follows an optional <w:rPr>; place it right
+                # after rPr if present, else first.
+                rpr = sdtPr.find(qn("w:rPr"))
+                if rpr is not None:
+                    rpr.addnext(alias_el)
+                else:
+                    sdtPr.insert(0, alias_el)
+            labeled += 1
+            applied.append(
+                {
+                    "kind": "form_field_label",
+                    "target_id": root.id,
+                    "summary": f"content control w:alias = {label!r}",
+                }
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            skipped.append({"target_id": root.id, "reason": f"failed_to_label_form_field:{exc}"})
+            continue
+
+    if labeled == 0:
+        skipped.append({"target_id": root.id, "reason": "no_derivable_form_field_labels"})
 
 
 def _apply_image(

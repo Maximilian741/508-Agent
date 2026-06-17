@@ -420,9 +420,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "When a screen reader lands on an unlabeled field it announces something like \"edit text, blank\" — the user has no idea what to type. Every input needs a programmatically associated label so its purpose is clear. WCAG 3.3.2 (Labels or Instructions) and 4.1.2 (Name, Role, Value).",
     autoFix:
-      "We flag this for review — the correct label depends on what the field is for, which can't be inferred reliably.",
+      "For Word content controls, we label them for you when the intent is unambiguous — we read the field's adjacent text (an inline \"Full Name: [ ]\" prompt or the label cell to its left in a form table) and write it as the control's accessible name. Fields with no clear nearby label are left for you, because a wrong label is worse than none. (PDF form fields are still manual for now.)",
     manualJudgment:
-      "Give the field an accessible name: in a PDF set the field's tooltip (TU); in Word give the content control a Title/Tag in its properties.",
+      "For the controls we couldn't confidently label: give each an accessible name — in Word, set the content control's Title in its properties; in a PDF, set the field's tooltip (TU).",
     severity: "error",
     standards: {
       wcag: ["3.3.2 Labels or Instructions", "4.1.2 Name, Role, Value"],
