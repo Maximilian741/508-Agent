@@ -154,6 +154,10 @@ export default function AuditScreen() {
   // auto-save update the SAME row (instead of leaving two: a snapshot-less
   // upload row and a separate "-live" row).
   const auditIdRef = useRef<string | null>(null);
+  // Monotonic id per analyze request, so a stale (e.g. rapidly double-uploaded)
+  // call can't clobber the latest result — fixes a stale error banner showing
+  // next to a successful audit.
+  const analyzeSeqRef = useRef(0);
   const [downloadingFixed, setDownloadingFixed] = useState(false);
   const [issuingCert, setIssuingCert] = useState(false);
   // The most recently issued certificate, so the conformance report can cite a
@@ -451,6 +455,8 @@ export default function AuditScreen() {
       ) {
         return;
       }
+      const seq = ++analyzeSeqRef.current;
+      const isStale = () => seq !== analyzeSeqRef.current;
       setBusy(true);
       setError(null);
       setFilename(file.name);
@@ -465,6 +471,9 @@ export default function AuditScreen() {
       setEditing(false);
       try {
         const response = await client.runPipeline(file, true);
+        // A newer upload superseded this one — drop this result so it can't
+        // overwrite the latest (or leave a stale error/report behind).
+        if (isStale()) return;
         setPreviousScore(report?.score.score ?? 0);
         setReport(response);
         // Apply the user's auto-fix policy to the fresh report.
@@ -507,6 +516,7 @@ export default function AuditScreen() {
         notify(`Audit complete — ${response.score.grade}`, file.name);
         playChime();
       } catch (e) {
+        if (isStale()) return; // a newer upload owns the UI now
         const err = e as Error & { status?: number };
         const msg = err.message ?? "Couldn't analyze that file.";
         // Anonymous first touch: the API requires an account even for the
@@ -524,7 +534,8 @@ export default function AuditScreen() {
         setError(msg);
         toast.error("Audit failed", { description: msg });
       } finally {
-        setBusy(false);
+        // Only the latest request controls the busy spinner.
+        if (!isStale()) setBusy(false);
       }
     },
     [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy],
@@ -1845,6 +1856,31 @@ export default function AuditScreen() {
 
           {lastRemediation ? (
             <View style={{ marginTop: 12, gap: 8 }}>
+              {(() => {
+                const fixed = lastRemediation.applied.length;
+                const needsHuman = decisionCounts.pending + decisionCounts.rejected;
+                const fmt = (report?.summary.sourceFormat || "file").toUpperCase();
+                return (
+                  <InlineNotice
+                    tone="success"
+                    title={"✓ You're all set — your accessible " + fmt + " downloaded"}
+                    message={
+                      "We applied " +
+                      fixed +
+                      " fix" +
+                      (fixed === 1 ? "" : "es") +
+                      " and saved the corrected file to your computer." +
+                      (needsHuman > 0
+                        ? " " +
+                          needsHuman +
+                          " item" +
+                          (needsHuman === 1 ? "" : "s") +
+                          " still need a human decision — we don't auto-fix those because a wrong fix is worse than none. They're listed below and in your manual-review queue."
+                        : " Nothing else needs your attention. Tip: click “Verify the fix” to confirm, or download a conformance report for your records.")
+                    }
+                  />
+                );
+              })()}
               <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>
                 Changes baked into the remediated file
               </Text>
