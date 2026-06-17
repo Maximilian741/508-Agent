@@ -206,12 +206,12 @@ const C: Record<string, IssueCatalogEntry> = {
 
   DOCUMENT_TITLE_MISSING: {
     ruleId: "DOCUMENT_TITLE_MISSING",
-    title: "Document has no title",
-    summary: "The document's metadata title is empty.",
+    title: "Document has no real title",
+    summary: "The document's metadata title is empty — or a generic placeholder.",
     why:
-      "When users open a document, screen readers announce the title before anything else. Without it, users hear the file name (often a meaningless ID like \"Q3-final-v7.pdf\") or nothing at all.",
+      "When users open a document, screen readers announce the title before anything else. Without it — or with a leftover placeholder like \"Document1\", \"PowerPoint Presentation\", or the bare filename — users hear something meaningless instead of what the document is.",
     autoFix:
-      "We'll suggest a title based on the document's first heading, or the filename if there's no heading.",
+      "We set a real title for you, derived from the document's first heading. We also catch generic placeholder titles (\"Document1\", \"Microsoft Word - …\", the filename) and replace them — but only when we can derive something genuinely better, so we never swap one junk title for another.",
     manualJudgment:
       "Confirm the suggested title actually describes the document — auto-suggestions can be too generic.",
     severity: "warning",
