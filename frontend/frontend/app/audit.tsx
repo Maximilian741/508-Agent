@@ -43,6 +43,11 @@ import {
 } from "../src/domain/achievements";
 import { loadWeights } from "../src/domain/scoreWeights";
 import { lookupIssue } from "../src/domain/issueCatalog";
+import {
+  computeConformance,
+  conformanceTotals,
+  type CriterionVerdict,
+} from "../src/domain/wcagCriteria";
 import { IssuedCertificate, issueCertificate, loadAccount, loadToken, refreshAccount } from "../src/domain/account";
 import { costFor, formatForFile } from "../src/domain/creditCosts";
 import { SignInModal } from "../src/ui/components/SignInModal";
@@ -151,6 +156,9 @@ export default function AuditScreen() {
   const auditIdRef = useRef<string | null>(null);
   const [downloadingFixed, setDownloadingFixed] = useState(false);
   const [issuingCert, setIssuingCert] = useState(false);
+  // The most recently issued certificate, so the conformance report can cite a
+  // verifiable reference if the user issued one.
+  const [lastIssuedCert, setLastIssuedCert] = useState<IssuedCertificate | null>(null);
   const [fixedDownloadUrl, setFixedDownloadUrl] = useState<string | null>(null);
   // "Verify the fix" re-audit of the remediated file (free analyze pass).
   const [reaudit, setReaudit] = useState<{
@@ -158,6 +166,9 @@ export default function AuditScreen() {
     afterIssues: number;
     afterScore: number;
     afterGrade: string;
+    // The fixed file's own findings, so the conformance report can reflect the
+    // REMEDIATED document (not just the original) once "Verify the fix" is run.
+    afterViolations?: PipelineViolation[];
   } | null>(null);
   const [reauditBusy, setReauditBusy] = useState(false);
   const [lastRemediation, setLastRemediation] = useState<
@@ -740,6 +751,7 @@ export default function AuditScreen() {
         afterIssues: after.violations.length,
         afterScore: after.score.score,
         afterGrade: after.score.grade,
+        afterViolations: after.violations,
       });
       toast.success("Re-audit complete", {
         description: `${report.violations.length} issue(s) before → ${after.violations.length} after.`,
@@ -765,6 +777,7 @@ export default function AuditScreen() {
       // The certificate is bound to the SERVER's analysis of this document
       // (looked up by documentId) — the client no longer supplies the numbers.
       const cert = await issueCertificate({ documentId: report.summary.documentId });
+      setLastIssuedCert(cert);
       _openReport(report, decisions, decisionLog, fname, cert);
       unlockAchievement("first_certificate");
       toast.success("Remediation summary issued", {
@@ -792,6 +805,49 @@ export default function AuditScreen() {
       setIssuingCert(false);
     }
   };
+
+  /**
+   * Download a procurement-grade Accessibility Conformance Report (VPAT-style):
+   * every WCAG 2.1 A/AA criterion with a Supports / Partially Supports / Does
+   * Not Support / Not Evaluated verdict. If "Verify the fix" has been run, the
+   * report reflects the REMEDIATED document (its re-scanned findings); otherwise
+   * it reflects the document as analyzed. Honest by construction — criteria the
+   * engine doesn't test are marked "Not Evaluated", never silently "Supports".
+   */
+  const onDownloadConformanceReport = useCallback(() => {
+    if (!report) {
+      toast.warning("No audit yet", {
+        description: "Run an audit first so we can build the conformance report.",
+        dedupeKey: "no-audit-yet",
+      });
+      return;
+    }
+    if (Platform.OS !== "web") return;
+    const fname = filename ?? "document";
+    const usingFixed = !!reaudit?.afterViolations;
+    const findings = (usingFixed ? reaudit!.afterViolations! : report.violations).map((v) => ({
+      ruleId: v.ruleId,
+      severity: v.severity,
+    }));
+    const html = _buildConformanceReportHtml({
+      report,
+      filename: fname,
+      findings,
+      assessedFixedFile: usingFixed,
+      cert: lastIssuedCert,
+      // Print the score of the version the verdicts describe.
+      scoreNum: usingFixed ? reaudit!.afterScore : report.score.score,
+      scoreGrade: usingFixed ? reaudit!.afterGrade : report.score.grade,
+    });
+    const blob = new Blob([html], { type: "text/html" });
+    _saveBlob(blob, _safeFilename(fname) + "-conformance-report.html");
+    unlockAchievement("first_certificate");
+    toast.success("Conformance report downloaded", {
+      description: usingFixed
+        ? "Reflects your remediated file. Open it and Print → Save as PDF to share."
+        : "Tip: click \"Verify the fix\" first so the report reflects your fixed file.",
+    });
+  }, [report, filename, reaudit, lastIssuedCert, toast]);
 
   const downloadRemediated = useCallback(async () => {
     // Free-scan gate fires before any of the existing branches so the user
@@ -1839,6 +1895,24 @@ export default function AuditScreen() {
             </View>
           ) : null}
 
+          {/* Procurement deliverable: a VPAT-style conformance report. */}
+          {Platform.OS === "web" ? (
+            <View style={{ marginTop: 10 }}>
+              <Button
+                title="Download conformance report (VPAT-style)"
+                onPress={onDownloadConformanceReport}
+                variant="secondary"
+                accessibilityHint="Generates a per-WCAG-criterion Accessibility Conformance Report you can hand to procurement or legal. Reflects your fixed file once you run Verify the fix."
+              />
+              <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 6 }]}>
+                A per-criterion WCAG 2.1 AA report for procurement & legal.
+                {reaudit?.afterViolations
+                  ? " Reflects your remediated file."
+                  : " Tip: run “Verify the fix” first so it reflects your fixed file."}
+              </Text>
+            </View>
+          ) : null}
+
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={showMoreOptions ? "Hide more options" : "More options"}
@@ -2715,6 +2789,183 @@ function _buildReportHtml(
   </div>
 </body></html>`;
 }
+
+function _buildConformanceReportHtml(opts: {
+  report: PipelineResponse;
+  filename: string;
+  findings: { ruleId: string; severity: string }[];
+  assessedFixedFile: boolean;
+  cert?: IssuedCertificate | null;
+  // Score of the version actually assessed (the remediated file's score when
+  // assessedFixedFile, else the original). Keeps the printed score coherent
+  // with the verdicts.
+  scoreNum?: number;
+  scoreGrade?: string;
+}): string {
+  const { report, filename, findings, assessedFixedFile, cert } = opts;
+  const scoreNum = typeof opts.scoreNum === "number" ? opts.scoreNum : report.score.score;
+  const scoreGrade = opts.scoreGrade || report.score.grade;
+  const verdicts = computeConformance(findings);
+  const totals = conformanceTotals(verdicts);
+  const today = new Date().toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  const statusClass = (s: CriterionVerdict["status"]) =>
+    s === "Supports"
+      ? "ok"
+      : s === "Partially Supports"
+      ? "warn"
+      : s === "Does Not Support"
+      ? "err"
+      : "na";
+
+  const rows = verdicts
+    .map((v) => {
+      // A clean partial-coverage criterion shows "Supports†" so the green pill
+      // is never mistaken for a full-criterion attestation (the remark explains).
+      const label =
+        v.status === "Supports" && v.partialCoverage ? "Supports&#8224;" : _escape(v.status);
+      return `<tr>
+        <td class="num">${_escape(v.num)}</td>
+        <td>${_escape(v.title)}</td>
+        <td class="lvl">${_escape(v.level)}</td>
+        <td><span class="pill pill-${statusClass(v.status)}">${label}</span></td>
+        <td class="remark">${_escape(v.remark)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const totalCriteria = totals.evaluatedTotal + totals.notEvaluated;
+  // The single-sentence headline conformance statement, honest by construction.
+  // Both branches lead with "X of N evaluated" so an all-clear result can never
+  // read as a full clean bill of health when 39 criteria were never tested.
+  const headline =
+    totals.unsupported === 0 && totals.partial === 0 && totals.evaluatedTotal > 0
+      ? `Automated testing evaluated ${totals.evaluatedTotal} of ${totalCriteria} WCAG 2.1 A/AA success criteria and detected no failures in them. ` +
+        `The remaining ${totals.notEvaluated} criteria were not tested by this tool and require manual review by a qualified assessor.`
+      : `Automated testing evaluated ${totals.evaluatedTotal} of ${totalCriteria} WCAG 2.1 A/AA criteria: ` +
+        `${totals.supports} Supports, ${totals.partial} Partially Supports, ${totals.unsupported} Does Not Support. ` +
+        `The remaining ${totals.notEvaluated} criteria were not tested and require manual review.`;
+
+  const versionLabel = assessedFixedFile
+    ? "Remediated file (re-scanned after fixes)"
+    : "As submitted (before remediation)";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Accessibility Conformance Report — ${_escape(filename)}</title>
+<style>
+  :root { color-scheme: light; --accent:#2D5BFF; --ok:#16A34A; --warn:#F59E0B; --err:#DC2626; --na:#64748B; --bg:#F6F7FB; --fg:#0F172A; --muted:#5B6475; --border:#E2E8F0; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); margin: 0; padding: 32px 16px; }
+  .page { max-width: 980px; margin: 0 auto; background: white; border-radius: 16px; box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08); overflow: hidden; }
+  .hero { background: linear-gradient(135deg, var(--accent) 0%, #1E3A8A 100%); color: white; padding: 32px 40px; }
+  .hero .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; opacity: 0.85; }
+  .hero h1 { font-size: 30px; margin: 6px 0 4px; letter-spacing: -0.5px; }
+  .hero .filename { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; opacity: 0.85; }
+  .hero .headline { margin-top: 16px; font-size: 15px; line-height: 1.5; max-width: 680px; }
+  .body { padding: 32px 40px; }
+  .body h2 { font-size: 20px; border-bottom: 2px solid var(--border); padding-bottom: 6px; margin-top: 32px; margin-bottom: 12px; }
+  .body h2:first-child { margin-top: 0; }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
+  .tile { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .tile .label { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted); }
+  .tile .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+  .tally { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  .tally .cell { border-radius: 10px; padding: 14px; text-align: center; border: 1px solid var(--border); }
+  .tally .n { font-size: 28px; font-weight: 800; }
+  .tally .k { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+  .tally .ok { color: var(--ok); } .tally .warn { color: var(--warn); } .tally .err { color: var(--err); } .tally .na { color: var(--na); }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--bg); font-weight: 700; font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted); }
+  td.num { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+  td.lvl { font-weight: 700; color: var(--muted); }
+  td.remark { color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .pill-ok { background: #DCFCE7; color: var(--ok); }
+  .pill-warn { background: #FEF3C7; color: #B45309; }
+  .pill-err { background: #FEE2E2; color: var(--err); }
+  .pill-na { background: #F1F5F9; color: var(--na); }
+  .callout { background: #EFF6FF; border-left: 4px solid var(--accent); padding: 12px 16px; border-radius: 6px; margin-top: 12px; line-height: 1.55; font-size: 13px; }
+  .footer { background: var(--bg); padding: 16px 40px; font-size: 11px; color: var(--muted); text-align: center; }
+  .print-btn { position: fixed; top: 16px; right: 16px; padding: 10px 16px; border-radius: 999px; border: none; background: var(--accent); color: white; cursor: pointer; font-weight: 700; box-shadow: 0 4px 12px rgba(45, 91, 255, 0.4); }
+  @media print { body { background: white; padding: 0; } .page { box-shadow: none; border-radius: 0; max-width: none; } .print-btn { display: none; } h2 { page-break-after: avoid; } tr { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+  <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+  <div class="page">
+    <header class="hero">
+      <div class="eyebrow">Accessibility Conformance Report · VPAT®-style</div>
+      <h1>${_escape(report.summary.title || filename)}</h1>
+      <div class="filename">${_escape(filename)}</div>
+      <div class="headline">${_escape(headline)}</div>
+    </header>
+    <div class="body">
+      <h2>Report information</h2>
+      <div class="meta-grid">
+        <div class="tile"><div class="label">Standard</div><div class="value">WCAG 2.1 AA</div></div>
+        <div class="tile"><div class="label">Format</div><div class="value">${_escape(report.summary.sourceFormat.toUpperCase())}</div></div>
+        <div class="tile"><div class="label">Report date</div><div class="value" style="font-size:15px;">${_escape(today)}</div></div>
+        <div class="tile"><div class="label">Automated score</div><div class="value">${scoreNum.toFixed(0)}/100 · ${_escape(scoreGrade)}</div></div>
+      </div>
+      <div class="callout"><strong>Document version assessed:</strong> ${_escape(versionLabel)}.${
+        assessedFixedFile
+          ? ""
+          : ` To certify the corrected document, run “Verify the fix” first, then re-download this report.`
+      }</div>
+
+      <h2>Conformance summary</h2>
+      <div class="tally">
+        <div class="cell"><div class="n ok">${totals.supports}</div><div class="k ok">Supports</div></div>
+        <div class="cell"><div class="n warn">${totals.partial}</div><div class="k warn">Partially</div></div>
+        <div class="cell"><div class="n err">${totals.unsupported}</div><div class="k err">Does Not Support</div></div>
+        <div class="cell"><div class="n na">${totals.notEvaluated}</div><div class="k na">Not Evaluated</div></div>
+      </div>
+      ${
+        cert && assessedFixedFile
+          ? `<div class="callout" style="background:#ECFDF5;border-left-color:var(--ok);">
+        <strong>&#10003; Verifiable remediation certificate — ${_escape(cert.certificateId)}</strong><br>
+        Issued ${_escape(new Date(cert.issuedAt).toLocaleString())}. Independently verifiable at <code>${_escape(cert.verifyUrl)}</code>.
+      </div>`
+          : ""
+      }
+
+      <h2>WCAG 2.1 Level A &amp; AA — criterion by criterion</h2>
+      <div class="callout" style="background:#FFFBEB;border-left-color:var(--warn);">
+        <strong>How to read this table.</strong> A <strong>“Supports”</strong> verdict means automated testing
+        detected no issue for that criterion — it is <strong>not</strong> a guarantee of full conformance.
+        Criteria marked <strong>“Not Evaluated”</strong> were not tested by this tool at all. A dagger
+        (&#8224;) marks criteria where automated testing covers only part of the requirement (the remark says
+        what was checked). Only ${totals.evaluatedTotal} of ${totalCriteria} criteria are evaluated automatically;
+        the rest require manual review by a qualified assessor.
+      </div>
+      <table>
+        <thead><tr><th>Criterion</th><th>Name</th><th>Level</th><th>Conformance</th><th>Remarks</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Methodology &amp; scope.</strong> This report is produced by automated testing of the document's
+        structure. It reports a verdict only for the success criteria this tool evaluates (alt text, headings,
+        reading structure, tables, lists, titles, language, link text, colour contrast and form-field labels);
+        every other criterion is marked <em>“Not Evaluated”</em> and requires manual review by a qualified
+        assessor. “Supports” means no issue was detected by automated testing for that criterion — it is not a
+        guarantee of full conformance. This document is an automated assessment and an aid to remediation; it is
+        <strong>not</strong> a substitute for a formal manual WCAG 2.1 / Section 508 audit.
+      </div>
+    </div>
+    <div class="footer">Generated by 508 Agent · Automated accessibility assessment · ${_escape(today)}</div>
+  </div>
+</body>
+</html>`;
+}
+
 
 function _findingsTable(
   violations: PipelineResponse["violations"],
