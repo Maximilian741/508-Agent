@@ -7,7 +7,7 @@
  */
 
 import { useState } from "react";
-import { Pressable, StyleSheet, Switch, Text, TextInput, View, useColorScheme } from "react-native";
+import { Image, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { clearHistory } from "../src/domain/auditHistory";
 import {
@@ -17,6 +17,12 @@ import {
   nukeDemoData,
 } from "../src/domain/demoSeed";
 import { DEFAULT_WEIGHTS, loadWeights, resetWeights, saveWeights } from "../src/domain/scoreWeights";
+import {
+  hasBranding,
+  loadBranding,
+  saveBranding,
+  type ReportBranding,
+} from "../src/domain/reportBranding";
 import {
   notificationsAvailable,
   notificationsEnabled,
@@ -55,7 +61,37 @@ export default function SettingsScreen() {
   const backendUrlSource = useAppStore((state) => state.backendUrlSource);
   const [draftUrl, setDraftUrl] = useState(apiBaseUrl);
   const [notifyOn, setNotifyOn] = useState(notificationsEnabled());
+  // White-label report branding (agencies put their own brand on deliverables).
+  const [branding, setBranding] = useState<ReportBranding>(() => loadBranding());
   const systemScheme = useColorScheme();
+
+  const pickLogo = () => {
+    if (Platform.OS !== "web" || typeof document === "undefined") return;
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 512 * 1024) {
+        toast.error("Logo too large", { description: "Please use an image under 512 KB." });
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => setBranding((b) => ({ ...b, logoDataUrl: String(reader.result || "") }));
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
+  const saveBrandingNow = () => {
+    saveBranding(branding);
+    toast.success("Report branding saved", {
+      description: hasBranding(branding)
+        ? "Your reports now carry your brand."
+        : "Branding cleared — reports use the default style.",
+    });
+  };
   // Operator/dev affordances (free-scan bypass, analyzer URL override, AI
   // provider notes) are hidden on managed builds: customers on the hosted
   // product must never see a "bypass the paywall" switch or be told to run
@@ -77,6 +113,85 @@ export default function SettingsScreen() {
           />
         }
       />
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Report branding</Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          Put your own logo, name, and colour on the conformance &amp; remediation reports you download —
+          hand clients a deliverable under your brand. (The methodology text always keeps a small
+          “automated testing by 508 Agent” line.)
+        </Text>
+
+        <Text style={[styles.brandLabel, { color: theme.colors.textMuted }]}>Organization name</Text>
+        <TextInput
+          value={branding.orgName}
+          onChangeText={(v) => setBranding((b) => ({ ...b, orgName: v }))}
+          style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+          placeholder="Sunriver Consulting"
+          placeholderTextColor={theme.colors.textMuted}
+        />
+
+        <Text style={[styles.brandLabel, { color: theme.colors.textMuted }]}>Contact line (optional)</Text>
+        <TextInput
+          value={branding.contact}
+          onChangeText={(v) => setBranding((b) => ({ ...b, contact: v }))}
+          style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+          placeholder="access@sunriver.com · sunriver.com"
+          placeholderTextColor={theme.colors.textMuted}
+        />
+
+        <Text style={[styles.brandLabel, { color: theme.colors.textMuted }]}>Accent colour (hex)</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <TextInput
+            value={branding.accent}
+            onChangeText={(v) => setBranding((b) => ({ ...b, accent: v }))}
+            style={[styles.input, { flex: 1, borderColor: theme.colors.border, color: theme.colors.text }]}
+            placeholder="#2D5BFF"
+            placeholderTextColor={theme.colors.textMuted}
+            autoCapitalize="none"
+          />
+          {/^#[0-9a-fA-F]{6}$/.test(branding.accent.trim()) ? (
+            <View style={{ width: 36, height: 36, borderRadius: 8, backgroundColor: branding.accent.trim(), borderWidth: 1, borderColor: theme.colors.border }} />
+          ) : null}
+        </View>
+
+        <Text style={[styles.brandLabel, { color: theme.colors.textMuted }]}>Logo</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+          <Button title={branding.logoDataUrl ? "Change logo" : "Upload logo"} onPress={pickLogo} variant="secondary" />
+          {branding.logoDataUrl ? (
+            <>
+              <Image
+                source={{ uri: branding.logoDataUrl }}
+                style={{ height: 40, width: 120, resizeMode: "contain" }}
+                accessibilityLabel="Current logo preview"
+              />
+              <Pressable accessibilityRole="button" accessibilityLabel="Remove logo" onPress={() => setBranding((b) => ({ ...b, logoDataUrl: "" }))}>
+                <Text style={[theme.typography.body, { color: theme.colors.danger, fontWeight: "700", fontSize: 13 }]}>Remove</Text>
+              </Pressable>
+            </>
+          ) : (
+            <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>PNG/SVG, under 512 KB</Text>
+          )}
+        </View>
+
+        <View style={styles.buttonRow}>
+          <Button title="Save branding" onPress={saveBrandingNow} />
+          {hasBranding(branding) ? (
+            <Button
+              title="Clear"
+              onPress={() => {
+                setBranding({ orgName: "", logoDataUrl: "", accent: "", contact: "" });
+                saveBranding({ orgName: "", logoDataUrl: "", accent: "", contact: "" });
+                toast.success("Branding cleared");
+              }}
+              variant="ghost"
+            />
+          ) : null}
+        </View>
+      </Card>
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -683,6 +798,7 @@ function DiagnosticsPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
 const styles = StyleSheet.create({
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   input: { borderWidth: 1, borderRadius: 10, padding: 10, marginTop: 12 },
+  brandLabel: { fontSize: 12, fontWeight: "700", letterSpacing: 0.3, marginTop: 12, textTransform: "uppercase" },
   buttonRow: { flexDirection: "row", marginTop: 12, gap: 8 },
   toggleRow: {
     flexDirection: "row",
