@@ -14,6 +14,7 @@ from app.services.remediators.fix_list_structure_executor import FixListStructur
 from app.services.remediators.generate_alt_text_executor import GenerateAltTextExecutor
 from app.services.remediators.improve_link_text_executor import ImproveLinkTextExecutor
 from app.services.remediators.normalize_heading_level_executor import NormalizeHeadingLevelExecutor
+from app.services.remediators.promote_heading_executor import PromoteHeadingExecutor
 from app.services.remediators.remove_decorative_alt_text_executor import RemoveDecorativeAltTextExecutor
 from app.services.remediators.resolve_reading_order_executor import ResolveReadingOrderExecutor
 from app.services.remediators.set_document_language_executor import SetDocumentLanguageExecutor
@@ -28,6 +29,7 @@ def get_default_executors() -> List[RemediationExecutor]:
         GenerateAltTextExecutor(),
         RemoveDecorativeAltTextExecutor(),
         NormalizeHeadingLevelExecutor(),
+        PromoteHeadingExecutor(),
         AddTableHeadersExecutor(),
         SetTableHeaderScopeExecutor(),
         FixListStructureExecutor(),

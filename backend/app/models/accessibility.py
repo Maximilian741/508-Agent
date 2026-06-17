@@ -571,6 +571,7 @@ class ActionCode(str, Enum):
     GENERATE_ALT_TEXT = "GENERATE_ALT_TEXT"
     REMOVE_DECORATIVE_ALT_TEXT = "REMOVE_DECORATIVE_ALT_TEXT"
     NORMALIZE_HEADING_LEVEL = "NORMALIZE_HEADING_LEVEL"
+    PROMOTE_HEADING = "PROMOTE_HEADING"
     ADD_TABLE_HEADERS = "ADD_TABLE_HEADERS"
     SET_TABLE_HEADER_SCOPE = "SET_TABLE_HEADER_SCOPE"
     FIX_LIST_STRUCTURE = "FIX_LIST_STRUCTURE"
@@ -671,6 +672,20 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=True,
             supported_node_types=[NodeType.HEADING],
             related_flag_code=AccessibilityFlagCode.SKIPPED_HEADING_LEVEL,
+        )
+    ],
+    AccessibilityFlagCode.TEXT_STYLED_AS_HEADING: [
+        RemediationAction(
+            action_code=ActionCode.PROMOTE_HEADING,
+            description=(
+                "Promote text that only looks like a heading into a real heading "
+                "so screen-reader users can navigate to it."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.PARAGRAPH],
+            related_flag_code=AccessibilityFlagCode.TEXT_STYLED_AS_HEADING,
         )
     ],
     AccessibilityFlagCode.TABLE_MISSING_HEADERS: [

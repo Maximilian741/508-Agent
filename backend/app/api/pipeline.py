@@ -837,6 +837,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "SET_DOCUMENT_TITLE",
         "SET_DOCUMENT_LANGUAGE",
         "NORMALIZE_HEADING_LEVEL",
+        # Paragraphs only *styled* as headings are promoted to real Heading
+        # styles (w:pStyle) so they enter the navigation outline — verified by
+        # smoke_promote_heading (re-parse sees a real HeadingNode).
+        "PROMOTE_HEADING",
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         "ADD_TABLE_HEADERS",

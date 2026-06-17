@@ -267,14 +267,21 @@ class DOCXParser:
 
             if text and not link_nodes:
                 para_props = _text_color_props(paragraph, theme_colors)
-                if _looks_like_fake_heading(paragraph, style_name, text):
+                is_fake_heading = _looks_like_fake_heading(paragraph, style_name, text)
+                if is_fake_heading:
                     # Visually a heading (Title/Subtitle style, or short
                     # all-bold large text) but NOT a real Heading style —
                     # invisible to screen-reader navigation. Flagged by
                     # TextStyledAsHeadingAnalyzer.
                     para_props = dict(para_props or {})
                     para_props["looks_like_heading"] = True
-                fake_sig = _fake_list_signature(text)
+                # A line that looks like a heading is NOT also a fake-list item.
+                # A big/bold numbered section header ("1. Introduction") is a
+                # heading, not a bullet — tagging it both ways lets two fixes
+                # (PROMOTE_HEADING + FIX_LIST_STRUCTURE) target the same node,
+                # where only one can win in the writer (the other is silently
+                # dropped yet still scored/charged). Promotion takes precedence.
+                fake_sig = None if is_fake_heading else _fake_list_signature(text)
                 if fake_sig:
                     kind, char, ordinal = fake_sig
                     para_props = dict(para_props or {})

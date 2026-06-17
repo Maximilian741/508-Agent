@@ -273,6 +273,8 @@ export default function AuditScreen() {
 
   const currentViolation: PipelineViolation | null = filteredViolations[reviewIndex] ?? null;
   const totalIssues = report?.violations.length ?? 0;
+  // How many findings we can actually auto-fix (drives the one-click CTA copy).
+  const fixableCount = useMemo(() => _countFixable(report), [report]);
   const reviewedCount = useMemo(
     () =>
       Object.values(decisions).filter(
@@ -840,6 +842,36 @@ export default function AuditScreen() {
     setConfirmRemediateOpen(true);
   }, [gateFreeScan, handlePick, mockMode, report, sourceFile, toast]);
 
+  /**
+   * One-click "Fix everything": approve every finding that has a real fix
+   * (including AI-written alt text), then run the same remediate-and-download
+   * flow. This is the zero-effort path — the user never has to triage issues
+   * one by one. The credit-cost confirm still appears (it's money), and the
+   * per-issue review queue remains available for anyone who wants it.
+   */
+  const fixEverythingAndDownload = useCallback(() => {
+    if (!report) {
+      toast.warning("No audit yet", {
+        description: "Run an audit first so we know what to fix.",
+        dedupeKey: "no-audit-yet",
+      });
+      return;
+    }
+    const all = _approveAllFixable(report);
+    if (Object.keys(all).length === 0) {
+      toast.info("Nothing we can auto-fix here", {
+        description:
+          "Every remaining issue needs a human judgment call. Review them below — we explain each one.",
+      });
+      return;
+    }
+    setDecisions(all);
+    // downloadRemediated runs the free-scan + sign-in gates and opens the
+    // credit-cost confirm; _runRemediateNow reads the freshly-approved
+    // decisions after the user confirms (a re-render happens in between).
+    void downloadRemediated();
+  }, [report, downloadRemediated, toast]);
+
   /* ---- Keyboard shortcuts ------------------------------------------------- */
   useKeyboardShortcuts(
     [
@@ -1204,7 +1236,7 @@ export default function AuditScreen() {
           <InlineNotice title="Couldn't analyze that file" message={error} tone="danger" />
         ) : null}
 
-        {/* Auto-fix policy selector */}
+        {/* Auto-fix mode selector */}
         <View style={styles.policyBlock}>
           <Text
             style={[
@@ -1212,29 +1244,29 @@ export default function AuditScreen() {
               { color: theme.colors.textMuted, marginBottom: 6 },
             ]}
           >
-            Auto-fix policy
+            How much should we do for you?
           </Text>
           <View style={styles.policyRow}>
             {(
               [
                 {
-                  key: "conservative" as const,
-                  label: "Conservative",
-                  desc: "Only fix things I am 95%+ certain about.",
-                },
-                {
                   key: "balanced" as const,
-                  label: "Balanced",
-                  desc: "Fix common issues, leave judgment calls for me.",
+                  label: "Fix it for me (recommended)",
+                  desc: "We apply every fix we can — including AI-written alt text — then you just download. Nothing's permanent: re-audit, edit, or undo anytime.",
                 },
                 {
-                  key: "aggressive" as const,
-                  label: "Aggressive",
-                  desc: "Fix everything you can - I will review the output.",
+                  key: "conservative" as const,
+                  label: "Let me review each fix",
+                  desc: "We suggest a fix for every issue, but apply nothing until you approve it.",
                 },
               ]
             ).map((opt) => {
-              const selected = autoFixPolicy === opt.key;
+              // "balanced" and the legacy "aggressive" both mean "fix it all",
+              // so the recommended tile stays selected for either stored value.
+              const selected =
+                opt.key === "conservative"
+                  ? autoFixPolicy === "conservative"
+                  : autoFixPolicy !== "conservative";
               return (
                 <Pressable
                   key={opt.key}
@@ -1403,6 +1435,54 @@ export default function AuditScreen() {
 
           <SeverityHeatmap errors={buckets.errors} warnings={buckets.warnings} infos={buckets.infos} />
         </Card>
+      ) : null}
+
+      {/* === One-click "Fix everything" — the zero-effort path ================ */}
+      {report && fixableCount > 0 && !fixedDownloadUrl && !mockMode ? (
+        (() => {
+          const fmt = formatForFile(sourceFile) ?? (report.summary.sourceFormat?.toLowerCase() as any);
+          const cost = costFor(fmt);
+          const fileLabel = (report.summary.sourceFormat || "file").toUpperCase();
+          return (
+            <Card>
+              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+                <Text style={{ fontSize: 30, lineHeight: 34 }}>✨</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+                    Let us fix it for you
+                  </Text>
+                  <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>
+                    We'll apply all {fixableCount} automatic fix{fixableCount === 1 ? "" : "es"} —
+                    including writing the alt text for your images and repairing the
+                    structure — and hand you back a fixed {fileLabel}. You don't have to
+                    write or decide anything.
+                  </Text>
+                </View>
+              </View>
+              <Button
+                title={
+                  downloadingFixed
+                    ? "Fixing your document..."
+                    : `Fix all ${fixableCount} issue${fixableCount === 1 ? "" : "s"} & download`
+                }
+                onPress={fixEverythingAndDownload}
+                loading={downloadingFixed}
+                variant="primary"
+                accessibilityLabel={`Fix all ${fixableCount} issues automatically and download the corrected file`}
+                accessibilityHint="Applies every automatic fix, including AI-written alt text, then downloads the corrected document."
+              />
+              <Text
+                style={[
+                  theme.typography.caption,
+                  { color: theme.colors.textMuted, marginTop: 8, textAlign: "center" },
+                ]}
+              >
+                Costs {cost} credit{cost === 1 ? "" : "s"}. Want to check each fix first?
+                You can review them one by one below.
+              </Text>
+            </Card>
+          );
+        })()
       ) : null}
 
       {/* === Letter from Curb: warm prose summary ============================= */}
@@ -2217,41 +2297,48 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
  *   - aggressive: pre-approves every violation that has at least one
  *     non-manual-review recommended action.
  */
+/**
+ * Decide which findings to pre-approve based on the user's auto-fix policy.
+ *
+ * Two real behaviors (the third enum value is a back-compat alias):
+ *   - "conservative" → approve nothing; the user reviews every fix by hand.
+ *   - "balanced" / "aggressive" → approve EVERYTHING we can actually fix,
+ *     including AI-written alt text and link text. The whole value of the
+ *     product is "we do the work for you" — approval IS the review, and the
+ *     user can still re-audit, edit, or undo any fix afterward. Only findings
+ *     whose sole action is manual review are left for the user.
+ */
 function _preDecideFromPolicy(
   report: PipelineResponse,
   policy: "conservative" | "balanced" | "aggressive",
 ): Record<string, IssueState> {
   if (policy === "conservative") return {};
+  return _approveAllFixable(report);
+}
+
+/**
+ * Approve every finding that has a real, automatable fix — i.e. anything whose
+ * recommended actions are not *only* "flag for manual review". Used both by the
+ * default auto-fix policy and by the one-click "Fix everything" button, so the
+ * two paths can never disagree about what counts as auto-fixable.
+ */
+function _approveAllFixable(report: PipelineResponse): Record<string, IssueState> {
   const at = new Date().toISOString();
   const out: Record<string, IssueState> = {};
-  const judgmentActions = new Set([
-    "FLAG_FOR_MANUAL_REVIEW",
-    "GENERATE_ALT_TEXT",
-    "IMPROVE_LINK_TEXT",
-  ]);
-  const aiProvider = (report.aiProvider || "").toLowerCase();
   for (const v of report.violations) {
     const actions = v.recommendedActions ?? [];
     if (actions.length === 0) continue;
-    if (actions.includes("FLAG_FOR_MANUAL_REVIEW") && actions.length === 1) {
-      // Pure manual-review items are never pre-approved by policy.
-      continue;
-    }
-    const hasDeterministic = actions.some((a) => !judgmentActions.has(a));
-    if (policy === "aggressive") {
-      // Approve anything that has a fix at all. AI-suggested or heuristic
-      // both count - the user opted in to "review the output".
-      out[v.id] = { decision: "approved", decidedAt: at };
-      continue;
-    }
-    // Balanced: pre-approve heuristic high-confidence patterns that have
-    // a deterministic action. Non-heuristic AI providers still defer to
-    // the user under balanced.
-    if (hasDeterministic && (aiProvider === "heuristic" || aiProvider === "")) {
-      out[v.id] = { decision: "approved", decidedAt: at };
-    }
+    // Pure manual-review items have no automatable fix — leave them pending.
+    if (actions.every((a) => a === "FLAG_FOR_MANUAL_REVIEW")) continue;
+    out[v.id] = { decision: "approved", decidedAt: at };
   }
   return out;
+}
+
+/** Count findings that have a real automatable fix (drives the one-click CTA). */
+function _countFixable(report: PipelineResponse | null): number {
+  if (!report) return 0;
+  return Object.keys(_approveAllFixable(report)).length;
 }
 
 function _extractProvenance(notes: string): { provider: string; confidence?: number } | null {

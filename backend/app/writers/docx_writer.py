@@ -162,6 +162,14 @@ def write_remediated_docx(
             _apply_link(node, hyperlink_by_id, applied, skipped)
         elif isinstance(node, HeadingNode):
             _apply_heading(node, paragraph_by_id, applied, skipped)
+        elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("promote_to_heading_level"):
+            # A paragraph that only LOOKED like a heading (big/bold/Title text)
+            # which the PROMOTE_HEADING executor approved — give it a real
+            # Heading style so it joins the navigation outline. Checked BEFORE
+            # list-conversion: the parser makes these mutually exclusive (a
+            # styled heading is never tagged as a fake list), but if both ever
+            # co-occur, promotion must win — a heading is not a bullet.
+            _apply_promote_heading(node, paragraph_by_id, applied, skipped)
         elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
             # A typed fake-list paragraph the FIX_LIST_STRUCTURE executor
             # approved for conversion — give it real Word list semantics.
@@ -655,6 +663,51 @@ def _apply_heading(
             "kind": "heading_level",
             "target_id": heading.id,
             "summary": f"paragraph.style = {style_name!r}",
+        }
+    )
+
+
+def _apply_promote_heading(
+    paragraph_node: ParagraphNode,
+    paragraph_by_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Style a styled-but-fake-heading paragraph as a real ``Heading {level}``.
+
+    The level was chosen by ``PromoteHeadingExecutor`` and stashed on the node
+    as ``promote_to_heading_level``. We re-use the same ``paragraph.style``
+    assignment ``_apply_heading`` uses for genuine headings, so a re-parse of
+    the output emits a real ``HeadingNode`` and the TEXT_STYLED_AS_HEADING flag
+    clears.
+    """
+
+    paragraph = paragraph_by_id.get(paragraph_node.id)
+    if paragraph is None:
+        skipped.append({"target_id": paragraph_node.id, "reason": "paragraph_not_found_for_promotion"})
+        return
+    props = paragraph_node.metadata.properties or {}
+    try:
+        level = max(1, min(6, int(props.get("promote_to_heading_level") or 1)))
+    except (TypeError, ValueError):
+        level = 1
+    style_name = f"Heading {level}"
+    try:
+        paragraph.style = paragraph.part.document.styles[style_name]
+    except KeyError:
+        try:
+            paragraph.style = style_name
+        except Exception as exc:
+            skipped.append({"target_id": paragraph_node.id, "reason": f"failed_to_set_style:{exc}"})
+            return
+    except Exception as exc:  # pragma: no cover - defensive
+        skipped.append({"target_id": paragraph_node.id, "reason": f"failed_to_set_style:{exc}"})
+        return
+    applied.append(
+        {
+            "kind": "promote_heading",
+            "target_id": paragraph_node.id,
+            "summary": f"paragraph.style = {style_name!r} (promoted fake heading)",
         }
     )
 

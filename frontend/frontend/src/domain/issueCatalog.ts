@@ -325,9 +325,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen-reader users navigate by pulling up the document's heading list and jumping to a section. Text that is merely styled big and bold — the classic title page — looks like a heading to sighted readers but is invisible in that list, so whole sections effectively disappear from navigation (WCAG 1.3.1).",
     autoFix:
-      "We flag this for review — promoting text to a heading requires choosing the right level (H1? H2?), which depends on the document's structure, so we don't guess.",
+      "We promote it to a real heading for you. We pick a level that keeps the outline valid — the same level as the nearest heading above it, or Heading 1 when it sits at the top with nothing above — so it never creates a new level jump. The remediated file gets a genuine Heading style (it shows up in Word's Navigation pane and the screen-reader heading list).",
     manualJudgment:
-      "In Word, select the text and apply a real heading style (Home → Styles → Heading 1/2/3) instead of manual bold/size formatting. Word's Title style is also not a navigational heading — use Heading 1 for the document title.",
+      "Optional: if you want a different level than the one we chose, open the remediated file in Word, click the heading, and pick Heading 1/2/3 from Home → Styles.",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],
