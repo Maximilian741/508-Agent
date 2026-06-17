@@ -853,6 +853,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
     "pptx": {
         "SET_DOCUMENT_TITLE",
         "SET_DOCUMENT_LANGUAGE",
+        # Untitled slides get a real title placeholder (cloned from the layout)
+        # carrying derived text — verified by smoke_slide_title (re-parse sees a
+        # titled slide and the flag clears).
+        "SET_SLIDE_TITLE",
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         "IMPROVE_LINK_TEXT",

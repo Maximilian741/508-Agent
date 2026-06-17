@@ -578,6 +578,7 @@ class ActionCode(str, Enum):
     IMPROVE_LINK_TEXT = "IMPROVE_LINK_TEXT"
     SET_DOCUMENT_LANGUAGE = "SET_DOCUMENT_LANGUAGE"
     SET_DOCUMENT_TITLE = "SET_DOCUMENT_TITLE"
+    SET_SLIDE_TITLE = "SET_SLIDE_TITLE"
     RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
     TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
     ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
@@ -672,6 +673,20 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=True,
             supported_node_types=[NodeType.HEADING],
             related_flag_code=AccessibilityFlagCode.SKIPPED_HEADING_LEVEL,
+        )
+    ],
+    AccessibilityFlagCode.SLIDE_TITLE_MISSING: [
+        RemediationAction(
+            action_code=ActionCode.SET_SLIDE_TITLE,
+            description=(
+                "Give the slide a real title (derived from its most prominent "
+                "text) so it appears in the slide-title navigation list."
+            ),
+            requires_ai=False,
+            requires_human_review=False,
+            is_auto_applicable=True,
+            supported_node_types=[NodeType.SECTION],
+            related_flag_code=AccessibilityFlagCode.SLIDE_TITLE_MISSING,
         )
     ],
     AccessibilityFlagCode.TEXT_STYLED_AS_HEADING: [

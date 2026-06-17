@@ -401,9 +401,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Screen-reader users move through a presentation by slide title, and the title placeholder is what assistive tech announces when a slide opens. A slide with no title (or with text typed into a stray text box instead of the title placeholder) leaves users unsure where they are. WCAG 2.4.2 / 1.3.1.",
     autoFix:
-      "We flag this for review — a meaningful slide title depends on the slide's content, so it needs human input rather than an automatic guess.",
+      "We give the slide a real title for you. We take the slide's topmost line of text (skipping footers, dates and page numbers — the line you most likely meant as the title) and insert it into a proper Title placeholder — even on a blank layout — so it shows up in PowerPoint's Outline view and the screen-reader slide list. On a slide with no usable text we fall back to \"Slide N\".",
     manualJudgment:
-      "Add a title in the slide's Title placeholder (PowerPoint's Outline view is the fastest way). If a slide is intentionally title-less, give it a title and hide it off-canvas only as a last resort.",
+      "Optional: if our derived title isn't ideal, edit it in PowerPoint's Outline view (View → Outline) — it's already a real title placeholder, so just retype it.",
     severity: "error",
     standards: {
       wcag: ["2.4.2 Page Titled", "1.3.1 Info and Relationships"],

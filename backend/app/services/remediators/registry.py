@@ -19,6 +19,7 @@ from app.services.remediators.remove_decorative_alt_text_executor import RemoveD
 from app.services.remediators.resolve_reading_order_executor import ResolveReadingOrderExecutor
 from app.services.remediators.set_document_language_executor import SetDocumentLanguageExecutor
 from app.services.remediators.set_document_title_executor import SetDocumentTitleExecutor
+from app.services.remediators.set_slide_title_executor import SetSlideTitleExecutor
 from app.services.remediators.set_table_header_scope_executor import SetTableHeaderScopeExecutor
 from app.services.remediators.add_ocr_text_layer_executor import AddOcrTextLayerExecutor
 from app.services.remediators.tag_pdf_structure_executor import TagPdfStructureExecutor
@@ -36,6 +37,7 @@ def get_default_executors() -> List[RemediationExecutor]:
         ImproveLinkTextExecutor(),
         SetDocumentLanguageExecutor(),
         SetDocumentTitleExecutor(),
+        SetSlideTitleExecutor(),
         ResolveReadingOrderExecutor(),
         TagPdfStructureExecutor(),
         AddOcrTextLayerExecutor(),
