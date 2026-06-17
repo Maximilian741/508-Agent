@@ -203,6 +203,69 @@ export interface ConformanceTotals {
   evaluatedTotal: number;
 }
 
+export interface BatchCriterionVerdict extends CriterionVerdict {
+  /** How many documents in the batch have at least one finding for this criterion. */
+  docsAffected: number;
+  totalDocs: number;
+}
+
+/**
+ * Aggregate a per-criterion conformance verdict across many documents (an
+ * agency/batch VPAT). A criterion's status is the WORST across the batch: any
+ * document with an error-level finding → "Does Not Support"; only
+ * advisory/warning findings → "Partially Supports"; the engine tested it and no
+ * document had a finding → "Supports"; the engine doesn't test it → "Not
+ * Evaluated". Same honesty contract as the single-document report.
+ */
+export function computeBatchConformance(
+  docs: { filename: string; findings: { ruleId: string; severity: string }[] }[],
+): BatchCriterionVerdict[] {
+  const totalDocs = docs.length;
+  return WCAG_21_CRITERIA.map((c) => {
+    const rules = CRITERION_RULES[c.num];
+    const partialCoverage = c.num in PARTIAL_COVERAGE_CRITERIA;
+    if (!rules || rules.length === 0) {
+      return {
+        ...c,
+        evaluated: false,
+        partialCoverage: false,
+        status: "Not Evaluated" as const,
+        remark: "Not assessed by automated analysis. Requires manual review.",
+        docsAffected: 0,
+        totalDocs,
+      };
+    }
+    let anyError = false;
+    let anyOther = false;
+    let docsAffected = 0;
+    for (const d of docs) {
+      const matching = d.findings.filter((f) => rules.includes(f.ruleId));
+      if (matching.length > 0) {
+        docsAffected += 1;
+        if (matching.some((m) => m.severity === "error")) anyError = true;
+        else anyOther = true;
+      }
+    }
+    if (docsAffected === 0) {
+      const remark = partialCoverage
+        ? `No issues found in the automated checks (${PARTIAL_COVERAGE_CRITERIA[c.num]}) in any document; other aspects require manual review.`
+        : "No issues detected in any document in the automated scan.";
+      return { ...c, evaluated: true, partialCoverage, status: "Supports" as const, remark, docsAffected: 0, totalDocs };
+    }
+    const status: ConformanceStatus = anyError ? "Does Not Support" : "Partially Supports";
+    void anyOther;
+    return {
+      ...c,
+      evaluated: true,
+      partialCoverage,
+      status,
+      remark: `${docsAffected} of ${totalDocs} document${totalDocs === 1 ? "" : "s"} have findings for this criterion.`,
+      docsAffected,
+      totalDocs,
+    };
+  });
+}
+
 export function conformanceTotals(verdicts: CriterionVerdict[]): ConformanceTotals {
   const supports = verdicts.filter((v) => v.status === "Supports").length;
   const partial = verdicts.filter((v) => v.status === "Partially Supports").length;
