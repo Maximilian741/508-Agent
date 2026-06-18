@@ -34,21 +34,36 @@ const STEPS = [
 
 const DIFFERENTIATORS = [
   {
-    title: "Fixes, not just findings",
-    body: "Most checkers stop at a list of problems. 508 Agent writes the approved fixes back into your file — alt text, titles, language, link text, table headers, and typed “- item” lines converted into real Word and PowerPoint lists.",
+    title: "One click — including the alt text",
+    body: "Upload, click “Fix everything,” download an accessible file. We write the alt text for your images with AI and repair headings, titles, lists, tables, language and link text. You don't write or decide anything.",
+  },
+  {
+    title: "Procurement-grade conformance reports",
+    body: "One click produces a VPAT-style Accessibility Conformance Report — a verdict on every WCAG 2.1 A/AA criterion — that you can hand straight to legal or procurement.",
+  },
+  {
+    title: "Built for agencies & teams",
+    body: "Process a whole folder at once, download every fixed file as a ZIP, and generate one consolidated conformance report — all under your own logo and brand colours.",
   },
   {
     title: "Rebuilds PDF structure",
     body: "Untagged PDF? The engine reconstructs a real PDF/UA structure tree from the page content — headings, lists, tables, figures, and header/footer artifacts.",
   },
   {
-    title: "Catches scanned PDFs",
-    body: "A scanned document looks fine and reads as nothing. We flag image-only PDFs as a hard error with OCR guidance instead of waving them through.",
+    title: "Verifiable certificates & a developer API",
+    body: "Every remediation summary has a public verification link auditors can check. Need automation? Scan documents programmatically from your CI pipeline with an API key.",
   },
   {
-    title: "Honest scoring & verifiable certificates",
-    body: "The score only counts fixes that genuinely persist into the file, and every certificate has a public verification link auditors can check themselves.",
+    title: "Honest by design",
+    body: "The score only counts fixes that genuinely persist into the file, and the report marks criteria we don't auto-check as “needs manual review.” No overclaiming — the kind of report an auditor trusts.",
   },
+];
+
+const AUDIENCES = [
+  { title: "Government & public sector", body: "Meet ADA Title II / Section 508 across your document libraries before the deadline." },
+  { title: "Agencies & consultants", body: "Remediate client documents in bulk and deliver branded, verifiable reports." },
+  { title: "Enterprise & regulated industries", body: "Keep finance, HR and customer PDFs compliant and audit-ready." },
+  { title: "Universities & education", body: "Make course materials, syllabi and handouts accessible at scale." },
 ];
 
 export default function LandingScreen() {
@@ -59,18 +74,37 @@ export default function LandingScreen() {
       <Hero
         shader="ember"
         eyebrow="508 AGENT"
-        title="Accessibility audits without the busywork"
-        subtitle="508 Agent walks every WCAG 2.1, Section 508, and PDF/UA finding in your documents and proposes a fix you can approve, edit, or reject."
+        title="Make every document accessible — and prove it."
+        subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, and PowerPoint files, fixes them automatically — including writing the alt text for your images — and hands you a conformance report. Your first audits are free."
       >
         <View style={styles.ctaRow}>
-          <Button title="Try it free" onPress={() => router.push("/" as any)} />
+          <Button title="Start free — 25 credits" onPress={() => router.push("/audit" as any)} />
           <Button
-            title="Run your first audit"
+            title="See pricing"
             variant="ghost"
-            onPress={() => router.push("/audit" as any)}
+            onPress={() => router.push("/billing" as any)}
           />
         </View>
       </Hero>
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <Chip label="ADA Title II" tone="warning" />
+          <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 18 }]}>
+            The compliance deadline is already here
+          </Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8 }]}>
+          Under the DOJ's ADA Title II rule, state &amp; local government web content and
+          documents must meet WCAG 2.1 Level AA by{" "}
+          <Text style={{ color: theme.colors.text, fontWeight: "700" }}>April 24, 2026</Text>{" "}
+          for larger entities (populations of 50,000+) and{" "}
+          <Text style={{ color: theme.colors.text, fontWeight: "700" }}>April 26, 2027</Text>{" "}
+          for smaller entities and special districts. Most organizations have thousands of
+          untagged PDFs and documents to remediate — at manual rates of $5–25 per page, that's
+          a wall. 508 Agent fixes them in bulk, automatically.
+        </Text>
+      </Card>
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Three steps.</Text>
@@ -102,7 +136,7 @@ export default function LandingScreen() {
       </Card>
 
       <Card>
-        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>What makes this different</Text>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Everything you need to ship accessible documents</Text>
         <View style={styles.steps}>
           {DIFFERENTIATORS.map((d) => (
             <View
@@ -124,6 +158,21 @@ export default function LandingScreen() {
       </Card>
 
       <Card>
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Who it's for</Text>
+        <View style={styles.steps}>
+          {AUDIENCES.map((a) => (
+            <View
+              key={a.title}
+              style={[styles.step, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}
+            >
+              <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>{a.title}</Text>
+              <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>{a.body}</Text>
+            </View>
+          ))}
+        </View>
+      </Card>
+
+      <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards covered</Text>
         <View style={styles.chipRow}>
           <Pressable accessibilityRole="button" accessibilityLabel="Open the WCAG 2.1 specification (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
@@ -135,6 +184,22 @@ export default function LandingScreen() {
           <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
+        </View>
+      </Card>
+
+      <Card>
+        <View style={{ alignItems: "center", paddingVertical: 8 }}>
+          <Text style={[theme.typography.h2, { color: theme.colors.text, textAlign: "center" }]}>
+            Start free — your first audits are on us
+          </Text>
+          <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6, textAlign: "center", maxWidth: 520 }]}>
+            25 free credits, no credit card. Pay-as-you-go credit packs or a monthly plan when
+            you're ready to scale. Fix one document or ten thousand.
+          </Text>
+          <View style={[styles.ctaRow, { justifyContent: "center" }]}>
+            <Button title="Start free" onPress={() => router.push("/audit" as any)} />
+            <Button title="See pricing" variant="ghost" onPress={() => router.push("/billing" as any)} />
+          </View>
         </View>
       </Card>
 
