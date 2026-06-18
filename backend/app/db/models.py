@@ -227,6 +227,31 @@ class CertificateRow(Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class ApiKeyRow(Base):
+    """A developer API key for programmatic accessibility *scanning*.
+
+    Only a SHA-256 hash of the key is stored — the plaintext is shown once at
+    creation and is unrecoverable thereafter. ``key_prefix`` is a short,
+    non-secret slice ("ak_live_ab12…") kept only so the owner can recognise a
+    key in the list. A revoked key has ``revoked_at`` set and is rejected.
+    """
+
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        Index("idx_api_keys_user", "user_id"),
+        Index("idx_api_keys_hash", "key_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, default="API key")
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(24), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class TeamRow(Base):
     """A team that shares its owner's subscription benefit and credit wallet.
 

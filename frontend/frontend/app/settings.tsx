@@ -6,7 +6,7 @@
  * data; the new copy spells it out.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Image, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { clearHistory } from "../src/domain/auditHistory";
@@ -23,6 +23,14 @@ import {
   saveBranding,
   type ReportBranding,
 } from "../src/domain/reportBranding";
+import {
+  createApiKey,
+  listApiKeys,
+  revokeApiKey,
+  type ApiKeyDTO,
+  type CreatedApiKeyDTO,
+} from "../src/domain/apiKeys";
+import { loadToken } from "../src/domain/account";
 import {
   notificationsAvailable,
   notificationsEnabled,
@@ -91,6 +99,61 @@ export default function SettingsScreen() {
         ? "Your reports now carry your brand."
         : "Branding cleared — reports use the default style.",
     });
+  };
+
+  // --- Developer API keys ---------------------------------------------------
+  const signedIn = !!loadToken();
+  const [apiKeys, setApiKeys] = useState<ApiKeyDTO[]>([]);
+  const [apiKeysError, setApiKeysError] = useState<string | null>(null);
+  const [keyName, setKeyName] = useState("");
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [justCreatedKey, setJustCreatedKey] = useState<CreatedApiKeyDTO | null>(null);
+
+  useEffect(() => {
+    if (!signedIn || mockMode) return;
+    let alive = true;
+    listApiKeys(apiBaseUrl)
+      .then((ks) => { if (alive) setApiKeys(ks); })
+      .catch((e) => { if (alive) setApiKeysError((e as Error).message); });
+    return () => { alive = false; };
+  }, [signedIn, mockMode, apiBaseUrl]);
+
+  const onCreateKey = async () => {
+    setCreatingKey(true);
+    setApiKeysError(null);
+    try {
+      const created = await createApiKey(apiBaseUrl, keyName.trim() || "API key");
+      setJustCreatedKey(created);
+      setKeyName("");
+      setApiKeys((prev) => [created, ...prev]);
+      toast.success("API key created", { description: "Copy it now — you won't see it again." });
+    } catch (e) {
+      setApiKeysError((e as Error).message);
+      toast.error("Couldn't create API key", { description: (e as Error).message });
+    } finally {
+      setCreatingKey(false);
+    }
+  };
+
+  const onRevokeKey = async (id: string) => {
+    try {
+      const updated = await revokeApiKey(apiBaseUrl, id);
+      setApiKeys((prev) => prev.map((k) => (k.id === id ? updated : k)));
+      if (justCreatedKey?.id === id) setJustCreatedKey(null);
+      toast.success("API key revoked");
+    } catch (e) {
+      toast.error("Couldn't revoke key", { description: (e as Error).message });
+    }
+  };
+
+  const copyKey = async (value: string) => {
+    if (Platform.OS !== "web") return;
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Couldn't copy — select it and copy manually.");
+    }
   };
   // Operator/dev affordances (free-scan bypass, analyzer URL override, AI
   // provider notes) are hidden on managed builds: customers on the hosted
@@ -191,6 +254,88 @@ export default function SettingsScreen() {
             />
           ) : null}
         </View>
+      </Card>
+
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Developer API</Text>
+        </View>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          Scan documents for accessibility issues programmatically — wire it into your CI or build pipeline.
+          Create a key and POST a file to <Text style={[theme.typography.mono, { color: theme.colors.text }]}>/pipeline/analyze</Text>.
+          Keys are scan-only: they can't spend credits or change your account.
+        </Text>
+
+        {!signedIn ? (
+          <InlineNotice tone="info" title="Sign in first" message="Create a free account to generate API keys." />
+        ) : (
+          <>
+            <View style={[styles.codeBlock, { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border }]}>
+              <Text style={[theme.typography.mono, { color: theme.colors.text, fontSize: 12 }]}>
+                {`curl -X POST ${apiBaseUrl}/pipeline/analyze \\\n  -H "X-API-Key: ak_live_…" \\\n  -F "file=@report.pdf"`}
+              </Text>
+            </View>
+
+            {justCreatedKey ? (
+              <View style={[styles.newKeyBox, { borderColor: theme.colors.success, backgroundColor: theme.colors.success + "12" }]}>
+                <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>
+                  Your new API key — copy it now
+                </Text>
+                <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+                  This is the only time we'll show it. Store it somewhere safe.
+                </Text>
+                <Text selectable style={[theme.typography.mono, { color: theme.colors.text, fontSize: 12 }]}>
+                  {justCreatedKey.key}
+                </Text>
+                <View style={[styles.buttonRow, { marginTop: 8 }]}>
+                  <Button title="Copy key" onPress={() => copyKey(justCreatedKey.key)} variant="secondary" />
+                  <Button title="Done" onPress={() => setJustCreatedKey(null)} variant="ghost" />
+                </View>
+              </View>
+            ) : null}
+
+            <Text style={[styles.brandLabel, { color: theme.colors.textMuted }]}>New key name</Text>
+            <View style={{ flexDirection: "row", gap: 10, alignItems: "center" }}>
+              <TextInput
+                value={keyName}
+                onChangeText={setKeyName}
+                style={[styles.input, { flex: 1, borderColor: theme.colors.border, color: theme.colors.text, marginTop: 0 }]}
+                placeholder="CI pipeline"
+                placeholderTextColor={theme.colors.textMuted}
+              />
+              <Button title={creatingKey ? "Creating…" : "Create key"} onPress={onCreateKey} loading={creatingKey} disabled={creatingKey} />
+            </View>
+
+            {apiKeysError ? <InlineNotice tone="danger" title="API keys" message={apiKeysError} /> : null}
+
+            {apiKeys.length > 0 ? (
+              <View style={{ marginTop: 12, gap: 6 }}>
+                {apiKeys.map((k) => (
+                  <View key={k.id} style={[styles.keyRow, { borderColor: theme.colors.border }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600", fontSize: 14 }]}>
+                        {k.name}{" "}
+                        <Text style={[theme.typography.mono, { color: theme.colors.textMuted, fontSize: 12 }]}>{k.keyPrefix}…</Text>
+                      </Text>
+                      <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+                        Created {new Date(k.createdAt).toLocaleDateString()}
+                        {k.lastUsedAt ? ` · last used ${new Date(k.lastUsedAt).toLocaleDateString()}` : " · never used"}
+                      </Text>
+                    </View>
+                    {k.revoked ? (
+                      <Chip label="Revoked" tone="default" />
+                    ) : (
+                      <Pressable accessibilityRole="button" accessibilityLabel={`Revoke ${k.name}`} onPress={() => onRevokeKey(k.id)}>
+                        <Text style={[theme.typography.body, { color: theme.colors.danger, fontWeight: "700", fontSize: 13 }]}>Revoke</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </>
+        )}
       </Card>
 
       <Card>
@@ -799,6 +944,9 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   input: { borderWidth: 1, borderRadius: 10, padding: 10, marginTop: 12 },
   brandLabel: { fontSize: 12, fontWeight: "700", letterSpacing: 0.3, marginTop: 12, textTransform: "uppercase" },
+  codeBlock: { borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 12 },
+  newKeyBox: { borderWidth: 1, borderRadius: 10, padding: 14, marginTop: 12 },
+  keyRow: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderRadius: 10, padding: 12 },
   buttonRow: { flexDirection: "row", marginTop: 12, gap: 8 },
   toggleRow: {
     flexDirection: "row",

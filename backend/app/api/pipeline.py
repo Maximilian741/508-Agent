@@ -37,7 +37,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.deps import require_user_id
+from app.api.deps import require_user_id, require_user_id_or_api_key
 from app.config import get_settings
 from app.security.signing import sign_file_url, verify_file_signature
 from app.security.uploads import stream_to_tempfile
@@ -137,7 +137,10 @@ async def analyze(
     request: Request,
     file: UploadFile = File(...),
     execute: bool = False,
-    user_id: str = Depends(require_user_id),
+    # Free, read-only scanning — accepts a session JWT (UI) OR a developer API
+    # key. Remediation (which spends credits) stays JWT-only on purpose, so an
+    # API key can never trigger billing.
+    user_id: str = Depends(require_user_id_or_api_key),
 ) -> PipelineResponse:
     """Analyze a document and return findings.
 
