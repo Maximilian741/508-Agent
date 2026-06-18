@@ -61,6 +61,81 @@ export function contrastRatio(
   return (light + 0.05) / (dark + 0.05);
 }
 
+type RGB = [number, number, number];
+
+function _blend(a: RGB, b: RGB, t: number): RGB {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+
+function _toHex([r, g, b]: RGB): string {
+  return (
+    "#" +
+    [r, g, b]
+      .map((x) => Math.max(0, Math.min(255, x)).toString(16).padStart(2, "0"))
+      .join("")
+      .toUpperCase()
+  );
+}
+
+/**
+ * Find the colour CLOSEST to ``color`` (smallest perceptual nudge) that, paired
+ * with ``against``, reaches ``target`` contrast. Scans toward black and toward
+ * white — a fine linear scan, not a binary search, because the ratio is U-shaped
+ * (non-monotonic) when ``color`` and ``against`` straddle each other in
+ * luminance. ``adjustingForeground`` controls which side of the ratio ``color``
+ * sits on. Returns null when even pure black/white can't reach the target.
+ */
+function _nearestPassing(
+  color: RGB,
+  against: RGB,
+  target: number,
+  adjustingForeground: boolean,
+): { hex: string; ratio: number } | null {
+  const extremes: RGB[] = [
+    [0, 0, 0],
+    [255, 255, 255],
+  ];
+  let best: { hex: string; ratio: number; t: number } | null = null;
+  for (const extreme of extremes) {
+    for (let i = 1; i <= 100; i += 1) {
+      const t = i / 100;
+      const c = _blend(color, extreme, t);
+      const ratio = adjustingForeground ? contrastRatio(c, against) : contrastRatio(against, c);
+      if (ratio >= target) {
+        if (!best || t < best.t) best = { hex: _toHex(c), ratio, t };
+        break; // first passing step in this direction is the closest for it
+      }
+    }
+  }
+  return best ? { hex: best.hex, ratio: best.ratio } : null;
+}
+
+/**
+ * Suggest the nearest passing colours for a failing pair: keep one channel and
+ * nudge the other (and vice-versa) just enough to clear ``target`` (AA normal
+ * = 4.5 by default). Either field is null if that side can't reach the target.
+ */
+export function suggestPassing(
+  fgHex: string,
+  bgHex: string,
+  target = 4.5,
+): {
+  foreground: { hex: string; ratio: number } | null;
+  background: { hex: string; ratio: number } | null;
+} {
+  const fg = parseHex(fgHex);
+  const bg = parseHex(bgHex);
+  if (!fg || !bg) return { foreground: null, background: null };
+  return {
+    foreground: _nearestPassing(fg, bg, target, true),
+    background: _nearestPassing(bg, fg, target, false),
+  };
+}
+
 export function evaluate(
   fgHex: string,
   bgHex: string,
