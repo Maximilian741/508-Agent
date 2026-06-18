@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.admin_metrics import router as admin_metrics_router
+from app.api.api_keys import router as api_keys_router
 from app.api.audit_log import router as audit_log_router
 from app.api.auth import router as auth_router
 from app.api.credits import router as credits_router
@@ -108,6 +109,7 @@ app.include_router(credits_router, tags=["credits"])
 app.include_router(stripe_billing_router, tags=["billing"])
 app.include_router(teams_router, tags=["teams"])
 app.include_router(admin_metrics_router, tags=["admin"])
+app.include_router(api_keys_router, tags=["api-keys"])
 app.include_router(documents_router, tags=["documents"])
 app.include_router(scan_router, tags=["scan"])
 app.include_router(remediate_router, tags=["remediate"])

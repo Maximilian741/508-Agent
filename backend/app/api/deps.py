@@ -14,15 +14,21 @@ route that needs a caller identity depends on one of the helpers below.
 
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.db.models import UserRow
+from app.db.models import ApiKeyRow, UserRow
 from app.db.session_sqlalchemy import session_scope
 from app.security.sessions import verify_session
+
+# Developer API keys are prefixed so they're recognisable and never confused
+# with a session JWT.
+API_KEY_PREFIX = "ak_"
 
 
 def _bearer_sub(authorization: Optional[str]) -> Optional[str]:
@@ -81,6 +87,59 @@ def require_admin(user_id: str = Depends(require_user_id)) -> UserRow:
     if not is_admin:
         raise HTTPException(status_code=403, detail="admin_only")
     return row
+
+
+def hash_api_key(plaintext: str) -> str:
+    """SHA-256 of the full key. Keys are 256-bit random, so a direct hash lookup
+    is not guessable and needs no constant-time compare (no low-entropy secret)."""
+    return hashlib.sha256((plaintext or "").encode("utf-8")).hexdigest()
+
+
+def _api_key_user_id(presented: Optional[str]) -> Optional[str]:
+    """Resolve a presented API key to its owner's user id, or None.
+
+    Looks up the key by its hash among non-revoked keys and stamps last-used.
+    Never reveals whether a key exists (callers get a generic 401).
+    """
+    key = (presented or "").strip()
+    if not key.startswith(API_KEY_PREFIX):
+        return None
+    digest = hash_api_key(key)
+    with session_scope() as session:
+        row = session.execute(
+            select(ApiKeyRow)
+            .where(ApiKeyRow.key_hash == digest)
+            .where(ApiKeyRow.revoked_at.is_(None))
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        row.last_used_at = datetime.utcnow()  # committed on scope exit
+        return row.user_id
+
+
+def require_user_id_or_api_key(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+) -> str:
+    """Authenticate via a session JWT (UI) OR a developer API key (programmatic).
+
+    Deliberately SEPARATE from ``require_user_id`` so the API-key path can never
+    weaken the core session auth used by every other route. Applied only to the
+    free, read-only scanning endpoint. The key may arrive as ``X-API-Key`` or as
+    ``Authorization: Bearer ak_…``.
+    """
+    sub = _bearer_sub(authorization)
+    if sub:
+        return sub
+    candidate = x_api_key
+    if not candidate and authorization:
+        parts = authorization.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            candidate = parts[1].strip()
+    uid = _api_key_user_id(candidate)
+    if uid:
+        return uid
+    raise HTTPException(status_code=401, detail="authentication_required")
 
 
 def optional_user(authorization: Optional[str] = Header(default=None)) -> Optional[UserRow]:
