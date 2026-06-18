@@ -104,6 +104,16 @@ export default function LandingScreen() {
           untagged PDFs and documents to remediate — at manual rates of $5–25 per page, that's
           a wall. 508 Agent fixes them in bulk, automatically.
         </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Estimate how much you would save versus manual remediation"
+          onPress={() => router.push("/savings" as any)}
+          style={({ hovered }: any) => [{ marginTop: 12, alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
+            Calculate your savings vs. manual remediation →
+          </Text>
+        </Pressable>
       </Card>
 
       <Card>
@@ -205,6 +215,8 @@ export default function LandingScreen() {
 
       <View style={styles.footer}>
         <FooterLink label="Pricing" onPress={() => router.push("/billing" as any)} />
+        <FooterLink label="Savings calculator" onPress={() => router.push("/savings" as any)} />
+        <FooterLink label="FAQ" onPress={() => router.push("/faq" as any)} />
         <FooterLink label="About" onPress={() => router.push("/about" as any)} />
         <FooterLink label="Help" onPress={() => router.push("/help" as any)} />
         <FooterLink label="Terms" onPress={() => router.push("/terms" as any)} />
