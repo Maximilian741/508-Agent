@@ -21,6 +21,7 @@ from app.api.pipeline import router as pipeline_router
 from app.api.policies import router as policies_router
 from app.api.remediate import router as remediate_router
 from app.api.scan import router as scan_router
+from app.api.tools import router as tools_router
 from app.config import get_settings
 from app.persistence.db import init_db
 # Importing app.db.models registers every ORM table on the shared Base
@@ -112,6 +113,7 @@ app.include_router(admin_metrics_router, tags=["admin"])
 app.include_router(api_keys_router, tags=["api-keys"])
 app.include_router(documents_router, tags=["documents"])
 app.include_router(scan_router, tags=["scan"])
+app.include_router(tools_router, tags=["tools"])
 app.include_router(remediate_router, tags=["remediate"])
 app.include_router(manual_review_router, tags=["manual-review"])
 app.include_router(policies_router, tags=["policies"])
