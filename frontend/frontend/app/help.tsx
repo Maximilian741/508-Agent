@@ -49,7 +49,7 @@ const FAQ: { question: string; answer: string }[] = [
   {
     question: "What does a remediation cost?",
     answer:
-      "Analysis is always free — upload as many documents as you like and read every finding. Writing a remediated file costs credits by format: PDF 5 credits, Word (DOCX) 3 credits, PowerPoint (PPTX) 4 credits. Certificates cost 2 credits, or are included free on Team and Business plans. New accounts start with 25 free credits.",
+      "Analysis is always free — upload as many documents as you like and read every finding. Writing a remediated file costs credits by format: PDF 5 credits, Word (DOCX) 3 credits, PowerPoint (PPTX) 4 credits, HTML 3 credits. Certificates cost 2 credits, or are included free on Team and Business plans. New accounts start with 25 free credits.",
   },
   {
     question: "How do I get help?",

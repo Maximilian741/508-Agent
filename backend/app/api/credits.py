@@ -96,6 +96,11 @@ DOC_FORMAT_COSTS = {
     "pdf": 5,
     "docx": 3,
     "pptx": 4,
+    # HTML is text-native and v1 does only lightweight attribute/text DOM
+    # edits (no content-stream surgery or OOXML rewriting), so it sits in the
+    # cheapest tier alongside docx. MUST match frontend creditCosts.ts.
+    "html": 3,
+    "htm": 3,
 }
 
 

@@ -77,7 +77,7 @@ export default function DocumentsScreen() {
 
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".pdf,.docx,.pptx";
+    input.accept = ".pdf,.docx,.pptx,.html,.htm";
     input.onchange = () => {
       const file = input.files?.[0];
       if (file) {

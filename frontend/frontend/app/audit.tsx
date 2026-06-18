@@ -90,9 +90,12 @@ const ACCEPTED_FILE_TYPES = [
   ".pdf",
   ".docx",
   ".pptx",
+  ".html",
+  ".htm",
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/html",
 ].join(",");
 
 type Decision = "pending" | "approved" | "rejected";
@@ -994,10 +997,10 @@ export default function AuditScreen() {
 
   // Window-wide drag-and-drop file pickup.
   const { isDragging } = useFileDrop((file) => {
-    const okExt = /\.(pdf|docx|pptx)$/i.test(file.name);
+    const okExt = /\.(pdf|docx|pptx|html|htm)$/i.test(file.name);
     if (!okExt) {
       toast.error("Unsupported file type", {
-        description: "Drop a .pdf, .docx, or .pptx file.",
+        description: "Drop a .pdf, .docx, .pptx, or .html file.",
       });
       return;
     }
@@ -1259,7 +1262,7 @@ export default function AuditScreen() {
           >
             <PixelIcon name="doc" size={5} color={theme.colors.accent} />
             <Text style={[theme.typography.h2, { color: theme.colors.text, marginTop: 10, textAlign: "center" }]}>
-              Drop a PDF, Word, or PowerPoint file here
+              Drop a PDF, Word, PowerPoint, or HTML file here
             </Text>
             <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4, textAlign: "center" }]}>
               Or click anywhere in this box to choose one from your computer
@@ -1268,7 +1271,7 @@ export default function AuditScreen() {
               <Text style={styles.dropZoneCtaText}>Choose file</Text>
             </View>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 10 }]}>
-              .pdf · .docx · .pptx
+              .pdf · .docx · .pptx · .html
             </Text>
           </Pressable>
         ) : (
