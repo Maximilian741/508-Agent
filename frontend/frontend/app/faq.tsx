@@ -36,7 +36,7 @@ const SECTIONS: Section[] = [
     items: [
       {
         q: "What kinds of files can I fix?",
-        a: "PDF, Microsoft Word (.docx) and Microsoft PowerPoint (.pptx). Upload one at a time, or a whole folder at once on the Batch screen.",
+        a: "PDF, Microsoft Word (.docx), Microsoft PowerPoint (.pptx) and HTML web pages (.html). Upload one at a time, or a whole folder at once on the Batch screen.",
       },
       {
         q: "Do I have to know anything about accessibility?",
@@ -58,7 +58,7 @@ const SECTIONS: Section[] = [
     items: [
       {
         q: "What is a credit, and what does a fix cost?",
-        a: "Analysis is free. Downloading a remediated file costs credits by format: PDF 5, Word 3, PowerPoint 4. A conformance certificate costs 2 credits, or is included free on Team and Business plans. Credits never expire.",
+        a: "Analysis is free. Downloading a remediated file costs credits by format: PDF 5, Word 3, PowerPoint 4, HTML 3. A conformance certificate costs 2 credits, or is included free on Team and Business plans. Credits never expire.",
       },
       {
         q: "Do I need a subscription?",
