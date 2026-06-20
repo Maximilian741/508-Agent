@@ -26,7 +26,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -826,6 +826,91 @@ async def verify_certificate(cert_id: str) -> CertificateDTO:
             paidWith=row.paid_with,
             verifyUrl=_verify_url_for(row.id),
         )
+
+
+# ---------------------------------------------------------------------------
+# Embeddable badge (sellable / viral: every embed links back to the public
+# verification page). The badge is HONEST — it surfaces the certificate's own
+# server-computed score (the same number shown on /verify) and links to the
+# full report with its careful "automated summary, not a formal determination"
+# claim. It never asserts a conformance level on its own.
+# ---------------------------------------------------------------------------
+
+# Score thresholds -> shields-style colours.
+_BADGE_THRESHOLDS = [(90, "#2da44e"), (75, "#3f9142"), (60, "#dfb317"), (0, "#e0843b")]
+
+
+def _badge_color(score: int) -> str:
+    for threshold, color in _BADGE_THRESHOLDS:
+        if score >= threshold:
+            return color
+    return "#9f9f9f"
+
+
+def _badge_text_width(text: str) -> int:
+    # Approximate width for an 11px Verdana-ish font; generous so text never clips.
+    return int(len(text) * 6.5) + 12
+
+
+def _render_badge_svg(label: str, value: str, color: str) -> str:
+    import html as _html
+
+    label = _html.escape(label)
+    value = _html.escape(value)
+    lw = _badge_text_width(label)
+    vw = _badge_text_width(value)
+    total = lw + vw
+    label_mid = lw / 2
+    value_mid = lw + vw / 2
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total}" height="20" '
+        f'role="img" aria-label="{label}: {value}">'
+        f'<title>{label}: {value}</title>'
+        f'<linearGradient id="s" x2="0" y2="100%">'
+        f'<stop offset="0" stop-color="#bbb" stop-opacity=".1"/>'
+        f'<stop offset="1" stop-opacity=".1"/></linearGradient>'
+        f'<clipPath id="r"><rect width="{total}" height="20" rx="3" fill="#fff"/></clipPath>'
+        f'<g clip-path="url(#r)">'
+        f'<rect width="{lw}" height="20" fill="#555"/>'
+        f'<rect x="{lw}" width="{vw}" height="20" fill="{color}"/>'
+        f'<rect width="{total}" height="20" fill="url(#s)"/></g>'
+        f'<g fill="#fff" text-anchor="middle" '
+        f'font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">'
+        f'<text x="{label_mid:.0f}" y="15" fill="#010101" fill-opacity=".3">{label}</text>'
+        f'<text x="{label_mid:.0f}" y="14">{label}</text>'
+        f'<text x="{value_mid:.0f}" y="15" fill="#010101" fill-opacity=".3">{value}</text>'
+        f'<text x="{value_mid:.0f}" y="14">{value}</text>'
+        f'</g></svg>'
+    )
+
+
+@router.get("/certificate/{cert_id}/badge.svg")
+async def certificate_badge(cert_id: str) -> Response:
+    """Public SVG badge for a certificate. Embed it (wrapped in a link to the
+    verify page) on a site to show an accessibility report exists. Renders a
+    neutral 'not found' badge for an unknown id so a stale embed degrades
+    gracefully rather than showing a broken image."""
+    with session_scope() as session:
+        row = session.execute(
+            select(CertificateRow).where(CertificateRow.id == cert_id)
+        ).scalar_one_or_none()
+        # Read the score while the session is open (the row detaches on exit).
+        score = max(0, min(100, int(row.score))) if row is not None else None
+
+    if score is None:
+        svg = _render_badge_svg("508 Agent", "not found", "#9f9f9f")
+    else:
+        svg = _render_badge_svg("508 Agent", f"{score}/100", _badge_color(score))
+
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "public, max-age=300",
+            # SVG badges are safe to embed cross-origin as <img>.
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @router.post("/overage", response_model=SubscriptionDTO)
