@@ -28,6 +28,7 @@ _RATE_LIMITED_PREFIXES: Tuple[str, ...] = (
     "/pipeline",
     "/billing",  # checkout / cert issuance / overage — abuse + Stripe-cost surface
     "/teams",  # invite endpoint sends email per call — block invite/email spam
+    "/tools",  # standalone AI utilities (alt-text) — bound vision-AI cost/abuse
 )
 _RATE_LIMITED_EXACT: frozenset = frozenset({"/documents/upload"})
 # Stripe POSTs webhooks here and retries on any non-2xx; a 429 would silently
