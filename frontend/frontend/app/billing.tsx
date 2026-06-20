@@ -100,6 +100,23 @@ const PLAN_FAMILIES: PlanFamily[] = [
   },
 ];
 
+// At-a-glance comparison. Columns: pay-as-you-go credit packs / Team / Business.
+// Every cell must be true of the product today (see TIERS / PLAN_FAMILIES above
+// and the entitlements enforced server-side).
+const COMPARE_COLUMNS = ["Credit packs", "Team", "Business"] as const;
+const COMPARE_ROWS: { feature: string; values: [string, string, string] }[] = [
+  { feature: "Free unlimited analysis", values: ["✓", "✓", "✓"] },
+  { feature: "Remediated file downloads", values: ["Per credit", "1,000 / mo", "6,000 / mo"] },
+  { feature: "Conformance certificates", values: ["2 credits", "Included", "Included"] },
+  { feature: "Team seats (shared wallet)", values: ["1", "3", "10"] },
+  { feature: "Batch / folder processing", values: ["✓", "✓", "✓"] },
+  { feature: "White-label branded reports", values: ["✓", "✓", "✓"] },
+  { feature: "Developer API (free scans)", values: ["✓", "✓", "✓"] },
+  { feature: "Auto top-up if you run out", values: ["—", "✓", "✓"] },
+  { feature: "Credits expiry", values: ["Never", "Monthly refill", "Monthly refill"] },
+  { feature: "Support", values: ["Email", "Email", "Email"] },
+];
+
 function redirectTo(url: string) {
   if (Platform.OS === "web" && typeof window !== "undefined") {
     window.location.href = url;
@@ -274,6 +291,24 @@ export default function BillingScreen() {
         ))}
       </View>
 
+      {/* At-a-glance comparison */}
+      <Text style={[theme.typography.displaySmall, { color: theme.colors.text, marginTop: 32 }]}>Compare plans</Text>
+      <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4, marginBottom: 12 }}>
+        Everything in pay-as-you-go, plus shared seats and free certificates on the subscription plans.
+      </Text>
+      <ComparisonTable theme={theme} />
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Estimate how much you would save versus manual remediation"
+        onPress={() => router.push("/savings" as any)}
+        style={{ marginTop: 14, alignSelf: "flex-start" }}
+      >
+        <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
+          Estimate your savings vs. manual remediation →
+        </Text>
+      </Pressable>
+
       {!stripeEnabled ? (
         <Text style={{ color: theme.colors.textMuted, fontSize: 12, textAlign: "center", marginTop: 24, paddingHorizontal: 16 }}>
           Stripe is not configured in this build - credit packs add local test credits, and subscriptions need Stripe keys.
@@ -413,6 +448,44 @@ function TierCard({ tier, busy, onChoose }: { tier: Tier; busy: boolean; onChoos
   );
 }
 
+function ComparisonTable({ theme }: { theme: ReturnType<typeof useTheme> }) {
+  return (
+    <View style={[styles.table, { borderColor: theme.colors.border }]}>
+      {/* Header */}
+      <View style={[styles.tableRow, { backgroundColor: theme.colors.surface2, borderBottomColor: theme.colors.border }]}>
+        <Text style={[styles.cellFeature, { color: theme.colors.textMuted, fontWeight: "800" }]}>Feature</Text>
+        {COMPARE_COLUMNS.map((c, i) => (
+          <Text
+            key={c}
+            style={[
+              styles.cellValue,
+              { color: i === 1 ? theme.colors.accent : theme.colors.text, fontWeight: "800" },
+            ]}
+          >
+            {c}
+          </Text>
+        ))}
+      </View>
+      {COMPARE_ROWS.map((row, ri) => (
+        <View
+          key={row.feature}
+          style={[
+            styles.tableRow,
+            ri < COMPARE_ROWS.length - 1 ? { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.colors.border } : null,
+          ]}
+        >
+          <Text style={[styles.cellFeature, { color: theme.colors.text }]}>{row.feature}</Text>
+          {row.values.map((v, vi) => (
+            <Text key={vi} style={[styles.cellValue, { color: v === "—" ? theme.colors.textMuted : theme.colors.text }]}>
+              {v}
+            </Text>
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   grid: { flexDirection: "row", gap: 16, marginTop: 4 },
   gridStacked: { flexDirection: "column" },
@@ -424,4 +497,8 @@ const styles = StyleSheet.create({
   features: { marginTop: 4, gap: 8 },
   featureRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   bullet: { width: 6, height: 6, borderRadius: 3 },
+  table: { borderWidth: 1, borderRadius: 12, overflow: "hidden" },
+  tableRow: { flexDirection: "row", alignItems: "center", paddingVertical: 11, paddingHorizontal: 12, gap: 8 },
+  cellFeature: { flex: 1.6, fontSize: 13 },
+  cellValue: { flex: 1, fontSize: 12, textAlign: "center" },
 });
