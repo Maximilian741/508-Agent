@@ -150,7 +150,7 @@ async def analyze(
     every deterministic fix into the in-memory tree (legacy behavior).
     """
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".pptx"}:
+    if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
 
     settings = get_settings()
@@ -399,7 +399,7 @@ async def remediate(
     """
 
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".pptx"}:
+    if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
 
     try:
@@ -819,6 +819,8 @@ def _media_type_for(name: str) -> str:
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     if lower.endswith(".pptx"):
         return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    if lower.endswith((".html", ".htm")):
+        return "text/html; charset=utf-8"
     return "application/octet-stream"
 
 
@@ -887,6 +889,20 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # succeeds when an OCR provider is actually available, so counting
         # it is honest — verified by smoke_ocr_layer.
         "ADD_OCR_TEXT_LAYER",
+    },
+    "html": {
+        # html_writer does attribute/text DOM edits that each round-trip into
+        # the output bytes — verified by smoke_html (re-parse sees the fix and
+        # the original flag clears). Form-field labeling is detection-only in
+        # v1 (the executor skips), so FILL_FORM_FIELD_LABELS is intentionally
+        # absent; contrast is not populated (no class/stylesheet colours), so
+        # no LOW_CONTRAST false positives.
+        "SET_DOCUMENT_TITLE",       # writes/creates <head><title>
+        "SET_DOCUMENT_LANGUAGE",    # writes <html lang="...">
+        "GENERATE_ALT_TEXT",        # writes <img alt="...">
+        "NORMALIZE_HEADING_LEVEL",  # renames the heading tag (h3 -> h2)
+        "IMPROVE_LINK_TEXT",        # rewrites pure-text link content
+        "ADD_TABLE_HEADERS",        # promotes row-0 <td> -> <th scope=col> / inserts a header row
     },
 }
 

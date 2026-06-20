@@ -1,12 +1,12 @@
 # 508 Agent
 
-**A document-accessibility auditor and remediator** for PDF, Word, and PowerPoint files. The agent runs deterministic structural analysis against WCAG 2.1, Section 508, and PDF/UA, then walks the user through every finding with approve / edit / reject controls before baking only the approved fixes into a remediated copy. Ships as a hosted web app (Expo Router frontend, FastAPI backend) with billing, accounts, and a deterministic-plus-AI remediation pipeline.
+**A document-accessibility auditor and remediator** for PDF, Word, PowerPoint, and HTML files. The agent runs deterministic structural analysis against WCAG 2.1, Section 508, and PDF/UA, then walks the user through every finding with approve / edit / reject controls before baking only the approved fixes into a remediated copy. Ships as a hosted web app (Expo Router frontend, FastAPI backend) with billing, accounts, and a deterministic-plus-AI remediation pipeline.
 
 ---
 
 ## What this is
 
-508 Agent is a self-serve document accessibility platform. Upload a PDF, DOCX, or PPTX; the backend extracts structure, runs 20 analyzers (alt text and alt-text quality, heading hierarchy and fake bold-text headings, typed fake lists, table headers, link text incl. field-code links and links inside tables/text boxes/footnotes, slide reading order, document title/language, colour contrast with theme-colour resolution, unlabeled form fields, untitled slides, scanned-image PDFs, untagged PDFs), and proposes concrete fixes with provenance. The user reviews each issue one at a time, approves what they want, and downloads a remediated file plus a printable remediation certificate. Approved fixes are written into the file itself — including converting typed "- item" runs into real Word/PowerPoint lists and reconstructing a full PDF structure tree (headings, lists, tables, artifacts) on untagged PDFs.
+508 Agent is a self-serve document accessibility platform. Upload a PDF, DOCX, PPTX, or HTML file; the backend extracts structure, runs 20 analyzers (alt text and alt-text quality, heading hierarchy and fake bold-text headings, typed fake lists, table headers, link text incl. field-code links and links inside tables/text boxes/footnotes, slide reading order, document title/language, colour contrast with theme-colour resolution, unlabeled form fields, untitled slides, scanned-image PDFs, untagged PDFs), and proposes concrete fixes with provenance. The user reviews each issue one at a time, approves what they want, and downloads a remediated file plus a printable remediation certificate. Approved fixes are written into the file itself — including converting typed "- item" runs into real Word/PowerPoint lists and reconstructing a full PDF structure tree (headings, lists, tables, artifacts) on untagged PDFs.
 
 ---
 

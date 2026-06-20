@@ -7,12 +7,13 @@
  * confirmation before kicking off a paid run.
  */
 
-export type RemediateFormat = "pdf" | "docx" | "pptx";
+export type RemediateFormat = "pdf" | "docx" | "pptx" | "html";
 
 const COSTS: Record<RemediateFormat, number> = {
   pdf: 5,
   docx: 3,
   pptx: 4,
+  html: 3,
 };
 
 const DEFAULT_COST = 5;
@@ -27,9 +28,10 @@ const DEFAULT_COST = 5;
 export function costFor(format: string | null | undefined): number {
   if (!format) return DEFAULT_COST;
   const key = format.trim().toLowerCase().replace(/^\./, "");
-  if (key === "pdf" || key === "docx" || key === "pptx") {
+  if (key === "pdf" || key === "docx" || key === "pptx" || key === "html") {
     return COSTS[key];
   }
+  if (key === "htm") return COSTS.html;
   return DEFAULT_COST;
 }
 
@@ -46,9 +48,11 @@ export function formatForFile(
   if (name.endsWith(".pdf")) return "pdf";
   if (name.endsWith(".docx")) return "docx";
   if (name.endsWith(".pptx")) return "pptx";
+  if (name.endsWith(".html") || name.endsWith(".htm")) return "html";
   const type = (file.type || "").toLowerCase();
   if (type.includes("pdf")) return "pdf";
   if (type.includes("wordprocessingml")) return "docx";
   if (type.includes("presentationml")) return "pptx";
+  if (type.includes("html")) return "html";
   return null;
 }

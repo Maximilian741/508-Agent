@@ -51,7 +51,7 @@ import { useTheme } from "../src/ui/useTheme";
 
 // Per-format remediation credit cost — mirrors the backend DOC_FORMAT_COSTS
 // (pipeline.py). Used to show the batch total before charging.
-const FORMAT_CREDIT_COST: Record<string, number> = { pdf: 5, docx: 3, pptx: 4 };
+const FORMAT_CREDIT_COST: Record<string, number> = { pdf: 5, docx: 3, pptx: 4, html: 3, htm: 3 };
 function _formatOf(filename: string): string {
   const m = /\.([a-z0-9]+)$/i.exec(filename || "");
   return (m ? m[1] : "").toLowerCase();
@@ -64,9 +64,12 @@ const ACCEPTED_FILE_TYPES = [
   ".pdf",
   ".docx",
   ".pptx",
+  ".html",
+  ".htm",
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/html",
 ].join(",");
 
 const MAX_CONCURRENCY = 3;
@@ -697,7 +700,7 @@ export default function BatchScreen() {
       const accepted: QueueItem[] = [];
       let rejected = 0;
       for (const file of files) {
-        if (!/\.(pdf|docx|pptx)$/i.test(file.name)) {
+        if (!/\.(pdf|docx|pptx|html|htm)$/i.test(file.name)) {
           rejected += 1;
           continue;
         }
