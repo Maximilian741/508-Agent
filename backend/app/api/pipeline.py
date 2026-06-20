@@ -562,14 +562,32 @@ async def remediate(
             detail="Could not remediate this file — it may be encrypted or corrupted. You were not charged.",
         )
 
-    # Success: NOW charge credits (never before the file exists). On the rare
-    # race where the wallet was drained since the precheck, this 402s and we
-    # clean up without delivering a file.
-    try:
-        _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
-    except HTTPException:
-        _cleanup_job_dir(job_dir)
-        raise
+    # Honesty: only charge when at least one APPROVED fix actually succeeded AND
+    # persists into the file for this format. If every approved item was
+    # manual-only / non-persistable (or nothing was approved), the download is
+    # effectively the source — billing for that is the same overcharge the
+    # hard-fail guard above prevents, via a different path. (We can't key off the
+    # writer's ``applied`` list: writers re-assert existing structure — e.g. an
+    # already-correct heading style — so it is non-empty even when no approved
+    # fix landed.) We still return the file + summary + manual-review items; the
+    # caller simply isn't billed. ``charged`` is surfaced for transparency.
+    persisted_fixes = sum(
+        1
+        for e in executions
+        if getattr(e.status, "value", e.status) == "success"
+        and _action_persists(e.action_code.value, fmt)
+    )
+    charged = False
+    if persisted_fixes > 0:
+        # Charge AFTER the file exists. On the rare race where the wallet was
+        # drained since the precheck, this 402s and we clean up without
+        # delivering a file.
+        try:
+            _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
+        except HTTPException:
+            _cleanup_job_dir(job_dir)
+            raise
+        charged = True
 
     # Owner email comes from the CF Access middleware (when enabled).  We
     # persist it on the job manifest so /pipeline/files can compare against
@@ -602,6 +620,7 @@ async def remediate(
         ],
         "writer": write_result,
         "manualReviewItemsCreated": manual_items_created,
+        "charged": charged,
     }
 
     # Drop a side-by-side metadata file so subsequent /pipeline/files calls
