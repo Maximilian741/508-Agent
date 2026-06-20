@@ -20,7 +20,10 @@ Design:
 from __future__ import annotations
 
 import base64
-from typing import Optional
+import threading
+import time
+from collections import deque
+from typing import Deque, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
@@ -35,6 +38,30 @@ router = APIRouter(prefix="/tools")
 # on it.
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MiB
 _CHUNK = 64 * 1024
+
+# Per-USER hourly cap on the free vision-AI alt-text tool. The per-request cost
+# cap (SemanticInferenceClient.max_cost_usd) bounds a single call, and the IP
+# rate limiter bounds bursts, but neither bounds a single authenticated user
+# making many calls over time (the IP limit is per-IP, not per-account). This
+# caps cumulative free-AI spend per user. In-memory / single-instance (same
+# caveat as security/rate_limit.py — swap for Redis under horizontal scale).
+_ALT_TEXT_WINDOW_S = 3600.0
+_ALT_TEXT_MAX_PER_USER = 40
+_alt_text_calls: Dict[str, Deque[float]] = {}
+_alt_text_lock = threading.Lock()
+
+
+def _alt_text_rate_ok(user_id: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - _ALT_TEXT_WINDOW_S
+    with _alt_text_lock:
+        dq = _alt_text_calls.setdefault(user_id, deque())
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= _ALT_TEXT_MAX_PER_USER:
+            return False
+        dq.append(now)
+        return True
 
 
 class AltTextToolResponse(BaseModel):
@@ -68,6 +95,14 @@ async def generate_alt_text(
     user_id: str = Depends(require_user_id),
 ) -> AltTextToolResponse:
     """Generate alternative text for a single uploaded image. Free (0 credits)."""
+    if not _alt_text_rate_ok(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"rate_limited: the free alt-text tool is capped at "
+                f"{_ALT_TEXT_MAX_PER_USER} images/hour per account. Try again later."
+            ),
+        )
     chunks: list[bytes] = []
     total = 0
     while True:

@@ -16,7 +16,7 @@ import { type PropsWithChildren } from "react";
 
 const TITLE = "508 Agent — Automated document accessibility & remediation";
 const DESCRIPTION =
-  "Automatically find and fix WCAG 2.1, Section 508 & PDF/UA accessibility issues in PDF, Word and PowerPoint files — including AI-written alt text — and get a conformance report. First audits free.";
+  "Automatically find and fix WCAG 2.1, Section 508 & PDF/UA accessibility issues in PDF, Word, PowerPoint, and HTML files — including AI-written alt text — and get a conformance report. First audits free.";
 // Brand primary (light theme `accent`, burnt-orange ember).
 const THEME_COLOR = "#C2410C";
 

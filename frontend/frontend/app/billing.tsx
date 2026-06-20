@@ -48,7 +48,7 @@ interface Tier {
 }
 
 // Every feature line below must be TRUE in the product today. Credits per
-// remediation: PDF 5 · DOCX 3 · PPTX 4 (analysis is always free).
+// remediation: PDF 5 · DOCX 3 · PPTX 4 · HTML 3 (analysis is always free).
 const TIERS: Tier[] = [
   { key: "starter", name: "Starter", priceCents: 500, baseCredits: 50, bonusCredits: 0, features: ["50 credits — about 10 PDF remediations", "Analysis is always free", "Email support"] },
   { key: "pro", name: "Pro", priceCents: 1500, baseCredits: 250, bonusCredits: 0, features: ["250 credits — about 50 PDFs", "Best per-credit value under $50", "Credits never expire", "Email support"], highlight: true },

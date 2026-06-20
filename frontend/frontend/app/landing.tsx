@@ -18,7 +18,7 @@ const STEPS = [
   {
     n: "1",
     title: "Drop a doc",
-    body: "Upload a PDF, Word, or PowerPoint file. Analysis is free, hosted files are deleted after 24 hours, and we never train AI on your documents.",
+    body: "Upload a PDF, Word, PowerPoint, or HTML file. Analysis is free, hosted files are deleted after 24 hours, and we never train AI on your documents.",
   },
   {
     n: "2",
@@ -75,7 +75,7 @@ export default function LandingScreen() {
         shader="ember"
         eyebrow="508 AGENT"
         title="Make every document accessible — and prove it."
-        subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, and PowerPoint files, fixes them automatically — including writing the alt text for your images — and hands you a conformance report. Your first audits are free."
+        subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, PowerPoint, and HTML files, fixes them automatically — including writing the alt text for your images — and hands you a conformance report. Your first audits are free."
       >
         <View style={styles.ctaRow}>
           <Button title="Start free — 25 credits" onPress={() => router.push("/audit" as any)} />
