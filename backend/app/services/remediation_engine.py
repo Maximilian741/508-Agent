@@ -308,6 +308,14 @@ def _collect_evidence(node, flag: AccessibilityFlag) -> dict:
     }:
         evidence["language"] = getattr(node.metadata, "language", None)
         evidence["title"] = node.metadata.properties.get("title") if node.metadata.properties else None
+    if flag.code == AccessibilityFlagCode.LOW_CONTRAST_TEXT:
+        cf = (node.metadata.properties or {}).get("contrast_finding")
+        if isinstance(cf, dict):
+            # Surface the measured colours/ratio AND the suggested accessible
+            # text colour so the UI/report can show the exact fix.
+            for key in ("fg", "bg", "ratio", "required", "suggested_fg", "suggested_ratio"):
+                if key in cf:
+                    evidence[key] = cf[key]
     return evidence
 
 

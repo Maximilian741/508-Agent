@@ -286,7 +286,7 @@ function fixtureContrastFlyer(): PipelineResponse {
         nodeId: "docx-p-7",
         page: 1,
         standards: { wcag_2_1: ["1.4.3"], section_508: ["E207.1"], pdf_ua: ["7.1-1"] },
-        evidence: { foreground: "#9aa0a6", background: "#ffffff", ratio: 2.85 },
+        evidence: { fg: "9AA0A6", bg: "FFFFFF", ratio: 2.85, required: 4.5, suggested_fg: "71767A", suggested_ratio: 4.59 },
         recommendedActions: ["INCREASE_TEXT_CONTRAST", "FLAG_FOR_MANUAL_REVIEW"],
       },
       mkAlt("demo-fl-img-1", 1, "docx-img-1"),
