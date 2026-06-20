@@ -213,6 +213,17 @@ export default function HomeScreen() {
             A folder at a time
           </Text>
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to readability checker"
+          onPress={() => router.push("/tools/readability")}
+          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
+            Readability checker
+          </Text>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+            Plain-language score (3.1.5)
+          </Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Go to tools contrast"
           onPress={() => router.push("/tools/contrast")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
