@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
-import { evaluate, parseHex } from "../../src/domain/contrast";
+import { evaluate, parseHex, suggestPassing } from "../../src/domain/contrast";
 import { Card } from "../../src/ui/components/Card";
 import { Chip } from "../../src/ui/components/Chip";
 import { Hero } from "../../src/ui/components/Hero";
@@ -60,6 +60,11 @@ export default function ContrastChecker() {
   const [bg, setBg] = useState("#FFFFFF");
 
   const evaluation = useMemo(() => evaluate(fg, bg), [fg, bg]);
+  const suggestions = useMemo(
+    () =>
+      evaluation.ok && !evaluation.result.aaNormal ? suggestPassing(fg, bg, 4.5) : null,
+    [evaluation, fg, bg],
+  );
 
   return (
     <Screen scroll title="Contrast checker">
@@ -131,6 +136,35 @@ export default function ContrastChecker() {
               <PassPill label="AAA · normal text" minRatio={7} pass={evaluation.result.aaaNormal} />
               <PassPill label="AAA · large text" minRatio={4.5} pass={evaluation.result.aaaLarge} />
             </View>
+
+            {suggestions && (suggestions.foreground || suggestions.background) ? (
+              <View style={styles.fixBlock}>
+                <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+                  FAILS AA FOR NORMAL TEXT — ONE TAP TO FIX
+                </Text>
+                <View style={styles.fixRow}>
+                  {suggestions.foreground ? (
+                    <FixSwatch
+                      label="Darken / lighten the text"
+                      hex={suggestions.foreground.hex}
+                      ratio={suggestions.foreground.ratio}
+                      onPress={() => setFg(suggestions.foreground!.hex)}
+                    />
+                  ) : null}
+                  {suggestions.background ? (
+                    <FixSwatch
+                      label="Adjust the background"
+                      hex={suggestions.background.hex}
+                      ratio={suggestions.background.ratio}
+                      onPress={() => setBg(suggestions.background!.hex)}
+                    />
+                  ) : null}
+                </View>
+                <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 8 }]}>
+                  Each option is the closest colour to your original that reaches 4.5:1. Tap to apply.
+                </Text>
+              </View>
+            ) : null}
           </>
         ) : (
           <Text style={[theme.typography.body, { color: theme.colors.danger }]}>
@@ -283,6 +317,44 @@ function PassPill({
   );
 }
 
+function FixSwatch({
+  label,
+  hex,
+  ratio,
+  onPress,
+}: {
+  label: string;
+  hex: string;
+  ratio: number;
+  onPress: () => void;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: use ${hex}, contrast ${ratio.toFixed(2)} to 1. Tap to apply.`}
+      onPress={onPress}
+      style={({ hovered, pressed }: any) => [
+        styles.fixSwatch,
+        {
+          borderColor: theme.colors.border,
+          backgroundColor: pressed || hovered ? theme.colors.surface2 : theme.colors.surface,
+        },
+      ]}
+    >
+      <View style={[styles.fixSwatchChip, { backgroundColor: hex, borderColor: theme.colors.border }]} />
+      <View style={{ flex: 1 }}>
+        <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13, fontWeight: "600" }]}>
+          {label}
+        </Text>
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+          {hex} · {ratio.toFixed(2)}:1
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
 function _safe(value: string): string {
   return parseHex(value) ? value : "#888888";
 }
@@ -331,4 +403,17 @@ const styles = StyleSheet.create({
     flexGrow: 1,
   },
   pillIcon: { fontSize: 18, fontWeight: "800" },
+  fixBlock: { marginTop: 18 },
+  fixRow: { flexDirection: "row", gap: 10, flexWrap: "wrap", marginTop: 10 },
+  fixSwatch: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    minWidth: 220,
+    flexGrow: 1,
+  },
+  fixSwatchChip: { width: 28, height: 28, borderRadius: 6, borderWidth: 1 },
 });
