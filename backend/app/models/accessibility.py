@@ -89,6 +89,7 @@ class AccessibilityFlagCode(str, Enum):
     PDF_UNTAGGED = "PDF_UNTAGGED"
     TEXT_STYLED_AS_HEADING = "TEXT_STYLED_AS_HEADING"
     TABLE_COMPLEX_NEEDS_SUMMARY = "TABLE_COMPLEX_NEEDS_SUMMARY"
+    TABLE_NESTED = "TABLE_NESTED"
 
 
 class StandardReference(BaseModel):
@@ -243,6 +244,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
         code=AccessibilityFlagCode.TABLE_COMPLEX_NEEDS_SUMMARY,
         severity=Severity.WARNING,
         message="Complex table (merged cells or large grid) needs a summary describing its structure.",
+        standards=StandardReference(
+            wcag_2_1=["1.3.1"],
+            section_508=["E205.2"],
+            pdf_ua=["7.5"],
+        ),
+    ),
+    AccessibilityFlagCode.TABLE_NESTED: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.TABLE_NESTED,
+        severity=Severity.WARNING,
+        message="Table is nested inside another table's cell, which screen readers struggle to navigate.",
         standards=StandardReference(
             wcag_2_1=["1.3.1"],
             section_508=["E205.2"],
@@ -904,6 +915,17 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.TABLE],
             related_flag_code=AccessibilityFlagCode.TABLE_COMPLEX_NEEDS_SUMMARY,
+        ),
+    ],
+    AccessibilityFlagCode.TABLE_NESTED: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag nested table for manual restructuring.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.TABLE],
+            related_flag_code=AccessibilityFlagCode.TABLE_NESTED,
         ),
     ],
     AccessibilityFlagCode.LINK_TARGET_BROKEN: [
