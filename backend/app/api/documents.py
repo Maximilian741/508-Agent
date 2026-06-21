@@ -113,13 +113,16 @@ def _ensure_dirs() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-_ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".html", ".htm"}
+# The legacy /documents flow is a separate implementation (its own
+# _analyze_*/_apply_*_fixes per format) that only supports Office + PDF. HTML is
+# a first-class format in the MODERN /pipeline flow (audit + batch screens), so
+# it is deliberately NOT accepted here — uploading HTML belongs on the audit
+# screen. Keeping this list to 3 formats keeps the legacy path honest.
+_ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 _ALLOWED_MIME_HINTS = {
     ".pdf": {"application/pdf"},
     ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
     ".pptx": {"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
-    ".html": {"text/html", "application/xhtml+xml"},
-    ".htm": {"text/html", "application/xhtml+xml"},
 }
 
 
@@ -128,13 +131,6 @@ def _sniff_signature(payload: bytes, suffix: str) -> bool:
         return payload.startswith(b"%PDF-")
     if suffix in {".docx", ".pptx"}:
         return payload.startswith(b"PK\x03\x04")
-    if suffix in {".html", ".htm"}:
-        # HTML has no single reliable magic prefix (it may start with a BOM,
-        # leading whitespace, a doctype, a comment, or a bare tag). Strip a
-        # leading BOM + whitespace and accept anything that opens a tag; the
-        # parser is the real gate.
-        head = payload.lstrip(b"\xef\xbb\xbf\xff\xfe\xfe\xff").lstrip()
-        return head[:1] == b"<"
     return False
 
 
@@ -149,7 +145,7 @@ def _safe_filename(raw_name: str) -> str:
 def _validate_upload_header(filename: str, content_type: str) -> str:
     suffix = Path(filename or "").suffix.lower().strip()
     if suffix not in _ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Unsupported file type. Only PDF, DOCX, PPTX, and HTML are allowed.")
+        raise HTTPException(status_code=400, detail="Unsupported file type. Only PDF, DOCX, and PPTX are allowed here — upload HTML on the Audit screen.")
     hinted = (content_type or "").split(";")[0].strip().lower()
     expected_hints = _ALLOWED_MIME_HINTS.get(suffix, set())
     if hinted and hinted != "application/octet-stream" and expected_hints and hinted not in expected_hints:

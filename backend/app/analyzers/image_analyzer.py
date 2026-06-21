@@ -20,10 +20,22 @@ _IMG_EXTS = (
     ".svg", ".webp", ".emf", ".wmf", ".heic", ".ico",
 )
 
-# The whole alt is just a generic word (+ optional trailing number): says nothing.
+# Generic words that name the *kind* of image but not its content. As the WHOLE
+# alt (optionally with a trailing number) they describe nothing — a content
+# image still needs a real description, so these warrant regeneration. We
+# deliberately EXCLUDE decorative-hint words (spacer/divider/separator) because
+# those signal a different remediation (mark the image decorative, empty alt)
+# rather than "write a better description".
+_PLACEHOLDER_WORDS = (
+    "image", "picture", "photo", "photograph", "graphic", "graphics", "img",
+    "pic", "figure", "drawing", "object", "chart", "diagram", "shape",
+    "placeholder", "untitled", "content placeholder", "logo", "banner", "icon",
+    "avatar", "thumbnail", "illustration", "artwork", "clipart", "clip art",
+    "screenshot", "screen shot", "headshot", "snapshot", "image file",
+)
+# The whole alt is just one of those words (+ optional separators/number).
 _PLACEHOLDER_RE = re.compile(
-    r"^(image|picture|photo|graphic|img|pic|figure|drawing|object|chart|diagram|"
-    r"shape|placeholder|untitled|content placeholder)[\s_\-#]*\d*$",
+    r"^(?:" + "|".join(re.escape(w) for w in _PLACEHOLDER_WORDS) + r")[\s_\-#:]*\d*$",
     re.IGNORECASE,
 )
 
@@ -33,15 +45,40 @@ _CAMERA_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Whole-alt filler that conveys nothing (matched case-insensitively, exact).
+_JUNK_ALTS = frozenset({
+    "n/a", "na", "n.a.", "none", "null", "nil", "blank", "empty", "tbd",
+    "todo", "to do", "test", "temp", "tmp", "asdf", "xxx", "...", "--", "—",
+    "no alt", "no alt text", "no description", "alt", "alt text", "alttext",
+    "description", "desc", "caption", "title", "name",
+})
+
+# A URL / data-URI / file path dropped in as alt instead of a description.
+_URL_RE = re.compile(r"^(https?://|www\.|ftp://|file:|data:image/)", re.IGNORECASE)
+# A filesystem-ish path: starts with a drive/slash and has NO spaces (real
+# descriptions have spaces; paths don't).
+_PATH_RE = re.compile(r"^([a-zA-Z]:[\\/]|\.{0,2}[\\/])\S+$")
+# Just a pixel dimension, e.g. "1024x768", "300 x 250", "640X480 px".
+_DIMENSIONS_RE = re.compile(r"^\d{2,5}\s*[x×*]\s*\d{2,5}(\s*px)?$", re.IGNORECASE)
+
 
 def is_nondescriptive_alt(alt: str) -> bool:
-    """True when ``alt`` is present but provides no real description — a filename
-    or a generic placeholder. Conservative: only clear cases, so a genuinely
-    short-but-valid description ("Red car") is never flagged."""
+    """True when ``alt`` is present but provides no real description — a filename,
+    URL/path, raw dimensions, generic filler, or a word that names the image's
+    kind but not its content. Conservative by design: a genuinely short-but-valid
+    description ("Red car", "Map of Europe", "Acme Corp logo") is never flagged,
+    because a false positive here would cause good alt text to be regenerated."""
     a = (alt or "").strip()
     if not a:
         return False  # empty is the MissingAltText case, not this one
-    if a.lower().endswith(_IMG_EXTS):
+    low = a.lower()
+    if low in _JUNK_ALTS:
+        return True
+    if low.endswith(_IMG_EXTS):
+        return True
+    if _URL_RE.match(a) or _PATH_RE.match(a):
+        return True
+    if _DIMENSIONS_RE.match(a):
         return True
     if _PLACEHOLDER_RE.match(a):
         return True

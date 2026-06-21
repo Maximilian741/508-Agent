@@ -1021,7 +1021,7 @@ export default function AuditScreen() {
           ]}
         >
           <Text style={styles.dropOverlayText}>Drop to audit</Text>
-          <Text style={styles.dropOverlaySub}>PDF · DOCX · PPTX accepted</Text>
+          <Text style={styles.dropOverlaySub}>PDF · DOCX · PPTX · HTML accepted</Text>
         </View>
       ) : null}
       {showHelp ? <KeyboardHelpOverlay onClose={() => setShowHelp(false)} /> : null}
@@ -2043,7 +2043,7 @@ export default function AuditScreen() {
       {!report && !busy ? (
         <EmptyState
           title="No audit yet"
-          message="Pick a PDF, DOCX, or PPTX above (or click a sample card) and we'll walk you through every accessibility finding."
+          message="Pick a PDF, DOCX, PPTX, or HTML file above (or click a sample card) and we'll walk you through every accessibility finding."
         />
       ) : null}
     </Screen>
@@ -2097,6 +2097,96 @@ function ProgressBar(props: {
           />
         );
       })}
+    </View>
+  );
+}
+
+/**
+ * Actionable colour-contrast evidence for a LOW_CONTRAST_TEXT finding: shows
+ * the measured foreground/background and ratio, plus the nearest WCAG-AA-passing
+ * text colour the backend computed — so the user gets the exact fix instead of
+ * trial-and-error. Renders nothing for other findings or when colours are absent.
+ */
+function ContrastEvidence({ violation }: { violation: PipelineViolation }) {
+  const theme = useTheme();
+  const toast = useToast();
+  if (violation.ruleId !== "LOW_CONTRAST_TEXT") return null;
+  const ev = (violation.evidence || {}) as Record<string, unknown>;
+  const fg = typeof ev.fg === "string" ? ev.fg : null;
+  const bg = typeof ev.bg === "string" ? ev.bg : null;
+  if (!fg || !bg) return null;
+  const ratio = typeof ev.ratio === "number" ? ev.ratio : null;
+  const required = typeof ev.required === "number" ? ev.required : null;
+  const suggested = typeof ev.suggested_fg === "string" ? ev.suggested_fg : null;
+  const suggestedRatio = typeof ev.suggested_ratio === "number" ? ev.suggested_ratio : null;
+
+  const Swatch = ({ hex }: { hex: string }) => (
+    <View
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: 4,
+        backgroundColor: `#${hex}`,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+      }}
+    />
+  );
+
+  return (
+    <View
+      style={{
+        borderWidth: 1,
+        borderRadius: 10,
+        padding: 12,
+        marginTop: 14,
+        borderColor: theme.colors.border,
+        backgroundColor: theme.colors.surface2,
+      }}
+    >
+      <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 8 }]}>
+        COLOUR CONTRAST
+      </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Swatch hex={fg} />
+        <Swatch hex={bg} />
+        <Text style={{ color: theme.colors.text, fontSize: 13, flex: 1 }}>
+          {`Current: #${fg} on #${bg}`}
+          {ratio != null ? ` — ${ratio.toFixed(2)}:1` : ""}
+          {required != null ? ` (needs ${required}:1)` : ""}
+        </Text>
+      </View>
+      {suggested ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 }}>
+          <Swatch hex={suggested} />
+          <Swatch hex={bg} />
+          <Text style={{ color: theme.colors.text, fontSize: 13, flex: 1 }}>
+            {"Use "}
+            <Text style={{ fontWeight: "800", color: theme.colors.accent }}>{`#${suggested}`}</Text>
+            {" for the text"}
+            {suggestedRatio != null ? ` — ${suggestedRatio.toFixed(2)}:1 — meets AA` : " — meets AA"}
+          </Text>
+          {Platform.OS === "web" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Copy suggested colour #${suggested}`}
+              onPress={() => {
+                try {
+                  (navigator as any)?.clipboard?.writeText(`#${suggested}`);
+                  toast.success(`Copied #${suggested}`);
+                } catch {}
+              }}
+              style={{ borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderColor: theme.colors.border }}
+            >
+              <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "700" }}>Copy</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+      <Text style={{ color: theme.colors.textMuted, fontSize: 11, marginTop: 10, lineHeight: 16 }}>
+        We don&apos;t change document colours automatically — recolouring is a design decision — but this is the
+        nearest colour to your original that passes WCAG AA against the same background.
+      </Text>
     </View>
   );
 }
@@ -2187,6 +2277,7 @@ function IssueCard(props: {
                 : `Node ${v.nodeId} (no page available - likely document-level metadata)`
             }
           />
+          <ContrastEvidence violation={v} />
           {catalog.manualJudgment ? (
             <Section title="What needs your judgment" body={catalog.manualJudgment} tone="warning" />
           ) : null}

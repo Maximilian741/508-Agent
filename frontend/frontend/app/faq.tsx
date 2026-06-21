@@ -27,7 +27,7 @@ interface Section {
 }
 
 // Pricing facts mirrored from billing.tsx / help.tsx: analysis free; remediation
-// PDF 5 · DOCX 3 · PPTX 4 credits; certificate 2 (free on Team/Business);
+// PDF 5 · DOCX 3 · PPTX 4 · HTML 3 credits; certificate 2 (free on Team/Business);
 // 25 free credits on signup; Team 3 seats / Business 10 seats, shared wallet.
 const SECTIONS: Section[] = [
   {

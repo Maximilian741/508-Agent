@@ -20,11 +20,11 @@ import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 
-type DocType = "pdf" | "word" | "ppt";
+type DocType = "pdf" | "word" | "ppt" | "html";
 
-// Credits per remediated file, mirrored from billing.tsx / help.tsx.
-const CREDITS_BY_TYPE: Record<DocType, number> = { pdf: 5, word: 3, ppt: 4 };
-const TYPE_LABEL: Record<DocType, string> = { pdf: "PDF", word: "Word", ppt: "PowerPoint" };
+// Credits per remediated file, mirrored from billing.tsx / help.tsx / credits.py.
+const CREDITS_BY_TYPE: Record<DocType, number> = { pdf: 5, word: 3, ppt: 4, html: 3 };
+const TYPE_LABEL: Record<DocType, string> = { pdf: "PDF", word: "Word", ppt: "PowerPoint", html: "HTML" };
 // Pro credit pack: $15 / 250 credits = $0.06 per credit (representative mid tier).
 const PER_CREDIT_USD = 15 / 250;
 

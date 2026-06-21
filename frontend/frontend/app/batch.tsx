@@ -720,7 +720,7 @@ export default function BatchScreen() {
       if (rejected > 0) {
         toast.warning(
           `Skipped ${rejected} unsupported file${rejected === 1 ? "" : "s"}`,
-          { description: "Only PDF, DOCX, and PPTX are accepted." },
+          { description: "Only PDF, DOCX, PPTX, and HTML are accepted." },
         );
       }
       if (!accepted.length) return;
@@ -822,7 +822,7 @@ export default function BatchScreen() {
         >
           <Text style={styles.dropOverlayText}>Drop to queue</Text>
           <Text style={styles.dropOverlaySub}>
-            Multiple files OK · PDF · DOCX · PPTX
+            Multiple files OK · PDF · DOCX · PPTX · HTML
           </Text>
         </View>
       ) : null}
@@ -860,7 +860,7 @@ export default function BatchScreen() {
           ]}
         >
           Drop a folder of documents anywhere on this page, or click Choose
-          files to multi-select. PDF, DOCX, PPTX accepted.
+          files to multi-select. PDF, DOCX, PPTX, HTML accepted.
         </Text>
         {Platform.OS === "web" ? (
           // @ts-ignore — RN-Web supports a hidden file input
@@ -1013,7 +1013,7 @@ export default function BatchScreen() {
         open={confirmRemediateOpen}
         title="Remediate the whole batch?"
         message={
-          `This applies the available auto-fixes to ${bulk.pendingRemediate.length} document(s) and produces a remediated copy of each. It spends ${bulk.totalCost} credits (PDF 5, Word 3, PowerPoint 4 per file). Findings that need human judgment are queued for manual review, not silently claimed.`
+          `This applies the available auto-fixes to ${bulk.pendingRemediate.length} document(s) and produces a remediated copy of each. It spends ${bulk.totalCost} credits (PDF 5, Word 3, PowerPoint 4, HTML 3 per file). Findings that need human judgment are queued for manual review, not silently claimed.`
         }
         confirmLabel={`Charge ${bulk.totalCost} & remediate`}
         cancelLabel="Cancel"

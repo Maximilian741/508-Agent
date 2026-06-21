@@ -59,7 +59,7 @@ const STEPS: Step[] = [
     badge: "STEP 4 · DOWNLOAD",
     title: "Apply approved fixes & download",
     body:
-      "Click 'Apply fixes – Download'. We confirm the credit cost, bake your approved changes into a fresh copy, and the corrected file downloads automatically. Credit costs: PDF 5, Word 3, PowerPoint 4.",
+      "Click 'Apply fixes – Download'. We confirm the credit cost, bake your approved changes into a fresh copy, and the corrected file downloads automatically. Credit costs: PDF 5, Word 3, PowerPoint 4, HTML 3.",
     tip: "If a credit-cost box appears, that's the confirm dialog: click the orange button to proceed.",
   },
   {

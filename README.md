@@ -142,6 +142,7 @@ Each remediation deducts credits based on format:
 | PDF    | 5                       |
 | DOCX   | 3                       |
 | PPTX   | 4                       |
+| HTML   | 3                       |
 
 Analysis is free; credits are only spent when the user clicks **Apply approved fixes** and a remediated file is produced.
 

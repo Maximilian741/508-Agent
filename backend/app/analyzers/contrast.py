@@ -69,6 +69,51 @@ def required_ratio(size_pt: Optional[float], bold: bool = False) -> float:
     return AA_LARGE if is_large_text(size_pt, bold) else AA_NORMAL
 
 
+def _to_hex(rgb: RGB) -> str:
+    return "".join(f"{max(0, min(255, int(round(c)))):02X}" for c in rgb)
+
+
+def _toward(src: RGB, target: RGB, t: float) -> RGB:
+    return (
+        src[0] + (target[0] - src[0]) * t,
+        src[1] + (target[1] - src[1]) * t,
+        src[2] + (target[2] - src[2]) * t,
+    )
+
+
+def suggest_passing_fg(fg: object, bg: object, required: float = AA_NORMAL) -> Optional[str]:
+    """The nearest foreground colour to ``fg`` that meets ``required`` contrast
+    against ``bg``, as ``RRGGBB`` (no ``#``), or None.
+
+    We never change the background (recolouring a page is a bigger design
+    decision than nudging text), and we change the text colour as little as
+    possible: scan from ``fg`` toward black and toward white, take the first
+    passing colour found along each direction (the nearest in that direction),
+    and return whichever of the two is the smaller change. Returns None if
+    ``fg``/``bg`` are unparseable or ``fg`` already passes (nothing to suggest)."""
+    f = parse_hex(fg)
+    b = parse_hex(bg)
+    if f is None or b is None:
+        return None
+    current = contrast_ratio(fg, bg)
+    if current is not None and current >= required:
+        return None
+
+    best: Optional[Tuple[float, str]] = None  # (squared-distance, hex)
+    steps = 64
+    for target in ((0, 0, 0), (255, 255, 255)):
+        for i in range(1, steps + 1):
+            cand = _toward(f, target, i / steps)
+            cand_hex = _to_hex(cand)
+            r = contrast_ratio(cand_hex, bg)
+            if r is not None and r >= required:
+                dist = sum((cand[k] - f[k]) ** 2 for k in range(3))
+                if best is None or dist < best[0]:
+                    best = (dist, cand_hex)
+                break  # first passing along this direction is the nearest in it
+    return best[1] if best else None
+
+
 __all__ = [
     "AA_NORMAL",
     "AA_LARGE",
@@ -77,4 +122,5 @@ __all__ = [
     "contrast_ratio",
     "is_large_text",
     "required_ratio",
+    "suggest_passing_fg",
 ]
