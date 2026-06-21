@@ -137,6 +137,42 @@ function _esc(s: unknown): string {
   );
 }
 
+/** RFC-4180 CSV cell: quote when it contains a comma, quote, or newline. */
+function _csvCell(v: unknown): string {
+  const s = String(v ?? "");
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/**
+ * Build a machine-readable CSV of the batch queue — one row per document with
+ * score, issue count, and remediation status. Agencies drop this straight into
+ * their own trackers/spreadsheets instead of re-typing from the HTML report.
+ * A UTF-8 BOM + CRLF line endings keep Excel happy with non-ASCII filenames.
+ */
+function _buildBatchCsv(items: QueueItem[]): string {
+  const header = [
+    "Filename",
+    "Format",
+    "Status",
+    "Score",
+    "Grade",
+    "Issues",
+    "Remediated",
+    "Fixes applied",
+  ];
+  const rows = items.map((i) => [
+    i.filename,
+    (i.sourceFormat || _formatOf(i.filename)).toUpperCase(),
+    i.status,
+    i.status === "done" && i.score != null ? String(i.score) : "",
+    i.grade ?? "",
+    i.totalIssues != null ? String(i.totalIssues) : "",
+    i.remediateStatus === "remediated" ? "yes" : "no",
+    i.remediateStatus === "remediated" ? String(i.appliedCount ?? 0) : "",
+  ]);
+  return [header, ...rows].map((r) => r.map(_csvCell).join(",")).join("\r\n");
+}
+
 /**
  * Build a printable, branded multi-document Accessibility Assessment Report —
  * the consolidated deliverable an agency (e.g. Sunriver) hands a client after
@@ -559,6 +595,23 @@ export default function BatchScreen() {
     _saveBlob(new Blob([html], { type: "text/html" }), "508-batch-conformance-report.html");
     toast.success("Conformance report downloaded", {
       description: `Consolidated WCAG 2.1 AA report across ${docs.length} document${docs.length === 1 ? "" : "s"}.`,
+    });
+  }, [items, toast]);
+
+  /** Export the batch results as a CSV for the agency's own trackers. */
+  const downloadBatchCsv = useCallback(() => {
+    if (Platform.OS !== "web") return;
+    if (items.length === 0) {
+      toast.warning("Nothing to export yet", {
+        description: "Add and analyze documents first.",
+        dedupeKey: "no-batch-csv",
+      });
+      return;
+    }
+    const csv = String.fromCharCode(0xfeff) + _buildBatchCsv(items);
+    _saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), "508-batch-results.csv");
+    toast.success("Results exported", {
+      description: `CSV with ${items.length} document${items.length === 1 ? "" : "s"}.`,
     });
   }, [items, toast]);
 
@@ -987,6 +1040,12 @@ export default function BatchScreen() {
                   onPress={downloadBatchConformanceReport}
                   variant="ghost"
                   accessibilityHint="Downloads one consolidated WCAG 2.1 AA conformance report covering every analyzed document in this batch."
+                />
+                <Button
+                  title="Export CSV"
+                  onPress={downloadBatchCsv}
+                  variant="ghost"
+                  accessibilityHint="Downloads a spreadsheet (CSV) of every document in this batch with its score, issue count, and remediation status."
                 />
               </View>
             </View>
