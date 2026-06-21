@@ -97,7 +97,7 @@ export default function SettingsScreen() {
     toast.success("Report branding saved", {
       description: hasBranding(branding)
         ? "Your reports now carry your brand."
-        : "Branding cleared — reports use the default style.",
+        : "Branding cleared. Reports use the default style.",
     });
   };
 
@@ -126,7 +126,7 @@ export default function SettingsScreen() {
       setJustCreatedKey(created);
       setKeyName("");
       setApiKeys((prev) => [created, ...prev]);
-      toast.success("API key created", { description: "Copy it now — you won't see it again." });
+      toast.success("API key created", { description: "Copy it now; you won't see it again." });
     } catch (e) {
       setApiKeysError((e as Error).message);
       toast.error("Couldn't create API key", { description: (e as Error).message });
@@ -165,7 +165,6 @@ export default function SettingsScreen() {
   return (
     <Screen scroll title="Settings">
       <Hero
-        shader="ember"
         eyebrow="SETTINGS"
         title="Settings"
         subtitle="Where the analyzer lives, and whether you're working with real or fake data."
@@ -183,8 +182,8 @@ export default function SettingsScreen() {
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Report branding</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Put your own logo, name, and colour on the conformance &amp; remediation reports you download —
-          hand clients a deliverable under your brand. (The methodology text always keeps a small
+          Put your own logo, name, and colour on the conformance &amp; remediation reports you download.
+          Hand clients a deliverable under your brand. (The methodology text always keeps a small
           “automated testing by 508 Agent” line.)
         </Text>
 
@@ -192,7 +191,7 @@ export default function SettingsScreen() {
         <TextInput
           value={branding.orgName}
           onChangeText={(v) => setBranding((b) => ({ ...b, orgName: v }))}
-          style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+          style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text, borderRadius: theme.radius.xs }]}
           placeholder="Sunriver Consulting"
           placeholderTextColor={theme.colors.textMuted}
         />
@@ -201,7 +200,7 @@ export default function SettingsScreen() {
         <TextInput
           value={branding.contact}
           onChangeText={(v) => setBranding((b) => ({ ...b, contact: v }))}
-          style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+          style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text, borderRadius: theme.radius.xs }]}
           placeholder="access@sunriver.com · sunriver.com"
           placeholderTextColor={theme.colors.textMuted}
         />
@@ -211,13 +210,13 @@ export default function SettingsScreen() {
           <TextInput
             value={branding.accent}
             onChangeText={(v) => setBranding((b) => ({ ...b, accent: v }))}
-            style={[styles.input, { flex: 1, borderColor: theme.colors.border, color: theme.colors.text }]}
+            style={[styles.input, { flex: 1, borderColor: theme.colors.border, color: theme.colors.text, borderRadius: theme.radius.xs }]}
             placeholder="#2D5BFF"
             placeholderTextColor={theme.colors.textMuted}
             autoCapitalize="none"
           />
           {/^#[0-9a-fA-F]{6}$/.test(branding.accent.trim()) ? (
-            <View style={{ width: 36, height: 36, borderRadius: 8, backgroundColor: branding.accent.trim(), borderWidth: 1, borderColor: theme.colors.border }} />
+            <View style={{ width: 36, height: 36, borderRadius: theme.radius.xs, backgroundColor: branding.accent.trim(), borderWidth: 1, borderColor: theme.colors.border }} />
           ) : null}
         </View>
 
@@ -262,7 +261,7 @@ export default function SettingsScreen() {
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Developer API</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Scan documents for accessibility issues programmatically — wire it into your CI or build pipeline.
+          Scan documents for accessibility issues programmatically, and wire it into your CI or build pipeline.
           Create a key and POST a file to <Text style={[theme.typography.mono, { color: theme.colors.text }]}>/pipeline/analyze</Text>.
           Keys are scan-only: they can't spend credits or change your account.
         </Text>
@@ -271,16 +270,16 @@ export default function SettingsScreen() {
           <InlineNotice tone="info" title="Sign in first" message="Create a free account to generate API keys." />
         ) : (
           <>
-            <View style={[styles.codeBlock, { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border }]}>
+            <View style={[styles.codeBlock, { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border, borderRadius: theme.radius.xs }]}>
               <Text style={[theme.typography.mono, { color: theme.colors.text, fontSize: 12 }]}>
                 {`curl -X POST ${apiBaseUrl}/pipeline/analyze \\\n  -H "X-API-Key: ak_live_…" \\\n  -F "file=@report.pdf"`}
               </Text>
             </View>
 
             {justCreatedKey ? (
-              <View style={[styles.newKeyBox, { borderColor: theme.colors.success, backgroundColor: theme.colors.success + "12" }]}>
+              <View style={[styles.newKeyBox, { borderColor: theme.colors.success, backgroundColor: theme.colors.success + "12", borderRadius: theme.radius.xs }]}>
                 <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>
-                  Your new API key — copy it now
+                  Your new API key: copy it now
                 </Text>
                 <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
                   This is the only time we'll show it. Store it somewhere safe.
@@ -300,7 +299,7 @@ export default function SettingsScreen() {
               <TextInput
                 value={keyName}
                 onChangeText={setKeyName}
-                style={[styles.input, { flex: 1, borderColor: theme.colors.border, color: theme.colors.text, marginTop: 0 }]}
+                style={[styles.input, { flex: 1, borderColor: theme.colors.border, color: theme.colors.text, marginTop: 0, borderRadius: theme.radius.xs }]}
                 placeholder="CI pipeline"
                 placeholderTextColor={theme.colors.textMuted}
               />
@@ -312,7 +311,7 @@ export default function SettingsScreen() {
             {apiKeys.length > 0 ? (
               <View style={{ marginTop: 12, gap: 6 }}>
                 {apiKeys.map((k) => (
-                  <View key={k.id} style={[styles.keyRow, { borderColor: theme.colors.border }]}>
+                  <View key={k.id} style={[styles.keyRow, { borderColor: theme.colors.border, borderRadius: theme.radius.none }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600", fontSize: 14 }]}>
                         {k.name}{" "}
@@ -346,8 +345,8 @@ export default function SettingsScreen() {
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
           When Demo Mode is on, the app shows pre-baked sample data instead of calling the
           analyzer service. It's useful for exploring the UI without setting up the backend, but
-          findings and scores in Demo Mode are <Text style={{ fontWeight: "700" }}>not real</Text>
-          — don't rely on them for an audit.
+          findings and scores in Demo Mode are <Text style={{ fontWeight: "700" }}>not real</Text>.
+          Don't rely on them for an audit.
         </Text>
         <View style={styles.toggleRow}>
           <Text style={[theme.typography.body, { color: theme.colors.text }]}>
@@ -425,7 +424,7 @@ export default function SettingsScreen() {
           onChangeText={setDraftUrl}
           style={[
             styles.input,
-            { borderColor: theme.colors.border, color: theme.colors.text },
+            { borderColor: theme.colors.border, color: theme.colors.text, borderRadius: theme.radius.xs },
           ]}
           placeholder="http://127.0.0.1:8000"
           placeholderTextColor={theme.colors.textMuted}
@@ -474,6 +473,7 @@ export default function SettingsScreen() {
                 {
                   borderColor: themeMode === mode ? theme.colors.accent : theme.colors.border,
                   backgroundColor: themeMode === mode ? theme.colors.accent + "22" : theme.colors.surface,
+                  borderRadius: theme.radius.sm,
                 },
               ]}
             >
@@ -502,7 +502,7 @@ export default function SettingsScreen() {
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Notifications</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Get a browser notification and a soft chime when an audit finishes — useful when you've
+          Get a browser notification and a soft chime when an audit finishes. Useful when you've
           switched tabs while a long document is being analyzed.
         </Text>
         <View style={styles.toggleRow}>
@@ -724,7 +724,7 @@ function ScoreWeightControls() {
             borderWidth: 1,
             borderColor: theme.colors.border,
             backgroundColor: theme.colors.surface2,
-            borderRadius: 8,
+            borderRadius: theme.radius.none,
           }}
         >
           <View
@@ -745,7 +745,7 @@ function ScoreWeightControls() {
             style={{
               width: 28,
               height: 28,
-              borderRadius: 6,
+              borderRadius: theme.radius.sm,
               borderWidth: 1,
               borderColor: theme.colors.border,
               alignItems: "center",
@@ -768,7 +768,7 @@ function ScoreWeightControls() {
             style={{
               width: 28,
               height: 28,
-              borderRadius: 6,
+              borderRadius: theme.radius.sm,
               borderWidth: 1,
               borderColor: theme.colors.border,
               alignItems: "center",
@@ -841,7 +841,7 @@ function DiagnosticsPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
             borderWidth: 1,
             borderColor: theme.colors.danger,
             backgroundColor: theme.colors.danger + "11",
-            borderRadius: 8,
+            borderRadius: theme.radius.none,
             padding: 10,
           }}
         >
@@ -867,7 +867,7 @@ function DiagnosticsPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
                 borderWidth: 1,
                 borderColor: check.ok ? theme.colors.border : theme.colors.danger,
                 backgroundColor: check.ok ? theme.colors.surface2 : theme.colors.danger + "11",
-                borderRadius: 8,
+                borderRadius: theme.radius.none,
                 padding: 10,
                 gap: 4,
               }}
@@ -900,7 +900,7 @@ function DiagnosticsPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
               borderWidth: 1,
               borderColor: result.ai.ok ? theme.colors.border : theme.colors.danger,
               backgroundColor: result.ai.ok ? theme.colors.surface2 : theme.colors.danger + "11",
-              borderRadius: 8,
+              borderRadius: theme.radius.none,
               padding: 10,
               gap: 6,
             }}
@@ -942,11 +942,11 @@ function DiagnosticsPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
 
 const styles = StyleSheet.create({
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  input: { borderWidth: 1, borderRadius: 10, padding: 10, marginTop: 12 },
+  input: { borderWidth: 1, padding: 10, marginTop: 12 },
   brandLabel: { fontSize: 12, fontWeight: "700", letterSpacing: 0.3, marginTop: 12, textTransform: "uppercase" },
-  codeBlock: { borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 12 },
-  newKeyBox: { borderWidth: 1, borderRadius: 10, padding: 14, marginTop: 12 },
-  keyRow: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderRadius: 10, padding: 12 },
+  codeBlock: { borderWidth: 1, padding: 12, marginTop: 12 },
+  newKeyBox: { borderWidth: 1, padding: 14, marginTop: 12 },
+  keyRow: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, padding: 12 },
   buttonRow: { flexDirection: "row", marginTop: 12, gap: 8 },
   toggleRow: {
     flexDirection: "row",
@@ -962,7 +962,6 @@ const styles = StyleSheet.create({
     minWidth: 90,
     paddingVertical: 10,
     paddingHorizontal: 14,
-    borderRadius: 10,
     borderWidth: 1.5,
     alignItems: "center",
   },

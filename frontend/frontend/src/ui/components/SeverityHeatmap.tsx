@@ -90,7 +90,7 @@ function _LegendDot({ color, label }: { color: string; label: string }) {
 
 const styles = StyleSheet.create({
   wrap: { gap: 8 },
-  bar: { flexDirection: "row", height: 12, borderRadius: 6, overflow: "hidden" },
+  bar: { flexDirection: "row", height: 12, borderRadius: 0, overflow: "hidden" },
   seg: { alignItems: "center", justifyContent: "center" },
   count: { color: "#FFFFFF", fontSize: 9, fontWeight: "800", letterSpacing: 0.4 },
   legend: { flexDirection: "row", gap: 12, flexWrap: "wrap" },

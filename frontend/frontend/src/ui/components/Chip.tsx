@@ -12,6 +12,8 @@ interface ChipProps {
   /** When set, the chip becomes a Pressable button. */
   onPress?: () => void;
   accessibilityLabel?: string;
+  /** Genuine pill shape (rare exception). Default false → right-angled tag. */
+  rounded?: boolean;
 }
 
 export function Chip({
@@ -22,9 +24,11 @@ export function Chip({
   textStyle,
   onPress,
   accessibilityLabel,
+  rounded = false,
 }: ChipProps) {
   const theme = useTheme();
   const styles = createStyles(theme);
+  const shape = rounded ? { borderRadius: theme.radius.pill } : null;
   const content = (
     <>
       {icon}
@@ -40,6 +44,7 @@ export function Chip({
         style={({ pressed }: any) => [
           styles.base,
           styles[`tone_${tone}`],
+          shape,
           pressed ? { opacity: 0.85 } : null,
           style,
         ]}
@@ -48,7 +53,7 @@ export function Chip({
       </Pressable>
     );
   }
-  return <View style={[styles.base, styles[`tone_${tone}`], style]}>{content}</View>;
+  return <View style={[styles.base, styles[`tone_${tone}`], shape, style]}>{content}</View>;
 }
 
 const createStyles = (theme: ReturnType<typeof useTheme>) =>
@@ -59,8 +64,8 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       gap: theme.spacing.xs,
       paddingHorizontal: theme.spacing.sm,
       paddingVertical: theme.spacing.xs,
-      borderRadius: theme.radius.sm,
-      borderWidth: 1,
+      borderRadius: theme.radius.none,
+      borderWidth: theme.border.thin,
     },
     text: {
       fontSize: 12,

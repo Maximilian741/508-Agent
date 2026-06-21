@@ -356,7 +356,7 @@ export default function ManualReviewScreen() {
                 <TextInput
                   value={editedText[item.id] ?? item.approvedText ?? item.suggestedText}
                   onChangeText={(value) => setEditedText((prev) => ({ ...prev, [item.id]: value }))}
-                  style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+                  style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text, borderRadius: theme.radius.xs }]}
                   placeholder="Edit suggested text"
                   placeholderTextColor={theme.colors.textMuted}
                 />
@@ -429,7 +429,7 @@ const styles = StyleSheet.create({
   linkRow: { gap: 8 },
   link: { fontWeight: "600" },
   suggestionBox: { gap: 8, marginTop: 6 },
-  input: { borderWidth: 1, borderRadius: 8, padding: 8 },
+  input: { borderWidth: 1, padding: 8 },
   filterActiveText: { color: "#FFFFFF" },
   filterActiveDefault: { backgroundColor: "#0EA5E9", borderColor: "#0EA5E9" },
 });

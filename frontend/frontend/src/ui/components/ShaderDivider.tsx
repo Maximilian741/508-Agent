@@ -24,39 +24,14 @@ interface ShaderDividerProps {
 
 export function ShaderDivider({ spacing = 24 }: ShaderDividerProps) {
   const theme = useTheme();
-  const accent = theme.colors.accent;
-  const accent2 = theme.colors.accentSecondary;
 
-  if (Platform.OS === "web") {
-    // Web: tinted gradient bar + a slightly larger soft glow underneath via
-    // boxShadow.  Both layers are pointer-events:none so the divider never
-    // intercepts hover/click that belongs to the layout above or below.
-    const gradient = {
-      // @ts-ignore — RN-Web supports CSS background-image
-      backgroundImage: `linear-gradient(90deg, transparent 0%, ${accent} 25%, ${accent2} 75%, transparent 100%)`,
-      // @ts-ignore — RN-Web supports CSS box-shadow
-      boxShadow: `0 0 3px 0 ${accent}66, 0 0 6px 0 ${accent2}33`,
-    } as any;
-    return (
-      <View
-        accessibilityRole={Platform.OS === "web" ? ("separator" as any) : undefined}
-        // @ts-ignore — RN-Web honours aria-hidden on View
-        aria-hidden={true}
-        style={[styles.bar, { marginVertical: spacing }, gradient]}
-      />
-    );
-  }
-
-  // Native fallback — flat hairline.
+  // A plain hairline rule — no gradient, no glow. A printed-page section break.
   return (
     <View
-      style={[
-        styles.bar,
-        {
-          marginVertical: spacing,
-          backgroundColor: accent,
-        },
-      ]}
+      accessibilityRole={Platform.OS === "web" ? ("separator" as any) : undefined}
+      // @ts-ignore — RN-Web honours aria-hidden on View
+      aria-hidden={true}
+      style={[styles.bar, { marginVertical: spacing, backgroundColor: theme.colors.border }]}
     />
   );
 }
@@ -65,7 +40,7 @@ const styles = StyleSheet.create({
   bar: {
     height: 1,
     width: "100%",
-    borderRadius: 0.5,
+    borderRadius: 0,
   },
 });
 

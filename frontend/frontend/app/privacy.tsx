@@ -29,7 +29,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "Account data we keep",
     body: [
-      "Email address, display name, password hash (salted scrypt — we cannot read your password), credit balance and transaction history, subscription state, team membership, issued certificates (document name, score, issue date), and audit-history metadata needed to show your dashboard.",
+      "Email address, display name, password hash (salted scrypt, which we cannot read), credit balance and transaction history, subscription state, team membership, issued certificates (document name, score, issue date), and audit-history metadata needed to show your dashboard.",
       "Operational logs (request IDs, timestamps, status codes) are kept for debugging and abuse prevention. We do not log document contents.",
     ],
   },
@@ -54,7 +54,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "Your controls",
     body: [
-      "Export your account data or delete your account entirely from your Account page — deletion removes your account record, credit ledger, history, and any stored artifacts. Email privacy@508-agent.app for anything else; we respond within 7 days.",
+      "Export your account data or delete your account entirely from your Account page. Deletion removes your account record, credit ledger, history, and any stored artifacts. Email privacy@508-agent.app for anything else; we respond within 7 days.",
     ],
   },
   {
@@ -71,7 +71,6 @@ export default function PrivacyScreen() {
   return (
     <Screen scroll title="Privacy">
       <Hero
-        shader="aurora"
         eyebrow="LEGAL"
         title="Privacy policy"
         subtitle={`What we store, for how long, and what we never do. Last updated ${LAST_UPDATED}.`}

@@ -172,7 +172,6 @@ export default function DashboardScreen() {
     return (
       <Screen scroll title="Dashboard">
         <Hero
-          shader="aurora"
           eyebrow="DASHBOARD"
           title="Your audit queue"
           subtitle={
@@ -226,7 +225,6 @@ export default function DashboardScreen() {
   return (
     <Screen scroll title="Dashboard">
       <Hero
-        shader="aurora"
         eyebrow="DASHBOARD"
         title={"Welcome back, " + greetingName}
         subtitle={
@@ -288,8 +286,7 @@ export default function DashboardScreen() {
         </View>
 
         {history.length > 0 ? (
-          <View style={[styles.searchRow, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
-            <Text style={{ color: theme.colors.textMuted, fontSize: 14 }}>🔍</Text>
+          <View style={[styles.searchRow, { borderRadius: theme.radius.xs, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
             <TextInput
               value={query}
               onChangeText={setQuery}
@@ -435,6 +432,7 @@ function AuditRow({ entry, isLast, onOpen, onDelete }: AuditRowProps) {
       onPress={onOpen}
       style={({ hovered, pressed }: any) => [
         styles.row,
+        { borderRadius: theme.radius.none },
         !isLast
           ? { borderBottomWidth: 1, borderBottomColor: theme.colors.border }
           : null,
@@ -494,7 +492,7 @@ function AuditRow({ entry, isLast, onOpen, onDelete }: AuditRowProps) {
           }}
           style={({ hovered, pressed }: any) => [
             styles.deleteBtn,
-            { borderColor: theme.colors.border },
+            { borderRadius: theme.radius.sm, borderColor: theme.colors.border },
             hovered ? { borderColor: theme.colors.danger, opacity: 1 } : null,
             pressed ? { opacity: 0.7 } : null,
           ]}
@@ -548,7 +546,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     borderWidth: 1,
-    borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 8,
     marginTop: 12,
@@ -583,7 +580,6 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderWidth: 1,
-    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
     opacity: 0.75,
@@ -594,7 +590,6 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 4,
     gap: 8,
-    borderRadius: 6,
   },
   cell: { paddingRight: 8 },
   scoreCell: {

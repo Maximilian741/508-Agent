@@ -46,7 +46,7 @@ const FIRST_RUN_STEPS = [
   {
     n: "3",
     title: "Approve & download",
-    body: "Approve the fixes you trust, edit the rest, and download a remediated file — plus a conformance certificate.",
+    body: "Approve the fixes you trust, edit the rest, and download a remediated file, plus a conformance certificate.",
   },
 ];
 
@@ -109,7 +109,7 @@ export default function HomeScreen() {
       return `${pending} finding${pending === 1 ? "" : "s"} still waiting on ${inProgress.filename}.`;
     }
     if (history.length === 0)
-      return "Find and fix accessibility issues in your PDFs, Word docs, slides, and web pages — checked against WCAG 2.1, Section 508, and PDF/UA.";
+      return "Find and fix accessibility issues in your PDFs, Word docs, slides, and web pages, checked against WCAG 2.1, Section 508, and PDF/UA.";
     return `${history.length} document${history.length === 1 ? "" : "s"} on the bench. Pick one up where you left it.`;
   }, [history]);
 
@@ -119,7 +119,6 @@ export default function HomeScreen() {
     <Screen scroll title="Home">
       {/* === 1. Welcome hero ============================================== */}
       <Hero
-        shader="nebula"
         eyebrow="HOME"
         title={greeting}
         subtitle={resumeLine}
@@ -146,6 +145,7 @@ export default function HomeScreen() {
         style={({ hovered }: any) => [
           styles.bench,
           {
+            borderRadius: theme.radius.md,
             borderColor: hovered ? theme.colors.accent : theme.colors.border,
             backgroundColor: theme.colors.surface,
           },
@@ -399,7 +399,7 @@ function FirstRun({
             key={s.n}
             style={[
               styles.step,
-              { borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
+              { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
             ]}
           >
             <View style={[styles.stepDot, { backgroundColor: theme.colors.accent }]}>
@@ -445,7 +445,7 @@ function FirstRun({
           },
         ]}
       >
-        Free to start — create an account in seconds and your first audits are on us (25 free
+        Free to start: create an account in seconds and your first audits are on us (25 free
         credits). After that, credit packs start at $5, or subscribe for a monthly allowance
         with certificates included.
       </Text>
@@ -577,7 +577,6 @@ const styles = StyleSheet.create({
   // 2. Bench - the workshop. Tall, considered, a single object.
   bench: {
     borderWidth: 1,
-    borderRadius: 18,
     paddingHorizontal: 32,
     paddingVertical: 36,
     minHeight: 220,
@@ -656,7 +655,6 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 220,
     borderWidth: 1,
-    borderRadius: 12,
     padding: 16,
   },
   stepDot: {

@@ -163,7 +163,7 @@ export default function TeamScreen() {
     backgroundColor: theme.colors.surface2,
     borderColor: theme.colors.border,
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: theme.radius.xs,
     paddingHorizontal: 12,
     paddingVertical: 10,
     color: theme.colors.text,
@@ -175,7 +175,6 @@ export default function TeamScreen() {
   return (
     <Screen scroll title="Team">
       <Hero
-        shader="aurora"
         eyebrow="TEAM SEATS"
         title="Your team"
         subtitle="Share one subscription's credits and free certificates across your whole team."
@@ -222,7 +221,7 @@ export default function TeamScreen() {
               <Text style={[theme.typography.h2, { color: theme.colors.text, marginBottom: 8 }]}>Members</Text>
               <View style={{ gap: 8 }}>
                 {team.members.map((m) => (
-                  <View key={m.userId} style={[styles.memberRow, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+                  <View key={m.userId} style={[styles.memberRow, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.none }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={{ color: theme.colors.text, fontWeight: "700", fontSize: 13 }}>
                         {m.displayName || m.email || m.userId}
@@ -278,7 +277,7 @@ export default function TeamScreen() {
                   <View style={{ marginTop: 14, gap: 8 }}>
                     <Text style={{ color: theme.colors.textMuted, fontSize: 12, fontWeight: "700" }}>PENDING INVITES</Text>
                     {team.invites.map((inv) => (
-                      <View key={inv.id} style={[styles.memberRow, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+                      <View key={inv.id} style={[styles.memberRow, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.none }]}>
                         <View style={{ flex: 1 }}>
                           <Text style={{ color: theme.colors.text, fontSize: 13 }}>{inv.email}</Text>
                           <Text style={{ color: theme.colors.textMuted, fontSize: 11 }}>invited · {inv.role}</Text>
@@ -304,7 +303,7 @@ export default function TeamScreen() {
           <Card>
             <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>Create your team</Text>
             <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 6, marginBottom: 12, lineHeight: 20 }}>
-              Your subscription includes multiple seats. Name your team, then invite teammates — everyone shares your
+              Your subscription includes multiple seats. Name your team, then invite teammates. Everyone shares your
               monthly credits and gets free certificates.
             </Text>
             <View style={styles.inviteRow}>
@@ -357,7 +356,7 @@ async function _copy(text: string): Promise<boolean> {
 
 const styles = StyleSheet.create({
   spread: { flexDirection: "row", alignItems: "center", gap: 12 },
-  memberRow: { flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderRadius: 10, padding: 10 },
+  memberRow: { flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, padding: 10 },
   inviteRow: { flexDirection: "row", gap: 10, alignItems: "center", flexWrap: "wrap" },
 });
 

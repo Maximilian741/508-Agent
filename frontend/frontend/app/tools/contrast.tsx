@@ -69,7 +69,6 @@ export default function ContrastChecker() {
   return (
     <Screen scroll title="Contrast checker">
       <Hero
-        shader="aurora"
         eyebrow="CONTRAST"
         title="Contrast checker"
         subtitle="Paste any two hex colors (foreground over background) and instantly see whether they meet WCAG 2.1 AA/AAA contrast minimums. Useful for design review and when remediating PDFs with hard-to-read body text."
@@ -102,15 +101,15 @@ export default function ContrastChecker() {
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Live preview</Text>
-        <View style={[styles.preview, { backgroundColor: _safe(bg) }]}>
+        <View style={[styles.preview, { backgroundColor: _safe(bg), borderRadius: theme.radius.md }]}>
           <Text style={[styles.previewLarge, { color: _safe(fg) }]}>
-            18.66pt large text — Aa
+            18.66pt large text: Aa
           </Text>
           <Text style={[styles.previewBody, { color: _safe(fg) }]}>
             Normal body text. The quick brown fox jumps over the lazy dog.
           </Text>
           <Text style={[styles.previewSmall, { color: _safe(fg) }]}>
-            Small print 12pt — fine details, footnotes, footers, legal disclaimers.
+            Small print 12pt: fine details, footnotes, footers, legal disclaimers.
           </Text>
         </View>
       </Card>
@@ -140,7 +139,7 @@ export default function ContrastChecker() {
             {suggestions && (suggestions.foreground || suggestions.background) ? (
               <View style={styles.fixBlock}>
                 <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-                  FAILS AA FOR NORMAL TEXT — ONE TAP TO FIX
+                  FAILS AA FOR NORMAL TEXT: ONE TAP TO FIX
                 </Text>
                 <View style={styles.fixRow}>
                   {suggestions.foreground ? (
@@ -211,6 +210,7 @@ function ColorInput({
             {
               backgroundColor: valid ? value : theme.colors.surface2,
               borderColor: theme.colors.border,
+              borderRadius: theme.radius.none,
             },
           ]}
         />
@@ -228,6 +228,7 @@ function ColorInput({
               color: theme.colors.text,
               borderColor: valid ? theme.colors.border : theme.colors.danger,
               backgroundColor: theme.colors.surface,
+              borderRadius: theme.radius.xs,
             },
           ]}
         />
@@ -258,6 +259,7 @@ function ColorInput({
                   : hovered
                   ? theme.colors.surface2
                   : theme.colors.surface,
+                borderRadius: theme.radius.sm,
               },
             ]}
           >
@@ -294,6 +296,7 @@ function PassPill({
         {
           backgroundColor: pass ? theme.colors.success + "22" : theme.colors.danger + "22",
           borderColor: pass ? theme.colors.success : theme.colors.danger,
+          borderRadius: theme.radius.none,
         },
       ]}
     >
@@ -339,10 +342,11 @@ function FixSwatch({
         {
           borderColor: theme.colors.border,
           backgroundColor: pressed || hovered ? theme.colors.surface2 : theme.colors.surface,
+          borderRadius: theme.radius.sm,
         },
       ]}
     >
-      <View style={[styles.fixSwatchChip, { backgroundColor: hex, borderColor: theme.colors.border }]} />
+      <View style={[styles.fixSwatchChip, { backgroundColor: hex, borderColor: theme.colors.border, borderRadius: theme.radius.none }]} />
       <View style={{ flex: 1 }}>
         <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13, fontWeight: "600" }]}>
           {label}
@@ -363,14 +367,13 @@ const styles = StyleSheet.create({
   inputRow: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
   colorBlock: { flex: 1, minWidth: 220, gap: 6 },
   colorPickerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  swatch: { width: 36, height: 36, borderRadius: 8, borderWidth: 1 },
-  input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10, minWidth: 120 },
+  swatch: { width: 36, height: 36, borderWidth: 1 },
+  input: { flex: 1, borderWidth: 1, padding: 10, minWidth: 120 },
   grabBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
     borderWidth: 1,
-    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
@@ -380,7 +383,6 @@ const styles = StyleSheet.create({
   preview: {
     marginTop: 12,
     padding: 20,
-    borderRadius: 12,
     minHeight: 140,
     justifyContent: "center",
     gap: 8,
@@ -396,7 +398,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     borderWidth: 1,
-    borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 8,
     minWidth: 200,
@@ -410,10 +411,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     borderWidth: 1,
-    borderRadius: 10,
     padding: 10,
     minWidth: 220,
     flexGrow: 1,
   },
-  fixSwatchChip: { width: 28, height: 28, borderRadius: 6, borderWidth: 1 },
+  fixSwatchChip: { width: 28, height: 28, borderWidth: 1 },
 });

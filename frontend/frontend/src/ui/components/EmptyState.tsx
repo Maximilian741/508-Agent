@@ -85,7 +85,7 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
     iconWrap: {
       width: 72,
       height: 72,
-      borderRadius: 12,
+      borderRadius: theme.radius.md,
       borderWidth: 2,
       alignItems: "center",
       justifyContent: "center",

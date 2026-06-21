@@ -95,7 +95,6 @@ export default function AdminScreen() {
   return (
     <Screen scroll>
       <Hero
-        shader="nebula"
         eyebrow="ADMIN"
         title="Admin"
         subtitle="Revenue, usage, certificates, and a full audit trail of every action."
@@ -199,7 +198,7 @@ export default function AdminScreen() {
             ) : (
               <View style={styles.list}>
                 {entries.map((e) => (
-                  <View key={e.id} style={[styles.item, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+                  <View key={e.id} style={[styles.item, { borderRadius: theme.radius.none, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
                     <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>{e.event}</Text>
                     <Text style={[theme.typography.body, { color: theme.colors.textMuted, fontSize: 12 }]}>
                       {new Date(e.at).toLocaleString()} - {e.actorEmail || "system"}
@@ -235,7 +234,7 @@ function Stat({
   accent?: boolean;
 }) {
   return (
-    <View style={[styles.stat, { borderColor: accent ? theme.colors.accent : theme.colors.border, backgroundColor: theme.colors.surface }]}>
+    <View style={[styles.stat, { borderRadius: theme.radius.none, borderColor: accent ? theme.colors.accent : theme.colors.border, backgroundColor: theme.colors.surface }]}>
       <Text style={{ color: theme.colors.textMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</Text>
       <Text style={[theme.typography.pixelLarge, { color: accent ? theme.colors.accent : theme.colors.text, marginTop: 4 }]}>{value}</Text>
       {sub ? <Text style={{ color: theme.colors.textMuted, fontSize: 11, marginTop: 2 }}>{sub}</Text> : null}
@@ -252,9 +251,9 @@ const styles = StyleSheet.create({
   },
   loadingRow: { flexDirection: "row", gap: 8, padding: 12, alignItems: "center" },
   list: { gap: 8, marginTop: 12 },
-  item: { borderWidth: 1, borderRadius: 10, padding: 10, gap: 4 },
+  item: { borderWidth: 1, padding: 10, gap: 4 },
   statGrid: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
-  stat: { flex: 1, minWidth: 150, borderWidth: 1, borderRadius: 12, padding: 14 },
+  stat: { flex: 1, minWidth: 150, borderWidth: 1, padding: 14 },
   twoCol: { flexDirection: "row", gap: 12, flexWrap: "wrap" },
   colCard: { flex: 1, minWidth: 280 },
   kvRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8, paddingVertical: 4 },

@@ -20,11 +20,34 @@ export const spacing = {
   xxl: 24,
 } as const;
 
+// Near-square radius vocabulary. Data/utility surfaces are right-angled (none);
+// prose/marketing cards and dialogs get a single small 4px radius; pill is the
+// named exception for genuine circles/pills (avatars, grade dots, toggle chips).
+// Nothing should use a value between 5 and 998 — that uniform-soft rounding is
+// the look we are deliberately leaving behind.
 export const radius = {
-  sm: 8,
-  md: 12,
-  lg: 14,
-  xl: 20,
+  none: 0,
+  xs: 2,
+  sm: 3,
+  md: 4,
+  // Back-compat aliases (same near-square values) so existing call sites that
+  // still reference lg/xl render square instead of failing to compile.
+  lg: 4,
+  xl: 4,
+  pill: 999,
+} as const;
+
+// Border weights: a hairline carries structure everywhere; medium (2) is only
+// for an active/selected surface and the focus ring. No 3px.
+export const border = {
+  thin: 1,
+  medium: 2,
+} as const;
+
+// Single tokenised focus ring (WCAG-critical — keep 2px / 2px offset).
+export const focus = {
+  outlineWidth: 2,
+  outlineOffset: 2,
 } as const;
 
 const serifStack = Platform.select({
@@ -42,19 +65,19 @@ export const typography = {
     fontFamily: serifStack,
     fontSize: 42,
     fontWeight: "700" as const,
-    letterSpacing: -0.8,
+    letterSpacing: -0.2,
     lineHeight: 48,
   },
   displaySmall: {
     fontFamily: serifStack,
     fontSize: 30,
     fontWeight: "700" as const,
-    letterSpacing: -0.5,
+    letterSpacing: -0.2,
     lineHeight: 36,
   },
   title: {
     fontSize: 30,
-    fontWeight: "800" as const,
+    fontWeight: "700" as const,
     letterSpacing: -0.4,
   },
   h1: {
@@ -79,40 +102,49 @@ export const typography = {
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     fontSize: 12,
   },
-  // Retro pixel-art look. Monospace stack with chunky letter spacing so
-  // titles/numbers read like an arcade HUD or 8-bit boot screen.
+  // NOTE: these two keys used to be an arcade/pixel font (VT323/Press Start) —
+  // a strong "look at this generated thing" tell. Re-pointed to clean type so
+  // every existing consumer (wordmark labels, big numbers) reads as a typeset
+  // dossier instead. Keys kept to avoid churning ~12 call sites.
+  // `pixel` → a crisp tracked uppercase label (wordmark / eyebrow scale).
   pixel: {
-    fontFamily: Platform.select({
-      ios: "Menlo",
-      android: "monospace",
-      default: "ui-monospace, 'VT323', 'Press Start 2P', 'Silkscreen', monospace",
-    }),
     fontSize: 13,
     fontWeight: "700" as const,
-    letterSpacing: 1.2,
+    letterSpacing: 1.4,
+    textTransform: "uppercase" as const,
   },
+  // `pixelLarge` → a serif headline number (scores, prices) — editorial, not arcade.
   pixelLarge: {
-    fontFamily: Platform.select({
-      ios: "Menlo",
-      android: "monospace",
-      default: "ui-monospace, 'VT323', 'Press Start 2P', 'Silkscreen', monospace",
-    }),
-    fontSize: 28,
-    fontWeight: "800" as const,
-    letterSpacing: 2.5,
+    fontFamily: serifStack,
+    fontSize: 30,
+    fontWeight: "700" as const,
+    letterSpacing: -0.2,
   },
 } as const;
 
-const baseShadow = {
-  shadowColor: "#1F140A",
-  shadowOffset: { width: 0, height: 12 },
-  shadowOpacity: 0.18,
-  shadowRadius: 24,
-  elevation: 4,
-};
-
+// One light source, straight down. No side-blur, no 0 0 Npx glow ring, no
+// accent-tinted shadow — those omnidirectional halos are the AI-app tell. Each
+// tier carries native RN props plus light/dark web boxShadow strings; the dark
+// strings are heavier so they read on the near-black walnut background.
 export const shadows = {
-  subtle: baseShadow,
+  // No shadow — the hairline border does the separating (used by data surfaces).
+  flat: {
+    rn: {},
+    web: "none",
+    webDark: "none",
+  },
+  // A close, low contact shadow for content cards / dropdowns.
+  near: {
+    rn: { shadowColor: "#1F140A", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.12, shadowRadius: 4, elevation: 2 },
+    web: "0 2px 4px rgba(31,20,10,0.10)",
+    webDark: "0 2px 4px rgba(0,0,0,0.30)",
+  },
+  // A taller drop for modals/overlays, with a defined lit top edge (not a halo).
+  far: {
+    rn: { shadowColor: "#1F140A", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.22, shadowRadius: 18, elevation: 8 },
+    web: "inset 0 1px 0 rgba(245,239,227,0.06), 0 8px 18px rgba(31,20,10,0.22)",
+    webDark: "inset 0 1px 0 rgba(245,239,227,0.08), 0 8px 18px rgba(0,0,0,0.45)",
+  },
 } as const;
 
 export type ThemeColors = {
@@ -219,6 +251,8 @@ export type Theme = {
   colors: ThemeColors;
   spacing: typeof spacing;
   radius: typeof radius;
+  border: typeof border;
+  focus: typeof focus;
   typography: typeof typography;
   shadows: typeof shadows;
 };

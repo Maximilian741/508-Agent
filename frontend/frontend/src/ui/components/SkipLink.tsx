@@ -29,7 +29,7 @@ export function SkipLink() {
         color: "#FFFFFF",
         fontWeight: 700,
         fontSize: 14,
-        borderRadius: 6,
+        borderRadius: 4,
         textDecoration: "none",
         // Hidden until keyboard-focused.
         transform: "translateY(-200%)",

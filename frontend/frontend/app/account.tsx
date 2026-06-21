@@ -127,7 +127,6 @@ export default function AccountScreen() {
   return (
     <Screen scroll title="Account">
       <Hero
-        shader="ember"
         eyebrow="ACCOUNT"
         title={account.displayName}
         subtitle={account.email + "  -  Member since " + memberSince}

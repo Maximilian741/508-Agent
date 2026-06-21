@@ -54,7 +54,7 @@ export function AppNav() {
         accessibilityLabel="Home"
         style={({ focused }: any) => [styles.brand, focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null]}
       >
-        <View style={styles.logoFrame}>
+        <View style={[styles.logoFrame, { borderRadius: theme.radius.none }]}>
           <PixelLogo size={3} color={theme.colors.accent} />
         </View>
         <Text style={[theme.typography.pixel, styles.brandText, { color: theme.colors.text }]}>508 · AGENT</Text>
@@ -79,6 +79,7 @@ export function AppNav() {
               style={({ focused }: any) => [
                 styles.link,
                 {
+                  borderRadius: theme.radius.none,
                   borderColor: active ? theme.colors.accent : "transparent",
                   backgroundColor: active ? theme.colors.accent + "1A" : "transparent",
                 },
@@ -210,6 +211,7 @@ function AccountChip() {
           style={({ focused, hovered, pressed }: any) => [
             styles.signInBtn,
             {
+              borderRadius: theme.radius.pill,
               backgroundColor: pressed
                 ? theme.colors.accentSecondary
                 : hovered
@@ -263,6 +265,7 @@ function AccountChip() {
         style={({ focused }: any) => [
           styles.acctChip,
           {
+            borderRadius: theme.radius.pill,
             backgroundColor: theme.colors.surface2,
             borderColor: open ? theme.colors.accent : theme.colors.border,
           },
@@ -278,7 +281,7 @@ function AccountChip() {
         >
           {account.displayName}
         </Text>
-        <View style={[styles.creditPill, { backgroundColor: theme.colors.accent + "22" }]}>
+        <View style={[styles.creditPill, { borderRadius: theme.radius.pill, backgroundColor: theme.colors.accent + "22" }]}>
           <Text style={[theme.typography.pixel, { color: theme.colors.accent, fontSize: 11 }]}>
             {creditsLabel}
           </Text>
@@ -297,6 +300,7 @@ function AccountChip() {
             style={[
               styles.acctMenu,
               {
+                borderRadius: theme.radius.md,
                 backgroundColor: theme.colors.surface,
                 borderColor: theme.colors.border,
                 top: anchor?.top ?? 56,
@@ -370,11 +374,11 @@ const styles = StyleSheet.create({
   },
   brand: { flexDirection: "row", alignItems: "center", gap: 10 },
   brandDivider: { width: 1, height: 22, marginHorizontal: 12, opacity: 0.6 },
-  logoFrame: { padding: 4, borderRadius: 4 },
+  logoFrame: { padding: 4 },
   logo: {
     width: 28,
     height: 28,
-    borderRadius: 8,
+    borderRadius: 4,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -384,7 +388,6 @@ const styles = StyleSheet.create({
   link: {
     paddingVertical: 6,
     paddingHorizontal: 10,
-    borderRadius: 8,
     borderWidth: 1,
   },
   right: {
@@ -396,7 +399,6 @@ const styles = StyleSheet.create({
   signInBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 999,
   },
   acctChip: {
     flexDirection: "row",
@@ -404,7 +406,6 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 8,
     paddingVertical: 5,
-    borderRadius: 999,
     borderWidth: 1,
     maxWidth: 240,
   },
@@ -419,7 +420,6 @@ const styles = StyleSheet.create({
   creditPill: {
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: 999,
   },
   acctBackdrop: {
     position: (Platform.OS === "web" ? "fixed" : "absolute") as any,
@@ -434,7 +434,6 @@ const styles = StyleSheet.create({
     position: (Platform.OS === "web" ? "fixed" : "absolute") as any,
     minWidth: 220,
     borderWidth: 1,
-    borderRadius: 10,
     paddingVertical: 4,
     zIndex: 9999,
     // @ts-ignore

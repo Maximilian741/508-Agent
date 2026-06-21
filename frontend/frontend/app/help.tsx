@@ -44,12 +44,12 @@ const FAQ: { question: string; answer: string }[] = [
   {
     question: "What does the remediated file actually contain?",
     answer:
-      "When you click Download remediated file, the backend applies every fix you approved and writes a new copy of your document: alt text, document title and language, heading renumbering, link-text rewrites (Word/PowerPoint — including links inside tables, text boxes and footnotes), table header rows (Word/PowerPoint), typed \"- item\" lines converted into real lists (Word numbering / PowerPoint bullets), and for PDFs a full structure tree — headings, lists, tables, figures with alt, link and form-field tagging, and header/footer artifacts. The score only counts fixes that genuinely persist into the file; anything else is honestly listed as pending manual work. Use \"Verify the fix\" after downloading to re-audit the fixed file for free.",
+      "When you click Download remediated file, the backend applies every fix you approved and writes a new copy of your document: alt text, document title and language, heading renumbering, link-text rewrites (Word/PowerPoint, including links inside tables, text boxes and footnotes), table header rows (Word/PowerPoint), typed \"- item\" lines converted into real lists (Word numbering / PowerPoint bullets), and for PDFs a full structure tree: headings, lists, tables, figures with alt, link and form-field tagging, and header/footer artifacts. The score only counts fixes that genuinely persist into the file; anything else is honestly listed as pending manual work. Use \"Verify the fix\" after downloading to re-audit the fixed file for free.",
   },
   {
     question: "What does a remediation cost?",
     answer:
-      "Analysis is always free — upload as many documents as you like and read every finding. Writing a remediated file costs credits by format: PDF 5 credits, Word (DOCX) 3 credits, PowerPoint (PPTX) 4 credits, HTML 3 credits. Certificates cost 2 credits, or are included free on Team and Business plans. New accounts start with 25 free credits.",
+      "Analysis is always free: upload as many documents as you like and read every finding. Writing a remediated file costs credits by format: PDF 5 credits, Word (DOCX) 3 credits, PowerPoint (PPTX) 4 credits, HTML 3 credits. Certificates cost 2 credits, or are included free on Team and Business plans. New accounts start with 25 free credits.",
   },
   {
     question: "How do I get help?",
@@ -86,7 +86,6 @@ export default function HelpScreen() {
   return (
     <Screen scroll title="Help & Glossary">
       <Hero
-        shader="aurora"
         eyebrow="HELP"
         title="Help & glossary"
         subtitle="Every accessibility check this tool runs, in plain English, with the underlying WCAG 2.1, Section 508, and PDF/UA citations. Use it as a reference when deciding whether to approve or reject a fix."

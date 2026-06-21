@@ -66,10 +66,9 @@ export default function SavingsScreen() {
   return (
     <Screen scroll title="Savings calculator">
       <Hero
-        shader="ember"
         eyebrow="SAVINGS"
         title="What you'd save vs. manual remediation"
-        subtitle="Manual document accessibility work is billed by the page. 508 Agent is billed per file, at a fraction of the cost. Put in your numbers — every assumption is shown so you can check the math."
+        subtitle="Manual document accessibility work is billed by the page. 508 Agent is billed per file, at a fraction of the cost. Put in your numbers, and every assumption is shown so you can check the math."
       />
 
       <View style={[styles.row, stacked && styles.col, { marginTop: 16 }]}>
@@ -94,11 +93,12 @@ export default function SavingsScreen() {
                 <Pressable
                   key={t}
                   accessibilityRole="button"
-                  accessibilityLabel={`${TYPE_LABEL[t]} — ${CREDITS_BY_TYPE[t]} credits per file`}
+                  accessibilityLabel={`${TYPE_LABEL[t]}: ${CREDITS_BY_TYPE[t]} credits per file`}
                   onPress={() => setDocType(t)}
                   style={[
                     styles.typeChip,
                     {
+                      borderRadius: theme.radius.pill,
                       borderColor: active ? theme.colors.accent : theme.colors.border,
                       backgroundColor: active ? theme.colors.accent + "22" : "transparent",
                     },
@@ -131,7 +131,7 @@ export default function SavingsScreen() {
               </View>
 
               <View style={{ marginTop: 18 }}>
-                <Button title="Start free — 25 credits" onPress={() => router.push("/audit" as any)} />
+                <Button title="Start free with 25 credits" onPress={() => router.push("/audit" as any)} />
                 <View style={{ height: 10 }} />
                 <Button title="See pricing" variant="ghost" onPress={() => router.push("/billing" as any)} />
               </View>
@@ -149,7 +149,7 @@ export default function SavingsScreen() {
       <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 20, lineHeight: 18, paddingHorizontal: 4 }}>
         How this is calculated: manual cost = total pages × your per-page rate. 508 Agent cost = number of
         documents × credits per file ({TYPE_LABEL[docType]} = {CREDITS_BY_TYPE[docType]} credits) × $
-        {PER_CREDIT_USD.toFixed(2)} per credit (our Pro credit pack — not the cheapest pack). Analysis is always free,
+        {PER_CREDIT_USD.toFixed(2)} per credit (our Pro credit pack, not the cheapest pack). Analysis is always free,
         so it isn't counted. Remediation is priced per file regardless of length, which is why longer documents save
         more. Actual results depend on document complexity and how many fixes need human review.
       </Text>
@@ -179,7 +179,7 @@ function Field({
       <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
         {label.toUpperCase()}
       </Text>
-      <View style={[styles.inputWrap, { borderColor: theme.colors.border }]}>
+      <View style={[styles.inputWrap, { borderColor: theme.colors.border, borderRadius: theme.radius.xs }]}>
         {prefix ? <Text style={{ color: theme.colors.textMuted, fontSize: 16, marginRight: 4 }}>{prefix}</Text> : null}
         <TextInput
           value={value}
@@ -226,8 +226,8 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", gap: 16, alignItems: "flex-start" },
   col: { flexDirection: "column" },
   typeRow: { flexDirection: "row", gap: 8, marginTop: 8, flexWrap: "wrap" },
-  typeChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1 },
-  inputWrap: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 4 },
+  typeChip: { paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1 },
+  inputWrap: { flexDirection: "row", alignItems: "center", borderWidth: 1, paddingHorizontal: 12, paddingVertical: 4 },
   input: { flex: 1, fontSize: 16, paddingVertical: 8, ...(Platform.OS === "web" ? ({ outlineStyle: "none" } as any) : null) },
   compareBlock: { marginTop: 20, gap: 12 },
   compareRow: { flexDirection: "row", alignItems: "center", gap: 12 },

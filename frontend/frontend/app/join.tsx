@@ -54,7 +54,6 @@ export default function JoinScreen() {
   return (
     <Screen scroll title="Join a team">
       <Hero
-        shader="aurora"
         eyebrow="TEAM INVITE"
         title="Join a team"
         subtitle="Accept your invitation to share a 508 Agent subscription."
@@ -70,7 +69,7 @@ export default function JoinScreen() {
           </Card>
         ) : state === "joined" ? (
           <Card style={{ borderColor: OK_GREEN, borderWidth: 2 }}>
-            <Text style={[theme.typography.pixelLarge, { color: OK_GREEN }]}>✓ You're in</Text>
+            <Text style={[theme.typography.pixelLarge, { color: OK_GREEN }]}>You're in</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8, marginBottom: 12 }}>
               You joined {teamName ? `“${teamName}”` : "the team"}. You now share the team's credits and free certificates.
             </Text>

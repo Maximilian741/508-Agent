@@ -77,7 +77,7 @@ function parseSummary(kind: string, summary: string): ParsedSummary {
     return {
       mode: "diff",
       before: "(alt text)",
-      after: "(decorative — no alt text)",
+      after: "(decorative, no alt text)",
     };
   }
 

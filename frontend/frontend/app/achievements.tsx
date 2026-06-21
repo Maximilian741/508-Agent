@@ -42,7 +42,6 @@ export default function AchievementsScreen() {
     <Screen scroll>
       <Confetti trigger={burst} />
       <Hero
-        shader="pumpkin"
         eyebrow="ACHIEVEMENTS"
         title="Achievements"
         subtitle="Stickers you have earned across all your audits."
@@ -88,6 +87,7 @@ export default function AchievementsScreen() {
               style={[
                 styles.tile,
                 {
+                  borderRadius: theme.radius.none,
                   borderColor: locked ? theme.colors.border : theme.colors.accent,
                   backgroundColor: locked ? theme.colors.surface2 : theme.colors.surface,
                   opacity: locked ? 0.7 : 1,
@@ -126,15 +126,14 @@ export default function AchievementsScreen() {
 }
 
 const styles = StyleSheet.create({
-  barTrack: { height: 8, borderRadius: 4, marginTop: 12, overflow: "hidden" },
-  barFill: { height: 8, borderRadius: 4 },
+  barTrack: { height: 8, borderRadius: 0, marginTop: 12, overflow: "hidden" },
+  barFill: { height: 8, borderRadius: 0 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 12, marginTop: 4 },
   tile: {
     flexBasis: "30%",
     flexGrow: 1,
     minWidth: 220,
     borderWidth: 1,
-    borderRadius: 12,
     padding: 14,
     gap: 4,
   },

@@ -23,17 +23,16 @@ export default function AboutScreen() {
   return (
     <Screen scroll title="About">
       <Hero
-        shader="aurora"
         eyebrow="ABOUT"
         title="Built for remediators, not bureaucrats"
-        subtitle="An accessibility auditor that ships in two flavors: a self-hosted package you run on your own machine, and 508-agent.app — the managed service with self-serve accounts. Both run the same open code; they differ in where your files live."
+        subtitle="An accessibility auditor that ships in two flavors: a self-hosted package you run on your own machine, and 508-agent.app, the managed service with self-serve accounts. Both run the same open code; they differ in where your files live."
       />
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>How your data is handled</Text>
 
         <View style={styles.modeRow}>
-          <View style={[styles.modeCol, { borderColor: theme.colors.success }]}>
+          <View style={[styles.modeCol, { borderColor: theme.colors.success, borderRadius: theme.radius.md }]}>
             <Chip label="Self-hosted (your machine)" tone="success" />
             <Bullet
               label="Local-first"
@@ -49,7 +48,7 @@ export default function AboutScreen() {
             />
           </View>
 
-          <View style={[styles.modeCol, { borderColor: theme.colors.info }]}>
+          <View style={[styles.modeCol, { borderColor: theme.colors.info, borderRadius: theme.radius.md }]}>
             <Chip label="508-agent.app (managed)" tone="info" />
             <Bullet
               label="Documents on our infrastructure"
@@ -89,7 +88,7 @@ export default function AboutScreen() {
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>What this tool does (and doesn't)</Text>
         <View style={styles.twoCol}>
-          <View style={[styles.col, { borderColor: theme.colors.success }]}>
+          <View style={[styles.col, { borderColor: theme.colors.success, borderRadius: theme.radius.md }]}>
             <Chip label="Does" tone="success" />
             <Text style={[theme.typography.body, { color: theme.colors.text }]}>
               {"• Detects WCAG 2.1, §508, and PDF/UA structural issues."}
@@ -104,7 +103,7 @@ export default function AboutScreen() {
               {"• Produces a printable conformance report and a downloadable remediated file."}
             </Text>
           </View>
-          <View style={[styles.col, { borderColor: theme.colors.warning }]}>
+          <View style={[styles.col, { borderColor: theme.colors.warning, borderRadius: theme.radius.md }]}>
             <Chip label="Doesn't" tone="warning" />
             <Text style={[theme.typography.body, { color: theme.colors.text }]}>
               {"• Replace human judgement on alt text, link rewrites, or reading order in complex layouts."}
@@ -123,13 +122,13 @@ export default function AboutScreen() {
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards we evaluate</Text>
         <View style={styles.standardsRow}>
           <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
-            <Chip label="WCAG 2.1 ↗" tone="info" />
+            <Chip label="WCAG 2.1" tone="info" />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.access-board.gov" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
-            <Chip label="Section 508 ↗" tone="info" />
+            <Chip label="Section 508" tone="info" />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
-            <Chip label="PDF/UA ↗" tone="info" />
+            <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 12 }]}>
@@ -194,7 +193,7 @@ function Bullet({ label, body }: { label: string; body: string }) {
 function TrustClaim({ label, body }: { label: string; body: string }) {
   const theme = useTheme();
   return (
-    <View style={[styles.trustCard, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+    <View style={[styles.trustCard, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.md }]}>
       <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 14 }]}>{label}</Text>
       <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4, fontSize: 13 }]}>
         {body}
@@ -208,16 +207,16 @@ const styles = StyleSheet.create({
   bullet: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
   bulletDot: { width: 8, height: 8, borderRadius: 4, marginTop: 8 },
   twoCol: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 12 },
-  col: { flex: 1, minWidth: 240, borderWidth: 1, borderRadius: 12, padding: 12, gap: 6 },
+  col: { flex: 1, minWidth: 240, borderWidth: 1, borderRadius: 4, padding: 12, gap: 6 },
   modeRow: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 12 },
-  modeCol: { flex: 1, minWidth: 280, borderWidth: 1, borderRadius: 12, padding: 12, gap: 10 },
+  modeCol: { flex: 1, minWidth: 280, borderWidth: 1, borderRadius: 4, padding: 12, gap: 10 },
   trustGrid: { flexDirection: "row", gap: 10, flexWrap: "wrap", marginTop: 12 },
   trustCard: {
     flexBasis: "48%",
     flexGrow: 1,
     minWidth: 220,
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 4,
     padding: 12,
   },
   standardsRow: { flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 8 },

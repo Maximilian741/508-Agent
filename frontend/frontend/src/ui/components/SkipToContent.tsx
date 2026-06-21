@@ -31,7 +31,7 @@ export function SkipToContent() {
         color: theme.colors.bg,
         fontWeight: 700,
         fontSize: 14,
-        borderRadius: 6,
+        borderRadius: theme.radius.md,
         textDecoration: "none",
         // Hidden until keyboard-focused. Stays in tab order.
         transform: "translateY(-200%)",

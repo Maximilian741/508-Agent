@@ -75,6 +75,7 @@ export function Dialog({
           {
             backgroundColor: theme.colors.surface,
             borderColor: theme.colors.border,
+            borderRadius: theme.radius.md,
           },
         ]}
       >
@@ -117,7 +118,6 @@ const styles = StyleSheet.create({
   },
   card: {
     borderWidth: 1,
-    borderRadius: 16,
     padding: 24,
     maxWidth: 460,
     width: "100%",

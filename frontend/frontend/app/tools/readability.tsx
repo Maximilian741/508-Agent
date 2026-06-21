@@ -32,10 +32,9 @@ export default function ReadabilityChecker() {
   return (
     <Screen scroll title="Readability checker">
       <Hero
-        shader="aurora"
         eyebrow="READABILITY"
         title="Readability checker"
-        subtitle="Paste any text to see how easy it is to read — Flesch Reading Ease and grade level. Plain language is an accessibility requirement (WCAG 2.1 §3.1.5); aim for a score of 60 or higher for a general audience."
+        subtitle="Paste any text to see how easy it is to read: Flesch Reading Ease and grade level. Plain language is an accessibility requirement (WCAG 2.1 §3.1.5); aim for a score of 60 or higher for a general audience."
       />
 
       <Card>
@@ -51,7 +50,7 @@ export default function ReadabilityChecker() {
           placeholderTextColor={theme.colors.textMuted}
           style={[
             styles.input,
-            { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
+            { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surface, borderRadius: theme.radius.xs },
           ]}
         />
       </Card>
@@ -93,7 +92,7 @@ export default function ReadabilityChecker() {
                 </Text>
                 {result.longSentences.map((s) => (
                   <Text key={s.index} style={[theme.typography.body, { color: theme.colors.text, fontSize: 13, marginTop: 4 }]}>
-                    • Sentence {s.index} — {s.words} words
+                    • Sentence {s.index}: {s.words} words
                   </Text>
                 ))}
                 <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 8 }]}>
@@ -102,7 +101,7 @@ export default function ReadabilityChecker() {
               </View>
             ) : (
               <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 12 }]}>
-                No sentences over 25 words — nice and tight.
+                No sentences over 25 words. Nice and tight.
               </Text>
             )}
           </Card>
@@ -126,7 +125,7 @@ function Stat({
   theme: ReturnType<typeof useTheme>;
 }) {
   return (
-    <View style={[styles.stat, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+    <View style={[styles.stat, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.none }]}>
       <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 22 }]}>{value}</Text>
       <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 2 }]}>{label}</Text>
     </View>
@@ -134,9 +133,9 @@ function Stat({
 }
 
 const styles = StyleSheet.create({
-  input: { borderWidth: 1, borderRadius: 10, padding: 12, minHeight: 160, fontSize: 15, lineHeight: 22, textAlignVertical: "top" },
+  input: { borderWidth: 1, padding: 12, minHeight: 160, fontSize: 15, lineHeight: 22, textAlignVertical: "top" },
   scoreRow: { flexDirection: "row", alignItems: "center", gap: 18, marginTop: 8 },
   score: { fontSize: 56, fontWeight: "800" },
   statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 12 },
-  stat: { minWidth: 140, flexGrow: 1, borderWidth: 1, borderRadius: 10, padding: 12 },
+  stat: { minWidth: 140, flexGrow: 1, borderWidth: 1, padding: 12 },
 });

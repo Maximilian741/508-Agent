@@ -58,17 +58,16 @@ export default function PaletteMatrix() {
   return (
     <Screen scroll title="Palette matrix">
       <Hero
-        shader="aurora"
         eyebrow="PALETTE"
         title="Accessible palette matrix"
-        subtitle="Add your brand colours and see every text-on-background pairing at once — which combinations meet WCAG 2.1 AA, and which to avoid. No more checking pairs one by one."
+        subtitle="Add your brand colours and see every text-on-background pairing at once: which combinations meet WCAG 2.1 AA, and which to avoid. No more checking pairs one by one."
       />
 
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Your colours</Text>
         <View style={styles.chips}>
           {valid.map((hex) => (
-            <View key={hex} style={[styles.chip, { borderColor: theme.colors.border }]}>
+            <View key={hex} style={[styles.chip, { borderColor: theme.colors.border, borderRadius: theme.radius.pill }]}>
               <View style={[styles.chipSwatch, { backgroundColor: hex, borderColor: theme.colors.border }]} />
               <Text style={{ color: theme.colors.text, fontSize: 12, fontFamily: "monospace" }}>{hex}</Text>
               <Pressable
@@ -94,7 +93,7 @@ export default function PaletteMatrix() {
               autoCorrect={false}
               accessibilityLabel="Add a hex colour"
               onSubmitEditing={addColor}
-              style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}
+              style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surface, borderRadius: theme.radius.xs }]}
             />
             {Platform.OS === "web" ? (
               // @ts-ignore - native HTML color picker
@@ -111,7 +110,7 @@ export default function PaletteMatrix() {
               accessibilityRole="button"
               accessibilityLabel="Add colour"
               onPress={addColor}
-              style={[styles.addBtn, { backgroundColor: theme.colors.accent }]}
+              style={[styles.addBtn, { backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm }]}
             >
               <Text style={{ color: "#fff", fontWeight: "700" }}>Add</Text>
             </Pressable>
@@ -134,12 +133,12 @@ export default function PaletteMatrix() {
             <View style={styles.matrixRow}>
               <View style={styles.corner} />
               {valid.map((bg) => (
-                <View key={`h-${bg}`} style={[styles.headCell, { backgroundColor: bg, borderColor: theme.colors.border }]} />
+                <View key={`h-${bg}`} style={[styles.headCell, { backgroundColor: bg, borderColor: theme.colors.border, borderRadius: theme.radius.none }]} />
               ))}
             </View>
             {valid.map((fg) => (
               <View key={`r-${fg}`} style={styles.matrixRow}>
-                <View style={[styles.headCell, { backgroundColor: fg, borderColor: theme.colors.border }]} />
+                <View style={[styles.headCell, { backgroundColor: fg, borderColor: theme.colors.border, borderRadius: theme.radius.none }]} />
                 {valid.map((bg) => {
                   const fgRgb = parseHex(fg)!;
                   const bgRgb = parseHex(bg)!;
@@ -149,7 +148,7 @@ export default function PaletteMatrix() {
                   return (
                     <View
                       key={`${fg}-${bg}`}
-                      style={[styles.cell, { backgroundColor: bg, borderColor: theme.colors.border }]}
+                      style={[styles.cell, { backgroundColor: bg, borderColor: theme.colors.border, borderRadius: theme.radius.none }]}
                     >
                       <Text style={{ color: fg, fontSize: 13, fontWeight: "700" }}>Aa</Text>
                       <Text style={{ color: fg, fontSize: 9 }}>{same ? "—" : ratio.toFixed(1)}</Text>
@@ -184,23 +183,21 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     borderWidth: 1,
-    borderRadius: 999,
     paddingLeft: 6,
     paddingRight: 10,
     paddingVertical: 5,
   },
   chipSwatch: { width: 20, height: 20, borderRadius: 10, borderWidth: 1 },
   addRow: { flexDirection: "row", gap: 8, marginTop: 14, alignItems: "center" },
-  input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10, minWidth: 120 },
-  addBtn: { borderRadius: 8, paddingHorizontal: 16, paddingVertical: 10 },
+  input: { flex: 1, borderWidth: 1, padding: 10, minWidth: 120 },
+  addBtn: { paddingHorizontal: 16, paddingVertical: 10 },
   matrixScroll: { gap: 4 },
   matrixRow: { flexDirection: "row", gap: 4 },
   corner: { width: 40, height: 40 },
-  headCell: { width: 40, height: 40, borderRadius: 6, borderWidth: 1 },
+  headCell: { width: 40, height: 40, borderWidth: 1 },
   cell: {
     width: 40,
     height: 40,
-    borderRadius: 6,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",

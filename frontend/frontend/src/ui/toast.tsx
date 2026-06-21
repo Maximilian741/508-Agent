@@ -191,7 +191,7 @@ const styles = StyleSheet.create({
   toast: {
     flexDirection: "row",
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 4,
     overflow: "hidden",
     minWidth: 240,
     maxWidth: 360,
