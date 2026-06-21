@@ -22,6 +22,7 @@ const ITEMS: { label: string; href: string; key: string }[] = [
   { label: "Home", href: "/", key: "home" },
   { label: "Audit", href: "/audit", key: "audit" },
   { label: "Dashboard", href: "/dashboard", key: "dashboard" },
+  { label: "Insights", href: "/insights", key: "insights" },
   { label: "Batch", href: "/batch", key: "batch" },
   { label: "Contrast", href: "/tools/contrast", key: "contrast" },
   { label: "Help", href: "/help", key: "help" },

@@ -17,6 +17,7 @@ from app.api.health import router as health_router
 from app.api.documents import router as documents_router
 from app.api.evidence_bundles import router as evidence_bundles_router
 from app.api.manual_review import router as manual_review_router
+from app.api.metrics import router as metrics_router
 from app.api.pipeline import router as pipeline_router
 from app.api.policies import router as policies_router
 from app.api.remediate import router as remediate_router
@@ -110,6 +111,7 @@ app.include_router(credits_router, tags=["credits"])
 app.include_router(stripe_billing_router, tags=["billing"])
 app.include_router(teams_router, tags=["teams"])
 app.include_router(admin_metrics_router, tags=["admin"])
+app.include_router(metrics_router, tags=["metrics"])
 app.include_router(api_keys_router, tags=["api-keys"])
 app.include_router(documents_router, tags=["documents"])
 app.include_router(scan_router, tags=["scan"])
