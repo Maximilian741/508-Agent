@@ -34,20 +34,20 @@ const STEPS = [
 
 const DIFFERENTIATORS = [
   {
-    title: "One click — including the alt text",
+    title: "One click, including the alt text",
     body: "Upload, click “Fix everything,” download an accessible file. We write the alt text for your images with AI and repair headings, titles, lists, tables, language and link text. You don't write or decide anything.",
   },
   {
     title: "Procurement-grade conformance reports",
-    body: "One click produces a VPAT-style Accessibility Conformance Report — a verdict on every WCAG 2.1 A/AA criterion — that you can hand straight to legal or procurement.",
+    body: "One click produces a VPAT-style Accessibility Conformance Report (a verdict on every WCAG 2.1 A/AA criterion) that you can hand straight to legal or procurement.",
   },
   {
     title: "Built for agencies & teams",
-    body: "Process a whole folder at once, download every fixed file as a ZIP, and generate one consolidated conformance report — all under your own logo and brand colours.",
+    body: "Process a whole folder at once, download every fixed file as a ZIP, and generate one consolidated conformance report, all under your own logo and brand colours.",
   },
   {
     title: "Rebuilds PDF structure",
-    body: "Untagged PDF? The engine reconstructs a real PDF/UA structure tree from the page content — headings, lists, tables, figures, and header/footer artifacts.",
+    body: "Untagged PDF? The engine reconstructs a real PDF/UA structure tree from the page content: headings, lists, tables, figures, and header/footer artifacts.",
   },
   {
     title: "Verifiable certificates & a developer API",
@@ -55,7 +55,7 @@ const DIFFERENTIATORS = [
   },
   {
     title: "Honest by design",
-    body: "The score only counts fixes that genuinely persist into the file, and the report marks criteria we don't auto-check as “needs manual review.” No overclaiming — the kind of report an auditor trusts.",
+    body: "The score only counts fixes that genuinely persist into the file, and the report marks criteria we don't auto-check as “needs manual review.” No overclaiming. The kind of report an auditor trusts.",
   },
 ];
 
@@ -72,13 +72,12 @@ export default function LandingScreen() {
   return (
     <Screen scroll>
       <Hero
-        shader="ember"
         eyebrow="508 AGENT"
-        title="Make every document accessible — and prove it."
-        subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, and PowerPoint files, fixes them automatically — including writing the alt text for your images — and hands you a conformance report. Your first audits are free."
+        title="Make every document accessible, and prove it."
+        subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, and PowerPoint files, fixes them automatically (including writing the alt text for your images), and hands you a conformance report. Your first audits are free."
       >
         <View style={styles.ctaRow}>
-          <Button title="Start free — 25 credits" onPress={() => router.push("/audit" as any)} />
+          <Button title="Start free (25 credits)" onPress={() => router.push("/audit" as any)} />
           <Button
             title="See pricing"
             variant="ghost"
@@ -101,7 +100,7 @@ export default function LandingScreen() {
           for larger entities (populations of 50,000+) and{" "}
           <Text style={{ color: theme.colors.text, fontWeight: "700" }}>April 26, 2027</Text>{" "}
           for smaller entities and special districts. Most organizations have thousands of
-          untagged PDFs and documents to remediate — at manual rates of $5–25 per page, that's
+          untagged PDFs and documents to remediate, and at manual rates of $5–25 per page, that's
           a wall. 508 Agent fixes them in bulk, automatically.
         </Text>
         <Pressable
@@ -111,7 +110,7 @@ export default function LandingScreen() {
           style={({ hovered }: any) => [{ marginTop: 12, alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
-            Calculate your savings vs. manual remediation →
+            Calculate your savings vs. manual remediation
           </Text>
         </Pressable>
       </Card>
@@ -124,7 +123,7 @@ export default function LandingScreen() {
               key={s.n}
               style={[
                 styles.step,
-                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+                { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
               ]}
             >
               <View style={[styles.stepDot, { backgroundColor: theme.colors.accent }]}>
@@ -153,7 +152,7 @@ export default function LandingScreen() {
               key={d.title}
               style={[
                 styles.step,
-                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+                { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
               ]}
             >
               <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>
@@ -173,7 +172,7 @@ export default function LandingScreen() {
           {AUDIENCES.map((a) => (
             <View
               key={a.title}
-              style={[styles.step, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}
+              style={[styles.step, { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}
             >
               <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}>{a.title}</Text>
               <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>{a.body}</Text>
@@ -200,7 +199,7 @@ export default function LandingScreen() {
       <Card>
         <View style={{ alignItems: "center", paddingVertical: 8 }}>
           <Text style={[theme.typography.h2, { color: theme.colors.text, textAlign: "center" }]}>
-            Start free — your first audits are on us
+            Start free. Your first audits are on us
           </Text>
           <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6, textAlign: "center", maxWidth: 520 }]}>
             25 free credits, no credit card. Pay-as-you-go credit packs or a monthly plan when
@@ -245,7 +244,7 @@ function FooterLink({ label, onPress }: { label: string; onPress: () => void }) 
 const styles = StyleSheet.create({
   ctaRow: { flexDirection: "row", gap: 12, marginTop: 16, flexWrap: "wrap" },
   steps: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 12 },
-  step: { flex: 1, minWidth: 220, borderWidth: 1, borderRadius: 12, padding: 14 },
+  step: { flex: 1, minWidth: 220, borderWidth: 1, padding: 14 },
   stepDot: {
     width: 28,
     height: 28,

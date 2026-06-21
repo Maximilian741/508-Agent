@@ -23,7 +23,6 @@ export default function SecurityScreen() {
   return (
     <Screen scroll title="Security">
       <Hero
-        shader="nebula"
         eyebrow="SECURITY"
         title="How 508-agent.app keeps your documents safe"
         subtitle="Plain-language summary of the controls behind the managed deployment. Every claim below corresponds to code in the open repository or to a configuration item you can ask us to share."
@@ -123,7 +122,7 @@ function Retention({ label, body }: { label: string; body: string }) {
     <View
       style={[
         styles.retentionCard,
-        { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+        { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.none },
       ]}
     >
       <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 14 }]}>{label}</Text>
@@ -140,7 +139,7 @@ function VendorChip({ name, subtitle }: { name: string; subtitle: string }) {
     <View
       style={[
         styles.vendorCard,
-        { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+        { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.none },
       ]}
     >
       <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 14 }]}>{name}</Text>
@@ -160,7 +159,6 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     minWidth: 220,
     borderWidth: 1,
-    borderRadius: 10,
     padding: 12,
   },
   vendorRow: { flexDirection: "row", gap: 10, flexWrap: "wrap", marginTop: 12 },
@@ -169,7 +167,6 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     minWidth: 220,
     borderWidth: 1,
-    borderRadius: 10,
     padding: 12,
   },
 });

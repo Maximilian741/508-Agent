@@ -188,13 +188,13 @@ export default function AccessibilityStatementTool() {
       await navigator.clipboard.writeText(text);
       toast.success("Statement copied to clipboard");
     } catch {
-      toast.error("Couldn't copy — select the text and copy manually.");
+      toast.error("Couldn't copy. Select the text and copy manually.");
     }
   };
 
   const inputStyle = [
     styles.input,
-    { borderColor: theme.colors.border, color: theme.colors.text, backgroundColor: theme.colors.surface },
+    { borderColor: theme.colors.border, color: theme.colors.text, backgroundColor: theme.colors.surface, borderRadius: theme.radius.xs },
   ];
 
   return (
@@ -202,7 +202,7 @@ export default function AccessibilityStatementTool() {
       <Hero
         eyebrow="Free tool"
         title="Accessibility Statement generator"
-        subtitle="Every site and document library should publish an accessibility statement. Fill in a few fields and get a ready-to-publish statement in the standard format — copy it or download it. No account needed."
+        subtitle="Every site and document library should publish an accessibility statement. Fill in a few fields and get a ready-to-publish statement in the standard format (copy it or download it). No account needed."
       />
 
       <Card>
@@ -236,6 +236,7 @@ export default function AccessibilityStatementTool() {
                   {
                     borderColor: selected ? theme.colors.accent : theme.colors.border,
                     backgroundColor: selected ? theme.colors.accent + "14" : theme.colors.surface,
+                    borderRadius: theme.radius.sm,
                   },
                 ]}
               >
@@ -247,7 +248,7 @@ export default function AccessibilityStatementTool() {
           })}
         </View>
         <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 4 }]}>
-          Most organizations should choose “Partially conformant” — it's the honest status while remediation is ongoing, and claiming full conformance you can't back up creates legal risk.
+          Most organizations should choose “Partially conformant”: it's the honest status while remediation is ongoing, and claiming full conformance you can't back up creates legal risk.
         </Text>
 
         <Text style={[styles.label, { color: theme.colors.textMuted, marginTop: 12 }]}>Known limitations (optional, one per line)</Text>
@@ -283,7 +284,7 @@ export default function AccessibilityStatementTool() {
             />
           </View>
         </View>
-        <View style={[styles.preview, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+        <View style={[styles.preview, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.md }]}>
           <Text style={[theme.typography.mono, { color: theme.colors.text, fontSize: 12, lineHeight: 18 }]} selectable>
             {text}
           </Text>
@@ -295,9 +296,9 @@ export default function AccessibilityStatementTool() {
 
 const styles = StyleSheet.create({
   label: { fontSize: 12, fontWeight: "700", letterSpacing: 0.3, marginTop: 10, marginBottom: 4, textTransform: "uppercase" },
-  input: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
+  input: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
   statusRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
-  statusOpt: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
+  statusOpt: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 10 },
   previewHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 },
-  preview: { borderWidth: 1, borderRadius: 10, padding: 14 },
+  preview: { borderWidth: 1, padding: 14 },
 });

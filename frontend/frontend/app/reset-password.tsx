@@ -67,7 +67,6 @@ export default function ResetPasswordScreen() {
   return (
     <Screen scroll title="Reset password">
       <Hero
-        shader="aurora"
         eyebrow="ACCOUNT"
         title="Choose a new password"
         subtitle="Reset links can be used once and expire after an hour."
@@ -99,7 +98,7 @@ export default function ResetPasswordScreen() {
               placeholder="At least 8 characters"
               placeholderTextColor={theme.colors.textMuted}
               accessibilityLabel="New password"
-              style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+              style={[styles.input, { borderRadius: theme.radius.xs, borderColor: theme.colors.border, color: theme.colors.text }]}
             />
             <Text style={{ color: theme.colors.textMuted, fontSize: 12 }}>Confirm new password</Text>
             <TextInput
@@ -110,7 +109,7 @@ export default function ResetPasswordScreen() {
               placeholder="Same password again"
               placeholderTextColor={theme.colors.textMuted}
               accessibilityLabel="Confirm new password"
-              style={[styles.input, { borderColor: theme.colors.border, color: theme.colors.text }]}
+              style={[styles.input, { borderRadius: theme.radius.xs, borderColor: theme.colors.border, color: theme.colors.text }]}
             />
             {error ? <InlineNotice tone="danger" title="Couldn't reset" message={error} /> : null}
             <View style={{ flexDirection: "row", gap: 8 }}>
@@ -127,7 +126,6 @@ export default function ResetPasswordScreen() {
 const styles = StyleSheet.create({
   input: {
     borderWidth: 1,
-    borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 14,

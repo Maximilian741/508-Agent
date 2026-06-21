@@ -215,10 +215,9 @@ export default function BillingScreen() {
   return (
     <Screen scroll title="Plans & credits">
       <Hero
-        shader="ember"
         eyebrow="BILLING"
         title="Plans & credits"
-        subtitle="Subscribe for a monthly or annual allowance (best for teams) — conformance certificates included — or buy one-time credit packs."
+        subtitle="Subscribe for a monthly or annual allowance (best for teams), conformance certificates included, or buy one-time credit packs."
       />
 
       {subscription?.active ? (
@@ -251,7 +250,7 @@ export default function BillingScreen() {
                 style={{ marginTop: 6, alignSelf: "flex-start" }}
               >
                 <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "700" }}>
-                  Share your plan with your team · manage seats →
+                  Share your plan with your team · manage seats
                 </Text>
               </Pressable>
             </View>
@@ -305,7 +304,7 @@ export default function BillingScreen() {
         style={{ marginTop: 14, alignSelf: "flex-start" }}
       >
         <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
-          Estimate your savings vs. manual remediation →
+          Estimate your savings vs. manual remediation
         </Text>
       </Pressable>
 
@@ -318,7 +317,7 @@ export default function BillingScreen() {
       {/* Refunds + legal — Stripe live mode expects these to be visible at the
           point of sale, and the promises here mirror the Terms page. */}
       <Text style={{ color: theme.colors.textMuted, fontSize: 12, textAlign: "center", marginTop: 24, paddingHorizontal: 16, lineHeight: 18 }}>
-        Refunds: unused credit packs are refundable within 14 days — email support@508-agent.app.
+        Refunds: unused credit packs are refundable within 14 days (email support@508-agent.app).
         Subscriptions can be cancelled anytime from the billing portal and keep access through the
         paid period. Credits are non-transferable and never expire.
       </Text>
@@ -349,7 +348,7 @@ export default function BillingScreen() {
 
 function IntervalToggle({ interval, onChange, theme }: { interval: Interval; onChange: (i: Interval) => void; theme: ReturnType<typeof useTheme> }) {
   return (
-    <View style={{ flexDirection: "row", alignSelf: "flex-start", borderWidth: 1, borderColor: theme.colors.border, borderRadius: 999, padding: 3 }}>
+    <View style={{ flexDirection: "row", alignSelf: "flex-start", borderWidth: 1, borderColor: theme.colors.border, borderRadius: theme.radius.pill, padding: 3 }}>
       {(["month", "year"] as Interval[]).map((opt) => {
         const active = interval === opt;
         return (
@@ -358,7 +357,7 @@ function IntervalToggle({ interval, onChange, theme }: { interval: Interval; onC
             accessibilityRole="button"
             accessibilityLabel={opt === "month" ? "Monthly billing" : "Annual billing"}
             onPress={() => onChange(opt)}
-            style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999, backgroundColor: active ? theme.colors.accent : "transparent" }}
+            style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: theme.radius.pill, backgroundColor: active ? theme.colors.accent : "transparent" }}
           >
             <Text style={{ color: active ? "#FFFFFF" : theme.colors.textMuted, fontWeight: "700", fontSize: 13 }}>
               {opt === "month" ? "Monthly" : "Annual · save 17%"}
@@ -492,12 +491,12 @@ const styles = StyleSheet.create({
   tierWrap: {},
   tierFlex: { flex: 1 },
   tierStacked: { width: "100%" },
-  badge: { alignSelf: "flex-start", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, marginBottom: 8 },
+  badge: { alignSelf: "flex-start", paddingHorizontal: 8, paddingVertical: 4, marginBottom: 8 },
   priceRow: { flexDirection: "row", alignItems: "flex-end", marginTop: 4 },
   features: { marginTop: 4, gap: 8 },
   featureRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   bullet: { width: 6, height: 6, borderRadius: 3 },
-  table: { borderWidth: 1, borderRadius: 12, overflow: "hidden" },
+  table: { borderWidth: 1, overflow: "hidden" },
   tableRow: { flexDirection: "row", alignItems: "center", paddingVertical: 11, paddingHorizontal: 12, gap: 8 },
   cellFeature: { flex: 1.6, fontSize: 13 },
   cellValue: { flex: 1, fontSize: 12, textAlign: "center" },

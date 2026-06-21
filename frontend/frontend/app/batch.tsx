@@ -828,7 +828,6 @@ export default function BatchScreen() {
       ) : null}
 
       <Hero
-        shader="pumpkin"
         eyebrow="BATCH"
         title="Batch audit"
         subtitle={`Drop multiple documents and we'll analyze them in parallel - up to ${MAX_CONCURRENCY} at once. Each finished audit lands in your history.`}
@@ -1237,7 +1236,7 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       alignItems: "center",
       gap: 12,
       borderWidth: 1,
-      borderRadius: 12,
+      borderRadius: theme.radius.none,
       padding: 14,
       marginBottom: theme.spacing.md,
     },

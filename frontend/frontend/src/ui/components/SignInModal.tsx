@@ -263,6 +263,7 @@ export function SignInModal({
           {
             backgroundColor: panelBg,
             borderColor: theme.colors.border,
+            borderRadius: theme.radius.md,
           },
         ]}
       >
@@ -396,7 +397,7 @@ function WelcomeStep(props: WelcomeStepProps) {
           backgroundColor: theme.colors.surface,
           borderColor: theme.colors.border,
           borderWidth: 1,
-          borderRadius: 10,
+          borderRadius: theme.radius.md,
           paddingHorizontal: 14,
           paddingVertical: 12,
           marginBottom: 18,
@@ -519,7 +520,7 @@ function WelcomeStep(props: WelcomeStepProps) {
       ) : (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Forgot password — email me a reset link"
+          accessibilityLabel="Forgot password: email me a reset link"
           onPress={onForgotPassword}
           disabled={forgotBusy}
           style={({ hovered }: any) => [{ alignSelf: "flex-start", marginTop: 6 }, hovered ? { opacity: 0.7 } : null]}
@@ -636,7 +637,7 @@ function RememberCheckbox({ theme, checked, onToggle }: RememberCheckboxProps) {
         style={{
           width: 18,
           height: 18,
-          borderRadius: 4,
+          borderRadius: theme.radius.xs,
           borderWidth: 2,
           borderColor: checked ? theme.colors.accent : theme.colors.border,
           backgroundColor: checked ? theme.colors.accent : "transparent",
