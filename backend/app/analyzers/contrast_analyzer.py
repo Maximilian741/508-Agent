@@ -17,7 +17,7 @@ assumed, the finding is a WARNING ("may not meet"), not a hard error.
 from __future__ import annotations
 
 from app.analyzers.base import Analyzer
-from app.analyzers.contrast import contrast_ratio, required_ratio
+from app.analyzers.contrast import contrast_ratio, required_ratio, suggest_passing_fg
 from app.analyzers.helpers import attach_flag, iter_nodes
 from app.models.accessibility import AccessibilityFlagCode, AccessibilityTree
 
@@ -56,11 +56,21 @@ class ContrastAnalyzer(Analyzer):
             if worst is not None:
                 ratio, fg, required = worst
                 # Record evidence on the node for the report / UI.
-                props["contrast_finding"] = {
+                finding = {
                     "fg": fg,
                     "bg": bg,
                     "ratio": round(ratio, 2),
                     "required": required,
                 }
+                # Hand the user the exact accessible colour to use, so the fix
+                # is one decision instead of trial-and-error. We only ever
+                # suggest a new TEXT colour (never silently recolour anything).
+                suggested = suggest_passing_fg(fg, bg, required)
+                if suggested:
+                    finding["suggested_fg"] = suggested
+                    sr = contrast_ratio(suggested, bg)
+                    if sr is not None:
+                        finding["suggested_ratio"] = round(sr, 2)
+                props["contrast_finding"] = finding
                 node.metadata.properties = props
                 attach_flag(node, AccessibilityFlagCode.LOW_CONTRAST_TEXT)
