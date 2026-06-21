@@ -594,6 +594,7 @@ class ActionCode(str, Enum):
     RESOLVE_READING_ORDER = "RESOLVE_READING_ORDER"
     TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
     ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
+    FIX_CONTRAST = "FIX_CONTRAST"
     FLAG_FOR_MANUAL_REVIEW = "FLAG_FOR_MANUAL_REVIEW"
 
 
@@ -915,6 +916,32 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.LINK],
             related_flag_code=AccessibilityFlagCode.LINK_TARGET_BROKEN,
+        ),
+    ],
+    AccessibilityFlagCode.LOW_CONTRAST_TEXT: [
+        RemediationAction(
+            action_code=ActionCode.FIX_CONTRAST,
+            description="Darken or lighten the text to the nearest colour that meets the WCAG AA contrast minimum, keeping the change as small as possible.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[
+                NodeType.PARAGRAPH,
+                NodeType.HEADING,
+                NodeType.LIST_ITEM,
+                NodeType.LINK,
+                NodeType.TABLE_CELL,
+            ],
+            related_flag_code=AccessibilityFlagCode.LOW_CONTRAST_TEXT,
+        ),
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.PARAGRAPH],
+            related_flag_code=AccessibilityFlagCode.LOW_CONTRAST_TEXT,
         ),
     ],
 }
