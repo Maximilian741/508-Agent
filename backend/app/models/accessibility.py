@@ -88,6 +88,7 @@ class AccessibilityFlagCode(str, Enum):
     SCANNED_DOCUMENT_NO_TEXT = "SCANNED_DOCUMENT_NO_TEXT"
     PDF_UNTAGGED = "PDF_UNTAGGED"
     TEXT_STYLED_AS_HEADING = "TEXT_STYLED_AS_HEADING"
+    TABLE_COMPLEX_NEEDS_SUMMARY = "TABLE_COMPLEX_NEEDS_SUMMARY"
 
 
 class StandardReference(BaseModel):
@@ -236,6 +237,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["1.3.1"],
             section_508=["E205.2"],
             pdf_ua=["7.3-5"],
+        ),
+    ),
+    AccessibilityFlagCode.TABLE_COMPLEX_NEEDS_SUMMARY: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.TABLE_COMPLEX_NEEDS_SUMMARY,
+        severity=Severity.WARNING,
+        message="Complex table (merged cells or large grid) needs a summary describing its structure.",
+        standards=StandardReference(
+            wcag_2_1=["1.3.1"],
+            section_508=["E205.2"],
+            pdf_ua=["7.5"],
         ),
     ),
     AccessibilityFlagCode.LINK_TARGET_BROKEN: AccessibilityFlagDefinition(
@@ -882,6 +893,17 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.TABLE],
             related_flag_code=AccessibilityFlagCode.TABLE_CAPTION_MISSING,
+        ),
+    ],
+    AccessibilityFlagCode.TABLE_COMPLEX_NEEDS_SUMMARY: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag complex table for manual summary review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.TABLE],
+            related_flag_code=AccessibilityFlagCode.TABLE_COMPLEX_NEEDS_SUMMARY,
         ),
     ],
     AccessibilityFlagCode.LINK_TARGET_BROKEN: [

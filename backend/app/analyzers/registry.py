@@ -28,6 +28,7 @@ from app.analyzers.list_analyzer import ListStructureAnalyzer
 from app.analyzers.reading_order_analyzer import ReadingOrderAnalyzer
 from app.analyzers.table_analyzer import TableMissingHeadersAnalyzer
 from app.analyzers.table_caption_analyzer import TableCaptionMissingAnalyzer
+from app.analyzers.table_complexity_analyzer import TableComplexityAnalyzer
 from app.models.accessibility import AccessibilityTree
 
 
@@ -47,6 +48,7 @@ def get_default_analyzers() -> List[Analyzer]:
         # assign COLUMN scope to header cells, so the NONE-scope condition is
         # unreachable from parsed documents — the rule could never fire.
         TableCaptionMissingAnalyzer(),
+        TableComplexityAnalyzer(),
         ListStructureAnalyzer(),
         LinkTextAnalyzer(),
         LinkTargetBrokenAnalyzer(),
