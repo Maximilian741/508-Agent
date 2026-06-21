@@ -268,6 +268,17 @@ export default function HomeScreen() {
             Drop an image, get alt text
           </Text>
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to link text checker"
+          onPress={() => router.push("/tools/link-text")}
+          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
+            Link text checker
+          </Text>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+            Is “click here” hurting you?
+          </Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
           onPress={() => router.push("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
