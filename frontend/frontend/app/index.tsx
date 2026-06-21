@@ -36,7 +36,7 @@ const FIRST_RUN_STEPS = [
   {
     n: "1",
     title: "Drop a document",
-    body: "Upload a PDF, Word, or PowerPoint file. We never train on your documents.",
+    body: "Upload a PDF, Word, PowerPoint, or HTML file. We never train on your documents.",
   },
   {
     n: "2",
@@ -109,7 +109,7 @@ export default function HomeScreen() {
       return `${pending} finding${pending === 1 ? "" : "s"} still waiting on ${inProgress.filename}.`;
     }
     if (history.length === 0)
-      return "Find and fix accessibility issues in your PDFs, Word docs, and slides — checked against WCAG 2.1, Section 508, and PDF/UA.";
+      return "Find and fix accessibility issues in your PDFs, Word docs, slides, and web pages — checked against WCAG 2.1, Section 508, and PDF/UA.";
     return `${history.length} document${history.length === 1 ? "" : "s"} on the bench. Pick one up where you left it.`;
   }, [history]);
 
@@ -178,7 +178,7 @@ export default function HomeScreen() {
             },
           ]}
         >
-          Drop a PDF, Word, or PowerPoint file on the audit screen and we will walk
+          Drop a PDF, Word, PowerPoint, or HTML file on the audit screen and we will walk
           every accessibility finding with you, one at a time, in plain English.
         </Text>
         <View style={styles.benchFooter}>
@@ -188,7 +188,7 @@ export default function HomeScreen() {
               { color: theme.colors.textMuted, letterSpacing: 0.8 },
             ]}
           >
-            .PDF   .DOCX   .PPTX
+            .PDF   .DOCX   .PPTX   .HTML
           </Text>
           <Button
             title={ready ? "Start an audit" : "Start in demo mode"}

@@ -168,7 +168,7 @@ async def analyze(
         result = await run_in_threadpool(parse_to_tree, str(tmp_path))
     except Exception as exc:
         logger.exception("pipeline parse failed: %s", exc)
-        raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF/DOCX/PPTX.")
+        raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.")
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -450,7 +450,7 @@ async def remediate(
         _cleanup_job_dir(job_dir)
         raise HTTPException(
             status_code=422,
-            detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF/DOCX/PPTX.",
+            detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.",
         )
 
     tree = result.tree

@@ -1021,7 +1021,7 @@ export default function AuditScreen() {
           ]}
         >
           <Text style={styles.dropOverlayText}>Drop to audit</Text>
-          <Text style={styles.dropOverlaySub}>PDF · DOCX · PPTX accepted</Text>
+          <Text style={styles.dropOverlaySub}>PDF · DOCX · PPTX · HTML accepted</Text>
         </View>
       ) : null}
       {showHelp ? <KeyboardHelpOverlay onClose={() => setShowHelp(false)} /> : null}
@@ -2042,7 +2042,7 @@ export default function AuditScreen() {
       {!report && !busy ? (
         <EmptyState
           title="No audit yet"
-          message="Pick a PDF, DOCX, or PPTX above — or click a sample card — and we'll walk you through every accessibility finding."
+          message="Pick a PDF, DOCX, PPTX, or HTML file above — or click a sample card — and we'll walk you through every accessibility finding."
         />
       ) : null}
     </Screen>

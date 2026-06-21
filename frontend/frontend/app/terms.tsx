@@ -23,7 +23,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "1. What the service is",
     body: [
-      "508 Agent analyzes documents you upload (PDF, Word, PowerPoint) for accessibility issues against WCAG 2.1, Section 508, and PDF/UA criteria, proposes fixes, and — where you approve them — writes a remediated copy of the document for you to download.",
+      "508 Agent analyzes documents you upload (PDF, Word, PowerPoint, and HTML) for accessibility issues against WCAG 2.1, Section 508, and PDF/UA criteria, proposes fixes, and — where you approve them — writes a remediated copy of the document for you to download.",
       "Automated checking has limits. The service finds and fixes the issue types listed on each audit report; it does not evaluate every success criterion, and it is not a substitute for human accessibility review or legal advice.",
     ],
   },

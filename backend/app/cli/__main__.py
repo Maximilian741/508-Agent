@@ -102,7 +102,7 @@ def _make_colorizer(no_color: bool) -> _Colorizer:
 # ---------------------------------------------------------------------------
 
 
-_SUPPORTED_EXTS = {".pdf", ".docx", ".pptx"}
+_SUPPORTED_EXTS = {".pdf", ".docx", ".pptx", ".html", ".htm"}
 
 
 def _is_supported(path: Path) -> bool:
@@ -541,7 +541,7 @@ def _run_audit(args: argparse.Namespace) -> int:
     if not files:
         print(
             color(
-                f"error: no supported files (.pdf .docx .pptx) under: {target}",
+                f"error: no supported files (.pdf .docx .pptx .html .htm) under: {target}",
                 "red",
                 "bold",
             ),
