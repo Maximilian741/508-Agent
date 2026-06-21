@@ -1,4 +1,4 @@
-import { Theme, darkColors, lightColors, radius, shadows, spacing, twilightColors, typography } from "./theme";
+import { Theme, border, darkColors, focus, lightColors, radius, shadows, spacing, twilightColors, typography } from "./theme";
 import { useAppStore } from "../store/useAppStore";
 
 /**
@@ -24,6 +24,8 @@ export function useTheme(): Theme {
     colors,
     spacing,
     radius,
+    border,
+    focus,
     typography,
     shadows,
   };
