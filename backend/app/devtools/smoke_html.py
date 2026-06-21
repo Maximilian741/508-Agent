@@ -53,7 +53,7 @@ DIRTY_HTML = """<!DOCTYPE html>
 <!-- a comment that must survive remediation -->
 <h1>Café Résumé</h1>
 <h3>Subsection jumped a level</h3>
-<p style="color:#888;background:#fff">Inline-styled grey text (must NOT be flagged for contrast in v1).</p>
+<p style="color:#888;background:#fff">Inline grey-on-white text (~3.5:1) — a real contrast failure that must be flagged.</p>
 <img src="logo.png">
 <img src="divider.gif" role="presentation" alt="decorative spacer junk">
 <p><a href="/annual-report">click here</a></p>
@@ -174,8 +174,8 @@ def main() -> int:
     check("missing <title> flagged", _flag_count(res.tree, TITLE) == 1, f"got {_flag_count(res.tree, TITLE)}")
     check("missing <html lang> flagged", _flag_count(res.tree, LANG) == 1, f"got {_flag_count(res.tree, LANG)}")
     check("unlabeled form control flagged", _flag_count(res.tree, FORM) == 1, f"got {_flag_count(res.tree, FORM)}")
-    check("NO contrast false-positive from inline grey-on-white (v1 skips contrast)",
-          _flag_count(res.tree, CONTRAST) == 0, f"got {_flag_count(res.tree, CONTRAST)}")
+    check("inline grey-on-white (#888 on #fff, ~3.5:1) flagged for contrast",
+          _flag_count(res.tree, CONTRAST) == 1, f"got {_flag_count(res.tree, CONTRAST)}")
 
     # ------------------------------------------------------------- remediate
     plans = plan_remediations(res.tree, policy)

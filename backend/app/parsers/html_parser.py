@@ -15,8 +15,13 @@ Design notes
   there is no fragile parser/writer id-counter to keep in lockstep — the locator
   is an absolute address into an identical tree.
 * v1 is deliberately conservative about what it *claims*:
-    - Contrast is NOT populated (we never assume colours from classes /
-      stylesheets), so no LOW_CONTRAST_TEXT false positives.
+    - Contrast is populated ONLY from *inline* styles, and ONLY when BOTH the
+      text colour and an effective background resolve to a concrete sRGB value
+      (the element's own ``background`` or the nearest inline-styled ancestor's).
+      We never assume a white page background or read class/stylesheet rules, so
+      LOW_CONTRAST_TEXT can only fire on colours we actually determined — no
+      false positives. (This catches the very common case of HTML *exported
+      from* Word / Google Docs, which is saturated with inline colour styling.)
     - Form fields are DETECTED (count) but ``form_fields_derivable`` is 0, so
       the labeling executor honestly skips — auto-labeling HTML controls
       correctly is deferred to v2 (a wrong label is worse than none).
@@ -28,6 +33,7 @@ Design notes
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +77,238 @@ _SCOPE_FROM_ATTR = {
     "row": TableHeaderScope.ROW,
     "rowgroup": TableHeaderScope.ROW,
 }
+
+# ---------------------------------------------------------------------------
+# Inline-style colour / contrast parsing (conservative; exact values only)
+# ---------------------------------------------------------------------------
+
+# The 16 basic HTML colour keywords + a handful that turn up constantly in real
+# documents. Exact mappings — no guessing. Anything not here (hsl(), other named
+# colours, currentColor, …) is left unresolved so it is simply not flagged.
+_NAMED_COLORS: Dict[str, str] = {
+    "black": "000000", "silver": "C0C0C0", "gray": "808080", "grey": "808080",
+    "white": "FFFFFF", "maroon": "800000", "red": "FF0000", "purple": "800080",
+    "fuchsia": "FF00FF", "magenta": "FF00FF", "green": "008000", "lime": "00FF00",
+    "olive": "808000", "yellow": "FFFF00", "navy": "000080", "blue": "0000FF",
+    "teal": "008080", "aqua": "00FFFF", "cyan": "00FFFF", "orange": "FFA500",
+    "lightgray": "D3D3D3", "lightgrey": "D3D3D3", "darkgray": "A9A9A9",
+    "darkgrey": "A9A9A9", "gold": "FFD700", "pink": "FFC0CB", "whitesmoke": "F5F5F5",
+    "gainsboro": "DCDCDC", "dimgray": "696969", "dimgrey": "696969",
+}
+
+_HEX_RE = re.compile(r"#([0-9a-fA-F]{3,8})")
+_RGB_RE = re.compile(r"rgba?\(([^)]*)\)", re.IGNORECASE)
+_URL_RE = re.compile(r"url\([^)]*\)", re.IGNORECASE)
+_IMPORTANT_RE = re.compile(r"\s*!\s*important\s*$", re.IGNORECASE)
+# Matches the `color` *property* (anchored at start/`;`) so it never matches
+# `background-color` / `border-color` / `caret-color` etc.
+_COLOR_DECL_RE = re.compile(r"(?:^|;)\s*color\s*:", re.IGNORECASE)
+
+# Style-context carried down the tree. ``color``/``sz``/``b`` inherit per CSS;
+# ``bg`` is the nearest ancestor's non-transparent background (what the text
+# visually sits on, since unstyled elements have transparent backgrounds).
+_EMPTY_CTX: Dict[str, Any] = {"color": None, "bg": None, "sz": None, "b": False}
+
+
+def _hex_token_to_hex(tok: str) -> Optional[str]:
+    """Normalise the digits after ``#`` (3/4/6/8) to ``RRGGBB``.
+
+    4- and 8-digit forms carry alpha; if the colour is not fully opaque we
+    return None (a blended colour can't be scored without the backdrop, so we
+    decline rather than guess)."""
+    t = tok.lower()
+    if len(t) == 3:
+        return "".join(ch * 2 for ch in t).upper()
+    if len(t) == 4:
+        if t[3] != "f":  # alpha nibble not opaque
+            return None
+        return "".join(ch * 2 for ch in t[:3]).upper()
+    if len(t) == 6:
+        return t.upper()
+    if len(t) == 8:
+        if t[6:8] != "ff":
+            return None
+        return t[:6].upper()
+    return None
+
+
+def _rgb_to_hex(inner: str) -> Optional[str]:
+    """``r,g,b`` / ``r,g,b,a`` (ints or %) -> ``RRGGBB``; None if translucent."""
+    # Accept comma- or whitespace/slash-separated components (modern + legacy).
+    parts = [p for p in re.split(r"[,/\s]+", inner.strip()) if p]
+    if len(parts) < 3:
+        return None
+    try:
+        comps = []
+        for p in parts[:3]:
+            if p.endswith("%"):
+                comps.append(round(float(p[:-1]) / 100.0 * 255.0))
+            else:
+                comps.append(int(round(float(p))))
+        if len(parts) >= 4:
+            a = parts[3]
+            alpha = float(a[:-1]) / 100.0 if a.endswith("%") else float(a)
+            if alpha < 1.0:
+                return None  # translucent -> can't score against unknown backdrop
+    except ValueError:
+        return None
+    comps = [max(0, min(255, c)) for c in comps]
+    return "".join(f"{c:02X}" for c in comps)
+
+
+def _css_color_to_hex(value: str) -> Optional[str]:
+    """Resolve a single CSS colour value to ``RRGGBB``, or None if we can't be
+    certain (named-but-unknown, hsl, transparent, currentColor, keywords)."""
+    v = value.strip().lower()
+    if not v or v in {"transparent", "inherit", "initial", "unset", "currentcolor", "none"}:
+        return None
+    if v.startswith("#"):
+        return _hex_token_to_hex(v[1:])
+    m = _RGB_RE.match(v)
+    if m:
+        return _rgb_to_hex(m.group(1))
+    return _NAMED_COLORS.get(v)
+
+
+def _extract_bg_color(value: str) -> Optional[str]:
+    """Pull a concrete colour out of a ``background`` shorthand (which may also
+    carry images/position/repeat), or None if none is resolvable."""
+    # Drop any url(...) first so a colour-like fragment id (e.g.
+    # url(sprite.svg#a0f0c0)) is never mistaken for a background colour.
+    value = _URL_RE.sub(" ", value)
+    m = _HEX_RE.search(value)
+    if m:
+        h = _hex_token_to_hex(m.group(1))
+        if h:
+            return h
+    m = _RGB_RE.search(value)
+    if m:
+        h = _rgb_to_hex(m.group(1))
+        if h:
+            return h
+    for tok in re.split(r"\s+", value.strip().lower()):
+        if tok in _NAMED_COLORS:
+            return _NAMED_COLORS[tok]
+    return None
+
+
+def _font_size_to_pt(value: str) -> Optional[float]:
+    """Absolute font-size to points: ``px`` (×0.75) or ``pt``. Relative units
+    (em/rem/%) and keywords are left unresolved (None) — we never guess a base
+    size, so the analyzer just treats size as unknown for those runs."""
+    v = value.strip().lower()
+    try:
+        if v.endswith("px"):
+            return float(v[:-2]) * 0.75
+        if v.endswith("pt"):
+            return float(v[:-2])
+    except ValueError:
+        return None
+    return None
+
+
+def _is_bold_weight(value: str) -> bool:
+    v = value.strip().lower()
+    if v in {"bold", "bolder"}:
+        return True
+    try:
+        return float(v) >= 700.0
+    except ValueError:
+        return False
+
+
+def _inline_style(el: Any) -> Dict[str, Any]:
+    """Parse the colour-relevant declarations from an element's ``style`` attr.
+
+    Only keys that resolve to a concrete value are returned, so a caller's
+    ``dict.get(k, inherited)`` merge naturally inherits everything else."""
+    raw = el.get("style")
+    out: Dict[str, Any] = {}
+    if not raw:
+        return out
+    decls: Dict[str, str] = {}
+    for part in raw.split(";"):
+        if ":" not in part:
+            continue
+        k, _, val = part.partition(":")
+        decls[k.strip().lower()] = _IMPORTANT_RE.sub("", val.strip())
+
+    if "color" in decls:
+        c = _css_color_to_hex(decls["color"])
+        if c:
+            out["color"] = c
+    if "background-color" in decls:
+        b = _css_color_to_hex(decls["background-color"])
+        if b:
+            out["bg"] = b
+    elif "background" in decls:
+        b = _extract_bg_color(decls["background"])
+        if b:
+            out["bg"] = b
+    if "font-size" in decls:
+        sz = _font_size_to_pt(decls["font-size"])
+        if sz is not None:
+            out["sz"] = sz
+    if "font-weight" in decls:
+        out["b"] = _is_bold_weight(decls["font-weight"])
+    return out
+
+
+def _merge_ctx(parent: Dict[str, Any], own: Dict[str, Any]) -> Dict[str, Any]:
+    """Layer an element's own inline style over the inherited context."""
+    return {
+        "color": own.get("color", parent.get("color")),
+        "bg": own.get("bg", parent.get("bg")),
+        "sz": own.get("sz", parent.get("sz")),
+        "b": own.get("b", parent.get("b", False)),
+    }
+
+
+def _contrast_props(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Contrast metadata for a text node — only when BOTH the resolved text
+    colour AND an effective background are known (else empty: never assume)."""
+    color = ctx.get("color")
+    bg = ctx.get("bg")
+    if not color or not bg:
+        return {}
+    return {
+        "explicit_text_colors": [{"c": color, "sz": ctx.get("sz"), "b": bool(ctx.get("b"))}],
+        "bg_color": bg,
+    }
+
+
+def _declares_color(el: Any) -> bool:
+    raw = el.get("style")
+    return bool(raw and _COLOR_DECL_RE.search(raw))
+
+
+def _has_conflicting_child_color(el: Any, resolved_color: str) -> bool:
+    """True if any descendant re-declares the ``color`` property to something
+    other than ``resolved_color`` (a different hex, or a value we can't resolve).
+
+    Because we score a text block with a single colour, such an override means
+    part of the visible text is actually a *different* colour than the one we'd
+    record — so we must decline rather than risk a false "fails contrast"."""
+    for desc in el.iterdescendants():
+        if not isinstance(desc.tag, str):
+            continue
+        if _tag(desc) in _SKIP_TAGS:
+            continue
+        if not _declares_color(desc):
+            continue
+        if _inline_style(desc).get("color") != resolved_color:
+            return True
+    return False
+
+
+def _emit_ctx(el: Any, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The style context to record on a text node, or None when contrast can't
+    be determined unambiguously (no resolved fg+bg, or a child overrides fg)."""
+    if not ctx.get("color") or not ctx.get("bg"):
+        return None
+    if _has_conflicting_child_color(el, ctx["color"]):
+        return None
+    return ctx
 
 
 class _Ids:
@@ -117,8 +355,15 @@ class HTMLParser:
 
         body = doc.find("body")
         content_root = body if body is not None else doc
+        # Seed the inherited style context from <html> then <body> so a
+        # page-level inline background/colour (common in exported-doc HTML and
+        # email) flows down to the content.
+        root_ctx = _merge_ctx(_EMPTY_CTX, _inline_style(doc))
+        if body is not None:
+            root_ctx = _merge_ctx(root_ctx, _inline_style(body))
+
         try:
-            children = _build_children(content_root, ids, roottree)
+            children = _build_children(content_root, ids, roottree, root_ctx)
         except RecursionError:
             # Pathologically deep markup (e.g. thousands of nested <div>s) would
             # otherwise exhaust the stack. Degrade gracefully to a minimal tree
@@ -190,27 +435,34 @@ def _parse_document(data: bytes):
         return lxml_html.document_fromstring(b"<html><head></head><body></body></html>")
 
 
-def _meta(el: Any, roottree: Any) -> NodeMetadata:
-    return NodeMetadata(source_format="html", properties={"__xpath": roottree.getpath(el)})
+def _meta(el: Any, roottree: Any, ctx: Optional[Dict[str, Any]] = None) -> NodeMetadata:
+    """Node metadata with the writer's xpath locator, plus contrast colours when
+    a style context is supplied for a text-bearing node."""
+    props: Dict[str, Any] = {"__xpath": roottree.getpath(el)}
+    if ctx is not None:
+        props.update(_contrast_props(ctx))
+    return NodeMetadata(source_format="html", properties=props)
 
 
-def _build_children(el: Any, ids: _Ids, roottree: Any) -> List[Any]:
+def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> List[Any]:
     out: List[Any] = []
     for child in el:
         tag = _tag(child)
         if tag is None or tag in _SKIP_TAGS:
             continue
-        node = _build_node(child, tag, ids, roottree)
+        child_ctx = _merge_ctx(ctx, _inline_style(child))
+        node = _build_node(child, tag, ids, roottree, child_ctx)
         if node is not None:
             out.append(node)
         else:
             # Transparent wrapper (span, strong, label, etc.): inline any
-            # accessibility-relevant descendants so inline <img>/<a> are seen.
-            out.extend(_build_children(child, ids, roottree))
+            # accessibility-relevant descendants so inline <img>/<a> are seen,
+            # carrying the wrapper's style down to them.
+            out.extend(_build_children(child, ids, roottree, child_ctx))
     return out
 
 
-def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any) -> Optional[Any]:
+def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> Optional[Any]:
     if tag in _HEADING_TAGS:
         text = _text(el)
         content = (
@@ -222,8 +474,8 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any) -> Optional[Any]:
             id=ids("html-h"),
             level=_HEADING_TAGS[tag],
             content=content,
-            metadata=_meta(el, roottree),
-            children=_build_children(el, ids, roottree),
+            metadata=_meta(el, roottree, _emit_ctx(el, ctx) if text else None),
+            children=_build_children(el, ids, roottree, ctx),
             accessibility_flags=[],
         )
 
@@ -234,24 +486,26 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any) -> Optional[Any]:
         text = _text(el)
         if text and not _has_element_children(el):
             content = NodeContent(kind=ContentKind.TEXT, text=text)
+            link_ctx: Optional[Dict[str, Any]] = _emit_ctx(el, ctx)
         else:
             # Links wrapping elements (e.g. <a><img></a>) get their name from
             # the child; we don't analyze/rewrite their text in v1.
             content = NodeContent(kind=ContentKind.NONE)
+            link_ctx = None
         return LinkNode(
             id=ids("html-link"),
             target=(el.get("href") or None),
             content=content,
-            metadata=_meta(el, roottree),
-            children=_build_children(el, ids, roottree),
+            metadata=_meta(el, roottree, link_ctx),
+            children=_build_children(el, ids, roottree, ctx),
             accessibility_flags=[],
         )
 
     if tag in {"ul", "ol"}:
-        return _build_list(el, tag, ids, roottree)
+        return _build_list(el, tag, ids, roottree, ctx)
 
     if tag == "table":
-        return _build_table(el, ids, roottree)
+        return _build_table(el, ids, roottree, ctx)
 
     if tag == "p":
         text = _text(el)
@@ -263,13 +517,13 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any) -> Optional[Any]:
         return ParagraphNode(
             id=ids("html-p"),
             content=content,
-            metadata=_meta(el, roottree),
-            children=_build_children(el, ids, roottree),
+            metadata=_meta(el, roottree, _emit_ctx(el, ctx) if text else None),
+            children=_build_children(el, ids, roottree, ctx),
             accessibility_flags=[],
         )
 
     if tag in _SECTION_TAGS:
-        children = _build_children(el, ids, roottree)
+        children = _build_children(el, ids, roottree, ctx)
         if not children:
             return None
         return SectionNode(
@@ -320,11 +574,12 @@ def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     )
 
 
-def _build_list(el: Any, tag: str, ids: _Ids, roottree: Any) -> ListNode:
+def _build_list(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> ListNode:
     items: List[Any] = []
     for li in el:
         if _tag(li) != "li":
             continue
+        li_ctx = _merge_ctx(ctx, _inline_style(li))
         text = _text(li)
         content = (
             NodeContent(kind=ContentKind.TEXT, text=text)
@@ -335,8 +590,8 @@ def _build_list(el: Any, tag: str, ids: _Ids, roottree: Any) -> ListNode:
             ListItemNode(
                 id=ids("html-li"),
                 content=content,
-                metadata=_meta(li, roottree),
-                children=_build_children(li, ids, roottree),
+                metadata=_meta(li, roottree, _emit_ctx(li, li_ctx) if text else None),
+                children=_build_children(li, ids, roottree, li_ctx),
                 accessibility_flags=[],
             )
         )
@@ -365,14 +620,16 @@ def _table_rows(table_el: Any) -> List[Any]:
     return rows
 
 
-def _build_table(el: Any, ids: _Ids, roottree: Any) -> TableNode:
+def _build_table(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> TableNode:
     rows_nodes: List[Any] = []
     for tr in _table_rows(el):
+        tr_ctx = _merge_ctx(ctx, _inline_style(tr))
         cells: List[Any] = []
         for cell_el in tr:
             ct = _tag(cell_el)
             if ct not in {"td", "th"}:
                 continue
+            cell_ctx = _merge_ctx(tr_ctx, _inline_style(cell_el))
             is_header = ct == "th"
             text = _text(cell_el)
             if is_header:
@@ -391,8 +648,8 @@ def _build_table(el: Any, ids: _Ids, roottree: Any) -> TableNode:
                     cell_type=TableCellType.HEADER if is_header else TableCellType.DATA,
                     header_scope=scope,
                     content=content,
-                    metadata=_meta(cell_el, roottree),
-                    children=_build_children(cell_el, ids, roottree),
+                    metadata=_meta(cell_el, roottree, _emit_ctx(cell_el, cell_ctx) if text else None),
+                    children=_build_children(cell_el, ids, roottree, cell_ctx),
                     accessibility_flags=[],
                 )
             )
