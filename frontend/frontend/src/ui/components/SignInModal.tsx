@@ -694,7 +694,7 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 480,
     borderWidth: 1,
-    borderRadius: 16,
+    borderRadius: 4,
     padding: 30,
     // @ts-ignore web-only shadow
     boxShadow: "0 18px 48px rgba(31, 20, 10, 0.34)",
@@ -714,14 +714,14 @@ const styles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 2,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 14,
   },
   inputLarge: {
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 2,
     paddingHorizontal: 14,
     paddingVertical: 14,
     fontSize: 16,
