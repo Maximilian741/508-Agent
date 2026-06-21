@@ -23,18 +23,47 @@ def iter_nodes(tree: AccessibilityTree) -> Iterable[Node]:
 _GENERIC_TITLES = {
     "untitled",
     "untitled document",
+    "untitled presentation",
+    "untitled spreadsheet",
+    "untitled form",
     "title",
     "document",
     "presentation",
     "powerpoint presentation",
     "microsoft word document",
     "microsoft powerpoint presentation",
+    "microsoft excel worksheet",
     "new microsoft word document",
     "new microsoft powerpoint presentation",
+    "new microsoft excel worksheet",
+    "new document",
+    "new presentation",
+    "new spreadsheet",
+    "blank",
+    "blank document",
+    "blank presentation",
+    "blank spreadsheet",
     "slide 1",
     "spreadsheet",
+    "workbook",
+    "no title",
+    "document title",
+    "presentation title",
+    # Placeholder prompts authoring tools pre-fill into the title box.
+    "click to add title",
+    "add title",
+    "title here",
+    "your title here",
+    "type a title",
+    "enter title here",
+    "google docs",
+    "google slides",
+    "google sheets",
 }
-_NUMBERED_DEFAULT_RE = re.compile(r"^(document|presentation|doc|slide|untitled|book|workbook)\s*\d+$")
+_NUMBERED_DEFAULT_RE = re.compile(
+    r"^(document|presentation|doc|slide|untitled|book|workbook|sheet|spreadsheet|"
+    r"drawing|form|page|copy)\s*\d+$"
+)
 _PRINTED_FROM_RE = re.compile(r"^microsoft (word|powerpoint|excel)\s*[-–]\s*")
 
 
