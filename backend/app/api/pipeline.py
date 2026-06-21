@@ -890,6 +890,11 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # Unlabeled content controls with a confident nearby label get a
         # w:alias (accessible name) — verified by smoke_form_field_labels.
         "FILL_FORM_FIELD_LABELS",
+        # Low-contrast runs are recoloured to the nearest AA-passing shade via an
+        # explicit w:color — verified by smoke_docx_contrast (re-parse clears the
+        # flag). Counted only when the writer confirms it (see the FIX_CONTRAST
+        # reconciliation against the applied list below).
+        "FIX_CONTRAST",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",

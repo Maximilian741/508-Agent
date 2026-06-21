@@ -23,8 +23,9 @@ whose writer applies it (see ``_PERSISTED_ACTIONS`` — the honesty invariant).
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, Optional
 
+from app.analyzers.contrast import contrast_ratio, required_ratio, suggest_passing_fg
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -72,6 +73,34 @@ class FixContrastExecutor(RemediationExecutor):
             )
 
         props["contrast_fix_fg"] = str(suggested)
+
+        # Per-run colour map for run-based formats (DOCX/PPTX): recolour ONLY the
+        # runs that actually fail, each to its own nearest AA-passing shade, so a
+        # paragraph with mixed colours keeps the ones that already pass. (HTML
+        # uses the single contrast_fix_fg above on the element's inline style.)
+        # Use the exact background the analyzer resolved (stored on the finding);
+        # it falls back to white the same way the analyzer's _DEFAULT_BG does, so
+        # the suggestions we compute here match the detection.
+        bg = (finding.get("bg") if isinstance(finding, dict) else None) or props.get("bg_color") or "FFFFFF"
+        runs = props.get("explicit_text_colors")
+        color_map: Dict[str, str] = {}
+        if bg and isinstance(runs, list):
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                fg = run.get("c")
+                if not fg:
+                    continue
+                required = required_ratio(run.get("sz"), bool(run.get("b")))
+                ratio = contrast_ratio(fg, bg)
+                if ratio is None or ratio >= required:
+                    continue
+                new = suggest_passing_fg(fg, bg, required)
+                if new:
+                    color_map[str(fg).lstrip("#").upper()] = str(new).lstrip("#").upper()
+        if color_map:
+            props["contrast_fix_colors"] = color_map
+
         node.metadata.properties = props
         return _result(
             action_code,
