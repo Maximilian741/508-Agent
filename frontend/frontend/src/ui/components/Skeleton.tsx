@@ -16,8 +16,9 @@ export interface SkeletonProps {
   style?: any;
 }
 
-export function Skeleton({ width = "100%", height = 16, radius = 6, style }: SkeletonProps) {
+export function Skeleton({ width = "100%", height = 16, radius, style }: SkeletonProps) {
   const theme = useTheme();
+  const resolvedRadius = radius ?? theme.radius.none;
   const shimmer = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -40,7 +41,7 @@ export function Skeleton({ width = "100%", height = 16, radius = 6, style }: Ske
         {
           width: width as any,
           height,
-          borderRadius: radius,
+          borderRadius: resolvedRadius,
           backgroundColor: theme.colors.surface2,
           opacity,
         },

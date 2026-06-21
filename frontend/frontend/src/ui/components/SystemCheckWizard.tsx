@@ -93,8 +93,8 @@ export function SystemCheckWizard() {
         update("backend", { state: "ok", detail: "The API server responded." });
       } else {
         update("backend", { state: "fail", detail: `Unexpected response (HTTP ${r.status}).` });
-        update("database", { state: "fail", detail: "Skipped — backend not reachable." });
-        update("engine", { state: "fail", detail: "Skipped — backend not reachable." });
+        update("database", { state: "fail", detail: "Skipped: backend not reachable." });
+        update("engine", { state: "fail", detail: "Skipped: backend not reachable." });
         setRunning(false);
         return;
       }
@@ -104,8 +104,8 @@ export function SystemCheckWizard() {
         detail:
           "Could not reach the API. Is the backend running, and is the URL in Settings correct?",
       });
-      update("database", { state: "fail", detail: "Skipped — backend not reachable." });
-      update("engine", { state: "fail", detail: "Skipped — backend not reachable." });
+      update("database", { state: "fail", detail: "Skipped: backend not reachable." });
+      update("engine", { state: "fail", detail: "Skipped: backend not reachable." });
       setRunning(false);
       return;
     }
@@ -183,13 +183,13 @@ export function SystemCheckWizard() {
         <Pressable
           onPress={(e: any) => e?.stopPropagation && e.stopPropagation()}
           accessibilityLabel="System check content"
-          style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
+          style={[styles.card, { borderRadius: theme.radius.md, backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
         >
           <Text accessibilityRole="header" style={[theme.typography.h1, { color: theme.colors.text, fontSize: 22 }]}>
             System check
           </Text>
           <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
-            Verifies your install is wired up and the engine actually works — end to end, on your
+            Verifies your install is wired up and the engine actually works, end to end, on your
             own server. Nothing is uploaded and no credits are spent.
           </Text>
 
@@ -199,17 +199,17 @@ export function SystemCheckWizard() {
               style={[
                 styles.banner,
                 {
+                  borderRadius: theme.radius.md,
                   borderColor: allGood ? theme.colors.success : theme.colors.danger,
                   backgroundColor: theme.colors.surface2,
                 },
               ]}
             >
-              <Text style={{ fontSize: 18 }}>{allGood ? "✅" : "⚠️"}</Text>
               <Text style={[theme.typography.body, { color: theme.colors.text, flex: 1, fontWeight: "700" }]}>
                 {allGood
                   ? "Everything's working. You're good to go."
                   : anyFail
-                    ? "Something needs attention — see the failed step below."
+                    ? "Something needs attention. See the failed step below."
                     : "Check complete."}
               </Text>
             </View>
@@ -236,7 +236,7 @@ export function SystemCheckWizard() {
 
           {/* Deployment summary */}
           {deployment && !deployment.error ? (
-            <View style={[styles.deploy, { borderColor: theme.colors.border }]}>
+            <View style={[styles.deploy, { borderRadius: theme.radius.md, borderColor: theme.colors.border }]}>
               <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
                 THIS DEPLOYMENT
               </Text>
@@ -259,7 +259,7 @@ export function SystemCheckWizard() {
               disabled={running}
               style={({ hovered }: any) => [
                 styles.ghostBtn,
-                { borderColor: theme.colors.border, opacity: running ? 0.4 : 1 },
+                { borderRadius: theme.radius.sm, borderColor: theme.colors.border, opacity: running ? 0.4 : 1 },
                 hovered && !running ? { opacity: 0.8 } : null,
               ]}
             >
@@ -273,7 +273,7 @@ export function SystemCheckWizard() {
               onPress={() => !running && setOpen(false)}
               style={({ hovered }: any) => [
                 styles.primaryBtn,
-                { backgroundColor: theme.colors.accent },
+                { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent },
                 hovered ? { opacity: 0.92 } : null,
               ]}
             >
@@ -331,7 +331,6 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 520,
     borderWidth: 1,
-    borderRadius: 16,
     padding: 22,
     // @ts-ignore web shadow
     boxShadow: "0 24px 60px rgba(0, 0, 0, 0.35)",
@@ -341,17 +340,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     borderWidth: 1,
-    borderRadius: 10,
     padding: 12,
     marginTop: 16,
   },
   stepRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   dot: { width: 24, height: 24, borderRadius: 12, alignItems: "center", justifyContent: "center", marginTop: 1 },
-  deploy: { borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 16 },
+  deploy: { borderWidth: 1, padding: 12, marginTop: 16 },
   deployRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },
   actions: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 10, marginTop: 20 },
-  ghostBtn: { borderWidth: 1, borderRadius: 9, paddingVertical: 9, paddingHorizontal: 14 },
-  primaryBtn: { borderRadius: 9, paddingVertical: 10, paddingHorizontal: 18 },
+  ghostBtn: { borderWidth: 1, paddingVertical: 9, paddingHorizontal: 14 },
+  primaryBtn: { paddingVertical: 10, paddingHorizontal: 18 },
 });
 
 export default SystemCheckWizard;

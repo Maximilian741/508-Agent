@@ -63,10 +63,9 @@ export default function VerifyScreen() {
   return (
     <Screen scroll title="Verify certificate">
       <Hero
-        shader="ember"
         eyebrow="VERIFICATION"
         title="Certificate verification"
-        subtitle="Confirm that a 508 Agent remediation certificate is genuine. A certificate records what was detected and fixed — it is not a formal conformance determination."
+        subtitle="Confirm that a 508 Agent remediation certificate is genuine. A certificate records what was detected and fixed; it is not a formal conformance determination."
       />
 
       <View style={{ marginTop: 16 }}>
@@ -158,7 +157,7 @@ function EmbedBadge({
 
   return (
     <Card style={{ marginTop: 16 }}>
-      <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Show it off — embed this badge</Text>
+      <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Show it off: embed this badge</Text>
       <Text style={{ color: theme.colors.textMuted, marginTop: 6, lineHeight: 20 }}>
         Add this badge to your website, README, or email signature. It links back to this verification page
         so anyone can confirm the report is genuine.
@@ -196,7 +195,7 @@ function Snippet({
           <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "700" }}>Copy</Text>
         </Pressable>
       </View>
-      <View style={[styles.code, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+      <View style={[styles.code, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.xs }]}>
         <Text selectable style={{ color: theme.colors.text, fontFamily: "monospace", fontSize: 12 }}>
           {value}
         </Text>
@@ -208,5 +207,5 @@ function Snippet({
 const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   detailRow: { flexDirection: "row", gap: 12, marginTop: 10, alignItems: "flex-start" },
-  code: { borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 6 },
+  code: { borderWidth: 1, padding: 10, marginTop: 6 },
 });

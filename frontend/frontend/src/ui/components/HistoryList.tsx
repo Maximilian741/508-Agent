@@ -21,7 +21,7 @@ export function HistoryList({ entries, onSelect, onClear, emptyHint }: HistoryLi
   if (!entries.length) {
     return (
       <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-        {emptyHint ?? "No recent audits yet — your history will appear here once you've run one."}
+        {emptyHint ?? "No recent audits yet. Your history will appear here once you've run one."}
       </Text>
     );
   }

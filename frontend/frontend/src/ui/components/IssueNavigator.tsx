@@ -75,7 +75,7 @@ export function IssueNavigator({
     <ScrollView
       style={[
         styles.outer,
-        { backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
+        { borderRadius: theme.radius.none, backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
       ]}
       contentContainerStyle={styles.content}
     >
@@ -116,10 +116,10 @@ export function IssueNavigator({
                 accessibilityState={{ expanded }}
                 style={[
                   styles.groupHeader,
-                  { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+                  { borderRadius: theme.radius.none, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
                 ]}
               >
-                <View style={[styles.sevBar, { backgroundColor: sevColor }]} />
+                <View style={[styles.sevBar, { borderRadius: theme.radius.none, backgroundColor: sevColor }]} />
                 <View style={{ flex: 1 }}>
                   <Text
                     style={[styles.groupTitle, { color: theme.colors.text }]}
@@ -151,6 +151,7 @@ export function IssueNavigator({
                         style={[
                           styles.row,
                           {
+                            borderRadius: theme.radius.none,
                             borderColor: isActive ? theme.colors.accent : "transparent",
                             backgroundColor: isActive
                               ? theme.colors.accent + "15"
@@ -161,7 +162,7 @@ export function IssueNavigator({
                         <View
                           style={[
                             styles.indent,
-                            { backgroundColor: sevColor + "55" },
+                            { borderRadius: theme.radius.none, backgroundColor: sevColor + "55" },
                           ]}
                         />
                         <Text
@@ -231,7 +232,6 @@ function _groupStats(
 const styles = StyleSheet.create({
   outer: {
     borderWidth: 1,
-    borderRadius: 12,
     maxHeight: 480,
   },
   content: { padding: 10, gap: 4 },
@@ -248,11 +248,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     borderWidth: 1,
-    borderRadius: 8,
     paddingVertical: 8,
     paddingHorizontal: 8,
   },
-  sevBar: { width: 4, alignSelf: "stretch", borderRadius: 2 },
+  sevBar: { width: 4, alignSelf: "stretch" },
   groupTitle: { fontSize: 13, fontWeight: "700" },
   groupMeta: { fontSize: 11, marginTop: 1 },
   chev: { fontSize: 13, marginLeft: 4 },
@@ -261,13 +260,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     borderWidth: 1,
-    borderRadius: 6,
     paddingVertical: 5,
     paddingHorizontal: 6,
     marginTop: 2,
     marginLeft: 14,
   },
-  indent: { width: 3, alignSelf: "stretch", borderRadius: 2 },
+  indent: { width: 3, alignSelf: "stretch" },
   rowText: { flex: 1, fontSize: 12 },
   decisionBadge: {
     width: 18,

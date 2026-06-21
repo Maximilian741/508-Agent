@@ -23,7 +23,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "1. What the service is",
     body: [
-      "508 Agent analyzes documents you upload (PDF, Word, PowerPoint) for accessibility issues against WCAG 2.1, Section 508, and PDF/UA criteria, proposes fixes, and — where you approve them — writes a remediated copy of the document for you to download.",
+      "508 Agent analyzes documents you upload (PDF, Word, PowerPoint) for accessibility issues against WCAG 2.1, Section 508, and PDF/UA criteria, proposes fixes, and (where you approve them) writes a remediated copy of the document for you to download.",
       "Automated checking has limits. The service finds and fixes the issue types listed on each audit report; it does not evaluate every success criterion, and it is not a substitute for human accessibility review or legal advice.",
     ],
   },
@@ -45,7 +45,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "4. Refunds",
     body: [
-      "Credit packs: refundable within 14 days of purchase if the credits are unused — email support@508-agent.app from your account email.",
+      "Credit packs: refundable within 14 days of purchase if the credits are unused; email support@508-agent.app from your account email.",
       "Subscriptions: cancel anytime; we do not pro-rate partial months, but if you were charged in error or hit a billing bug, contact us and we will make it right.",
       "Charges disputed with your card issuer while credits from that charge have been spent may result in account suspension until resolved.",
     ],
@@ -74,7 +74,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
   {
     title: "8. Service quality and liability",
     body: [
-      "The service is provided \"as is\" without warranties. We work hard on accuracy — scores only count fixes that genuinely persist into your file — but we cannot promise the service is error-free or uninterrupted.",
+      "The service is provided \"as is\" without warranties. We work hard on accuracy (scores only count fixes that genuinely persist into your file), but we cannot promise the service is error-free or uninterrupted.",
       "To the maximum extent permitted by law, our total liability for any claim related to the service is limited to the amount you paid us in the 12 months before the claim arose. We are not liable for indirect or consequential damages, or for the outcome of any compliance review, audit, or legal proceeding concerning your documents.",
     ],
   },
@@ -99,7 +99,6 @@ export default function TermsScreen() {
   return (
     <Screen scroll title="Terms of Service">
       <Hero
-        shader="aurora"
         eyebrow="LEGAL"
         title="Terms of Service"
         subtitle={`Plain-English terms for the hosted 508 Agent service. Last updated ${LAST_UPDATED}.`}

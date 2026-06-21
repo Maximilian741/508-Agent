@@ -517,12 +517,12 @@ export default function AuditScreen() {
         const past = loadHistory();
         if (past.length >= 10) unlockAchievement("ten_audits");
         checkStreakFromHistory(past.map((h) => h.ranAt));
-        toast.success(`Audit complete — ${response.score.grade}`, {
+        toast.success(`Audit complete: ${response.score.grade}`, {
           description: `${response.violations.length} finding${
             response.violations.length === 1 ? "" : "s"
           } across ${response.summary.pageCount} page(s).`,
         });
-        notify(`Audit complete — ${response.score.grade}`, file.name);
+        notify(`Audit complete: ${response.score.grade}`, file.name);
         playChime();
       } catch (e) {
         if (isStale()) return; // a newer upload owns the UI now
@@ -534,7 +534,7 @@ export default function AuditScreen() {
         if (err.status === 401 || msg.includes("authentication_required")) {
           pendingFileRef.current = file;
           setSignInReason(
-            "Create a free account to run your audit — it takes a few seconds, and your first audits are on us (25 free credits).",
+            "Create a free account to run your audit. It takes a few seconds, and your first audits are on us (25 free credits).",
           );
           setSignInOpen(true);
           setError(null);
@@ -937,7 +937,7 @@ export default function AuditScreen() {
     if (Object.keys(all).length === 0) {
       toast.info("Nothing we can auto-fix here", {
         description:
-          "Every remaining issue needs a human judgment call. Review them below — we explain each one.",
+          "Every remaining issue needs a human judgment call. Review them below; we explain each one.",
       });
       return;
     }
@@ -1117,7 +1117,7 @@ export default function AuditScreen() {
           message={
             !sourceFile
               ? "We kept your review state across reloads, but the original document was not stored locally. Drop the same file again (or click \"Choose a different file\" above) and you can apply the approved fixes."
-              : "You picked up where you left off — decisions, log, and review position are preserved. Drop a new file (or click Choose) to start fresh."
+              : "You picked up where you left off: decisions, log, and review position are preserved. Drop a new file (or click Choose) to start fresh."
           }
           actionLabel={!sourceFile ? "Re-attach file" : undefined}
           onAction={!sourceFile ? handlePick : undefined}
@@ -1126,7 +1126,6 @@ export default function AuditScreen() {
 
       {/* === Header ============================================================ */}
       <Hero
-        shader="aurora"
         eyebrow="AUDIT"
         title="508 Agent Audit"
         subtitle="Drop a document, walk through every finding, approve only the fixes you want."
@@ -1190,7 +1189,7 @@ export default function AuditScreen() {
               We're having trouble reaching the service
             </Text>
             <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
-              This is usually momentary. Your work is saved locally — retry in a few seconds, and
+              This is usually momentary. Your work is saved locally, so retry in a few seconds, and
               if it persists for more than a couple of minutes, email support@508-agent.app.
             </Text>
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
@@ -1213,7 +1212,7 @@ export default function AuditScreen() {
             <View
               style={[
                 styles.codeBlock,
-                { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border },
+                { borderRadius: theme.radius.none, backgroundColor: theme.colors.surface2, borderColor: theme.colors.border },
               ]}
             >
               <Text style={[theme.typography.mono, { color: theme.colors.text }]}>
@@ -1251,6 +1250,7 @@ export default function AuditScreen() {
             style={({ hovered, pressed }: any) => [
               styles.dropZone,
               {
+                borderRadius: theme.radius.md,
                 borderColor: pressed || hovered ? theme.colors.accent : theme.colors.border,
                 backgroundColor: pressed
                   ? theme.colors.accent + "11"
@@ -1267,7 +1267,7 @@ export default function AuditScreen() {
             <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4, textAlign: "center" }]}>
               Or click anywhere in this box to choose one from your computer
             </Text>
-            <View style={[styles.dropZoneCta, { backgroundColor: theme.colors.accent }]}>
+            <View style={[styles.dropZoneCta, { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent }]}>
               <Text style={styles.dropZoneCtaText}>Choose file</Text>
             </View>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 10 }]}>
@@ -1328,7 +1328,7 @@ export default function AuditScreen() {
                 {
                   key: "balanced" as const,
                   label: "Fix it for me (recommended)",
-                  desc: "We apply every fix we can — including AI-written alt text — then you just download. Nothing's permanent: re-audit, edit, or undo anytime.",
+                  desc: "We apply every fix we can (including AI-written alt text), then you just download. Nothing's permanent: re-audit, edit, or undo anytime.",
                 },
                 {
                   key: "conservative" as const,
@@ -1353,6 +1353,7 @@ export default function AuditScreen() {
                   style={[
                     styles.policyOption,
                     {
+                      borderRadius: theme.radius.md,
                       borderColor: selected ? theme.colors.accent : theme.colors.border,
                       backgroundColor: selected
                         ? theme.colors.accent + "14"
@@ -1398,13 +1399,14 @@ export default function AuditScreen() {
                   accessibilityLabel={`Load sample document: ${sample.title}`}
                   style={[
                     styles.sampleCard,
-                    { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+                    { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
                   ]}
                 >
                   <View
                     style={[
                       styles.sampleBadge,
                       {
+                        borderRadius: theme.radius.pill,
                         backgroundColor:
                           sample.scenario === "clean"
                             ? theme.colors.success
@@ -1522,15 +1524,14 @@ export default function AuditScreen() {
           return (
             <Card>
               <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
-                <Text style={{ fontSize: 30, lineHeight: 34 }}>✨</Text>
                 <View style={{ flex: 1 }}>
                   <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
                     Let us fix it for you
                   </Text>
                   <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 4 }]}>
-                    We'll apply all {fixableCount} automatic fix{fixableCount === 1 ? "" : "es"} —
-                    including writing the alt text for your images and repairing the
-                    structure — and hand you back a fixed {fileLabel}. You don't have to
+                    We'll apply all {fixableCount} automatic fix{fixableCount === 1 ? "" : "es"}
+                    (including writing the alt text for your images and repairing the
+                    structure) and hand you back a fixed {fileLabel}. You don't have to
                     write or decide anything.
                   </Text>
                 </View>
@@ -1646,12 +1647,12 @@ export default function AuditScreen() {
               style={[
                 styles.celebration,
                 {
+                  borderRadius: theme.radius.md,
                   borderColor: theme.colors.success,
                   backgroundColor: theme.colors.success + "12",
                 },
               ]}
             >
-              <Text style={styles.celebrationEmoji}>✨</Text>
               <View style={{ flex: 1 }}>
                 <Text style={[theme.typography.h2, { color: theme.colors.success }]}>
                   All {totalIssues} issue{totalIssues === 1 ? "" : "s"} reviewed
@@ -1676,7 +1677,7 @@ export default function AuditScreen() {
                 )
               }
               accessibilityLabel="Approve all errors"
-              style={[styles.bulkButton, { borderColor: theme.colors.border }]}
+              style={[styles.bulkButton, { borderRadius: theme.radius.sm, borderColor: theme.colors.border }]}
             >
               <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13 }]}>
                 Approve all errors
@@ -1694,7 +1695,7 @@ export default function AuditScreen() {
                 )
               }
               accessibilityLabel="Approve all deterministic fixes"
-              style={[styles.bulkButton, { borderColor: theme.colors.border }]}
+              style={[styles.bulkButton, { borderRadius: theme.radius.sm, borderColor: theme.colors.border }]}
             >
               <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13 }]}>
                 Approve safe auto-fixes
@@ -1711,7 +1712,7 @@ export default function AuditScreen() {
                 )
               }
               accessibilityLabel="Reject all AI suggestions"
-              style={[styles.bulkButton, { borderColor: theme.colors.border }]}
+              style={[styles.bulkButton, { borderRadius: theme.radius.sm, borderColor: theme.colors.border }]}
             >
               <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13 }]}>
                 Reject heuristic suggestions
@@ -1720,7 +1721,7 @@ export default function AuditScreen() {
             <Pressable accessibilityRole="button"
               onPress={() => setResetDialogOpen(true)}
               accessibilityLabel="Reset all decisions"
-              style={[styles.bulkButton, { borderColor: theme.colors.border }]}
+              style={[styles.bulkButton, { borderRadius: theme.radius.sm, borderColor: theme.colors.border }]}
             >
               <Text style={[theme.typography.body, { color: theme.colors.text, fontSize: 13 }]}>
                 Reset all
@@ -1808,7 +1809,7 @@ export default function AuditScreen() {
           </View>
 
           <View style={styles.navRow}>
-            <Button title="← Previous (k)" onPress={prev} variant="ghost" />
+            <Button title="Previous (k)" onPress={prev} variant="ghost" />
             <Text
               style={[
                 theme.typography.body,
@@ -1872,7 +1873,7 @@ export default function AuditScreen() {
                 return (
                   <InlineNotice
                     tone="success"
-                    title={"✓ You're all set — your accessible " + fmt + " downloaded"}
+                    title={"You're all set: your accessible " + fmt + " downloaded"}
                     message={
                       "We applied " +
                       fixed +
@@ -1884,7 +1885,7 @@ export default function AuditScreen() {
                           needsHuman +
                           " item" +
                           (needsHuman === 1 ? "" : "s") +
-                          " still need a human decision — we don't auto-fix those because a wrong fix is worse than none. They're listed below and in your manual-review queue."
+                          " still need a human decision. We don't auto-fix those because a wrong fix is worse than none. They're listed below and in your manual-review queue."
                         : " Nothing else needs your attention. Tip: click “Verify the fix” to confirm, or download a conformance report for your records.")
                     }
                   />
@@ -1904,7 +1905,7 @@ export default function AuditScreen() {
                 style={({ hovered }: any) => [{ alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
               >
                 <Text style={[theme.typography.body, { color: theme.colors.accent, fontWeight: "600", fontSize: 13 }]}>
-                  Rejected or manual items? Open the manual review queue →
+                  Rejected or manual items? Open the manual review queue
                 </Text>
               </Pressable>
             </View>
@@ -1924,13 +1925,13 @@ export default function AuditScreen() {
                   message={
                     `Re-audit of the fixed file scored ${reaudit.afterScore} (${reaudit.afterGrade}).` +
                     (reaudit.afterIssues > 0
-                      ? " Remaining items are detect-only checks or need manual judgment — see the manual review queue."
+                      ? " Remaining items are detect-only checks or need manual judgment; see the manual review queue."
                       : "")
                   }
                 />
               ) : (
                 <Button
-                  title={reauditBusy ? "Re-auditing..." : "Verify the fix — free re-audit"}
+                  title={reauditBusy ? "Re-auditing..." : "Verify the fix (free re-audit)"}
                   onPress={_runReaudit}
                   loading={reauditBusy}
                   variant="secondary"
@@ -1962,7 +1963,7 @@ export default function AuditScreen() {
             accessibilityRole="button"
             accessibilityLabel={showMoreOptions ? "Hide more options" : "More options"}
             onPress={() => setShowMoreOptions((p) => !p)}
-            style={[styles.detailsToggle, { borderColor: theme.colors.border, marginTop: 8 }]}
+            style={[styles.detailsToggle, { borderRadius: theme.radius.sm, borderColor: theme.colors.border, marginTop: 8 }]}
           >
             <Text style={[theme.typography.caption, { color: theme.colors.accent, fontWeight: "700" }]}>
               {showMoreOptions ? "Hide more options" : "More options"}
@@ -2042,7 +2043,7 @@ export default function AuditScreen() {
       {!report && !busy ? (
         <EmptyState
           title="No audit yet"
-          message="Pick a PDF, DOCX, or PPTX above — or click a sample card — and we'll walk you through every accessibility finding."
+          message="Pick a PDF, DOCX, or PPTX above (or click a sample card) and we'll walk you through every accessibility finding."
         />
       ) : null}
     </Screen>
@@ -2066,7 +2067,7 @@ function ProgressBar(props: {
     <View
       style={[
         styles.progressRibbon,
-        { backgroundColor: theme.colors.surface2 },
+        { borderRadius: theme.radius.none, backgroundColor: theme.colors.surface2 },
       ]}
     >
       {props.violations.map((v, i) => {
@@ -2130,9 +2131,9 @@ function IssueCard(props: {
   }, [props.violation.id, props.customText]);
 
   return (
-    <View style={[styles.issueCard, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}>
+    <View style={[styles.issueCard, { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}>
       {/* Workshop note - thin coloured rule on the left, serif heading. */}
-      <View style={[styles.issueRule, { backgroundColor: tone }]} />
+      <View style={[styles.issueRule, { borderTopRightRadius: theme.radius.none, borderBottomRightRadius: theme.radius.none, backgroundColor: tone }]} />
       <View style={styles.issueTop}>
         <View style={{ flex: 1 }}>
           <Text
@@ -2168,7 +2169,7 @@ function IssueCard(props: {
         accessibilityRole="button"
         accessibilityLabel={props.showDetails ? "Hide details" : "Show details"}
         onPress={() => props.onToggleDetails()}
-        style={[styles.detailsToggle, { borderColor: theme.colors.border }]}
+        style={[styles.detailsToggle, { borderRadius: theme.radius.sm, borderColor: theme.colors.border }]}
       >
         <Text style={[theme.typography.caption, { color: theme.colors.accent, fontWeight: "700" }]}>
           {props.showDetails ? "Hide details" : "Show details"}
@@ -2232,7 +2233,7 @@ function IssueCard(props: {
       ) : null}
 
       {props.isEditing ? (
-        <View style={[styles.editor, { borderColor: theme.colors.border }]}>
+        <View style={[styles.editor, { borderRadius: theme.radius.xs, borderColor: theme.colors.border }]}>
           <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
             Custom replacement text (replaces the auto-fix suggestion)
           </Text>
@@ -2244,7 +2245,7 @@ function IssueCard(props: {
             multiline
             style={[
               styles.editorInput,
-              { color: theme.colors.text, borderColor: theme.colors.border },
+              { borderRadius: theme.radius.xs, color: theme.colors.text, borderColor: theme.colors.border },
             ]}
           />
           <View style={styles.row}>
@@ -2288,7 +2289,7 @@ function ReviewerNote({ value, onChange }: { value: string; onChange: (v: string
   }, [value]);
   const dirty = draft !== value;
   return (
-    <View style={[styles.reviewerNote, { borderColor: theme.colors.border }]}>
+    <View style={[styles.reviewerNote, { borderRadius: theme.radius.xs, borderColor: theme.colors.border }]}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
           Reviewer note (optional, exported with the audit report)
@@ -2316,7 +2317,7 @@ function ReviewerNote({ value, onChange }: { value: string; onChange: (v: string
         accessibilityLabel="Reviewer note for this issue"
         style={[
           styles.reviewerNoteInput,
-          { color: theme.colors.text, borderColor: theme.colors.border },
+          { borderRadius: theme.radius.xs, color: theme.colors.text, borderColor: theme.colors.border },
         ]}
       />
     </View>
@@ -2339,7 +2340,7 @@ function Section(props: {
       : theme.colors.textMuted;
   return (
     <View style={styles.section}>
-      <View style={[styles.sectionRule, { backgroundColor: accent }]} />
+      <View style={[styles.sectionRule, { borderRadius: theme.radius.none, backgroundColor: accent }]} />
       <View style={{ flex: 1 }}>
         <Text style={[theme.typography.caption, { color: accent }]}>{props.title}</Text>
         <Text style={[theme.typography.body, { color: theme.colors.text, marginTop: 2 }]}>
@@ -2362,7 +2363,7 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
       <View
         style={[
           styles.overlayCard,
-          { backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
+          { borderRadius: theme.radius.md, backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
         ]}
       >
         <Text style={[theme.typography.h1, { color: theme.colors.text }]}>Keyboard shortcuts</Text>
@@ -2380,7 +2381,7 @@ function KeyboardHelpOverlay({ onClose }: { onClose: () => void }) {
               <View
                 style={[
                   styles.kbd,
-                  { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+                  { borderRadius: theme.radius.xs, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
                 ]}
               >
                 <Text style={[theme.typography.mono, { color: theme.colors.text }]}>{key}</Text>
@@ -3122,17 +3123,16 @@ const styles = StyleSheet.create({
   stepHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
   stepNumber: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center" },
   stepNumberText: { color: "#FFFFFF", fontWeight: "800", fontSize: 13 },
-  codeBlock: { marginTop: 8, borderWidth: 1, borderRadius: 10, padding: 12 },
+  codeBlock: { marginTop: 8, borderWidth: 1, padding: 12 },
   summaryRow: { flexDirection: "row", gap: 16, flexWrap: "wrap", alignItems: "center", marginTop: 4 },
   summaryMeta: { flex: 1, minWidth: 220, gap: 6 },
   scoreBreakdown: { gap: 4, marginTop: 4 },
   filterRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 8 },
   progressRow: { flexDirection: "row", gap: 4, marginVertical: 12, flexWrap: "wrap" },
-  progressCell: { width: 14, height: 14, borderRadius: 3, borderWidth: 2 },
+  progressCell: { width: 14, height: 14, borderRadius: 0, borderWidth: 2 },
   progressRibbon: {
     flexDirection: "row",
     height: 3,
-    borderRadius: 2,
     overflow: "hidden",
     marginVertical: 16,
     gap: 1,
@@ -3144,7 +3144,6 @@ const styles = StyleSheet.create({
   },
   issueCard: {
     borderWidth: 1,
-    borderRadius: 14,
     paddingHorizontal: 24,
     paddingVertical: 24,
     gap: 14,
@@ -3157,25 +3156,22 @@ const styles = StyleSheet.create({
     bottom: 24,
     left: 0,
     width: 3,
-    borderTopRightRadius: 2,
-    borderBottomRightRadius: 2,
   },
   issueTop: { flexDirection: "row", gap: 12, alignItems: "flex-start", paddingLeft: 14 },
   severityDot: { width: 10, height: 10, borderRadius: 5, marginTop: 6 },
   section: { flexDirection: "row", gap: 10 },
-  sectionRule: { width: 3, borderRadius: 2, alignSelf: "stretch" },
+  sectionRule: { width: 3, alignSelf: "stretch" },
   standards: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   detailsToggle: {
     alignSelf: "flex-start",
     borderWidth: 1,
-    borderRadius: 8,
     paddingVertical: 6,
     paddingHorizontal: 10,
   },
   decisionRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   navRow: { flexDirection: "row", alignItems: "center", marginTop: 12, gap: 8 },
-  editor: { borderWidth: 1, borderRadius: 10, padding: 10, gap: 8 },
-  editorInput: { borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 64 },
+  editor: { borderWidth: 1, padding: 10, gap: 8 },
+  editorInput: { borderWidth: 1, padding: 10, minHeight: 64 },
   logList: { gap: 6, marginTop: 6 },
   logRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   overlay: {
@@ -3191,7 +3187,6 @@ const styles = StyleSheet.create({
   },
   overlayCard: {
     borderWidth: 1,
-    borderRadius: 16,
     padding: 24,
     width: "100%",
     maxWidth: 460,
@@ -3203,7 +3198,6 @@ const styles = StyleSheet.create({
     minWidth: 80,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 6,
     borderWidth: 1,
     alignItems: "center",
   },
@@ -3213,7 +3207,6 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 200,
     borderWidth: 1,
-    borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
@@ -3224,7 +3217,6 @@ const styles = StyleSheet.create({
     minWidth: 220,
     maxWidth: 320,
     borderWidth: 1,
-    borderRadius: 12,
     padding: 12,
     gap: 6,
   },
@@ -3232,7 +3224,6 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: 999,
   },
   sampleBadgeText: { color: "#FFFFFF", fontWeight: "800", fontSize: 10, letterSpacing: 0.5 },
   bulkRow: {
@@ -3245,7 +3236,6 @@ const styles = StyleSheet.create({
   bulkButton: {
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 8,
     borderWidth: 1,
   },
   workspaceRow: {
@@ -3266,7 +3256,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderWidth: 2,
     borderStyle: Platform.OS === "web" ? ("dashed" as any) : "solid",
-    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
     minHeight: 220,
@@ -3275,7 +3264,6 @@ const styles = StyleSheet.create({
     marginTop: 16,
     paddingHorizontal: 22,
     paddingVertical: 11,
-    borderRadius: 10,
   },
   dropZoneCtaText: {
     color: "#FFFFFF",
@@ -3306,27 +3294,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 14,
     borderWidth: 1.5,
-    borderRadius: 12,
     padding: 14,
     marginTop: 8,
   },
   celebrationEmoji: { fontSize: 28 },
   skippedBlock: {
     borderWidth: 1.5,
-    borderRadius: 12,
+    borderRadius: 0,
     padding: 12,
     marginTop: 12,
   },
   reviewerNote: {
     borderWidth: 1,
     borderStyle: Platform.OS === "web" ? ("dashed" as any) : "solid",
-    borderRadius: 10,
     padding: 10,
     gap: 6,
   },
   reviewerNoteInput: {
     borderWidth: 1,
-    borderRadius: 8,
     padding: 8,
     minHeight: 48,
     fontSize: 13,

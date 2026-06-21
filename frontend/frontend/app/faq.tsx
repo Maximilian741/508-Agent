@@ -40,11 +40,11 @@ const SECTIONS: Section[] = [
       },
       {
         q: "Do I have to know anything about accessibility?",
-        a: "No. Upload a document and click \"Fix everything\" — we detect the issues, write the fixes (including AI alt text for your images), and hand back a corrected file plus a plain-English report. You only step in if you want to review or edit a suggestion.",
+        a: "No. Upload a document and click \"Fix everything\": we detect the issues, write the fixes (including AI alt text for your images), and hand back a corrected file plus a plain-English report. You only step in if you want to review or edit a suggestion.",
       },
       {
         q: "Is there really a free tier?",
-        a: "Yes. Analysing a document — seeing every WCAG, Section 508 and PDF/UA issue it contains — is always free, with no card required. New accounts also get 25 free credits, enough to download several remediated files before you ever pay.",
+        a: "Yes. Analysing a document (seeing every WCAG, Section 508 and PDF/UA issue it contains) is always free, with no card required. New accounts also get 25 free credits, enough to download several remediated files before you ever pay.",
       },
       {
         q: "How long does it take?",
@@ -66,11 +66,11 @@ const SECTIONS: Section[] = [
       },
       {
         q: "What's your refund policy?",
-        a: "Unused credit packs are refundable within 14 days — just email support@508-agent.app. Subscriptions can be cancelled anytime from the billing portal and keep access through the period you've already paid for.",
+        a: "Unused credit packs are refundable within 14 days; just email support@508-agent.app. Subscriptions can be cancelled anytime from the billing portal and keep access through the period you've already paid for.",
       },
       {
         q: "Can I pay annually?",
-        a: "Yes — annual billing on Team and Business saves roughly 17% (about two months free) versus paying monthly.",
+        a: "Yes. Annual billing on Team and Business saves roughly 17% (about two months free) versus paying monthly.",
       },
     ],
   },
@@ -80,15 +80,15 @@ const SECTIONS: Section[] = [
     items: [
       {
         q: "Is this a legal guarantee of compliance?",
-        a: "No, and we're deliberately careful here. 508 Agent automates remediation and produces an honest summary of what was fixed — it is not a formal conformance determination or legal certification. The conformance report marks criteria we can't automatically verify as \"needs manual review\" rather than claiming a pass.",
+        a: "No, and we're deliberately careful here. 508 Agent automates remediation and produces an honest summary of what was fixed. It is not a formal conformance determination or legal certification. The conformance report marks criteria we can't automatically verify as \"needs manual review\" rather than claiming a pass.",
       },
       {
         q: "What if an automated fix is wrong?",
-        a: "Every remediated file is a new copy — your original is never overwritten. You can review and edit any AI suggestion before downloading, and after downloading you can click \"Verify the fix\" to re-audit the corrected file for free. Fixes that need human judgement (like the meaning of an image) are flagged for you rather than applied silently.",
+        a: "Every remediated file is a new copy; your original is never overwritten. You can review and edit any AI suggestion before downloading, and after downloading you can click \"Verify the fix\" to re-audit the corrected file for free. Fixes that need human judgement (like the meaning of an image) are flagged for you rather than applied silently.",
       },
       {
         q: "What does the score actually mean?",
-        a: "The score only counts fixes that genuinely persist into the downloaded file. If something can't be auto-fixed, it's listed honestly as pending manual work instead of inflating the number. That's the whole point — a report an auditor can trust.",
+        a: "The score only counts fixes that genuinely persist into the downloaded file. If something can't be auto-fixed, it's listed honestly as pending manual work instead of inflating the number. That's the whole point: a report an auditor can trust.",
       },
       {
         q: "Can someone verify a report I hand them?",
@@ -124,11 +124,11 @@ const SECTIONS: Section[] = [
       },
       {
         q: "Is there an API for automation?",
-        a: "Yes. You can generate an API key under Settings → Developer API and scan documents programmatically — for example from your CI pipeline. Analysis over the API is free; the key can't spend your credits.",
+        a: "Yes. You can generate an API key under Settings → Developer API and scan documents programmatically, for example from your CI pipeline. Analysis over the API is free; the key can't spend your credits.",
       },
       {
         q: "Can I put my agency's brand on the reports?",
-        a: "Yes. On Settings → Report branding you can add your logo and brand colours, and every conformance report and certificate you generate is rendered under your brand — ideal for agencies delivering to clients.",
+        a: "Yes. On Settings → Report branding you can add your logo and brand colours, and every conformance report and certificate you generate is rendered under your brand, ideal for agencies delivering to clients.",
       },
     ],
   },
@@ -142,10 +142,9 @@ export default function FaqScreen() {
   return (
     <Screen scroll title="FAQ">
       <Hero
-        shader="aurora"
         eyebrow="FAQ"
         title="Questions, answered"
-        subtitle="Everything a first-time buyer usually asks — pricing, privacy, accuracy and teams. Looking for the accessibility rules themselves? The Help & glossary page covers every check in depth."
+        subtitle="Everything a first-time buyer usually asks: pricing, privacy, accuracy and teams. Looking for the accessibility rules themselves? The Help & glossary page covers every check in depth."
       />
 
       <View style={styles.layout}>
@@ -221,7 +220,7 @@ export default function FaqScreen() {
               and a human will get back to you, or read the in-depth Help &amp; glossary.
             </Text>
             <View style={styles.ctaRow}>
-              <Button title="Start free — 25 credits" onPress={() => router.push("/audit" as any)} />
+              <Button title="Start free: 25 credits" onPress={() => router.push("/audit" as any)} />
               <Button title="Read the glossary" variant="ghost" onPress={() => router.push("/help" as any)} />
             </View>
           </Card>

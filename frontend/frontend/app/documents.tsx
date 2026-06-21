@@ -158,7 +158,7 @@ export default function DocumentsScreen() {
           disabled={isUploading}
           style={[
             styles.dropZone,
-            { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+            { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.md },
           ]}
           {...dragHandlers}
         >
@@ -238,7 +238,6 @@ const styles = StyleSheet.create({
   dropZone: {
     marginTop: 12,
     borderWidth: 1,
-    borderRadius: 14,
     paddingVertical: 24,
     paddingHorizontal: 16,
     alignItems: "center",

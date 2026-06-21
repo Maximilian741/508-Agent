@@ -35,10 +35,10 @@ export function ScoreBadge({ score, grade, fromScore = 0, subLabel }: ScoreBadge
   const tone = _gradeTone(grade, theme);
 
   return (
-    <View style={[styles.wrap, { backgroundColor: tone.bg, borderColor: tone.border }]}>
+    <View style={[styles.wrap, { borderRadius: theme.radius.none, backgroundColor: tone.bg, borderColor: tone.border }]}>
       <View style={styles.row}>
         <Text style={[theme.typography.pixelLarge, styles.score, { color: tone.text }]}>{display.toFixed(1)}</Text>
-        <View style={[styles.gradePill, { backgroundColor: tone.text }]}>
+        <View style={[styles.gradePill, { borderRadius: theme.radius.pill, backgroundColor: tone.text }]}>
           <Text style={[styles.gradeText, { color: tone.bg }]}>{grade}</Text>
         </View>
       </View>
@@ -65,14 +65,13 @@ function _gradeTone(grade: string, theme: ReturnType<typeof useTheme>) {
 const styles = StyleSheet.create({
   wrap: {
     borderWidth: 1.5,
-    borderRadius: 16,
     padding: 16,
     alignItems: "center",
     minWidth: 180,
   },
   row: { flexDirection: "row", alignItems: "center", gap: 12 },
   score: { fontSize: 42, fontWeight: "800", letterSpacing: -1 },
-  gradePill: { borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4 },
+  gradePill: { paddingHorizontal: 12, paddingVertical: 4 },
   gradeText: { fontSize: 16, fontWeight: "800", letterSpacing: 0.4 },
   label: { fontSize: 12, fontWeight: "700", letterSpacing: 0.6, textTransform: "uppercase", marginTop: 6 },
   sub: { fontSize: 12, fontWeight: "500", marginTop: 2, opacity: 0.85 },

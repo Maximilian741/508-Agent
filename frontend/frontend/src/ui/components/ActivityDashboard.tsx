@@ -91,6 +91,7 @@ export function ActivityDashboard({
         style={[
           styles.callout,
           {
+            borderRadius: theme.radius.md,
             backgroundColor: auditedToday
               ? theme.colors.successSoft
               : theme.colors.surface2,
@@ -107,7 +108,7 @@ export function ActivityDashboard({
               },
             ]}
           >
-            {auditedToday ? "Nice — you audited today!" : "Pick up where you left off"}
+            {auditedToday ? "Nice, you audited today!" : "Pick up where you left off"}
           </Text>
           <Text
             style={[styles.calloutBody, { color: theme.colors.textMuted }]}
@@ -128,7 +129,7 @@ export function ActivityDashboard({
             accessibilityLabel={`Resume audit ${mostRecent.filename}`}
             style={[
               styles.resumeBtn,
-              { backgroundColor: theme.colors.accent },
+              { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent },
             ]}
           >
             <Text style={styles.resumeBtnText}>
@@ -141,7 +142,7 @@ export function ActivityDashboard({
             accessibilityLabel="Start an audit"
             style={[
               styles.resumeBtn,
-              { backgroundColor: theme.colors.accent },
+              { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent },
             ]}
           >
             <Text style={styles.resumeBtnText}>Start an audit</Text>
@@ -188,13 +189,14 @@ export function ActivityDashboard({
                   <View
                     style={[
                       styles.barTrack,
-                      { backgroundColor: theme.colors.surface2 },
+                      { borderRadius: theme.radius.none, backgroundColor: theme.colors.surface2 },
                     ]}
                   >
                     <View
                       style={[
                         styles.barFill,
                         {
+                          borderRadius: theme.radius.none,
                           width: `${Math.max(8, pct)}%` as any,
                           backgroundColor: theme.colors.accentSecondary,
                         },
@@ -306,8 +308,8 @@ function Heatmap({
               y={labelH + y * (cell + gap)}
               width={cell}
               height={cell}
-              rx={3}
-              ry={3}
+              rx={0}
+              ry={0}
               fill={colorFor(day.count)}
             >
               {/* @ts-ignore — title for accessible tooltip */}
@@ -332,7 +334,7 @@ function Heatmap({
               style={{
                 width: cell,
                 height: cell,
-                borderRadius: 3,
+                borderRadius: theme.radius.none,
                 backgroundColor: colorFor(week[y]?.count ?? 0),
               }}
             />
@@ -548,7 +550,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
     padding: 12,
-    borderRadius: 12,
     borderWidth: 1,
     marginTop: 4,
   },
@@ -564,7 +565,6 @@ const styles = StyleSheet.create({
   resumeBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 8,
   },
   resumeBtnText: {
     color: "#FFFFFF",
@@ -584,12 +584,10 @@ const styles = StyleSheet.create({
   barTrack: {
     flex: 1,
     height: 8,
-    borderRadius: 999,
     overflow: "hidden",
   },
   barFill: {
     height: "100%",
-    borderRadius: 999,
   },
   barCount: {
     fontSize: 12,

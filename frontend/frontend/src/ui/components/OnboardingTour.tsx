@@ -31,14 +31,14 @@ const STEPS: Step[] = [
     badge: "WELCOME",
     title: "What 508 Agent does",
     body:
-      "You upload a document (PDF, Word, or PowerPoint). We check it against the accessibility rules a screen-reader user depends on — WCAG 2.1, Section 508, PDF/UA — and then write the approved fixes back into the file itself. You download a corrected copy. Analysis is always free; you only spend credits when you download a fixed file.",
+      "You upload a document (PDF, Word, or PowerPoint). We check it against the accessibility rules a screen-reader user depends on (WCAG 2.1, Section 508, PDF/UA) and then write the approved fixes back into the file itself. You download a corrected copy. Analysis is always free; you only spend credits when you download a fixed file.",
     tip: "Nothing is changed without your approval, and your original file is never overwritten.",
   },
   {
     badge: "STEP 1 · UPLOAD",
     title: "Drop a document on the Audit screen",
     body:
-      "Go to Audit and drag a file in (or click to browse). We parse it in a few seconds and give it a starting score out of 100. A low score is normal and expected — that's the work to be done, not a problem with your file.",
+      "Go to Audit and drag a file in (or click to browse). We parse it in a few seconds and give it a starting score out of 100. A low score is normal and expected. That's the work to be done, not a problem with your file.",
     tip: "First scan is on us. Batch lets you queue several files at once.",
   },
   {
@@ -60,14 +60,14 @@ const STEPS: Step[] = [
     title: "Apply approved fixes & download",
     body:
       "Click 'Apply fixes – Download'. We confirm the credit cost, bake your approved changes into a fresh copy, and the corrected file downloads automatically. Credit costs: PDF 5, Word 3, PowerPoint 4.",
-    tip: "If a credit-cost box appears, that's the confirm dialog — click the orange button to proceed.",
+    tip: "If a credit-cost box appears, that's the confirm dialog: click the orange button to proceed.",
   },
   {
     badge: "STEP 5 · VERIFY",
     title: "Prove the fix worked",
     body:
-      "After downloading, click 'Verify the fix' to re-audit the corrected file for free. You'll see the issue count drop and the score climb — the same before/after an auditor would check. Then issue a remediation certificate with a public verification link you can hand to anyone.",
-    tip: "The certificate is generated from our server's own analysis — you can't fake the numbers.",
+      "After downloading, click 'Verify the fix' to re-audit the corrected file for free. You'll see the issue count drop and the score climb, the same before/after an auditor would check. Then issue a remediation certificate with a public verification link you can hand to anyone.",
+    tip: "The certificate is generated from our server's own analysis. You can't fake the numbers.",
   },
   {
     badge: "YOU'RE SET",
@@ -171,10 +171,10 @@ export function OnboardingTour() {
           // Swallow backdrop taps inside the card.
           onPress={(e: any) => e?.stopPropagation && e.stopPropagation()}
           accessibilityLabel="Guide content"
-          style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
+          style={[styles.card, { borderRadius: theme.radius.md, backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
         >
           <View style={styles.row}>
-            <View style={[styles.badge, { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border }]}>
+            <View style={[styles.badge, { borderRadius: theme.radius.pill, backgroundColor: theme.colors.surface2, borderColor: theme.colors.border }]}>
               <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>
                 {current.badge}
               </Text>
@@ -196,7 +196,7 @@ export function OnboardingTour() {
             {current.body}
           </Text>
           {current.tip ? (
-            <View style={[styles.tip, { borderColor: theme.colors.accent, backgroundColor: theme.colors.surface2 }]}>
+            <View style={[styles.tip, { borderRadius: theme.radius.md, borderColor: theme.colors.accent, backgroundColor: theme.colors.surface2 }]}>
               <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "800" }}>TIP</Text>
               <Text style={[theme.typography.body, { color: theme.colors.text, flex: 1, fontSize: 13 }]}>
                 {current.tip}
@@ -228,11 +228,11 @@ export function OnboardingTour() {
               disabled={step === 0}
               style={({ hovered }: any) => [
                 styles.ghostBtn,
-                { borderColor: theme.colors.border, opacity: step === 0 ? 0.35 : 1 },
+                { borderRadius: theme.radius.sm, borderColor: theme.colors.border, opacity: step === 0 ? 0.35 : 1 },
                 hovered && step !== 0 ? { opacity: 0.8 } : null,
               ]}
             >
-              <Text style={{ color: theme.colors.text, fontWeight: "700", fontSize: 13 }}>← Back</Text>
+              <Text style={{ color: theme.colors.text, fontWeight: "700", fontSize: 13 }}>Back</Text>
             </Pressable>
             <Text style={{ color: theme.colors.textMuted, fontSize: 12 }}>
               {step + 1} / {STEPS.length}
@@ -243,12 +243,12 @@ export function OnboardingTour() {
               onPress={advance}
               style={({ hovered }: any) => [
                 styles.primaryBtn,
-                { backgroundColor: theme.colors.accent },
+                { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent },
                 hovered ? { opacity: 0.92 } : null,
               ]}
             >
               <Text style={{ color: "#FFFFFF", fontWeight: "800", fontSize: 13 }}>
-                {isLast ? "Got it" : "Next →"}
+                {isLast ? "Got it" : "Next"}
               </Text>
             </Pressable>
           </View>
@@ -274,19 +274,17 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 520,
     borderWidth: 1,
-    borderRadius: 16,
     padding: 22,
     // @ts-ignore web shadow
     boxShadow: "0 24px 60px rgba(0, 0, 0, 0.35)",
   },
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  badge: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  badge: { borderWidth: 1, paddingHorizontal: 10, paddingVertical: 4 },
   tip: {
     flexDirection: "row",
     gap: 8,
     alignItems: "flex-start",
     borderLeftWidth: 3,
-    borderRadius: 8,
     padding: 10,
     marginTop: 14,
   },
@@ -298,8 +296,8 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginTop: 18,
   },
-  ghostBtn: { borderWidth: 1, borderRadius: 9, paddingVertical: 9, paddingHorizontal: 14 },
-  primaryBtn: { borderRadius: 9, paddingVertical: 10, paddingHorizontal: 18 },
+  ghostBtn: { borderWidth: 1, paddingVertical: 9, paddingHorizontal: 14 },
+  primaryBtn: { paddingVertical: 10, paddingHorizontal: 18 },
 });
 
 export default OnboardingTour;
