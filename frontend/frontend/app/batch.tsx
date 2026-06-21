@@ -184,7 +184,7 @@ function _buildBatchReportHtml(
   body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1A1A1A;max-width:920px;margin:40px auto;padding:0 24px;line-height:1.5}
   h1{font-size:28px;margin:0 0 4px} .sub{color:#6B7280;margin:0 0 24px}
   .grid{display:flex;gap:16px;flex-wrap:wrap;margin:24px 0}
-  .tile{flex:1;min-width:160px;border:1px solid #E5E7EB;border-radius:12px;padding:16px}
+  .tile{flex:1;min-width:160px;border:1px solid #E5E7EB;border-radius:4px;padding:16px}
   .tile .n{font-size:30px;font-weight:800;color:#C2410C} .tile .l{color:#6B7280;font-size:13px}
   table{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}
   th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #E5E7EB}
@@ -239,22 +239,22 @@ function _buildBatchConformanceReportHtml(
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <title>Batch Accessibility Conformance Report</title>
 <style>
-  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0F172A;max-width:980px;margin:40px auto;padding:0 24px;line-height:1.5}
-  h1{font-size:28px;margin:0 0 4px} h2{font-size:19px;border-bottom:2px solid #E2E8F0;padding-bottom:6px;margin-top:32px}
-  .sub{color:#5B6475;margin:0 0 16px}
-  .headline{font-size:15px;background:#EFF6FF;border-left:4px solid #2D5BFF;padding:12px 16px;border-radius:6px}
+  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#2B1B0E;max-width:980px;margin:40px auto;padding:0 24px;line-height:1.5}
+  h1{font-size:28px;margin:0 0 4px} h2{font-size:19px;border-bottom:2px solid #E0CFB0;padding-bottom:6px;margin-top:32px}
+  .sub{color:#6B5840;margin:0 0 16px}
+  .headline{font-size:15px;background:#FBF1E4;border-left:4px solid #C2410C;padding:12px 16px;border-radius:4px}
   .tally{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}
-  .cell{border:1px solid #E2E8F0;border-radius:10px;padding:14px;text-align:center}
+  .cell{border:1px solid #E0CFB0;border-radius:4px;padding:14px;text-align:center}
   .cell .n{font-size:26px;font-weight:800}.cell .k{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
-  .ok{color:#16A34A}.warn{color:#B45309}.err{color:#DC2626}.na{color:#64748B}
+  .ok{color:#15803D}.warn{color:#A16207}.err{color:#B91C1C}.na{color:#6B5840}
   table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
-  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #E2E8F0;vertical-align:top}
-  th{background:#F6F7FB;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5B6475}
-  td.num{font-weight:700;white-space:nowrap}td.lvl{color:#5B6475;font-weight:700}td.remark{color:#5B6475}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #E0CFB0;vertical-align:top}
+  th{background:#F4EAD8;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6B5840}
+  td.num{font-weight:700;white-space:nowrap}td.lvl{color:#6B5840;font-weight:700}td.remark{color:#6B5840}
   .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
-  .pill-ok{background:#DCFCE7;color:#16A34A}.pill-warn{background:#FEF3C7;color:#B45309}.pill-err{background:#FEE2E2;color:#DC2626}.pill-na{background:#F1F5F9;color:#64748B}
-  .callout{background:#FFFBEB;border-left:4px solid #F59E0B;padding:12px 16px;border-radius:6px;margin-top:12px;font-size:13px}
-  .print-btn{position:fixed;top:16px;right:16px;padding:10px 16px;border-radius:999px;border:none;background:#2D5BFF;color:#fff;font-weight:700;cursor:pointer}
+  .pill-ok{background:#DCFCE7;color:#15803D}.pill-warn{background:#FEF3C7;color:#A16207}.pill-err{background:#FEE2E2;color:#B91C1C}.pill-na{background:#EFE7D6;color:#6B5840}
+  .callout{background:#FBF4E4;border-left:4px solid #A16207;padding:12px 16px;border-radius:4px;margin-top:12px;font-size:13px}
+  .print-btn{position:fixed;top:16px;right:16px;padding:10px 16px;border-radius:4px;border:none;background:#C2410C;color:#fff;font-weight:700;cursor:pointer}
   @media print{.print-btn{display:none}body{margin:0}}
 </style>${brandingAccentCss(branding)}</head><body>
   <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
@@ -273,7 +273,7 @@ function _buildBatchConformanceReportHtml(
   <h2>WCAG 2.1 Level A &amp; AA — consolidated</h2>
   <div class="callout"><strong>How to read this table.</strong> Each criterion is rated by the WORST result across all ${docs.length} documents. “Supports” means no document had an automated finding for it — not a guarantee of full conformance. “Not Evaluated” criteria were not tested by this tool. A dagger (&#8224;) marks criteria where automated testing covers only part of the requirement. Only ${totals.evaluatedTotal} of ${totalCriteria} criteria are evaluated automatically; the rest require manual review by a qualified assessor.</div>
   <table><thead><tr><th>Criterion</th><th>Name</th><th>Level</th><th>Conformance</th><th>Remarks</th></tr></thead><tbody>${rows}</tbody></table>
-  <p class="callout" style="background:#F6F7FB;border-left-color:#64748B;margin-top:24px">${brandingFooterHtml(branding)} · Automated accessibility assessment, not a substitute for a formal manual WCAG 2.1 / Section 508 audit · ${_esc(date)}</p>
+  <p class="callout" style="background:#F4EAD8;border-left-color:#6B5840;margin-top:24px">${brandingFooterHtml(branding)} · Automated accessibility assessment, not a substitute for a formal manual WCAG 2.1 / Section 508 audit · ${_esc(date)}</p>
 </body></html>`;
 }
 

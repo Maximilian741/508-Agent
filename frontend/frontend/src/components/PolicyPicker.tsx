@@ -96,10 +96,10 @@ export function PolicyPicker({
 
 const styles = StyleSheet.create({
   options: { marginTop: 12, gap: 8 },
-  option: { borderWidth: 1, borderRadius: 12, padding: 10, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  option: { borderWidth: 1, borderRadius: 4, padding: 10, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   actions: { marginTop: 10, alignItems: "flex-start" },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(15,23,42,0.45)", alignItems: "center", justifyContent: "center", padding: 16 },
-  modalBody: { width: "100%", maxWidth: 760, maxHeight: "85%", borderWidth: 1, borderRadius: 14, padding: 14, gap: 10 },
-  jsonWrap: { borderWidth: 1, borderRadius: 12, padding: 10, maxHeight: 360 },
+  modalBody: { width: "100%", maxWidth: 760, maxHeight: "85%", borderWidth: 1, borderRadius: 4, padding: 14, gap: 10 },
+  jsonWrap: { borderWidth: 1, borderRadius: 4, padding: 10, maxHeight: 360 },
   jsonText: { fontFamily: Platform.OS === "web" ? "monospace" : undefined, fontSize: 12 },
 });

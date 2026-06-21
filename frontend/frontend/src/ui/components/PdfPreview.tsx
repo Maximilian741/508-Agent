@@ -246,7 +246,7 @@ export function PdfPreview({ file, page }: PdfPreviewProps) {
             width: "100%",
             maxWidth: 480,
             overflow: "auto",
-            borderRadius: 8,
+            borderRadius: 4,
             opacity: status === "ready" ? 1 : 0,
             transition: "opacity 120ms ease-out",
           }}
@@ -272,7 +272,7 @@ const styles = StyleSheet.create({
     maxWidth: 480,
     minWidth: 320,
     padding: 12,
-    borderRadius: 12,
+    borderRadius: 4,
     borderWidth: 1,
     gap: 8,
   },
@@ -289,7 +289,7 @@ const styles = StyleSheet.create({
   },
   errorBox: {
     padding: 10,
-    borderRadius: 8,
+    borderRadius: 4,
     borderWidth: 1,
     gap: 4,
   },

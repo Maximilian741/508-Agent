@@ -98,5 +98,5 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   rowRight: { flexDirection: "row", gap: 8, alignItems: "center" },
   howToggle: { marginTop: 10, alignItems: "flex-start" },
-  howBody: { marginTop: 10, borderWidth: 1, borderRadius: 12, padding: 10, gap: 6 },
+  howBody: { marginTop: 10, borderWidth: 1, borderRadius: 4, padding: 10, gap: 6 },
 });

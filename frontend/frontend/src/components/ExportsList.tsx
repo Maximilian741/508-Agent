@@ -85,7 +85,7 @@ export function ExportsList({ title = "Evidence Bundles", docId, bundles, loadin
 const styles = StyleSheet.create({
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   rows: { marginTop: 10, gap: 8 },
-  row: { borderWidth: 1, borderRadius: 12, padding: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  row: { borderWidth: 1, borderRadius: 0, padding: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   meta: { flex: 1, minWidth: 0 },
   metaHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 },
 });
