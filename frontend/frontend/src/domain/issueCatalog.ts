@@ -280,6 +280,25 @@ const C: Record<string, IssueCatalogEntry> = {
     learnMoreUrl: "https://www.w3.org/WAI/tutorials/tables/caption-summary/",
   },
 
+  TABLE_COMPLEX_NEEDS_SUMMARY: {
+    ruleId: "TABLE_COMPLEX_NEEDS_SUMMARY",
+    title: "Complex table needs a summary",
+    summary: "Merged cells or a large grid — screen reader users need an overview of how it's organized.",
+    why:
+      "When a table has merged cells or is very large, a row-by-row read-out doesn't convey how the data is organized. A short structural summary (e.g. \"Costs by quarter; the first column lists departments, merged cells group regional totals\") lets screen reader users build a mental model before navigating. WCAG 1.3.1 expects these relationships to be perceivable.",
+    autoFix:
+      "We flag this for manual review — a meaningful summary of a complex table's structure needs human judgment, so it is never auto-written or counted as a fix.",
+    manualJudgment:
+      "Add a short summary describing the table's layout (what the rows and columns represent, and what any merged cells group together). For HTML, a caption or aria-describedby works; for Office/PDF, a sentence introducing the table.",
+    severity: "warning",
+    standards: {
+      wcag: ["1.3.1 Info and Relationships"],
+      section508: ["E205.2"],
+      pdfUa: ["7.5 Tables"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/tutorials/tables/caption-summary/",
+  },
+
   LINK_TARGET_BROKEN: {
     ruleId: "LINK_TARGET_BROKEN",
     title: "Link target is missing or unsafe",
