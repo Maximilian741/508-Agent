@@ -458,7 +458,7 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "Low-contrast text is hard to read for people with low vision, colour-vision deficiencies, or anyone on a dim screen or in bright light. WCAG 1.4.3 requires a contrast ratio of at least 4.5:1 for normal text (3:1 for large text) between the text and its background.",
     autoFix:
-      "HTML and Word: when you approve it, we recolour each failing run to the nearest shade of its own colour that meets the WCAG AA minimum and write it into the file (we only ever nudge the text, never the background, and change it as little as possible; runs that already pass are left alone). PowerPoint and PDF: we compute that exact accessible colour and show it here for you to apply, since rewriting run colours in those formats isn't supported yet.",
+      "HTML, Word and PowerPoint: when you approve it, we recolour each failing run to the nearest shade of its own colour that meets the WCAG AA minimum and write it into the file (we only ever nudge the text, never the background, and change it as little as possible; runs that already pass are left alone). PDF: we compute that exact accessible colour and show it here for you to apply, since rewriting run colours in PDFs isn't supported yet.",
     manualJudgment:
       "Review the suggested colour before approving — a minimal darkening preserves your design, but you may prefer a brand-specific shade that also passes. Contrast is only assessed where colours are explicit; inherited/themed colours and coloured-background pages still need a manual check.",
     severity: "warning",
