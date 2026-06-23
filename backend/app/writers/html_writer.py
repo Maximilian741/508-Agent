@@ -357,21 +357,35 @@ def _apply_list_conversion(
         members.append((node, el))
     if len(members) < 2:
         return
+    els = [el for _n, el in members]
+    # SAFETY: every member must share ONE DOM parent. Transparent inline wrappers
+    # (<span>…) can make tree-siblings live under different DOM parents; moving
+    # them would scramble reading order or emit a block list inside an inline.
+    parent = els[0].getparent()
+    if parent is None or any(el.getparent() is not parent for el in els):
+        skipped.append({"target_id": first_node.id, "reason": "list_members_cross_parent"})
+        return
+    # SAFETY: if a member's recolour was already applied + credited, removing its
+    # <p> would charge a FIX_CONTRAST that isn't in the bytes — leave the run.
+    if any((n.metadata.properties or {}).get("contrast_fix_fg") for n, _e in members):
+        skipped.append({"target_id": first_node.id, "reason": "list_member_pending_contrast"})
+        return
     kind = (first_node.metadata.properties or {}).get("convert_to_list")
     list_el = etree.Element("ol" if kind == "decimal" else "ul")
     for node, _el in members:
         li = etree.SubElement(list_el, "li")
         li.text = node.content.text if (node.content and node.content.text) else ""
-    first_el = members[0][1]
-    parent = first_el.getparent()
-    if parent is None:
-        skipped.append({"target_id": first_node.id, "reason": "list_parent_missing"})
-        return
-    parent.insert(parent.index(first_el), list_el)
-    for _node, el in members:
-        p = el.getparent()
-        if p is not None:
-            p.remove(el)
+    parent.insert(parent.index(els[0]), list_el)
+    # Preserve any real text that sat between/after the member <p> (their lxml
+    # .tail, which remove() would drop) — re-home it after the new list so no
+    # document content is ever lost.
+    tail_text = "".join((el.tail or "") for el in els)
+    for el in els:
+        el_parent = el.getparent()
+        if el_parent is not None:
+            el_parent.remove(el)
+    if tail_text.strip():
+        list_el.tail = (list_el.tail or "") + tail_text
     applied.append({"action": "FIX_LIST_STRUCTURE", "target_id": first_node.id})
 
 

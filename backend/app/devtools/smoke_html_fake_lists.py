@@ -147,6 +147,64 @@ def main() -> int:
     run_analyzers(rc.tree)
     check("clean doc: no LIST_STRUCTURE_INVALID flag", _flag_count(rc.tree, FLAG) == 0)
 
+    # =========================================================================
+    # Adversarial-review regressions (content-loss / false-conversion bugs).
+    # =========================================================================
+    def _run(body: str):
+        """parse -> analyze -> remediate -> write; return (flags, out_text, applied)."""
+        sp = tmp / f"r{abs(hash(body)) % 100000}.html"
+        sp.write_text(f"<!DOCTYPE html><html lang=en><head><meta charset=utf-8><title>r</title></head><body>{body}</body></html>",
+                      encoding="utf-8")
+        r = parse_to_tree(str(sp))
+        run_analyzers(r.tree)
+        flags = _flag_count(r.tree, FLAG)
+        execute_plans(r.tree, plan_remediations(r.tree, policy))
+        op = tmp / (sp.stem + ".out.html")
+        res = write_remediated_html(sp, r.tree, op)
+        return flags, op.read_text(encoding="utf-8"), res["applied"]
+
+    # Inline markup must NOT be swept in (would flatten <strong>/<em>).
+    f, out, _ = _run("<p>- Buy <strong>organic</strong> milk</p><p>- plain two</p>")
+    check("inline <strong> bullet NOT flagged (markup safe)", f == 0, f"flags={f}")
+    check("inline <strong> preserved in output", "<strong>" in out)
+
+    # <br> must NOT be swept in (would fuse 'line aline b').
+    f, out, _ = _run("<p>- line a<br>line b</p><p>- second</p>")
+    check("<br> bullet NOT flagged", f == 0, f"flags={f}")
+
+    # Code context: a leading '-' is a diff marker, not a bullet.
+    f, _o, _ = _run("<pre><p>- old line</p><p>- another removed line</p></pre>")
+    check("bullets inside <pre> NOT flagged", f == 0, f"flags={f}")
+
+    # Numbered PROSE (long sentences) must NOT become an <ol>.
+    f, _o, _ = _run("<p>1. This is actually a full sentence describing the first thing in great detail here today</p>"
+                    "<p>2. And the second one is also long prose that is clearly not a short list item at all</p>")
+    check("numbered long-prose NOT flagged (>12 words)", f == 0, f"flags={f}")
+
+    # Tail text between members must survive the conversion.
+    f, out, applied = _run("<p>- Milk</p>KEEP-THIS-TAIL<p>- Eggs</p><p>- Bread</p>")
+    converted = [a for a in applied if a.get("action") == "FIX_LIST_STRUCTURE"]
+    check("tail case: list converted", len(converted) == 1, str(applied))
+    check("tail text 'KEEP-THIS-TAIL' preserved in output", "KEEP-THIS-TAIL" in out, out)
+
+    # Members under different DOM parents -> writer skips (no scramble/loss).
+    f, out, applied = _run("<p>- Milk</p><span><p>- Eggs</p></span><p>- Bread</p>")
+    check("cross-parent run NOT converted (skipped)",
+          not any(a.get("action") == "FIX_LIST_STRUCTURE" for a in applied), str(applied))
+    check("cross-parent: all content preserved", "Milk" in out and "Eggs" in out and "Bread" in out)
+
+    # Low-contrast + fake-list: contrast persists, list conversion skips (no
+    # charged-but-absent recolour).
+    f, out, applied = _run('<p style="color:#bbbbbb;background:#ffffff">- Milk</p>'
+                           '<p style="color:#bbbbbb;background:#ffffff">- Eggs</p>'
+                           '<p style="color:#bbbbbb;background:#ffffff">- Bread</p>')
+    contrasts = [a for a in applied if a.get("action") == "FIX_CONTRAST"]
+    lists = [a for a in applied if a.get("action") == "FIX_LIST_STRUCTURE"]
+    check("contrast+list: FIX_CONTRAST applied, FIX_LIST_STRUCTURE skipped",
+          len(contrasts) >= 1 and len(lists) == 0, f"contrast={len(contrasts)} list={len(lists)}")
+    check("contrast+list: '#bbbbbb' replaced in output (recolour persisted)",
+          "#bbbbbb" not in out.lower(), out)
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

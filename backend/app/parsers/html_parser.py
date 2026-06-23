@@ -47,7 +47,11 @@ logger = logging.getLogger(__name__)
 
 # Reuse the DOCX fake-list rules so "what is a typed list" means the same thing
 # in every format (the executor already shares strip_fake_list_prefix from here).
-from app.parsers.docx_parser import _fake_list_signature, _group_fake_list_runs
+from app.parsers.docx_parser import (
+    _fake_list_signature,
+    _group_fake_list_runs,
+    strip_fake_list_prefix,
+)
 
 from app.models.accessibility import (
     AccessibilityTree,
@@ -350,6 +354,17 @@ def _has_element_children(el: Any) -> bool:
     return any(isinstance(child.tag, str) for child in el)
 
 
+def _in_code_context(el: Any) -> bool:
+    """True if ``el`` is inside a <pre>/<code>/<kbd>/<samp> ancestor — content
+    where a leading "- " is a diff/code marker, not a list bullet."""
+    parent = el.getparent()
+    while parent is not None:
+        if _tag(parent) in ("pre", "code", "kbd", "samp"):
+            return True
+        parent = parent.getparent()
+    return False
+
+
 class HTMLParser:
     """Parse an HTML document into an :class:`AccessibilityTree`."""
 
@@ -556,10 +571,18 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
             if text
             else NodeContent(kind=ContentKind.NONE)
         )
+        meta = _meta(el, roottree, _emit_ctx(el, ctx) if text else None)
+        # Facts the fake-list gate needs from the DOM (the tree node alone can't
+        # see inline <strong>/<em>/<br> — they're transparent wrappers with no
+        # node — so converting such a <p> to an <li> would flatten its markup).
+        if _has_element_children(el):
+            meta.properties["__p_has_inline_children"] = True
+        if _in_code_context(el):
+            meta.properties["__p_in_code_context"] = True
         return ParagraphNode(
             id=ids("html-p"),
             content=content,
-            metadata=_meta(el, roottree, _emit_ctx(el, ctx) if text else None),
+            metadata=meta,
             children=_build_children(el, ids, roottree, ctx),
             accessibility_flags=[],
         )
@@ -1043,22 +1066,35 @@ def _derive_html_label(ctrl: Any, labels_for: set) -> Optional[str]:
     return None
 
 
+_FAKE_LIST_MAX_WORDS = 12
+
+
 def _set_fake_list_signature(node: Any) -> None:
     """Tag a plain-text ``<p>`` node with its typed-list signature, if any.
 
-    Only simple text paragraphs (no child elements) are eligible: converting one
-    to an ``<li>`` then carries the whole paragraph, so nested markup can never
-    be lost.
+    Conservative — a wrong conversion (or lost markup) is worse than leaving a
+    typed list as plain paragraphs. A paragraph is eligible ONLY when it is:
+      * a ParagraphNode with no child nodes AND no inline DOM element children
+        (so converting to <li> from its text can't drop <strong>/<em>/<br>…);
+      * not inside <pre>/<code> (a leading "- " there is a diff/code marker);
+      * short — real list items are fragments, not full sentences (this keeps
+        enumerated prose like "1. <long sentence>." out of an <ol>).
     """
     if not isinstance(node, ParagraphNode) or node.children:
         return
+    props_in = node.metadata.properties or {}
+    if props_in.get("__p_has_inline_children") or props_in.get("__p_in_code_context"):
+        return
     if not (node.content and node.content.kind == ContentKind.TEXT and node.content.text):
         return
-    sig = _fake_list_signature(node.content.text)
+    text = node.content.text
+    sig = _fake_list_signature(text)
     if sig is None:
         return
+    if len(strip_fake_list_prefix(text).split()) > _FAKE_LIST_MAX_WORDS:
+        return  # reads as prose, not a list item
     kind, char, ordinal = sig
-    props = dict(node.metadata.properties or {})
+    props = dict(props_in)
     props["fake_list_kind"] = kind
     props["fake_list_char"] = char
     if ordinal is not None:
