@@ -206,6 +206,68 @@ def main() -> int:
           and _aria_labels(out_na) == [],
           str(res_na["applied"]))
 
+    # =========================================================================
+    # Fixture E — wrong-label regressions (adversarial review). Every one of
+    # these MUST stay manual: deriving a name here would be misleading, which is
+    # worse than no name. Combined into one doc; expect 0 derivable, 0 written.
+    # =========================================================================
+    def _derive_and_write(name: str, payload) -> tuple[int, list[str]]:
+        sp = tmp / name
+        if isinstance(payload, bytes):
+            sp.write_bytes(payload)
+        else:
+            sp.write_text(payload, encoding="utf-8")
+        r = parse_to_tree(str(sp))
+        run_analyzers(r.tree)
+        derivable = int(_root_props(r.tree).get("form_fields_derivable") or 0)
+        execute_plans(r.tree, [p for p in plan_remediations(r.tree, policy) if p.flag.code.value == FLAG])
+        op = tmp / (name + ".out.html")
+        write_remediated_html(sp, r.tree, op)
+        return derivable, _aria_labels(op)
+
+    WRONG = """<!DOCTYPE html><html lang="en"><head><title>E</title></head><body>
+      <form><fieldset><legend>Payment details</legend><input type="text" name="card"></fieldset></form>
+      <form><div><h2>Contact Information</h2><input type="text" name="x"></div></form>
+      <form><p><label for="cb">I agree to the Terms</label> <input type="text" name="coupon"> <input id="cb" type="checkbox"></p></form>
+      <form><div><label>Legal name</label><input type="text" name="first"><input type="text" name="last"></div></form>
+      <form><p>Gender <input type="radio" name="g" value="m"> Male <input type="radio" name="g" value="f"> Female</p></form>
+      <form><p>All fields required <input type="text" name="y"></p></form>
+    </body></html>"""
+    e_deriv, e_labels = _derive_and_write("e.html", WRONG)
+    check("E: NONE of the misleading cases are auto-derived (0 derivable)",
+          e_deriv == 0, f"derivable={e_deriv}")
+    check("E: no aria-labels written for any misleading case",
+          e_labels == [], str(e_labels))
+    # Specifically: the coupon box must never inherit the consent checkbox's name.
+    check("E: coupon box not mislabeled 'I agree to the Terms'",
+          "I agree to the Terms" not in e_labels, str(e_labels))
+
+    # legend/heading/group each in isolation (clearer failure messages).
+    for nm, payload, why in [
+        ("legend", '<!DOCTYPE html><html lang=en><head><title>l</title></head><body><form><fieldset><legend>Payment details</legend><input type="text" name="card"></fieldset></form></body></html>', "<legend> is a group caption"),
+        ("heading", '<!DOCTYPE html><html lang=en><head><title>h</title></head><body><form><div><h2>Contact Information</h2><input type="text" name="x"></div></form></body></html>', "<h2> is a section title"),
+        ("group", '<!DOCTYPE html><html lang=en><head><title>g</title></head><body><form><div><label>Legal name</label><input type="text" name="first"><input type="text" name="last"></div></form></body></html>', "shared group label"),
+    ]:
+        d, l = _derive_and_write(nm + ".html", payload)
+        check(f"E: {why} -> 0 derivable, nothing written", d == 0 and l == [], f"derivable={d} labels={l}")
+
+    # =========================================================================
+    # Fixture F — text-normalization (these SHOULD derive, but cleaned).
+    # =========================================================================
+    # &nbsp; + newline collapse to a single space.
+    d, l = _derive_and_write("nbsp.html",
+        '<!DOCTYPE html><html lang=en><head><title>n</title></head><body><form><p>Full&nbsp;Name\n   <input type="text" name="fn"></p></form></body></html>')
+    check("F: &nbsp;/newline normalized to 'Full Name'", l == ["Full Name"], f"derivable={d} labels={l}")
+    # Trailing currency symbol stripped (single control, so not a group label).
+    d, l = _derive_and_write("amt.html",
+        '<!DOCTYPE html><html lang=en><head><title>a</title></head><body><form><p>Amount $ <input type="text" name="amount"></p></form></body></html>')
+    check("F: trailing '$' stripped -> 'Amount'", l == ["Amount"], f"derivable={d} labels={l}")
+    # UTF-8 with NO <meta charset>: the accented label must NOT be mojibake.
+    utf8_no_charset = '<!DOCTYPE html><html lang="fr"><head><title>u</title></head><body><form><p>Prénom: <input type="text" name="p"></p></form></body></html>'.encode("utf-8")
+    d, l = _derive_and_write("utf8.html", utf8_no_charset)
+    check("F: charset-less UTF-8 derives correct accented label 'Prénom'",
+          l == ["Prénom"], f"derivable={d} labels={l!r}")
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

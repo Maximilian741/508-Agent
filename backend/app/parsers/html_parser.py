@@ -433,10 +433,37 @@ def _parse_document(data: bytes):
     keeps this threadpool-safe.
     """
     blob = data if data and data.strip() else b"<html><head></head><body></body></html>"
+    src: Any = _decode_html_bytes(blob)
     try:
-        return lxml_html.document_fromstring(blob)
+        return lxml_html.document_fromstring(src)
     except (etree.ParserError, etree.XMLSyntaxError, ValueError):
         return lxml_html.document_fromstring(b"<html><head></head><body></body></html>")
+
+
+def _decode_html_bytes(blob: bytes) -> Any:
+    """Return a unicode string when the bytes are charset-less UTF-8, else the
+    original bytes.
+
+    lxml decodes a charset-less document as latin-1/cp1252, so a UTF-8 page that
+    omits ``<meta charset>`` (common in fragments and exported HTML) comes back as
+    mojibake — which would then be written into alt text / aria-labels verbatim.
+    When the bytes carry no charset declaration but ARE valid UTF-8, we decode
+    them ourselves so the text is correct; documents that DO declare a charset
+    are left as bytes for lxml to honour, and non-UTF-8 bytes fall through
+    unchanged (legacy behaviour).
+    """
+    if blob[:3] == b"\xef\xbb\xbf":  # UTF-8 BOM
+        try:
+            return blob.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return blob
+    head = blob[:1024].lower()
+    if b"charset=" in head or b"encoding=" in head:
+        return blob  # an explicit declaration — let lxml use it
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return blob  # not UTF-8; let lxml guess from the raw bytes
 
 
 def _meta(el: Any, roottree: Any, ctx: Optional[Dict[str, Any]] = None) -> NodeMetadata:
@@ -785,6 +812,22 @@ _HTML_LABEL_STOPWORDS = {"n/a", "na", "tbd", "required", "optional", "yes", "no"
 _HTML_HEADING_PREFIX_RE = re.compile(
     r"^(section|part|chapter|article|step|appendix)\b", re.IGNORECASE
 )
+# Leading imperative verbs mark page INSTRUCTION text ("Please fill in", "Enter
+# your name"), not a field's name — reject so we never name a field after an
+# instruction. (A 1-word label like "Note" is unaffected: these all read as
+# instructions only as a phrase's first word.)
+_HTML_INSTRUCTION_PREFIXES = {
+    "please", "enter", "type", "select", "choose", "complete", "fill",
+    "provide", "ensure", "upload", "confirm", "kindly", "specify",
+}
+# A <legend> is a <fieldset> GROUP caption and an <h1>..<h6> is a section title —
+# neither is any single control's accessible name. Treat them as label
+# boundaries so their text is never harvested as a field label.
+_HTML_LABEL_BOUNDARY_TAGS = set(_HEADING_TAGS) | {"legend"}
+# Controls whose visible label conventionally sits AFTER the control and whose
+# group caption is not a valid per-option name — auto-deriving from preceding
+# text reliably mislabels them, so they stay manual.
+_HTML_GROUPED_INPUT_TYPES = {"radio", "checkbox"}
 
 
 def _clean_html_label(text: str, max_len: int = 60) -> Optional[str]:
@@ -797,8 +840,13 @@ def _clean_html_label(text: str, max_len: int = 60) -> Optional[str]:
     t = (text or "").strip()
     # Strip leading bullet/asterisk/dash/colon artifacts ("* Required", "- Name").
     t = re.sub(r"^[\s•\*\-–—·:]+", "", t)
-    # Strip a single trailing colon and surrounding space.
+    # Collapse interior whitespace and non-breaking spaces so the derived name
+    # matches the visible single-spaced label (\s does not match U+00A0).
+    t = re.sub(r"\s+", " ", t.replace("\xa0", " ")).strip()
+    # Strip a trailing colon, then trailing currency/unit/operator decoration
+    # ("Amount $" -> "Amount") — only trailing symbol runs, never interior chars.
     t = t.rstrip().rstrip(":").strip()
+    t = t.rstrip(" $€£¥%#*").strip()
     if not t or len(t) > max_len:
         return None
     if not any(c.isalpha() for c in t):
@@ -806,13 +854,23 @@ def _clean_html_label(text: str, max_len: int = 60) -> Optional[str]:
     low = t.lower()
     if low in _HTML_GENERIC_PROMPTS or low in _HTML_LABEL_STOPWORDS:
         return None
+    words = t.split()
+    # An imperative first word marks instruction text, not a field name
+    # ("All fields required", "Please fill in") — even without end punctuation.
+    first = words[0].lower().strip(".,;:!?") if words else ""
+    if first in _HTML_INSTRUCTION_PREFIXES or first == "all":
+        return None
+    # A trailing annotation ("... required" / "... optional") is not a name.
+    last = words[-1].lower().strip(".,;:!?") if words else ""
+    if last in {"required", "optional"}:
+        return None
     if t.endswith((".", "?", "!")):  # sentences / questions / instructions
         return None
     if "." in t and " " in t:  # an internal period with spaces reads as prose
         return None
     if _HTML_HEADING_PREFIX_RE.match(t):  # "Section 4 Employment" is a heading
         return None
-    if len(t.split()) > 6:  # a field label is short
+    if len(words) > 6:  # a field label is short
         return None
     return t
 
@@ -842,6 +900,48 @@ def _cell_text_excluding_controls(el: Any) -> str:
     return "".join(parts)
 
 
+def _shared_with_following_control(ctrl: Any, parent: Any) -> bool:
+    """True if the next labelable control after ``ctrl`` (same parent) has no
+    clean label of its own between them.
+
+    That means ``ctrl``'s preceding label is really a GROUP label shared by both
+    controls (e.g. one "Legal name" over a first/last pair), so neither should
+    claim it as its individual accessible name.
+    """
+    after = False
+    pending = False  # have we seen a clean own-label for the following control?
+    for child in parent:
+        if child is ctrl:
+            after = True
+            if child.tail and _clean_html_label(child.tail):
+                pending = True
+            continue
+        if not after:
+            continue
+        ctag = _tag(child)
+        if ctag in _FORM_CONTROL_TAGS:
+            labelable = True
+            if ctag == "input":
+                itype = (child.get("type") or "text").strip().lower()
+                if itype in _NONLABELABLE_INPUT_TYPES:
+                    labelable = False
+            if labelable:
+                return not pending
+            # a non-labelable control (submit/hidden) is transparent here
+        elif ctag in _HTML_LABEL_BOUNDARY_TAGS:
+            pass  # legend/heading is never a field's own label
+        elif ctag == "label":
+            if not (child.get("for") or "").strip() and not _wraps_control(child):
+                if _clean_html_label(child.text_content()):
+                    pending = True
+        elif ctag is not None:
+            if _clean_html_label(child.text_content() or ""):
+                pending = True
+        if child.tail and _clean_html_label(child.tail):
+            pending = True
+    return False
+
+
 def _derive_html_label(ctrl: Any, labels_for: set) -> Optional[str]:
     """Best-confidence accessible name for an unlabeled HTML control, or None.
 
@@ -855,10 +955,19 @@ def _derive_html_label(ctrl: Any, labels_for: set) -> Optional[str]:
          the 2nd control in "Name: [ ] Date: [ ]" derives "Date".
       3. The table cell immediately left of the control's cell.
 
-    Returns None (leave for manual review) when nothing clean is found, so we
-    never invent a misleading name.
+    Declines (returns None — leave for manual review) for grouped option
+    controls (radio/checkbox), for a label/text shared by >1 control (a GROUP
+    label), and whenever a ``<legend>``, heading, or ``<label for=other>`` would
+    otherwise leak its text — so we never invent a misleading name.
     """
     try:
+        # Grouped option controls: the visible label sits AFTER the control and
+        # a group question is not a per-option name — auto-deriving from the
+        # preceding sibling reliably mislabels, so leave them manual.
+        if _tag(ctrl) == "input":
+            itype = (ctrl.get("type") or "text").strip().lower()
+            if itype in _HTML_GROUPED_INPUT_TYPES:
+                return None
         parent = ctrl.getparent()
         if parent is None:
             return None
@@ -872,24 +981,33 @@ def _derive_html_label(ctrl: Any, labels_for: set) -> Optional[str]:
             if child is ctrl:
                 break
             ctag = _tag(child)
-            if ctag in _FORM_CONTROL_TAGS:
-                # An earlier control ends the previous label's scope.
+            if ctag in _FORM_CONTROL_TAGS or ctag in _HTML_LABEL_BOUNDARY_TAGS:
+                # A preceding control ends the previous label's scope; a
+                # <legend>/heading is a group/section caption, never a field
+                # name — both reset the scope and contribute no text.
                 orphan_label = None
                 preceding = []
-            elif ctag == "label" and not (child.get("for") or "").strip() and not _wraps_control(child):
-                cleaned = _clean_html_label(child.text_content())
-                if cleaned:
-                    orphan_label = cleaned
+            elif ctag == "label":
+                if (child.get("for") or "").strip():
+                    pass  # owned by another control via for= — never harvest it
+                elif not _wraps_control(child):
+                    cleaned = _clean_html_label(child.text_content())
+                    if cleaned:
+                        orphan_label = cleaned
             elif ctag is not None:  # skip comments / PIs (no text_content)
                 txt = child.text_content()
                 if txt:
                     preceding.append(txt)
             if child.tail and child.tail.strip():
                 preceding.append(child.tail)
-        if orphan_label:
+        # A single label shared by >1 unlabeled control is a GROUP label (e.g.
+        # "Legal name" over first/last) — decline so we never mislabel one
+        # arbitrary member with it.
+        shared = _shared_with_following_control(ctrl, parent)
+        if orphan_label and not shared:
             return orphan_label
         inline = _clean_html_label("".join(preceding))
-        if inline:
+        if inline and not shared:
             return inline
         # --- Source 3: the cell immediately left of the control's cell. ---
         cell = ctrl
