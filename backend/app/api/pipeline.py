@@ -571,12 +571,26 @@ async def remediate(
     # already-correct heading style — so it is non-empty even when no approved
     # fix landed.) We still return the file + summary + manual-review items; the
     # caller simply isn't billed. ``charged`` is surfaced for transparency.
-    persisted_fixes = sum(
-        1
-        for e in executions
-        if getattr(e.status, "value", e.status) == "success"
-        and _action_persists(e.action_code.value, fmt)
-    )
+    # FIX_CONTRAST is the one persisted action with no "re-assert existing
+    # structure" path: the writer appends it to ``applied`` ONLY when it
+    # actually recoloured a resolved element. So for it (unlike the structural
+    # fixes) the writer's applied list is authoritative — an approved recolour
+    # whose element didn't resolve must NOT be counted or charged.
+    _applied_contrast_targets = {
+        a.get("target_id")
+        for a in (_applied or [])
+        if isinstance(a, dict) and a.get("action") == "FIX_CONTRAST"
+    }
+    persisted_fixes = 0
+    for e in executions:
+        if getattr(e.status, "value", e.status) != "success":
+            continue
+        code = e.action_code.value
+        if not _action_persists(code, fmt):
+            continue
+        if code == "FIX_CONTRAST" and e.target_node_id not in _applied_contrast_targets:
+            continue
+        persisted_fixes += 1
     charged = False
     if persisted_fixes > 0:
         # Charge AFTER the file exists. On the rare race where the wallet was
@@ -914,14 +928,18 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # the output bytes — verified by smoke_html (re-parse sees the fix and
         # the original flag clears). Form-field labeling is detection-only in
         # v1 (the executor skips), so FILL_FORM_FIELD_LABELS is intentionally
-        # absent; contrast is not populated (no class/stylesheet colours), so
-        # no LOW_CONTRAST false positives.
+        # absent.
         "SET_DOCUMENT_TITLE",       # writes/creates <head><title>
         "SET_DOCUMENT_LANGUAGE",    # writes <html lang="...">
         "GENERATE_ALT_TEXT",        # writes <img alt="...">
         "NORMALIZE_HEADING_LEVEL",  # renames the heading tag (h3 -> h2)
         "IMPROVE_LINK_TEXT",        # rewrites pure-text link content
         "ADD_TABLE_HEADERS",        # promotes row-0 <td> -> <th scope=col> / inserts a header row
+        # Recolours low-contrast text to the nearest AA-passing shade as an
+        # inline style — verified by smoke_fix_contrast (re-parse sees the new
+        # colour and LOW_CONTRAST_TEXT clears). Only counted for HTML; DOCX/PPTX
+        # writers don't apply the marker yet, so they are intentionally absent.
+        "FIX_CONTRAST",
     },
 }
 

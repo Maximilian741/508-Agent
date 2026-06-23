@@ -113,6 +113,17 @@ def write_remediated_html(
             logger.warning("html_writer: could not resolve %s for node %s", xpath, node.id)
             skipped.append({"target_id": node.id, "reason": "element_not_resolved"})
 
+    # Contrast fixes can target any text node — paragraphs and list items are
+    # not in _LOCATABLE — so resolve those separately on the pristine DOM. The
+    # executor sets contrast_fix_fg only on nodes whose recolour was approved.
+    contrast_els: Dict[str, Any] = {}
+    for node in iter_reading_order(root):
+        nprops = node.metadata.properties or {}
+        if not nprops.get("contrast_fix_fg") or nprops.get("synthesized"):
+            continue
+        el = elements.get(node.id)
+        contrast_els[node.id] = el if el is not None else resolve(nprops.get("__xpath"))
+
     html_el = resolve(props.get("__html_xpath"))
     if html_el is None:
         html_el = doc
@@ -144,6 +155,22 @@ def write_remediated_html(
             _apply_table(node, elements, applied)
         # TableRow/TableCell handled inside _apply_table.
 
+    # Contrast recolour: write the analyzer's AA-passing colour as an inline
+    # style (inline wins over inherited/class colours) on each approved node.
+    for node in iter_reading_order(root):
+        nprops = node.metadata.properties or {}
+        fg = nprops.get("contrast_fix_fg")
+        if not fg:
+            continue
+        el = contrast_els.get(node.id)
+        if el is None:
+            # Record the miss so the caller never credits/charges a recolour
+            # that did not reach the output bytes (honesty invariant).
+            skipped.append({"target_id": node.id, "reason": "contrast_element_not_resolved"})
+            continue
+        if _apply_contrast(el, fg):
+            applied.append({"action": "FIX_CONTRAST", "target_id": node.id})
+
     try:
         out_bytes = _serialize(doc)
         Path(output_path).write_bytes(out_bytes)
@@ -152,6 +179,34 @@ def write_remediated_html(
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: serialize"}]}
 
     return {"applied": applied, "skipped": skipped}
+
+
+def _apply_contrast(el: Any, fg: str) -> bool:
+    """Set/replace the element's inline ``color`` with ``#fg``.
+
+    Writing the colour inline guarantees it wins over an inherited or class
+    colour (inline is the highest-specificity non-!important source), so the fix
+    is effective even when the failing colour came from a parent or a stylesheet.
+    """
+    new_color = "#" + str(fg).lstrip("#")
+    raw = el.get("style") or ""
+    out: List[str] = []
+    replaced = False
+    for decl in (d.strip() for d in raw.split(";") if d.strip()):
+        prop, sep, _val = decl.partition(":")
+        if sep and prop.strip().lower() == "color":
+            # Preserve an !important flag so the recolour keeps the same cascade
+            # weight the failing colour had (else a stylesheet could re-override
+            # it in the browser even though our re-parse sees the fixed colour).
+            important = " !important" if "!important" in _val.lower() else ""
+            out.append(f"color: {new_color}{important}")
+            replaced = True
+        else:
+            out.append(decl)
+    if not replaced:
+        out.append(f"color: {new_color}")
+    el.set("style", "; ".join(out))
+    return True
 
 
 def _apply_image(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> None:
