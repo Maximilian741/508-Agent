@@ -40,6 +40,7 @@ from app.models.accessibility import (
     ImageNode,
     iter_reading_order,
 )
+from app.parsers.pdf_parser import derive_pdf_field_label, iter_acroform_fields
 from app.pdf.ua_tagger import tag_pdf
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,17 @@ def write_remediated_pdf(
                 )
             except Exception as exc:
                 skipped.append({"target_id": "document", "reason": f"failed_to_write_lang: {exc}"})
+
+        # ------- 1b. AcroForm field labels (/TU from a descriptive /T) -----
+        # When the executor approved it, give each unlabeled field with a
+        # confident /T-derived name a /TU (the accessible name AT announces).
+        # The parser counted these with the SAME deriver, so we never write more
+        # than the form_fields_derivable count the executor reported.
+        if properties.get("apply_form_field_labels"):
+            try:
+                _apply_pdf_form_labels(writer, tree.root.id, applied, skipped)
+            except Exception as exc:  # pragma: no cover - defensive
+                skipped.append({"target_id": "document", "reason": f"form_labels_failed: {exc}"})
 
     # ------- 2. Image alt text on /XObject entries --------------------
     images_by_xobject_name: Dict[str, ImageNode] = {}
@@ -208,6 +220,37 @@ def _resolve(obj: Any) -> Any:
         except Exception:
             return None
     return obj
+
+
+def _apply_pdf_form_labels(
+    writer: PdfWriter,
+    doc_id: str,
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Write a ``/TU`` (accessible name) on each unlabeled AcroForm field whose
+    ``/T`` is a confident, human-readable label.
+
+    Walks the writer's cloned top-level fields with ``derive_pdf_field_label`` —
+    the same helper ``pdf_parser`` counted with — so exactly the fields counted
+    as ``form_fields_derivable`` are labeled, and nothing else.
+    """
+    try:
+        catalog = writer._root_object  # noqa: SLF001 — pypdf intentionally exposes
+        acro = _resolve(catalog.get("/AcroForm")) if "/AcroForm" in catalog else None
+    except Exception:
+        acro = None
+    if not isinstance(acro, DictionaryObject):
+        return
+    for fo in iter_acroform_fields(acro):
+        label = derive_pdf_field_label(fo)
+        if not label:
+            continue
+        try:
+            fo[NameObject("/TU")] = TextStringObject(label)
+            applied.append({"kind": "form_field_label", "target_id": doc_id, "summary": f"/TU -> {label!r}"})
+        except Exception as exc:  # pragma: no cover - defensive
+            skipped.append({"target_id": doc_id, "reason": f"form_label_write_failed: {exc}"})
 
 
 # ---------------------------------------------------------------------------

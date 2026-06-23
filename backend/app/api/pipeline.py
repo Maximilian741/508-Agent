@@ -931,6 +931,11 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # succeeds when an OCR provider is actually available, so counting
         # it is honest — verified by smoke_ocr_layer.
         "ADD_OCR_TEXT_LAYER",
+        # Unlabeled AcroForm fields with a descriptive /T get a /TU (the
+        # accessible name AT announces) — verified by smoke_pdf_form_labels
+        # (re-read shows /TU set and the unlabeled count drop). Confident-only:
+        # auto-generated names (Text1, Check Box 3) stay manual.
+        "FILL_FORM_FIELD_LABELS",
     },
     "html": {
         # html_writer does attribute/text DOM edits that each round-trip into

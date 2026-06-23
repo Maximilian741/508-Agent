@@ -229,37 +229,125 @@ def _pdf_text_colors(reader: PdfReader) -> List[Dict[str, Any]]:
     return out
 
 
-def _form_field_label_counts(reader: PdfReader) -> tuple[int, int]:
-    """Return ``(total, unlabeled)`` AcroForm fields.
+# Words that, together with a trailing number, mark an auto-generated field name
+# ("Text Field 2", "Check Box 3", "Radio Button 1") — never a human label.
+_PDF_WIDGET_WORDS = {
+    "text", "field", "fld", "form", "input", "box", "check", "checkbox",
+    "cb", "radio", "button", "btn", "combo", "list", "listbox", "dropdown",
+    "choice", "control", "element", "entry", "txt",
+}
+# Bare auto-names with no number that still name nothing.
+_PDF_JUNK_NAMES = {
+    "untitled", "undefined", "field", "text", "form", "fld", "button",
+    "btn", "checkbox", "check box", "radio", "radio button", "box", "control",
+}
+
+
+def _clean_pdf_field_name(raw: object) -> Optional[str]:
+    """A human-readable label from an AcroForm field's ``/T``, or None.
+
+    The partial field name is frequently descriptive in real fillable PDFs
+    ("First Name", "Date of Birth") and is exactly what an accessible name
+    should say — but it is just as often an auto-generated placeholder
+    ("Text1", "Text Field 2", "Check Box 3"). We accept the former and reject
+    the latter, so a wrong accessible name is never invented.
+
+    Rule: reject when (a) the whole name is a bare widget word, or (b) the name
+    ENDS in a number AND any of its words is a form-widget word — that is the
+    signature of an auto-generated name. "Address 2" / "Date of Birth" survive
+    (their words are not widget words); "Text Field 2" does not.
+    """
+    t = str(raw or "").strip()
+    if "." in t:  # fully-qualified name — take the field's own terminal segment
+        t = t.split(".")[-1].strip()
+    t = re.sub(r"\s+", " ", t.replace("_", " ")).strip()
+    if not t or len(t) > 60:
+        return None
+    if not any(c.isalpha() for c in t):
+        return None
+    low = t.lower()
+    if low in _PDF_JUNK_NAMES:
+        return None
+    words = low.split(" ")
+    ends_in_number = bool(re.search(r"\d+$", t))
+    if ends_in_number and any(w.strip("0123456789") in _PDF_WIDGET_WORDS for w in words):
+        return None
+    if re.match(r"^[A-Za-z]{1,4}\d+$", t):  # short stem + digits ("ab12") = auto
+        return None
+    return t
+
+
+def _pdf_field_is_pushbutton(fo: object) -> bool:
+    """True for a pushbutton field (an action, not an input that needs a name)."""
+    try:
+        if fo.get("/FT") != "/Btn":
+            return False
+        flags = int(fo.get("/Ff") or 0)
+        return bool(flags & (1 << 16))  # bit 17: Pushbutton
+    except Exception:
+        return False
+
+
+def derive_pdf_field_label(fo: object) -> Optional[str]:
+    """Confident accessible label for one unlabeled AcroForm field, or None.
+
+    Shared by the parser (to count how many are derivable) and the writer (to
+    write exactly those), so the credited count always equals what is written.
+    """
+    try:
+        if _pdf_field_is_pushbutton(fo):
+            return None
+        tu = fo.get("/TU")
+        if tu and str(tu).strip():
+            return None  # already has an accessible name
+        return _clean_pdf_field_name(fo.get("/T"))
+    except Exception:
+        return None
+
+
+def iter_acroform_fields(acro: object):
+    """Yield the resolved top-level AcroForm field dicts — the exact set the
+    label count and the writer both operate on, so they stay in lockstep."""
+    fields = acro.get("/Fields") or []
+    fields = fields.get_object() if hasattr(fields, "get_object") else fields
+    for field in fields:
+        try:
+            yield field.get_object() if hasattr(field, "get_object") else field
+        except Exception:
+            continue
+
+
+def _form_field_label_counts(reader: PdfReader) -> "tuple[int, int, int]":
+    """Return ``(total, unlabeled, derivable)`` AcroForm fields.
 
     "Unlabeled" means no ``/TU`` (the field's accessible label/tooltip — what AT
-    announces). A named field with no ``/TU`` is still unlabeled for AT.
+    announces). ``derivable`` is how many unlabeled fields have a confident
+    label we can auto-write from their ``/T`` (the rest stay manual).
     """
     total = 0
     unlabeled = 0
+    derivable = 0
     try:
         root = reader.trailer.get("/Root", {})
         root = root.get_object() if hasattr(root, "get_object") else root
         acro = root.get("/AcroForm") if root else None
         acro = acro.get_object() if hasattr(acro, "get_object") else acro
         if not acro:
-            return (0, 0)
-        fields = acro.get("/Fields") or []
-        fields = fields.get_object() if hasattr(fields, "get_object") else fields
-        for field in fields:
-            fo = field.get_object() if hasattr(field, "get_object") else field
+            return (0, 0, 0)
+        for fo in iter_acroform_fields(acro):
             try:
-                # Pushbuttons (field flag bit 17, /Ft Btn with PushButton) don't
-                # require a /TU the same way; but counting them is conservative.
+                # Pushbuttons are counted (conservative) but never auto-labeled.
                 total += 1
                 tu = fo.get("/TU")
                 if not tu or not str(tu).strip():
                     unlabeled += 1
+                    if derive_pdf_field_label(fo):
+                        derivable += 1
             except Exception:
                 continue
     except Exception:
-        return (total, unlabeled)
-    return (total, unlabeled)
+        return (total, unlabeled, derivable)
+    return (total, unlabeled, derivable)
 
 
 # ---------------------------------------------------------------------------
@@ -453,10 +541,13 @@ class PDFParser:
         properties: Dict[str, Any] = {}
         if title:
             properties["title"] = title
-        ff_total, ff_unlabeled = _form_field_label_counts(reader)
+        ff_total, ff_unlabeled, ff_derivable = _form_field_label_counts(reader)
         if ff_total:
             properties["form_fields_total"] = ff_total
             properties["form_fields_unlabeled"] = ff_unlabeled
+            # Unlabeled fields whose /T is a real label → auto-write /TU. The
+            # writer re-derives with the SAME helper so credit == what's written.
+            properties["form_fields_derivable"] = ff_derivable
         # Text colours from the content stream → contrast analysis (vs white).
         text_colors = _pdf_text_colors(reader)
         if text_colors:
