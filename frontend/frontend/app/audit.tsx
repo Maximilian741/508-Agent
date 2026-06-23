@@ -48,6 +48,7 @@ import {
   conformanceTotals,
   type CriterionVerdict,
 } from "../src/domain/wcagCriteria";
+import { buildOpenAcr } from "../src/domain/openAcr";
 import {
   brandingAccentCss,
   brandingFooterHtml,
@@ -868,6 +869,43 @@ export default function AuditScreen() {
         : "Tip: click \"Verify the fix\" first so the report reflects your fixed file.",
     });
   }, [report, filename, reaudit, lastIssuedCert, toast]);
+
+  /**
+   * Download the same per-criterion verdicts as machine-readable OpenACR JSON
+   * (the GSA/community standard behind the Open VPAT editor), so procurement and
+   * audit systems can ingest the result directly. Pure re-serialization of the
+   * verdicts the HTML report already shows — Not Evaluated criteria stay
+   * "not-evaluated", never a positive attestation.
+   */
+  const onDownloadOpenAcr = useCallback(() => {
+    if (!report) {
+      toast.warning("No audit yet", {
+        description: "Run an audit first so we can build the OpenACR file.",
+        dedupeKey: "no-audit-yet",
+      });
+      return;
+    }
+    if (Platform.OS !== "web") return;
+    const fname = filename ?? "document";
+    const usingFixed = !!reaudit?.afterViolations;
+    const findings = (usingFixed ? reaudit!.afterViolations! : report.violations).map((v) => ({
+      ruleId: v.ruleId,
+      severity: v.severity,
+    }));
+    const acr = buildOpenAcr({
+      filename: fname,
+      verdicts: computeConformance(findings),
+      scoreNum: usingFixed ? reaudit!.afterScore : report.score.score,
+      scoreGrade: usingFixed ? reaudit!.afterGrade : report.score.grade,
+      assessedFixedFile: usingFixed,
+      generatedAt: new Date().toISOString(),
+    });
+    const blob = new Blob([JSON.stringify(acr, null, 2)], { type: "application/json" });
+    _saveBlob(blob, _safeFilename(fname) + "-openacr.json");
+    toast.success("OpenACR (JSON) downloaded", {
+      description: "Machine-readable conformance for procurement/audit systems.",
+    });
+  }, [report, filename, reaudit, toast]);
 
   const downloadRemediated = useCallback(async () => {
     // Free-scan gate fires before any of the existing branches so the user
@@ -1956,6 +1994,17 @@ export default function AuditScreen() {
                   ? " Reflects your remediated file."
                   : " Tip: run “Verify the fix” first so it reflects your fixed file."}
               </Text>
+              <View style={{ marginTop: 10 }}>
+                <Button
+                  title="Download OpenACR (JSON)"
+                  onPress={onDownloadOpenAcr}
+                  variant="ghost"
+                  accessibilityHint="Exports the same per-WCAG-criterion verdicts as machine-readable OpenACR JSON, so procurement and audit systems can import the conformance result directly."
+                />
+                <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 6 }]}>
+                  Machine-readable conformance (OpenACR) for systems that ingest VPAT data.
+                </Text>
+              </View>
             </View>
           ) : null}
 
