@@ -81,7 +81,7 @@ export default function LandingScreen() {
           <Button
             title="See pricing"
             variant="ghost"
-            onPress={() => router.push("/billing" as any)}
+            onPress={() => router.push("/pricing" as any)}
           />
         </View>
       </Hero>
@@ -207,13 +207,13 @@ export default function LandingScreen() {
           </Text>
           <View style={[styles.ctaRow, { justifyContent: "center" }]}>
             <Button title="Start free" onPress={() => router.push("/audit" as any)} />
-            <Button title="See pricing" variant="ghost" onPress={() => router.push("/billing" as any)} />
+            <Button title="See pricing" variant="ghost" onPress={() => router.push("/pricing" as any)} />
           </View>
         </View>
       </Card>
 
       <View style={styles.footer}>
-        <FooterLink label="Pricing" onPress={() => router.push("/billing" as any)} />
+        <FooterLink label="Pricing" onPress={() => router.push("/pricing" as any)} />
         <FooterLink label="Savings calculator" onPress={() => router.push("/savings" as any)} />
         <FooterLink label="FAQ" onPress={() => router.push("/faq" as any)} />
         <FooterLink label="About" onPress={() => router.push("/about" as any)} />
