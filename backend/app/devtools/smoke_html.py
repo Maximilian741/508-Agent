@@ -9,8 +9,9 @@ unrelated markup (scripts, styles, comments, non-ASCII text) is preserved.
   executor -> deterministic/AI fixes mutate the tree
   writer   -> output bytes: alt / lang / <title> / heading tag / link text /
               <th scope> all change; scripts/styles/comments untouched
-  honesty  -> re-parsing the OUTPUT clears the flags; form-field labeling is
-              detection-only (the executor skips), so it is NOT credited
+  honesty  -> re-parsing the OUTPUT clears the flags; a label-less control here
+              has no confident label so it stays manual (confident HTML
+              auto-labeling is covered by smoke_html_form_labels)
 
 Usage:
     python -m app.devtools.smoke_html
@@ -155,10 +156,9 @@ def main() -> int:
         "NORMALIZE_HEADING_LEVEL",
         "IMPROVE_LINK_TEXT",
         "ADD_TABLE_HEADERS",
+        "FILL_FORM_FIELD_LABELS",
     ):
         check(f"honesty matrix: {code} persists for html", _action_persists(code, "html"))
-    check("honesty matrix: FILL_FORM_FIELD_LABELS NOT credited for html (detect-only)",
-          not _action_persists("FILL_FORM_FIELD_LABELS", "html"))
 
     # ------------------------------------------------------------- detection
     src = tmp / "dirty.html"
@@ -184,7 +184,10 @@ def main() -> int:
     check("alt-text generation executed", "GENERATE_ALT_TEXT" in successes, str(successes))
     check("heading normalize executed", "NORMALIZE_HEADING_LEVEL" in successes, str(successes))
     check("table headers executed", "ADD_TABLE_HEADERS" in successes, str(successes))
-    check("form-field labeling SKIPS for html (derivable=0, honest)",
+    # This bare <input> has no nearby label (no orphan <label>, no "Name:" text,
+    # no table cell), so it is correctly NOT auto-derivable and stays manual.
+    # (Confident HTML auto-labeling is covered by smoke_html_form_labels.)
+    check("form-field labeling SKIPS for this label-less control (honest)",
           "FILL_FORM_FIELD_LABELS" not in successes, str(successes))
 
     out = tmp / "dirty.fixed.html"

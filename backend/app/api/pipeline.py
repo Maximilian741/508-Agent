@@ -935,15 +935,18 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
     "html": {
         # html_writer does attribute/text DOM edits that each round-trip into
         # the output bytes — verified by smoke_html (re-parse sees the fix and
-        # the original flag clears). Form-field labeling is detection-only in
-        # v1 (the executor skips), so FILL_FORM_FIELD_LABELS is intentionally
-        # absent.
+        # the original flag clears).
         "SET_DOCUMENT_TITLE",       # writes/creates <head><title>
         "SET_DOCUMENT_LANGUAGE",    # writes <html lang="...">
         "GENERATE_ALT_TEXT",        # writes <img alt="...">
         "NORMALIZE_HEADING_LEVEL",  # renames the heading tag (h3 -> h2)
         "IMPROVE_LINK_TEXT",        # rewrites pure-text link content
         "ADD_TABLE_HEADERS",        # promotes row-0 <td> -> <th scope=col> / inserts a header row
+        # Unlabeled controls with a confident nearby label (orphan <label>,
+        # "Name: [input]" text, or a table label cell) get an aria-label —
+        # verified by smoke_html_form_labels (re-parse drops the unlabeled count
+        # by exactly the derivable count). Ambiguous controls stay manual.
+        "FILL_FORM_FIELD_LABELS",
         # Recolours low-contrast text to the nearest AA-passing shade as an
         # inline style — verified by smoke_fix_contrast (re-parse sees the new
         # colour and LOW_CONTRAST_TEXT clears). Only counted for HTML; DOCX/PPTX

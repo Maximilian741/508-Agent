@@ -21,9 +21,10 @@ never overclaims.
 Honesty: the set of actions credited for HTML lives in
 ``pipeline._PERSISTED_ACTIONS["html"]`` = {SET_DOCUMENT_TITLE,
 SET_DOCUMENT_LANGUAGE, GENERATE_ALT_TEXT, NORMALIZE_HEADING_LEVEL,
-IMPROVE_LINK_TEXT, ADD_TABLE_HEADERS}. Every one is persisted here. A locator
-that unexpectedly fails to resolve is logged and recorded in ``skipped`` (it
-should never happen for parser-produced nodes on a same-bytes re-parse).
+IMPROVE_LINK_TEXT, ADD_TABLE_HEADERS, FIX_CONTRAST, FILL_FORM_FIELD_LABELS}.
+Every one is persisted here. A locator that unexpectedly fails to resolve is
+logged and recorded in ``skipped`` (it should never happen for parser-produced
+nodes on a same-bytes re-parse).
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from app.models.accessibility import (
     TableRowNode,
     iter_reading_order,
 )
-from app.parsers.html_parser import _parse_document
+from app.parsers.html_parser import _parse_document, iter_derivable_form_labels
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,18 @@ def write_remediated_html(
             continue
         if _apply_contrast(el, fg):
             applied.append({"action": "FIX_CONTRAST", "target_id": node.id})
+
+    # Form-field labeling: when the executor approved it, give each unlabeled
+    # control with a CONFIDENT nearby label an aria-label. iter_derivable_form_labels
+    # re-derives with the same helper the parser used (on these same bytes), so we
+    # never label more than the form_fields_derivable count the executor reported
+    # — keeping the honesty invariant. Ambiguous controls are left for manual work.
+    if props.get("apply_form_field_labels"):
+        for ctrl, label_text in iter_derivable_form_labels(doc):
+            if (ctrl.get("aria-label") or "").strip():
+                continue  # already has an accessible name — never clobber
+            ctrl.set("aria-label", label_text)
+            applied.append({"action": "FILL_FORM_FIELD_LABELS", "target_id": root.id})
 
     try:
         out_bytes = _serialize(doc)
