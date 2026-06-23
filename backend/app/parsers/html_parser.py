@@ -22,9 +22,12 @@ Design notes
       LOW_CONTRAST_TEXT can only fire on colours we actually determined — no
       false positives. (This catches the very common case of HTML *exported
       from* Word / Google Docs, which is saturated with inline colour styling.)
-    - Form fields are DETECTED (count) but ``form_fields_derivable`` is 0, so
-      the labeling executor honestly skips — auto-labeling HTML controls
-      correctly is deferred to v2 (a wrong label is worse than none).
+    - Form fields are DETECTED (count) AND, when an unlabeled control has a
+      CONFIDENT nearby label (an orphan ``<label>``, "Name: [input]" preceding
+      text, or a table label cell), it is counted in ``form_fields_derivable``
+      so the executor can auto-write an ``aria-label``. Ambiguous controls stay
+      manual (a wrong accessible name is worse than none) — the same
+      conservative rules the DOCX content-control deriver uses.
     - Link text is only treated as analyzable when the ``<a>`` is pure text
       (no child elements), so the IMPROVE_LINK_TEXT writer can always safely
       replace it without destroying nested markup.
@@ -377,7 +380,7 @@ class HTMLParser:
         title = _text(title_el) if title_el is not None else ""
         language = (doc.get("lang") or "").strip() or None
 
-        ff_total, ff_unlabeled = _count_form_fields(doc)
+        ff_total, ff_unlabeled, ff_derivable = _count_form_fields(doc)
 
         properties: Dict[str, Any] = {"filename": path.name}
         if title:
@@ -389,10 +392,11 @@ class HTMLParser:
         if ff_total:
             properties["form_fields_total"] = ff_total
             properties["form_fields_unlabeled"] = ff_unlabeled
-            # v1: detect only — we do not auto-derive HTML labels (a wrong
-            # accessible name is worse than none), so the executor honestly
-            # skips and FILL_FORM_FIELD_LABELS is not in _PERSISTED_ACTIONS.
-            properties["form_fields_derivable"] = 0
+            # How many unlabeled controls have a CONFIDENT nearby label the
+            # writer can turn into an aria-label. The writer re-derives with the
+            # SAME helper on the same bytes, so this count == what gets written
+            # (the honesty invariant) — see iter_derivable_form_labels.
+            properties["form_fields_derivable"] = ff_derivable
 
         root = DocumentNode(
             id="doc-1",
@@ -679,26 +683,69 @@ def _build_table(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> Tabl
     )
 
 
-def _count_form_fields(doc: Any) -> Tuple[int, int]:
-    """Return (total, unlabeled) labelable form controls."""
+def _build_labels_for(doc: Any) -> set:
+    """The set of ids targeted by a ``<label for=...>`` (an associated label)."""
     labels_for: set = set()
     for lbl in doc.iter("label"):
         target = lbl.get("for")
         if target:
             labels_for.add(target)
+    return labels_for
 
-    total = 0
-    unlabeled = 0
+
+def _iter_labelable_controls(doc: Any):
+    """Yield every labelable form control in document order.
+
+    Iterating tag-by-tag (all inputs, then selects, then textareas) is a fixed,
+    deterministic order shared by the counter and the writer, so the count we
+    claim equals what gets labeled.
+    """
     for tag in _FORM_CONTROL_TAGS:
         for ctrl in doc.iter(tag):
             if tag == "input":
                 itype = (ctrl.get("type") or "text").strip().lower()
                 if itype in _NONLABELABLE_INPUT_TYPES:
                     continue
-            total += 1
-            if not _control_has_accessible_name(ctrl, labels_for):
-                unlabeled += 1
-    return total, unlabeled
+            yield ctrl
+
+
+def _count_form_fields(doc: Any) -> Tuple[int, int, int]:
+    """Return ``(total, unlabeled, derivable)`` labelable form controls.
+
+    ``derivable`` is how many of the unlabeled controls have a confident nearby
+    label we can auto-write (see :func:`_derive_html_label`); the rest stay
+    manual.
+    """
+    labels_for = _build_labels_for(doc)
+    total = 0
+    unlabeled = 0
+    derivable = 0
+    for ctrl in _iter_labelable_controls(doc):
+        total += 1
+        if _control_has_accessible_name(ctrl, labels_for):
+            continue
+        unlabeled += 1
+        if _derive_html_label(ctrl, labels_for):
+            derivable += 1
+    return total, unlabeled, derivable
+
+
+def iter_derivable_form_labels(doc: Any):
+    """Yield ``(control_element, label_text)`` for every unlabeled control that
+    has a confident nearby label.
+
+    The html_writer calls this on a fresh re-parse of the SAME bytes the parser
+    saw, so the controls, order, and derived text are identical to what
+    ``_count_form_fields`` counted — the writer never labels more (or fewer)
+    than the ``form_fields_derivable`` count the executor reported.
+    """
+    labels_for = _build_labels_for(doc)
+    for ctrl in _iter_labelable_controls(doc):
+        if _control_has_accessible_name(ctrl, labels_for):
+            continue
+        text = _derive_html_label(ctrl, labels_for)
+        if text:
+            yield ctrl, text
 
 
 def _control_has_accessible_name(ctrl: Any, labels_for: set) -> bool:
@@ -718,6 +765,153 @@ def _control_has_accessible_name(ctrl: Any, labels_for: set) -> bool:
             return True
         parent = parent.getparent()
     return False
+
+
+# Generic placeholder prompts that name no field, plus stopwords / heading
+# prefixes. Mirrors the DOCX content-control rules in
+# ``docx_parser._clean_form_label`` so "a wrong label is worse than none" means
+# the same thing in every format (kept local to avoid importing python-docx).
+_HTML_GENERIC_PROMPTS = {
+    "search",
+    "search…",
+    "search...",
+    "enter text",
+    "type here",
+    "choose an item",
+    "select an item",
+    "choose a date",
+}
+_HTML_LABEL_STOPWORDS = {"n/a", "na", "tbd", "required", "optional", "yes", "no"}
+_HTML_HEADING_PREFIX_RE = re.compile(
+    r"^(section|part|chapter|article|step|appendix)\b", re.IGNORECASE
+)
+
+
+def _clean_html_label(text: str, max_len: int = 60) -> Optional[str]:
+    """Normalize candidate label text, or None if it isn't label-like.
+
+    A real field label is a short noun phrase, optionally ending in a colon —
+    not a sentence, question, instruction, heading or generic prompt.
+    Deliberately conservative: a wrong accessible name is worse than none.
+    """
+    t = (text or "").strip()
+    # Strip leading bullet/asterisk/dash/colon artifacts ("* Required", "- Name").
+    t = re.sub(r"^[\s•\*\-–—·:]+", "", t)
+    # Strip a single trailing colon and surrounding space.
+    t = t.rstrip().rstrip(":").strip()
+    if not t or len(t) > max_len:
+        return None
+    if not any(c.isalpha() for c in t):
+        return None
+    low = t.lower()
+    if low in _HTML_GENERIC_PROMPTS or low in _HTML_LABEL_STOPWORDS:
+        return None
+    if t.endswith((".", "?", "!")):  # sentences / questions / instructions
+        return None
+    if "." in t and " " in t:  # an internal period with spaces reads as prose
+        return None
+    if _HTML_HEADING_PREFIX_RE.match(t):  # "Section 4 Employment" is a heading
+        return None
+    if len(t.split()) > 6:  # a field label is short
+        return None
+    return t
+
+
+def _wraps_control(el: Any) -> bool:
+    """True if ``el`` contains a form control in its subtree."""
+    for tag in _FORM_CONTROL_TAGS:
+        if el.find(".//" + tag) is not None:
+            return True
+    return False
+
+
+def _cell_text_excluding_controls(el: Any) -> str:
+    """All text inside ``el`` except text that belongs to a form control.
+
+    A label cell like ``<td>Email <input></td>`` should yield "Email", not the
+    control's own placeholder/value text.
+    """
+    parts: List[str] = []
+    if el.text:
+        parts.append(el.text)
+    for child in el:
+        if _tag(child) not in _FORM_CONTROL_TAGS:
+            parts.append(_cell_text_excluding_controls(child))
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
+
+
+def _derive_html_label(ctrl: Any, labels_for: set) -> Optional[str]:
+    """Best-confidence accessible name for an unlabeled HTML control, or None.
+
+    Mirrors the DOCX content-control deriver. Three high-precision sources, in
+    order; the writer applies the result as an ``aria-label``:
+
+      1. An orphan ``<label>`` (text, no ``for``, not wrapping a control)
+         appearing in the same parent before this control.
+      2. Visible label-like text immediately before the control in the same
+         parent ("Name: [input]"), measured only SINCE the previous control so
+         the 2nd control in "Name: [ ] Date: [ ]" derives "Date".
+      3. The table cell immediately left of the control's cell.
+
+    Returns None (leave for manual review) when nothing clean is found, so we
+    never invent a misleading name.
+    """
+    try:
+        parent = ctrl.getparent()
+        if parent is None:
+            return None
+        # --- Sources 1 + 2: inline content in the same parent, since the last
+        # control boundary. ---
+        orphan_label: Optional[str] = None
+        preceding: List[str] = []
+        if parent.text and parent.text.strip():
+            preceding.append(parent.text)
+        for child in parent:
+            if child is ctrl:
+                break
+            ctag = _tag(child)
+            if ctag in _FORM_CONTROL_TAGS:
+                # An earlier control ends the previous label's scope.
+                orphan_label = None
+                preceding = []
+            elif ctag == "label" and not (child.get("for") or "").strip() and not _wraps_control(child):
+                cleaned = _clean_html_label(child.text_content())
+                if cleaned:
+                    orphan_label = cleaned
+            elif ctag is not None:  # skip comments / PIs (no text_content)
+                txt = child.text_content()
+                if txt:
+                    preceding.append(txt)
+            if child.tail and child.tail.strip():
+                preceding.append(child.tail)
+        if orphan_label:
+            return orphan_label
+        inline = _clean_html_label("".join(preceding))
+        if inline:
+            return inline
+        # --- Source 3: the cell immediately left of the control's cell. ---
+        cell = ctrl
+        while cell is not None and _tag(cell) not in ("td", "th"):
+            cell = cell.getparent()
+        if cell is not None:
+            row = cell.getparent()
+            if row is not None and _tag(row) == "tr":
+                prev_cell = None
+                for c in row:
+                    if _tag(c) not in ("td", "th"):
+                        continue
+                    if c is cell:
+                        break
+                    prev_cell = c
+                if prev_cell is not None:
+                    label = _clean_html_label(_cell_text_excluding_controls(prev_cell))
+                    if label:
+                        return label
+    except Exception:
+        return None
+    return None
 
 
 __all__ = ["HTMLParser"]
