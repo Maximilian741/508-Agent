@@ -57,15 +57,19 @@ from app.models.accessibility import (
     TableNode,
     TableRowNode,
 )
+from docx.shared import RGBColor
+
 from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
     _derive_sdt_label,
+    _docx_theme_colors,
     _heading_level_from_style,
     _iter_note_parts,
     _iter_text_box_paragraphs,
     _link_elements_in_paragraph,
     _note_paragraphs,
+    _run_color_hex,
     strip_fake_list_prefix,
 )
 
@@ -196,6 +200,23 @@ def write_remediated_docx(
             # source element, so insert a real <w:tr> (tblHeader + bold cells)
             # into the source table — otherwise the "fix" never reaches the file.
             _apply_synthetic_table_header(node, tables_by_id, applied, skipped)
+
+    # Contrast recolour: the FixContrastExecutor leaves a {old_hex: new_hex} map
+    # on each approved node naming only the runs that failed AA. Recolour just
+    # those runs (each to its own nearest AA-passing shade), so colours that
+    # already pass are left untouched. Resolved via the same paragraph-id index
+    # the heading/list fixes use.
+    _contrast_theme_colors: Optional[Dict[str, str]] = None
+    for node in mutated_index.values():
+        color_map = (node.metadata.properties or {}).get("contrast_fix_colors")
+        if not color_map:
+            continue
+        if _contrast_theme_colors is None:
+            try:
+                _contrast_theme_colors = _docx_theme_colors(str(source_path))
+            except Exception:  # pragma: no cover - defensive
+                _contrast_theme_colors = {}
+        _apply_contrast(node, paragraph_by_id, color_map, _contrast_theme_colors, applied, skipped)
 
     # Footnote/endnote rewrites happened on trees parsed from the note
     # parts' blobs — write them back so the changes reach the file.
@@ -691,6 +712,53 @@ def _apply_link(
     for t in t_elems[1:]:
         t.text = ""
     applied.append({"kind": "link_text", "target_id": link.id, "summary": f"{current!r} -> {new_text!r}"})
+
+
+def _norm_hex(value: Any) -> str:
+    return str(value or "").lstrip("#").upper()
+
+
+def _apply_contrast(
+    node: Any,
+    paragraph_by_id: Dict[str, Any],
+    color_map: Dict[str, str],
+    theme_colors: Dict[str, str],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Recolour a paragraph's failing runs to their AA-passing shades.
+
+    ``color_map`` is ``{old_hex: new_hex}`` (no ``#``) for the runs the analyzer
+    flagged. We resolve each run's effective colour exactly as the analyzer did
+    (``_run_color_hex`` — explicit sRGB or resolved theme colour) and rewrite
+    only the runs whose colour is in the map, writing an explicit ``w:color`` so
+    it overrides any theme/inherited colour. Runs that already pass are left
+    alone, so a mixed-colour paragraph keeps the colours that were fine.
+    """
+    paragraph = paragraph_by_id.get(node.id)
+    if paragraph is None:
+        skipped.append({"target_id": node.id, "reason": "contrast_paragraph_not_resolved"})
+        return
+    norm_map = {_norm_hex(k): _norm_hex(v) for k, v in color_map.items() if v}
+    changed = 0
+    for run in getattr(paragraph, "runs", []) or []:
+        cur = _run_color_hex(run, theme_colors)
+        if not cur:
+            continue
+        new = norm_map.get(_norm_hex(cur))
+        if not new:
+            continue
+        try:
+            run.font.color.rgb = RGBColor.from_string(new)
+            changed += 1
+        except Exception as exc:  # pragma: no cover - defensive
+            skipped.append({"target_id": node.id, "reason": f"failed_to_set_run_color:{exc}"})
+    if changed:
+        applied.append({"action": "FIX_CONTRAST", "target_id": node.id})
+    else:
+        # Approved but nothing was rewritten (no run matched) — record it so the
+        # caller never credits/charges a recolour that didn't reach the bytes.
+        skipped.append({"target_id": node.id, "reason": "contrast_no_matching_run"})
 
 
 def _apply_heading(
