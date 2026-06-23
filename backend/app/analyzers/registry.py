@@ -29,6 +29,7 @@ from app.analyzers.reading_order_analyzer import ReadingOrderAnalyzer
 from app.analyzers.table_analyzer import TableMissingHeadersAnalyzer
 from app.analyzers.table_caption_analyzer import TableCaptionMissingAnalyzer
 from app.analyzers.table_complexity_analyzer import TableComplexityAnalyzer
+from app.analyzers.nested_table_analyzer import NestedTableAnalyzer
 from app.models.accessibility import AccessibilityTree
 
 
@@ -49,6 +50,7 @@ def get_default_analyzers() -> List[Analyzer]:
         # unreachable from parsed documents — the rule could never fire.
         TableCaptionMissingAnalyzer(),
         TableComplexityAnalyzer(),
+        NestedTableAnalyzer(),
         ListStructureAnalyzer(),
         LinkTextAnalyzer(),
         LinkTargetBrokenAnalyzer(),

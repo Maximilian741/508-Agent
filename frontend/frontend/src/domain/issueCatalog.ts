@@ -299,6 +299,25 @@ const C: Record<string, IssueCatalogEntry> = {
     learnMoreUrl: "https://www.w3.org/WAI/tutorials/tables/caption-summary/",
   },
 
+  TABLE_NESTED: {
+    ruleId: "TABLE_NESTED",
+    title: "Table is nested inside another table",
+    summary: "A table sits inside another table's cell — very hard for screen readers to navigate.",
+    why:
+      "When one table is placed inside another table's cell, a screen reader has to announce the inner table's rows and columns while the user is still mid-cell in the outer table. The two coordinate systems collide and the data becomes almost impossible to follow. Nested tables are a long-standing accessibility anti-pattern under WCAG 1.3.1.",
+    autoFix:
+      "We flag this for manual review — un-nesting a table is a layout decision a person has to make, so it is never auto-changed or counted as a fix.",
+    manualJudgment:
+      "Restructure so the data lives in a single table: either flatten the nested table into additional columns/rows of the outer one, or split them into two separate tables placed one after the other.",
+    severity: "warning",
+    standards: {
+      wcag: ["1.3.1 Info and Relationships"],
+      section508: ["E205.2"],
+      pdfUa: ["7.5 Tables"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/tutorials/tables/",
+  },
+
   LINK_TARGET_BROKEN: {
     ruleId: "LINK_TARGET_BROKEN",
     title: "Link target is missing or unsafe",
