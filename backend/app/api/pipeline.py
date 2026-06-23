@@ -911,6 +911,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # Typed "- item" lines in text boxes gain real a:buChar/a:buAutoNum
         # bullets with markers stripped — verified by smoke_fake_lists.
         "FIX_LIST_STRUCTURE",
+        # Low-contrast runs are recoloured to the nearest AA-passing shade via an
+        # explicit a:srgbClr — verified by smoke_pptx_contrast. Counted only when
+        # the writer confirms it (FIX_CONTRAST applied-list reconciliation).
+        "FIX_CONTRAST",
     },
     "pdf": {
         "SET_DOCUMENT_TITLE",

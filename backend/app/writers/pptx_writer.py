@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from lxml import etree
 
 from pptx import Presentation
+from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.oxml.ns import qn
 
@@ -63,6 +64,8 @@ from app.parsers.pptx_parser import (
     _iter_hyperlink_groups,
     _iter_shapes_recursive,
     _paragraph_has_real_bullet,
+    _pptx_theme_colors,
+    _run_color_hex_pptx,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,6 +187,24 @@ def write_remediated_pptx(
             # otherwise the fix would be counted but never reach the file.
             _apply_synthetic_pptx_table_header(node, table_by_node_id, applied, skipped)
 
+    # Step 5b — contrast recolour. The FixContrastExecutor leaves a
+    # {old_hex: new_hex} map on each approved node naming the failing run
+    # colours; recolour the shape's runs whose colour is in the map to their
+    # AA-passing shade (via an explicit a:srgbClr, which overrides a theme
+    # scheme colour). Counted only when the writer confirms it (the FIX_CONTRAST
+    # applied-list reconciliation in pipeline.py is format-agnostic).
+    _pptx_theme: Optional[Dict[str, str]] = None
+    for node in mutated_index.values():
+        color_map = (node.metadata.properties or {}).get("contrast_fix_colors")
+        if not color_map:
+            continue
+        if _pptx_theme is None:
+            try:
+                _pptx_theme = _pptx_theme_colors(str(source_path))
+            except Exception:  # pragma: no cover - defensive
+                _pptx_theme = {}
+        _apply_pptx_contrast(node, text_by_node_id, color_map, _pptx_theme, applied, skipped)
+
     # Step 6 — persist.
     try:
         prs.save(str(output_path))
@@ -220,6 +241,53 @@ def _index_tree(tree: Optional[AccessibilityTree]) -> Dict[str, Any]:
 # Source-deck indexing — re-mints the parser's per-slide ids and pairs them
 # back to the live python-pptx shape objects so we can mutate them.
 # ---------------------------------------------------------------------------
+
+
+def _norm_hex(value: Any) -> str:
+    return str(value or "").lstrip("#").upper()
+
+
+def _apply_pptx_contrast(
+    node: Any,
+    text_by_node_id: Dict[str, Any],
+    color_map: Dict[str, str],
+    theme_colors: Dict[str, str],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Recolour a text shape's failing runs to their AA-passing shades.
+
+    ``color_map`` is ``{old_hex: new_hex}`` (no ``#``) for the runs the analyzer
+    flagged. We resolve each run's effective colour exactly as the analyzer did
+    (``_run_color_hex_pptx`` — explicit sRGB or resolved scheme colour) and
+    rewrite the matching runs with an explicit ``a:srgbClr`` (via RGBColor),
+    which overrides a theme scheme colour. The PPTX node is the whole text shape,
+    so we walk all its paragraphs' runs.
+    """
+    shape = text_by_node_id.get(node.id)
+    if shape is None or not getattr(shape, "has_text_frame", False):
+        skipped.append({"target_id": node.id, "reason": "contrast_shape_not_resolved"})
+        return
+    norm_map = {_norm_hex(k): _norm_hex(v) for k, v in color_map.items() if v}
+    changed = 0
+    try:
+        for paragraph in shape.text_frame.paragraphs:
+            for run in paragraph.runs:
+                cur = _run_color_hex_pptx(run, theme_colors)
+                if not cur:
+                    continue
+                new = norm_map.get(_norm_hex(cur))
+                if not new:
+                    continue
+                run.font.color.rgb = RGBColor.from_string(new)
+                changed += 1
+    except Exception as exc:  # pragma: no cover - defensive
+        skipped.append({"target_id": node.id, "reason": f"failed_to_set_run_color:{exc}"})
+        return
+    if changed:
+        applied.append({"action": "FIX_CONTRAST", "target_id": node.id})
+    else:
+        skipped.append({"target_id": node.id, "reason": "contrast_no_matching_run"})
 
 
 def _apply_pptx_link(
