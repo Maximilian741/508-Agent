@@ -43,6 +43,7 @@ from app.models.accessibility import (
     HeadingNode,
     ImageNode,
     LinkNode,
+    ParagraphNode,
     TableCellNode,
     TableCellType,
     TableHeaderScope,
@@ -125,6 +126,17 @@ def write_remediated_html(
         el = elements.get(node.id)
         contrast_els[node.id] = el if el is not None else resolve(nprops.get("__xpath"))
 
+    # Fake-list members (typed "- item" <p> the executor approved for
+    # FIX_LIST_STRUCTURE) — resolve on the PRISTINE DOM so the later <ul>/<ol>
+    # surgery uses held references that survive earlier retag/insert mutations.
+    list_member_els: Dict[str, Any] = {}
+    nodes_by_id: Dict[str, Any] = {}
+    for node in iter_reading_order(root):
+        nodes_by_id[node.id] = node
+        nprops = node.metadata.properties or {}
+        if nprops.get("convert_to_list") and not nprops.get("synthesized"):
+            list_member_els[node.id] = resolve(nprops.get("__xpath"))
+
     html_el = resolve(props.get("__html_xpath"))
     if html_el is None:
         html_el = doc
@@ -183,6 +195,17 @@ def write_remediated_html(
                 continue  # already has an accessible name — never clobber
             ctrl.set("aria-label", label_text)
             applied.append({"action": "FILL_FORM_FIELD_LABELS", "target_id": root.id})
+
+    # Fake-list -> real list: each approved run becomes a <ul>/<ol>. Done LAST so
+    # the element removals can't disturb other held references.
+    for node in iter_reading_order(root):
+        if not isinstance(node, ParagraphNode):
+            continue
+        nprops = node.metadata.properties or {}
+        run_ids = nprops.get("fake_list_run_ids")
+        if not run_ids or not nprops.get("convert_to_list"):
+            continue  # only the run's FIRST node carries run_ids
+        _apply_list_conversion(node, run_ids, nodes_by_id, list_member_els, applied, skipped)
 
     try:
         out_bytes = _serialize(doc)
@@ -307,6 +330,49 @@ def _insert_synthetic_header_row(table_el: Any, row_node: TableRowNode) -> bool:
         return True
     table_el.append(tr)
     return True
+
+
+def _apply_list_conversion(
+    first_node: Any,
+    run_ids: List[str],
+    nodes_by_id: Dict[str, Any],
+    list_member_els: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Replace a run of typed-list ``<p>`` elements with a real ``<ul>``/``<ol>``.
+
+    Each member node's text was already stripped of its literal marker by the
+    executor, so the ``<li>`` text is clean. Only acts when EVERY member element
+    resolved (held from the pristine DOM); otherwise records a skip so the action
+    is never credited without persisting.
+    """
+    members = []
+    for mid in run_ids:
+        node = nodes_by_id.get(mid)
+        el = list_member_els.get(mid)
+        if node is None or el is None:
+            skipped.append({"target_id": first_node.id, "reason": "list_member_not_resolved"})
+            return
+        members.append((node, el))
+    if len(members) < 2:
+        return
+    kind = (first_node.metadata.properties or {}).get("convert_to_list")
+    list_el = etree.Element("ol" if kind == "decimal" else "ul")
+    for node, _el in members:
+        li = etree.SubElement(list_el, "li")
+        li.text = node.content.text if (node.content and node.content.text) else ""
+    first_el = members[0][1]
+    parent = first_el.getparent()
+    if parent is None:
+        skipped.append({"target_id": first_node.id, "reason": "list_parent_missing"})
+        return
+    parent.insert(parent.index(first_el), list_el)
+    for _node, el in members:
+        p = el.getparent()
+        if p is not None:
+            p.remove(el)
+    applied.append({"action": "FIX_LIST_STRUCTURE", "target_id": first_node.id})
 
 
 def _ensure_title_element(doc: Any) -> Optional[Any]:

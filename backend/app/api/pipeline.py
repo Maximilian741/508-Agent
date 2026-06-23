@@ -947,6 +947,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # verified by smoke_html_form_labels (re-parse drops the unlabeled count
         # by exactly the derivable count). Ambiguous controls stay manual.
         "FILL_FORM_FIELD_LABELS",
+        # Runs of typed "- item" / "1. item" <p> are converted into a real
+        # <ul>/<ol> (markers stripped) — verified by smoke_html_fake_lists
+        # (re-parse sees a real ListNode and the flag clears).
+        "FIX_LIST_STRUCTURE",
         # Recolours low-contrast text to the nearest AA-passing shade as an
         # inline style — verified by smoke_fix_contrast (re-parse sees the new
         # colour and LOW_CONTRAST_TEXT clears). Only counted for HTML; DOCX/PPTX

@@ -45,6 +45,10 @@ from lxml import html as lxml_html
 
 logger = logging.getLogger(__name__)
 
+# Reuse the DOCX fake-list rules so "what is a typed list" means the same thing
+# in every format (the executor already shares strip_fake_list_prefix from here).
+from app.parsers.docx_parser import _fake_list_signature, _group_fake_list_runs
+
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -374,6 +378,13 @@ class HTMLParser:
             # signals (title/language) we already collected.
             logger.warning("html_parser: document too deeply nested; structure truncated")
             children = []
+
+        # Detect FAKE lists — runs of plain <p> typed as "- item" / "1. item"
+        # that should be a real <ul>/<ol>. Mirrors the DOCX/PPTX path: mark each
+        # member's signature, then group consecutive same-kind runs (>=2). The
+        # analyzer + executor are format-agnostic, and html_writer converts the
+        # run to a real list under FIX_LIST_STRUCTURE.
+        _mark_html_fake_lists(children)
 
         # Document-level signals the analyzers read off the root.
         title_el = doc.find(".//title")
@@ -1030,6 +1041,44 @@ def _derive_html_label(ctrl: Any, labels_for: set) -> Optional[str]:
     except Exception:
         return None
     return None
+
+
+def _set_fake_list_signature(node: Any) -> None:
+    """Tag a plain-text ``<p>`` node with its typed-list signature, if any.
+
+    Only simple text paragraphs (no child elements) are eligible: converting one
+    to an ``<li>`` then carries the whole paragraph, so nested markup can never
+    be lost.
+    """
+    if not isinstance(node, ParagraphNode) or node.children:
+        return
+    if not (node.content and node.content.kind == ContentKind.TEXT and node.content.text):
+        return
+    sig = _fake_list_signature(node.content.text)
+    if sig is None:
+        return
+    kind, char, ordinal = sig
+    props = dict(node.metadata.properties or {})
+    props["fake_list_kind"] = kind
+    props["fake_list_char"] = char
+    if ordinal is not None:
+        props["fake_list_ordinal"] = ordinal
+    node.metadata.properties = props
+
+
+def _mark_html_fake_lists(nodes: List[Any]) -> None:
+    """Mark runs of consecutive typed-list paragraphs at every nesting level.
+
+    Sets each member's signature, then reuses the shared
+    :func:`_group_fake_list_runs` to record ``fake_list_run_ids`` on the first
+    node of every >=2-item run.
+    """
+    for node in nodes:
+        _set_fake_list_signature(node)
+    _group_fake_list_runs(nodes)
+    for node in nodes:
+        if getattr(node, "children", None):
+            _mark_html_fake_lists(node.children)
 
 
 __all__ = ["HTMLParser"]
