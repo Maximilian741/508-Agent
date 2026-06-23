@@ -279,6 +279,17 @@ export default function HomeScreen() {
             Is “click here” hurting you?
           </Text>
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to heading structure checker"
+          onPress={() => router.push("/tools/headings")}
+          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
+            Heading structure checker
+          </Text>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+            Missing H1? Skipped levels?
+          </Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
           onPress={() => router.push("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
