@@ -229,18 +229,44 @@ def _pdf_text_colors(reader: PdfReader) -> List[Dict[str, Any]]:
     return out
 
 
-# Words that, together with a trailing number, mark an auto-generated field name
-# ("Text Field 2", "Check Box 3", "Radio Button 1") — never a human label.
+# Whole words (or, in the numbered check, word stems) that mark an
+# auto-generated field name. Includes a few common non-English auto stems
+# (champ/feld/campo …) — these only fire as a label-killer below, never accept.
 _PDF_WIDGET_WORDS = {
     "text", "field", "fld", "form", "input", "box", "check", "checkbox",
     "cb", "radio", "button", "btn", "combo", "list", "listbox", "dropdown",
-    "choice", "control", "element", "entry", "txt",
+    "choice", "control", "element", "entry", "txt", "textbox", "textfield",
+    "champ", "zone", "texte", "feld", "textfeld", "campo", "casilla",
 }
+# Suffix roots: a word that ENDS with one of these is a widget type, not a
+# label ("DateField"→field, "fillText"→text, "TextBox"/"PO Box"→box). Field
+# /T names are short label-like tokens, so substring/suffix matching here is
+# safe (no real label is "Springfield"); we err toward leaving fields manual.
+_PDF_WIDGET_SUFFIXES = (
+    "textbox", "textfield", "checkbox", "combobox", "listbox", "dropdown",
+    "text", "field", "box", "button", "radio", "combo", "menu",
+)
 # Bare auto-names with no number that still name nothing.
 _PDF_JUNK_NAMES = {
     "untitled", "undefined", "field", "text", "form", "fld", "button",
     "btn", "checkbox", "check box", "radio", "radio button", "box", "control",
+    "champ", "feld", "campo", "zone",
 }
+# Checkbox/radio export/state VALUES that are sometimes used as the /T — these
+# are answers, not field labels, so they must never become an accessible name.
+_PDF_VALUE_TOKENS = {"yes", "no", "on", "off", "true", "false", "none", "n/a", "na"}
+
+
+def _pdf_word_kind(w: str) -> str:
+    has_alpha = any(c.isalpha() for c in w)
+    has_digit = any(c.isdigit() for c in w)
+    if has_alpha and has_digit:
+        return "mixed"
+    if has_digit:
+        return "number"
+    if has_alpha:
+        return "alpha"
+    return "other"
 
 
 def _clean_pdf_field_name(raw: object) -> Optional[str]:
@@ -248,44 +274,42 @@ def _clean_pdf_field_name(raw: object) -> Optional[str]:
 
     The partial field name is frequently descriptive in real fillable PDFs
     ("First Name", "Date of Birth") and is exactly what an accessible name
-    should say — but it is just as often an auto-generated placeholder
-    ("Text1", "Text Field 2", "Check Box 3"). We accept the former and reject
-    the latter, so a wrong accessible name is never invented.
-
-    Rule: reject when (a) the whole name is a bare widget word, or (b) the name
-    ENDS in a number AND any of its words is a form-widget word — that is the
-    signature of an auto-generated name. "Address 2" / "Date of Birth" survive
-    (their words are not widget words); "Text Field 2" does not.
+    should say — but just as often it is an auto-generated placeholder
+    ("Text1", "Text Field 2", "DateField"), an XFA path
+    ("topmostSubform[0].Page1[0].f1_01[0]"), an opaque id ("a8f3c2d1"), or a
+    code ("Q1a"). We accept only clean human labels; everything ambiguous stays
+    manual, because a wrong accessible name is worse than none.
     """
     t = str(raw or "").strip()
-    if "." in t:  # fully-qualified name — take the field's own terminal segment
+    # Strip XFA index brackets ([0]) and #subform sigils before anything else.
+    t = re.sub(r"\[\d+\]", "", t).replace("#", " ")
+    if "." in t:  # fully-qualified name — the field's own terminal segment
         t = t.split(".")[-1].strip()
     t = re.sub(r"\s+", " ", t.replace("_", " ")).strip()
-    if not t or len(t) > 60:
+    if not t or len(t) > 60 or len(t) == 1:
         return None
     if not any(c.isalpha() for c in t):
         return None
     low = t.lower()
-    if low in _PDF_JUNK_NAMES:
+    if low in _PDF_JUNK_NAMES or low in _PDF_VALUE_TOKENS:
         return None
     words = low.split(" ")
-    ends_in_number = bool(re.search(r"\d+$", t))
-    if ends_in_number and any(w.strip("0123456789") in _PDF_WIDGET_WORDS for w in words):
+    # Any token that mixes letters and digits is a code/id/auto-name, not a
+    # label ("Text1", "Q1a", "Item3b", "f1", "a8f3c2d1", "TextField1").
+    if any(_pdf_word_kind(w) == "mixed" for w in words):
         return None
-    if re.match(r"^[A-Za-z]{1,4}\d+$", t):  # short stem + digits ("ab12") = auto
+    # Hex/GUID-shaped single token ("ffff" with a digit, "a8f3...") — belt and
+    # braces; most are already caught as "mixed".
+    if " " not in t and any(c.isdigit() for c in t) and re.fullmatch(r"[0-9a-fA-F]+", t):
         return None
+    # A widget-type word ("DateField", "TextBox", "fillText", "Field", "Champ").
+    for w in words:
+        stem = w.rstrip("0123456789")
+        if not stem:
+            continue
+        if stem in _PDF_WIDGET_WORDS or stem.endswith(_PDF_WIDGET_SUFFIXES):
+            return None
     return t
-
-
-def _pdf_field_is_pushbutton(fo: object) -> bool:
-    """True for a pushbutton field (an action, not an input that needs a name)."""
-    try:
-        if fo.get("/FT") != "/Btn":
-            return False
-        flags = int(fo.get("/Ff") or 0)
-        return bool(flags & (1 << 16))  # bit 17: Pushbutton
-    except Exception:
-        return False
 
 
 def derive_pdf_field_label(fo: object) -> Optional[str]:
@@ -293,9 +317,12 @@ def derive_pdf_field_label(fo: object) -> Optional[str]:
 
     Shared by the parser (to count how many are derivable) and the writer (to
     write exactly those), so the credited count always equals what is written.
+    Only ``/Tx`` (text) and ``/Ch`` (choice) fields are labeled from ``/T``;
+    ``/Btn`` (checkbox / radio / pushbutton) ``/T`` is frequently the export
+    VALUE ("Yes", "Male") rather than a label, so those stay manual.
     """
     try:
-        if _pdf_field_is_pushbutton(fo):
+        if fo.get("/FT") == "/Btn":
             return None
         tu = fo.get("/TU")
         if tu and str(tu).strip():

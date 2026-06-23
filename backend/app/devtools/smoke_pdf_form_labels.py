@@ -41,6 +41,7 @@ from pypdf.generic import (  # noqa: E402
 from app.analyzers.registry import run_analyzers  # noqa: E402
 from app.api.pipeline import _action_persists  # noqa: E402
 from app.parsers import parse_to_tree  # noqa: E402
+from app.parsers.pdf_parser import _clean_pdf_field_name, derive_pdf_field_label  # noqa: E402
 from app.services.remediation_planner import RemediationPolicy, plan_remediations  # noqa: E402
 from app.services.remediators.registry import execute_plans  # noqa: E402
 from app.writers.pdf_writer import write_remediated_pdf  # noqa: E402
@@ -183,6 +184,43 @@ def main() -> int:
     run_analyzers(rc.tree)
     check("clean form: no FORM_FIELD_UNLABELED flag",
           not any(f.code.value == FLAG for f in rc.tree.root.accessibility_flags))
+
+    # =========================================================================
+    # Adversarial-review regressions (8 confirmed wrong-name cases). Each /T
+    # below must NOT become an accessible name — it is a widget type, an opaque
+    # id, a code, an XFA path, or a checkbox value, all worse than no /TU.
+    # =========================================================================
+    REJECT = [
+        "Field_TextBox", "fillText", "DateField", "EditField 3", "Datefield 1",
+        "Textbox 2", "Numberfield2", "editBox", "ListBox",          # compound widget words
+        "a8f3c2d1", "550e8400e29b", "b3f9",                          # hex / guid
+        "Q1a", "Item3b", "line_5a",                                  # codes
+        "topmostSubform[0].Page1[0].f1_01[0]",                       # XFA path
+        "form1[0].#subform[1].TextField1[0]",                       # XFA path
+        "X",                                                         # single letter
+        "Champ 2", "Feld 3",                                         # localized auto-names
+    ]
+    for name in REJECT:
+        check(f"reject auto/code/id name: {name!r}", _clean_pdf_field_name(name) is None,
+              f"got {_clean_pdf_field_name(name)!r}")
+
+    # Real labels must still pass (guard against over-rejection).
+    ACCEPT = {
+        "First Name": "First Name", "Date of Birth": "Date of Birth",
+        "Address 2": "Address 2", "Email": "Email", "Phone Number": "Phone Number",
+        "SSN": "SSN", "DOB": "DOB", "City": "City",
+    }
+    for name, want in ACCEPT.items():
+        check(f"accept real label: {name!r}", _clean_pdf_field_name(name) == want,
+              f"got {_clean_pdf_field_name(name)!r}")
+
+    # Checkbox/radio (/Btn) /T is a value, not a label -> never derived.
+    check("checkbox /T='Yes' not derived (value, not label)",
+          derive_pdf_field_label(_field("Yes", ft="/Btn")) is None)
+    check("radio /T='Male' not derived (value, not label)",
+          derive_pdf_field_label(_field("Male", ft="/Btn")) is None)
+    check("text /T='First Name' still derived",
+          derive_pdf_field_label(_field("First Name")) == "First Name")
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
