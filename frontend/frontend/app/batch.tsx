@@ -30,6 +30,7 @@ import { PipelineResponse, createApiClient } from "../src/api/client";
 import { loadAccount, loadToken, refreshAccount } from "../src/domain/account";
 import { appendHistory, findHistoryEntry } from "../src/domain/auditHistory";
 import { computeBatchConformance, conformanceTotals } from "../src/domain/wcagCriteria";
+import { buildBatchOpenAcr } from "../src/domain/openAcr";
 import {
   brandingAccentCss,
   brandingFooterHtml,
@@ -598,6 +599,33 @@ export default function BatchScreen() {
     });
   }, [items, toast]);
 
+  /** Download the consolidated batch conformance as machine-readable OpenACR JSON. */
+  const downloadBatchOpenAcr = useCallback(() => {
+    if (Platform.OS !== "web") return;
+    const docs = items
+      .filter((i) => i.status === "done" && i.findings)
+      .map((i) => ({ filename: i.filename, findings: i.findings ?? [] }));
+    if (docs.length === 0) {
+      toast.warning("Nothing to report yet", {
+        description: "Analyze at least one document first.",
+        dedupeKey: "no-batch-openacr",
+      });
+      return;
+    }
+    const acr = buildBatchOpenAcr({
+      verdicts: computeBatchConformance(docs),
+      documentCount: docs.length,
+      generatedAt: new Date().toISOString(),
+    });
+    _saveBlob(
+      new Blob([JSON.stringify(acr, null, 2)], { type: "application/json" }),
+      "508-batch-openacr.json",
+    );
+    toast.success("OpenACR (JSON) downloaded", {
+      description: "Machine-readable conformance for procurement/audit systems.",
+    });
+  }, [items, toast]);
+
   /** Export the batch results as a CSV for the agency's own trackers. */
   const downloadBatchCsv = useCallback(() => {
     if (Platform.OS !== "web") return;
@@ -1040,6 +1068,12 @@ export default function BatchScreen() {
                   onPress={downloadBatchConformanceReport}
                   variant="ghost"
                   accessibilityHint="Downloads one consolidated WCAG 2.1 AA conformance report covering every analyzed document in this batch."
+                />
+                <Button
+                  title="OpenACR (JSON)"
+                  onPress={downloadBatchOpenAcr}
+                  variant="ghost"
+                  accessibilityHint="Downloads the consolidated conformance result as machine-readable OpenACR JSON, so procurement and audit systems can import it directly."
                 />
                 <Button
                   title="Export CSV"
