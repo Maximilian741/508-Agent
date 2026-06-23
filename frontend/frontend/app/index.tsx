@@ -290,6 +290,17 @@ export default function HomeScreen() {
             Missing H1? Skipped levels?
           </Text>
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Go to professional assessment service"
+          onPress={() => router.push("/assessment")}
+          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
+        >
+          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
+            Professional assessment
+          </Text>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+            Want a human in the loop?
+          </Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
           onPress={() => router.push("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
