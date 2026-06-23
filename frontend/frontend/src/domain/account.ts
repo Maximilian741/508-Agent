@@ -828,6 +828,72 @@ async function _throwDetail(res: Response, fallback: string): Promise<never> {
   throw err;
 }
 
+// --- Accessibility metrics dashboard (server-backed, team-aware) ---------
+
+export interface MetricsTotals {
+  documentsAnalyzed: number;
+  issuesFound: number;
+  issuesAutoFixed: number;
+  issuesPendingManual: number;
+  avgScore: number;
+  autoFixablePct: number;
+}
+export interface MetricsFormatBreakdown {
+  format: string;
+  documents: number;
+  avgScore: number;
+}
+export interface MetricsGradeBreakdown {
+  grade: string;
+  documents: number;
+}
+export interface MetricsTimelinePoint {
+  weekStart: string;
+  documents: number;
+  avgScore: number;
+  issuesFound: number;
+  issuesAutoFixed: number;
+}
+export interface MetricsRecentDoc {
+  documentId: string;
+  filename: string;
+  format: string;
+  score: number;
+  grade: string;
+  issuesFound: number;
+  fixedAutomatically: number;
+  analyzedAt: string;
+}
+export interface MetricsScope {
+  kind: "self" | "team";
+  teamName?: string | null;
+  memberCount: number;
+}
+export interface MetricsOverview {
+  totals: MetricsTotals;
+  byFormat: MetricsFormatBreakdown[];
+  byGrade: MetricsGradeBreakdown[];
+  timeline: MetricsTimelinePoint[];
+  recentDocuments: MetricsRecentDoc[];
+  scope: MetricsScope;
+  generatedAt: string;
+}
+
+/**
+ * The signed-in user's (or their team's) accessibility metrics. Returns null
+ * when not signed in or on any error — the page renders a sign-in / empty state.
+ */
+export async function getMetricsOverview(): Promise<MetricsOverview | null> {
+  if (!_readToken()) return null;
+  try {
+    const res = await apiFetch("/metrics/overview");
+    if (!res.ok) return null;
+    return ((await _readJson(res)) as MetricsOverview) || null;
+  } catch {
+    return null;
+  }
+}
+
 /** The caller's team (or null) plus whether they're eligible to create one. */
 export async function getMyTeam(): Promise<MyTeam> {
   if (!_readToken()) return { team: null, canCreate: false };
