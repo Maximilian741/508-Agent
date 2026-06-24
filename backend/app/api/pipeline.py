@@ -961,6 +961,11 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # colour and LOW_CONTRAST_TEXT clears). Only counted for HTML; DOCX/PPTX
         # writers don't apply the marker yet, so they are intentionally absent.
         "FIX_CONTRAST",
+        # Caption-less data tables get an AI-generated <caption> inserted as the
+        # table's first child — verified by smoke_table_caption_writer (re-parse
+        # reads the <caption> back and TABLE_CAPTION_MISSING clears). Grounded in
+        # the table's own headers/rows; routes to review like alt text.
+        "GENERATE_TABLE_CAPTION",
     },
 }
 

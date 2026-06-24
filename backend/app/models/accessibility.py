@@ -606,6 +606,7 @@ class ActionCode(str, Enum):
     TAG_PDF_STRUCTURE = "TAG_PDF_STRUCTURE"
     ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
     FIX_CONTRAST = "FIX_CONTRAST"
+    GENERATE_TABLE_CAPTION = "GENERATE_TABLE_CAPTION"
     FLAG_FOR_MANUAL_REVIEW = "FLAG_FOR_MANUAL_REVIEW"
 
 
@@ -896,11 +897,16 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             related_flag_code=AccessibilityFlagCode.HEADING_TEXT_EMPTY,
         ),
     ],
+    # Sole action (no FLAG_FOR_MANUAL_REVIEW fallback), mirroring MISSING_ALT_TEXT:
+    # the dispatcher's action sort penalizes requires_ai, so a non-AI fallback in
+    # the same list would always be selected over this AI action. Without AI
+    # (default policy) the planner policy-blocks it → it surfaces as
+    # pending-manual anyway, so no manual path is lost.
     AccessibilityFlagCode.TABLE_CAPTION_MISSING: [
         RemediationAction(
-            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
-            description="Flag issue for manual review.",
-            requires_ai=False,
+            action_code=ActionCode.GENERATE_TABLE_CAPTION,
+            description="Generate a descriptive caption for the table from its headers/content.",
+            requires_ai=True,
             requires_human_review=True,
             is_auto_applicable=False,
             supported_node_types=[NodeType.TABLE],
