@@ -90,6 +90,7 @@ class AccessibilityFlagCode(str, Enum):
     TEXT_STYLED_AS_HEADING = "TEXT_STYLED_AS_HEADING"
     TABLE_COMPLEX_NEEDS_SUMMARY = "TABLE_COMPLEX_NEEDS_SUMMARY"
     TABLE_NESTED = "TABLE_NESTED"
+    LINK_NAME_MISSING = "LINK_NAME_MISSING"
 
 
 class StandardReference(BaseModel):
@@ -188,6 +189,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["2.4.4"],
             section_508=["E205.4"],
             pdf_ua=["7.6-6"],
+        ),
+    ),
+    AccessibilityFlagCode.LINK_NAME_MISSING: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.LINK_NAME_MISSING,
+        severity=Severity.ERROR,
+        message="Link has no accessible name (no text, image alt, or aria-label).",
+        standards=StandardReference(
+            wcag_2_1=["2.4.4", "4.1.2"],
+            section_508=["E205.4"],
+            pdf_ua=["7.18.1"],
         ),
     ),
     AccessibilityFlagCode.DOCUMENT_LANGUAGE_MISSING: AccessibilityFlagDefinition(
@@ -894,6 +905,21 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.HEADING],
             related_flag_code=AccessibilityFlagCode.HEADING_TEXT_EMPTY,
+        ),
+    ],
+    # A nameless link cannot be auto-fixed without inventing its purpose (we
+    # don't know where an icon/empty link goes), so it is manual-only. Detection
+    # is the value: it surfaces a hard WCAG 2.4.4/4.1.2 failure most scanners of
+    # uploaded files miss.
+    AccessibilityFlagCode.LINK_NAME_MISSING: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.LINK],
+            related_flag_code=AccessibilityFlagCode.LINK_NAME_MISSING,
         ),
     ],
     AccessibilityFlagCode.TABLE_CAPTION_MISSING: [

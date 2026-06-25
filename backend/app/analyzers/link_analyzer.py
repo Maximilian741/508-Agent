@@ -106,3 +106,23 @@ class LinkTextAnalyzer(Analyzer):
                 normalized = _normalize_text(raw)
                 if not normalized or normalized in NON_DESCRIPTIVE_LINK_TEXT or _looks_like_url(raw):
                     attach_flag(node, AccessibilityFlagCode.LINK_TEXT_NON_DESCRIPTIVE)
+
+
+class LinkNameMissingAnalyzer(Analyzer):
+    """Flags links with NO accessible name at all (WCAG 2.4.4 / 4.1.2).
+
+    Distinct from :class:`LinkTextAnalyzer`, which covers links that HAVE text
+    but it's generic. A nameless link — an icon-font link, an inline-SVG icon
+    with no title, an empty element link — announces to a screen reader only as
+    "link" with nothing else, so its destination is unknowable. The HTML parser
+    marks these with ``__link_nameless`` after a conservative accessible-name
+    check (see ``_link_is_nameless``); we never auto-fix (we can't invent the
+    link's purpose), so detection is the value.
+    """
+
+    name = "link_name_missing"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        for node in iter_nodes(tree):
+            if isinstance(node, LinkNode) and (node.metadata.properties or {}).get("__link_nameless"):
+                attach_flag(node, AccessibilityFlagCode.LINK_NAME_MISSING)

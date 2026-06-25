@@ -519,6 +519,50 @@ def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> L
     return out
 
 
+def _link_is_nameless(el: Any) -> bool:
+    """True iff an ``<a href>`` has NO accessible name from any source.
+
+    Conservative (zero false-positive): returns True only when there is no
+    ``aria-label``/``aria-labelledby``/``title`` on the ``<a>``, no subtree text,
+    and no descendant that supplies a name — a descendant ``<img>`` with
+    non-empty ``alt``, any descendant with a non-empty ``aria-label``, or an
+    inline-SVG ``<title>``. A descendant ``<img>`` with a MISSING ``alt`` is
+    deferred to the alt-text detection (we never double-flag), so this targets
+    the genuinely-uncovered case: icon-font / inline-SVG / empty-element links.
+    """
+    # A link removed from the accessibility tree (aria-hidden on it or any
+    # ancestor, role=presentation/none, or the boolean ``hidden`` attribute) is
+    # not announced at all, so a missing name there is not a real defect — and a
+    # decorative aria-hidden icon link duplicating a labelled one is common.
+    if (el.get("role") or "").strip().lower() in {"presentation", "none"}:
+        return False
+    if el.get("hidden") is not None:
+        return False
+    for anc in (el, *el.iterancestors()):
+        if isinstance(anc.tag, str) and (anc.get("aria-hidden") or "").strip().lower() == "true":
+            return False
+    for attr in ("aria-label", "aria-labelledby", "title"):
+        if (el.get(attr) or "").strip():
+            return False
+    if (_text(el) or "").strip():
+        return False
+    for d in el.iter():
+        if d is el or not isinstance(d.tag, str):
+            continue
+        if (d.get("aria-label") or "").strip():
+            return False
+        local = d.tag.rsplit("}", 1)[-1].lower()
+        if local == "img":
+            if d.get("alt") is None:
+                return False  # missing-alt image — alt-text detection covers it
+            if (d.get("alt") or "").strip():
+                return False  # a named image gives the link its name
+            # alt="" (decorative) contributes no name — keep looking
+        elif local == "title" and (d.text or "").strip():
+            return False  # inline SVG <title>
+    return True
+
+
 def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> Optional[Any]:
     if tag in _HEADING_TAGS:
         text = _text(el)
@@ -549,11 +593,17 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
             # the child; we don't analyze/rewrite their text in v1.
             content = NodeContent(kind=ContentKind.NONE)
             link_ctx = None
+        meta = _meta(el, roottree, link_ctx)
+        # An element-wrapping link with no accessible name (icon-font, inline
+        # SVG with no title, empty element) is flagged by LinkNameMissingAnalyzer.
+        # Empty-TEXT links are handled separately by LinkTextAnalyzer.
+        if content.kind != ContentKind.TEXT and _link_is_nameless(el):
+            meta.properties["__link_nameless"] = True
         return LinkNode(
             id=ids("html-link"),
             target=(el.get("href") or None),
             content=content,
-            metadata=_meta(el, roottree, link_ctx),
+            metadata=meta,
             children=_build_children(el, ids, roottree, ctx),
             accessibility_flags=[],
         )
