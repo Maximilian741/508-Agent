@@ -28,6 +28,13 @@ from app.models.accessibility import (
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
+# Formats whose writer actually materializes the generated caption into the
+# output bytes. MUST stay in sync with the GENERATE_TABLE_CAPTION entry in
+# pipeline._PERSISTED_ACTIONS — only HTML inserts a <caption> today. For any
+# other format the caption would never persist, so we must NOT spend an AI call
+# on it (margin leak) nor leave a phantom caption in the in-memory tree.
+_PERSISTABLE_FORMATS = {"html"}
+
 
 class GenerateTableCaptionExecutor(RemediationExecutor):
     supported_actions = [ActionCode.GENERATE_TABLE_CAPTION]
@@ -53,6 +60,18 @@ class GenerateTableCaptionExecutor(RemediationExecutor):
         existing = props.get("caption")
         if isinstance(existing, str) and existing.strip():
             return _skip(action_code, plan, f"Caption already present: {existing!r}.")
+
+        # AI-cost guard: skip BEFORE the provider call for formats whose writer
+        # can't persist a <caption>, so we never bill an AI request whose output
+        # is silently dropped. The flag still surfaces as pending-manual.
+        fmt = (target.metadata.source_format or "").lower()
+        if fmt not in _PERSISTABLE_FORMATS:
+            return _skip(
+                action_code,
+                plan,
+                f"Automatic captioning is only available for HTML "
+                f"(source format: {fmt or 'unknown'}); leaving this table for manual captioning.",
+            )
 
         headers, sample = _table_context(target)
         result = self._client.suggest_table_caption(headers=headers, sample=sample)

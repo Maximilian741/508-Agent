@@ -29,12 +29,42 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp(prefix='508_
 
 from pathlib import Path  # noqa: E402
 
+from lxml import html as lxml_html  # noqa: E402
+
+from app.ai.semantic_inference import InferenceResult  # noqa: E402
 from app.analyzers.registry import run_analyzers  # noqa: E402
-from app.api.pipeline import _action_persists  # noqa: E402
+from app.api.pipeline import _action_persists, _count_persisted_fixes  # noqa: E402
+from app.models.accessibility import (  # noqa: E402
+    ActionCode,
+    ContentKind,
+    NodeContent,
+    NodeMetadata,
+    TableCellNode,
+    TableCellType,
+    TableHeaderScope,
+    TableNode,
+    TableRowNode,
+    iter_reading_order,
+)
 from app.parsers import parse_to_tree  # noqa: E402
 from app.services.remediation_planner import RemediationPolicy, plan_remediations  # noqa: E402
+from app.services.remediators.base import ExecutionResult, ExecutionStatus  # noqa: E402
+from app.services.remediators.generate_table_caption_executor import (  # noqa: E402
+    GenerateTableCaptionExecutor,
+)
 from app.services.remediators.registry import execute_plans  # noqa: E402
 from app.writers.html_writer import write_remediated_html  # noqa: E402
+
+
+class _SpyClient:
+    """Records whether the AI provider was asked for a caption."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def suggest_table_caption(self, **payload):  # pragma: no cover - exercised in smoke
+        self.calls += 1
+        return InferenceResult(text="SHOULD NOT BE USED", confidence=0.4, provider="spy")
 
 FLAG = "TABLE_CAPTION_MISSING"
 
@@ -61,6 +91,38 @@ LABELED = """<!DOCTYPE html><html lang="en"><head><title>l</title></head><body>
   <p>Quarterly sales by region</p>
   <table>
     <tr><th>Region</th><th>Q1</th></tr><tr><td>North</td><td>120</td></tr><tr><td>South</td><td>90</td></tr>
+  </table></body></html>"""
+
+# Layout table: explicitly role="presentation" (used for visual positioning).
+# The analyzer must NOT flag it — captioning it would assert a tabular meaning
+# that doesn't exist and feed the generator non-data cells. (See Finding 3B.)
+LAYOUT = """<!DOCTYPE html><html lang="en"><head><title>x</title></head><body>
+  <table role="presentation">
+    <tr><td>Home</td><td>About</td></tr>
+    <tr><td>Products</td><td>Contact</td></tr>
+    <tr><td>Blog</td><td>Careers</td></tr>
+  </table></body></html>"""
+
+# Header-less DATA grid (no role): the guard must STILL flag it on shape alone
+# (>=3 rows, >=2 cols). This is the signal that stays stable across
+# ADD_TABLE_HEADERS so fixing headers never surfaces a brand-new caption finding.
+DATAGRID_NOHDR = """<!DOCTYPE html><html lang="en"><head><title>g</title></head><body>
+  <table>
+    <tr><td>North</td><td>120</td><td>140</td></tr>
+    <tr><td>South</td><td>90</td><td>110</td></tr>
+    <tr><td>East</td><td>70</td><td>95</td></tr>
+  </table></body></html>"""
+
+# Source table that ALREADY has an author <caption> but no header row — the
+# header-synthesis path must keep <caption> as the table's first child so the
+# output stays HTML-spec-conformant. (See Finding 4.)
+CAPTION_NO_HEADER = """<!DOCTYPE html><html lang="en"><head><title>h</title></head><body>
+  <table><caption>People and ages</caption>
+    <tbody>
+      <tr><td>Alice</td><td>30</td></tr>
+      <tr><td>Bob</td><td>25</td></tr>
+      <tr><td>Cy</td><td>40</td></tr>
+    </tbody>
   </table></body></html>"""
 
 
@@ -150,6 +212,110 @@ def main() -> int:
     run_analyzers(rl.tree)
     check("C: table with a preceding label NOT flagged (no over-eager caption)",
           _flag_count(rl.tree, FLAG) == 0)
+
+    # ----------------------------------------------- Case D: layout-table guard
+    # A role="presentation" layout table must never be flagged (Finding 3B) — so
+    # the AI is never handed non-data cells and never emits a wrong caption.
+    dsrc = tmp / "layout.html"
+    dsrc.write_text(LAYOUT, encoding="utf-8")
+    rd = parse_to_tree(str(dsrc))
+    run_analyzers(rd.tree)
+    check("D: role=presentation layout table NOT flagged TABLE_CAPTION_MISSING",
+          _flag_count(rd.tree, FLAG) == 0, f"got {_flag_count(rd.tree, FLAG)}")
+
+    # Header-less data grid (no role) is STILL flagged on shape — this is the
+    # stable signal that doesn't flip when ADD_TABLE_HEADERS later adds headers,
+    # so "fix everything" never surfaces a brand-new caption finding.
+    dgsrc = tmp / "datagrid.html"
+    dgsrc.write_text(DATAGRID_NOHDR, encoding="utf-8")
+    rdg = parse_to_tree(str(dgsrc))
+    run_analyzers(rdg.tree)
+    check("D: header-less data grid IS flagged (stable shape signal)",
+          _flag_count(rdg.tree, FLAG) == 1, f"got {_flag_count(rdg.tree, FLAG)}")
+
+    # ----------------------------------- Case E: no AI spend on non-HTML tables
+    # The executor must SKIP (before any provider call) when the table's source
+    # format can't persist a <caption> (Finding 2). We re-use the flagged DIRTY
+    # tree but stamp the table node as DOCX and run our own spy-backed executor.
+    esrc = tmp / "fmt.html"
+    esrc.write_text(DIRTY, encoding="utf-8")
+    re_ = parse_to_tree(str(esrc))
+    run_analyzers(re_.tree)
+    e_plans = [p for p in plan_remediations(re_.tree, policy)
+               if p.flag.code.value == FLAG and p.execution_allowed]
+    check("E: caption plan exists to exercise", len(e_plans) == 1, str(e_plans))
+    e_table = next((n for n in iter_reading_order(re_.tree.root) if isinstance(n, TableNode)), None)
+    spy = _SpyClient()
+    if e_plans and e_table is not None:
+        e_table.metadata.source_format = "docx"  # pretend this came from a DOCX
+        spy_exec = GenerateTableCaptionExecutor(client=spy)
+        e_res = spy_exec.execute(e_plans[0], re_.tree)
+        check("E: non-HTML table SKIPPED (no caption generated)",
+              e_res.status == ExecutionStatus.SKIPPED, e_res.notes)
+        check("E: AI provider was NOT called for a non-persistable format", spy.calls == 0,
+              f"spy.calls={spy.calls}")
+        check("E: no phantom caption left on the tree node",
+              not (e_table.metadata.properties or {}).get("caption"))
+
+    # --------------------------- Case F: charge/score reconciliation (Finding 1)
+    # GENERATE_TABLE_CAPTION (writer-confirmed) must only count when the writer
+    # actually applied it; a writer no-op (empty applied list) must count 0.
+    cap_ok = ExecutionResult(action_code=ActionCode.GENERATE_TABLE_CAPTION,
+                             target_node_id="t1", status=ExecutionStatus.SUCCESS, notes="")
+    check("F: caption counted when writer applied it",
+          _count_persisted_fixes([cap_ok], [{"action": "GENERATE_TABLE_CAPTION", "target_id": "t1"}], "html") == 1)
+    check("F: caption NOT counted on a writer no-op (empty applied) — no overcharge",
+          _count_persisted_fixes([cap_ok], [], "html") == 0)
+    check("F: caption NOT counted when only a DIFFERENT target was applied",
+          _count_persisted_fixes([cap_ok], [{"action": "GENERATE_TABLE_CAPTION", "target_id": "other"}], "html") == 0)
+    # A non-writer-confirmed persisted action (alt text) still counts on success
+    # regardless of the applied list — only the writer-confirmed set reconciles.
+    alt_ok = ExecutionResult(action_code=ActionCode.GENERATE_ALT_TEXT,
+                             target_node_id="i1", status=ExecutionStatus.SUCCESS, notes="")
+    check("F: non-reconciled action (alt) still counts on success",
+          _count_persisted_fixes([alt_ok], [], "html") == 1)
+
+    # ------------------------ Case G: <caption> stays first child (Finding 4)
+    # An author <caption> + header synthesis must yield [caption, thead, ...].
+    gsrc = tmp / "caption_no_header.html"
+    gsrc.write_text(CAPTION_NO_HEADER, encoding="utf-8")
+    rg = parse_to_tree(str(gsrc))
+    g_table = next((n for n in iter_reading_order(rg.tree.root) if isinstance(n, TableNode)), None)
+    check("G: source caption read onto the table node",
+          g_table is not None and (g_table.metadata.properties or {}).get("caption") == "People and ages")
+    if g_table is not None:
+        # Mimic the ADD_TABLE_HEADERS executor: prepend a synthesized header row.
+        syn = TableRowNode(
+            id="syn-row",
+            content=NodeContent(kind=ContentKind.NONE),
+            metadata=NodeMetadata(source_format="html", properties={"synthesized": True}),
+            children=[
+                TableCellNode(id="syn-c1", cell_type=TableCellType.HEADER,
+                              header_scope=TableHeaderScope.COLUMN,
+                              content=NodeContent(kind=ContentKind.TEXT, text="Name"),
+                              metadata=NodeMetadata(source_format="html"), children=[],
+                              accessibility_flags=[]),
+                TableCellNode(id="syn-c2", cell_type=TableCellType.HEADER,
+                              header_scope=TableHeaderScope.COLUMN,
+                              content=NodeContent(kind=ContentKind.TEXT, text="Age"),
+                              metadata=NodeMetadata(source_format="html"), children=[],
+                              accessibility_flags=[]),
+            ],
+            accessibility_flags=[],
+        )
+        g_table.children.insert(0, syn)
+        gout = tmp / "caption_no_header.out.html"
+        write_remediated_html(gsrc, rg.tree, gout)
+        out_doc = lxml_html.fromstring(gout.read_text(encoding="utf-8"))
+        out_table = out_doc.find(".//table")
+        child_tags = [c.tag for c in out_table] if out_table is not None else []
+        check("G: <caption> is still the table's FIRST child after header synthesis",
+              bool(child_tags) and child_tags[0] == "caption", str(child_tags))
+        check("G: a <thead> was inserted (after the caption)",
+              "thead" in child_tags and child_tags.index("caption") < child_tags.index("thead"),
+              str(child_tags))
+        check("G: still exactly one <caption> (author caption not duplicated)",
+              gout.read_text(encoding="utf-8").count("<caption>") == 1)
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

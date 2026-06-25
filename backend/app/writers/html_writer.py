@@ -334,10 +334,20 @@ def _insert_synthetic_header_row(table_el: Any, row_node: TableRowNode) -> bool:
         return True
     first_tr = next((c for c in table_el.iter("tr")), None)
     if first_tr is not None:
-        # Create a real <thead> as the table's first child and put the row there.
+        # Create a real <thead> and place it at the FIRST valid position for a
+        # row group: after any leading <caption>/<colgroup> (HTML requires
+        # <caption> to be the table's first child — inserting <thead> at index 0
+        # would shove an AI-generated or author-provided caption out of place
+        # and trip a conformance validator). Skip leading caption/colgroup.
         thead = etree.Element("thead")
         thead.append(tr)
-        table_el.insert(0, thead)
+        idx = 0
+        for child in table_el:
+            if isinstance(child.tag, str) and child.tag.lower() in ("caption", "colgroup"):
+                idx += 1
+            else:
+                break
+        table_el.insert(idx, thead)
         return True
     table_el.append(tr)
     return True
