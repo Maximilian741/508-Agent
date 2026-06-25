@@ -268,9 +268,9 @@ const C: Record<string, IssueCatalogEntry> = {
     why:
       "A short caption above a data table tells screen reader users what they're about to navigate before the row-by-row read-out begins. Without it, users land in a grid of numbers with no context. WCAG 1.3.1 expects relationships like \"this label belongs to that table\" to be programmatically determinable.",
     autoFix:
-      "We'll flag for manual review — heading/caption/link-target requires human input.",
+      "For HTML and Word (.docx), we generate a concise caption from the table's own headers and rows and add it as a real caption — an HTML <caption>, or a Word \"Caption\" paragraph above the table (AI-assisted, pending your review). Other formats are flagged for manual review.",
     manualJudgment:
-      "Add a caption metadata property, or place a short heading/paragraph immediately above the table that describes what the table contains (e.g. \"Q3 revenue by region\").",
+      "Review the generated caption (or, for other formats, add one): place a short heading/paragraph immediately above the table, or set a caption, describing what the table contains (e.g. \"Q3 revenue by region\").",
     severity: "warning",
     standards: {
       wcag: ["1.3.1 Info and Relationships"],

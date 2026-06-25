@@ -14,6 +14,7 @@ from app.services.remediators.fill_form_field_labels_executor import FillFormFie
 from app.services.remediators.fix_contrast_executor import FixContrastExecutor
 from app.services.remediators.fix_list_structure_executor import FixListStructureExecutor
 from app.services.remediators.generate_alt_text_executor import GenerateAltTextExecutor
+from app.services.remediators.generate_table_caption_executor import GenerateTableCaptionExecutor
 from app.services.remediators.improve_link_text_executor import ImproveLinkTextExecutor
 from app.services.remediators.normalize_heading_level_executor import NormalizeHeadingLevelExecutor
 from app.services.remediators.promote_heading_executor import PromoteHeadingExecutor
@@ -35,6 +36,7 @@ def get_default_executors() -> List[RemediationExecutor]:
         PromoteHeadingExecutor(),
         AddTableHeadersExecutor(),
         SetTableHeaderScopeExecutor(),
+        GenerateTableCaptionExecutor(),
         FixListStructureExecutor(),
         FillFormFieldLabelsExecutor(),
         FixContrastExecutor(),

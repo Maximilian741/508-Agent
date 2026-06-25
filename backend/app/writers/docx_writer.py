@@ -69,6 +69,7 @@ from app.parsers.docx_parser import (
     _iter_text_box_paragraphs,
     _link_elements_in_paragraph,
     _note_paragraphs,
+    _paragraph_caption_text,
     _run_color_hex,
     strip_fake_list_prefix,
 )
@@ -200,6 +201,9 @@ def write_remediated_docx(
             # source element, so insert a real <w:tr> (tblHeader + bold cells)
             # into the source table — otherwise the "fix" never reaches the file.
             _apply_synthetic_table_header(node, tables_by_id, applied, skipped)
+            # An AI-generated caption (GENERATE_TABLE_CAPTION) is materialized as
+            # a Caption-styled <w:p> immediately above the <w:tbl>.
+            _apply_table_caption(doc, node, tables_by_id, applied, skipped)
 
     # Contrast recolour: the FixContrastExecutor leaves a {old_hex: new_hex} map
     # on each approved node naming only the runs that failed AA. Recolour just
@@ -956,6 +960,121 @@ def _apply_synthetic_table_header(
     )
 
 
+def _xml_safe(text: str) -> str:
+    """Drop characters XML 1.0 forbids (NUL + C0 controls except tab/CR/LF).
+
+    lxml raises ``ValueError: All strings must be XML compatible`` when a w:t
+    ``.text`` contains them — an AI-provided caption could carry a stray control
+    byte, which would otherwise abort the whole write and lose every fix.
+    """
+    if not text:
+        return text
+    return "".join(
+        ch for ch in text
+        if ch in ("\t", "\n", "\r") or ord(ch) >= 0x20
+    )
+
+
+def _ensure_caption_style(doc) -> None:
+    """Guarantee the document defines a paragraph style with styleId "Caption".
+
+    A ``w:pStyle`` referencing a styleId absent from ``styles.xml`` is IGNORED
+    by Word (the paragraph falls back to Normal), so an inserted caption would
+    not be a real, programmatically-associated caption. Word only adds the
+    built-in Caption style the first time a user inserts a caption, so many
+    authored docs lack it — we add a minimal definition on demand (mirrors
+    :func:`_ensure_list_numbering`). Idempotent + memoized per Document.
+    """
+    if getattr(doc, "_a508_caption_style_ensured", False):
+        return
+    styles_el = doc.styles.element
+    for st in styles_el.findall(qn("w:style")):
+        if (st.get(qn("w:styleId")) or "").strip().lower() == "caption":
+            doc._a508_caption_style_ensured = True
+            return
+    style = OxmlElement("w:style")
+    style.set(qn("w:type"), "paragraph")
+    style.set(qn("w:styleId"), "Caption")
+    name = OxmlElement("w:name")
+    name.set(qn("w:val"), "Caption")
+    style.append(name)
+    based = OxmlElement("w:basedOn")
+    based.set(qn("w:val"), "Normal")
+    style.append(based)
+    nxt = OxmlElement("w:next")
+    nxt.set(qn("w:val"), "Normal")
+    style.append(nxt)
+    style.append(OxmlElement("w:qFormat"))
+    rpr = OxmlElement("w:rPr")
+    rpr.append(OxmlElement("w:i"))  # Word's Caption default: italic, muted, smaller
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "44546A")
+    rpr.append(color)
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), "18")
+    rpr.append(sz)
+    style.append(rpr)
+    styles_el.append(style)
+    doc._a508_caption_style_ensured = True
+
+
+def _apply_table_caption(
+    doc,
+    table: TableNode,
+    tables_by_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Insert a Caption-styled ``<w:p>`` above the table when one was generated.
+
+    ``GenerateTableCaptionExecutor`` stores the caption on
+    ``TableNode.metadata.properties['caption']``. We materialise it as a real
+    Word caption — a paragraph styled "Caption" placed immediately before the
+    ``<w:tbl>`` (where the Accessibility Checker and screen readers expect it),
+    ensuring the Caption style is actually defined so the reference resolves.
+    Re-parsing the output reads that paragraph back via
+    :func:`_paragraph_caption_text`, so ``TABLE_CAPTION_MISSING`` clears.
+
+    Idempotent and source-safe: skips (recording it, so it is never
+    credited/charged) when the table can't be resolved or already has an
+    adjacent Caption paragraph — so a caption that came from the SOURCE document
+    is never duplicated.
+    """
+    caption = (table.metadata.properties or {}).get("caption")
+    if not (isinstance(caption, str) and caption.strip()):
+        return
+    caption = _xml_safe(caption.strip())
+    if not caption:
+        return  # caption was nothing but control characters
+
+    docx_table = tables_by_id.get(table.id)
+    if docx_table is None:
+        skipped.append({"target_id": table.id, "reason": "table_not_found_in_source"})
+        return
+
+    tbl = docx_table._tbl
+    if _paragraph_caption_text(tbl.getprevious()) or _paragraph_caption_text(tbl.getnext()):
+        # Already captioned in the source — never double it (and never credit it).
+        skipped.append({"target_id": table.id, "reason": "caption_already_present"})
+        return
+
+    _ensure_caption_style(doc)
+    p = OxmlElement("w:p")
+    pPr = OxmlElement("w:pPr")
+    pStyle = OxmlElement("w:pStyle")
+    pStyle.set(qn("w:val"), "Caption")
+    pPr.append(pStyle)
+    p.append(pPr)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.set(qn("xml:space"), "preserve")
+    t.text = caption
+    run.append(t)
+    p.append(run)
+    tbl.addprevious(p)
+    applied.append({"action": "GENERATE_TABLE_CAPTION", "target_id": table.id})
+
+
 def _insert_docx_header_row(docx_table, texts: List[str]) -> None:
     """Build and insert a header ``<w:tr>`` at the top of ``docx_table``."""
 
@@ -974,7 +1093,7 @@ def _insert_docx_header_row(docx_table, texts: List[str]) -> None:
         run.append(rpr)
         t = OxmlElement("w:t")
         t.set(qn("xml:space"), "preserve")
-        t.text = text
+        t.text = _xml_safe(text)
         run.append(t)
         para.append(run)
         tc.append(para)
