@@ -21,8 +21,8 @@ never overclaims.
 Honesty: the set of actions credited for HTML lives in
 ``pipeline._PERSISTED_ACTIONS["html"]`` = {SET_DOCUMENT_TITLE,
 SET_DOCUMENT_LANGUAGE, GENERATE_ALT_TEXT, NORMALIZE_HEADING_LEVEL,
-IMPROVE_LINK_TEXT, ADD_TABLE_HEADERS, FIX_CONTRAST, FILL_FORM_FIELD_LABELS}.
-Every one is persisted here. A locator that unexpectedly fails to resolve is
+IMPROVE_LINK_TEXT, ADD_TABLE_HEADERS, FIX_CONTRAST, FILL_FORM_FIELD_LABELS,
+FIX_LIST_STRUCTURE, GENERATE_TABLE_CAPTION}. Every one is persisted here. A locator that unexpectedly fails to resolve is
 logged and recorded in ``skipped`` (it should never happen for parser-produced
 nodes on a same-bytes re-parse).
 """
@@ -282,6 +282,17 @@ def _apply_table(node: TableNode, elements: Dict[str, Any], applied: List[Dict[s
     table_el = elements.get(node.id)
     if table_el is None:
         return
+    # AI-generated <caption> (GENERATE_TABLE_CAPTION): insert as the table's
+    # FIRST child (the only valid position for <caption>). Never clobber an
+    # existing one. The executor only sets this when the table was flagged
+    # caption-missing, so re-parsing the output reads it back and clears the
+    # flag (honesty round-trip).
+    caption = (node.metadata.properties or {}).get("caption")
+    if isinstance(caption, str) and caption.strip() and table_el.find("caption") is None:
+        caption_el = etree.Element("caption")
+        caption_el.text = caption
+        table_el.insert(0, caption_el)
+        applied.append({"action": "GENERATE_TABLE_CAPTION", "target_id": node.id})
     for row_node in node.children:
         if not isinstance(row_node, TableRowNode):
             continue
@@ -323,10 +334,20 @@ def _insert_synthetic_header_row(table_el: Any, row_node: TableRowNode) -> bool:
         return True
     first_tr = next((c for c in table_el.iter("tr")), None)
     if first_tr is not None:
-        # Create a real <thead> as the table's first child and put the row there.
+        # Create a real <thead> and place it at the FIRST valid position for a
+        # row group: after any leading <caption>/<colgroup> (HTML requires
+        # <caption> to be the table's first child — inserting <thead> at index 0
+        # would shove an AI-generated or author-provided caption out of place
+        # and trip a conformance validator). Skip leading caption/colgroup.
         thead = etree.Element("thead")
         thead.append(tr)
-        table_el.insert(0, thead)
+        idx = 0
+        for child in table_el:
+            if isinstance(child.tag, str) and child.tag.lower() in ("caption", "colgroup"):
+                idx += 1
+            else:
+                break
+        table_el.insert(idx, thead)
         return True
     table_el.append(tr)
     return True

@@ -71,6 +71,10 @@ class SemanticInferenceProvider(ABC):
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
         raise NotImplementedError
 
+    @abstractmethod
+    def table_caption(self, payload: Dict[str, Any]) -> InferenceResult:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Heuristic provider
@@ -162,6 +166,16 @@ class HeuristicProvider(SemanticInferenceProvider):
         confidence = min(0.85, 0.3 + 0.05 * best[1])
         return InferenceResult(text=best[0], confidence=confidence, provider=self.name)
 
+    def table_caption(self, payload: Dict[str, Any]) -> InferenceResult:
+        # Offline: derive a caption from the table's column headers, e.g.
+        # "Table: Region, Q1, Q2, Q3". Low confidence so it routes to review.
+        headers = [str(h).strip() for h in (payload.get("headers") or []) if str(h).strip()]
+        if headers:
+            joined = ", ".join(headers[:6])
+            text = _slugify(f"Table: {joined}")
+            return InferenceResult(text=text, confidence=0.4, provider=self.name)
+        return InferenceResult(text="Data table", confidence=0.2, provider=self.name)
+
 
 # ---------------------------------------------------------------------------
 # Anthropic provider
@@ -209,6 +223,10 @@ class ClaudeProvider(SemanticInferenceProvider):
     def link_text(self, payload: Dict[str, Any]) -> InferenceResult:
         prompt = _link_text_prompt(payload)
         return self._respond(prompt, default_payload=payload, fallback=self.fallback.link_text)
+
+    def table_caption(self, payload: Dict[str, Any]) -> InferenceResult:
+        prompt = _table_caption_prompt(payload)
+        return self._respond(prompt, default_payload=payload, fallback=self.fallback.table_caption)
 
     def document_title(self, payload: Dict[str, Any]) -> InferenceResult:
         prompt = _title_prompt(payload)
@@ -373,6 +391,9 @@ class OpenAIProvider(SemanticInferenceProvider):
     def link_text(self, payload: Dict[str, Any]) -> InferenceResult:
         return self._respond(_link_text_prompt(payload), payload, self.fallback.link_text)
 
+    def table_caption(self, payload: Dict[str, Any]) -> InferenceResult:
+        return self._respond(_table_caption_prompt(payload), payload, self.fallback.table_caption)
+
     def document_title(self, payload: Dict[str, Any]) -> InferenceResult:
         return self._respond(_title_prompt(payload), payload, self.fallback.document_title)
 
@@ -514,6 +535,20 @@ def _link_text_prompt(payload: Dict[str, Any]) -> str:
     )
 
 
+def _table_caption_prompt(payload: Dict[str, Any]) -> str:
+    headers = ", ".join(str(h) for h in (payload.get("headers") or []) if str(h).strip())
+    sample = str(payload.get("sample") or "")
+    return (
+        "Write a short, descriptive caption (a title) for an HTML data table, so a "
+        "screen-reader user knows what the table contains before reading it. Base it "
+        "ONLY on the column headers and sample rows below — do not invent facts or "
+        "numbers. Return ONLY the caption as a concise noun phrase (no trailing period, "
+        "no 'This table').\n"
+        f"Column headers: {headers or '(none)'}\n"
+        f"Sample rows: {sample[:500] or '(none)'}"
+    )
+
+
 def _title_prompt(payload: Dict[str, Any]) -> str:
     filename = payload.get("filename") or payload.get("doc_id") or "Document"
     first_heading = payload.get("firstHeading") or ""
@@ -651,7 +686,7 @@ class SemanticInferenceClient:
     def _cache_key(kind: str, payload: Dict[str, Any]) -> Optional[str]:
         # We deliberately exclude the image bytes so we don't blow up the cache.
         bits: List[str] = [kind]
-        for key in ("label", "location", "page", "context", "caption", "text", "target", "filename", "firstHeading", "sample"):
+        for key in ("label", "location", "page", "context", "caption", "text", "target", "filename", "firstHeading", "sample", "headers"):
             value = payload.get(key)
             if value is None:
                 continue
@@ -694,6 +729,8 @@ class SemanticInferenceClient:
 
         if kind == "link_text":
             result = active.link_text(payload)
+        elif kind == "table_caption":
+            result = active.table_caption(payload)
         elif kind == "document_title":
             result = active.document_title(payload)
         elif kind == "document_language":
@@ -723,6 +760,9 @@ class SemanticInferenceClient:
 
     def suggest_link_text(self, **payload: Any) -> InferenceResult:
         return self._dispatch("link_text", payload)
+
+    def suggest_table_caption(self, **payload: Any) -> InferenceResult:
+        return self._dispatch("table_caption", payload)
 
     def suggest_document_title(self, **payload: Any) -> InferenceResult:
         return self._dispatch("document_title", payload)

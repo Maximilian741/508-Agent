@@ -850,6 +850,11 @@ def _build_table(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> Tabl
         )
 
     meta = _meta(el, roottree)
+    # Preserve an explicit layout-table signal so the caption analyzer can skip
+    # role="presentation"/"none" tables (they convey no tabular data).
+    role = (el.get("role") or "").strip().lower()
+    if role:
+        meta.properties["role"] = role
     caption_el = el.find("caption")
     if caption_el is not None:
         cap = _text(caption_el)

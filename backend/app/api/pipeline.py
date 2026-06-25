@@ -571,26 +571,12 @@ async def remediate(
     # already-correct heading style — so it is non-empty even when no approved
     # fix landed.) We still return the file + summary + manual-review items; the
     # caller simply isn't billed. ``charged`` is surfaced for transparency.
-    # FIX_CONTRAST is the one persisted action with no "re-assert existing
-    # structure" path: the writer appends it to ``applied`` ONLY when it
-    # actually recoloured a resolved element. So for it (unlike the structural
-    # fixes) the writer's applied list is authoritative — an approved recolour
-    # whose element didn't resolve must NOT be counted or charged.
-    _applied_contrast_targets = {
-        a.get("target_id")
-        for a in (_applied or [])
-        if isinstance(a, dict) and a.get("action") == "FIX_CONTRAST"
-    }
-    persisted_fixes = 0
-    for e in executions:
-        if getattr(e.status, "value", e.status) != "success":
-            continue
-        code = e.action_code.value
-        if not _action_persists(code, fmt):
-            continue
-        if code == "FIX_CONTRAST" and e.target_node_id not in _applied_contrast_targets:
-            continue
-        persisted_fixes += 1
+    # For the writer-confirmed actions (FIX_CONTRAST, GENERATE_TABLE_CAPTION)
+    # the writer's ``applied`` list is authoritative: it appends them ONLY on a
+    # real edit, so an approved fix whose element didn't resolve, or whose
+    # target already had the fix (writer no-op), must NOT be counted or charged.
+    # See ``_count_persisted_fixes`` / ``_WRITER_CONFIRMED_ACTIONS``.
+    persisted_fixes = _count_persisted_fixes(executions, _applied, fmt)
     charged = False
     if persisted_fixes > 0:
         # Charge AFTER the file exists. On the rare race where the wallet was
@@ -895,6 +881,12 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # flag). Counted only when the writer confirms it (see the FIX_CONTRAST
         # reconciliation against the applied list below).
         "FIX_CONTRAST",
+        # Caption-less data tables get an AI-generated caption inserted as a
+        # Caption-styled <w:p> above the <w:tbl> — verified by
+        # smoke_docx_table_caption (re-parse reads it back and the flag clears).
+        # Grounded in the table's own headers/rows. Reconciled against the
+        # writer's applied list (it is in _WRITER_CONFIRMED_ACTIONS).
+        "GENERATE_TABLE_CAPTION",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",
@@ -961,12 +953,56 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # colour and LOW_CONTRAST_TEXT clears). Only counted for HTML; DOCX/PPTX
         # writers don't apply the marker yet, so they are intentionally absent.
         "FIX_CONTRAST",
+        # Caption-less data tables get an AI-generated <caption> inserted as the
+        # table's first child — verified by smoke_table_caption_writer (re-parse
+        # reads the <caption> back and TABLE_CAPTION_MISSING clears). Grounded in
+        # the table's own headers/rows; routes to review like alt text.
+        "GENERATE_TABLE_CAPTION",
     },
 }
 
 
 def _action_persists(action_code: str, source_format: str) -> bool:
     return action_code in _PERSISTED_ACTIONS.get((source_format or "").lower(), set())
+
+
+# Actions whose writer appends to ``applied`` ONLY when it actually edited the
+# bytes — there is no "re-assert existing structure" path for them. For these
+# the writer's applied list is AUTHORITATIVE: an approved action whose target
+# element didn't resolve, or whose target already had the fix (so the writer
+# silently no-ops), must NOT be counted as fixed or charged. Every other
+# persisted action can legitimately appear in ``applied`` as a re-assertion of
+# pre-existing structure, so we can't key those off the applied list.
+#   - FIX_CONTRAST: only appended on a real recolour of a resolved element.
+#   - GENERATE_TABLE_CAPTION: only appended when a <caption> was actually
+#     inserted (guarded by ``find("caption") is None`` + a resolved table).
+_WRITER_CONFIRMED_ACTIONS = {"FIX_CONTRAST", "GENERATE_TABLE_CAPTION"}
+
+
+def _count_persisted_fixes(executions, applied, source_format: str) -> int:
+    """Count successful executions that genuinely persist into the output file.
+
+    Gates on executor-success ∩ :func:`_action_persists`, and for the
+    writer-confirmed actions additionally intersects against the writer's
+    ``applied`` list (keyed by action + target) so a silent writer no-op is
+    never counted or charged. This is the single honesty gate used by the
+    charge path (and unit-tested by smoke_table_caption_writer).
+    """
+    applied_by_action: Dict[str, set] = {}
+    for a in (applied or []):
+        if isinstance(a, dict):
+            applied_by_action.setdefault(a.get("action"), set()).add(a.get("target_id"))
+    count = 0
+    for e in executions:
+        if getattr(e.status, "value", e.status) != "success":
+            continue
+        code = e.action_code.value
+        if not _action_persists(code, source_format):
+            continue
+        if code in _WRITER_CONFIRMED_ACTIONS and e.target_node_id not in applied_by_action.get(code, set()):
+            continue
+        count += 1
+    return count
 
 
 def _build_score(*, violations, executions, source_format: str = "") -> PipelineScore:
