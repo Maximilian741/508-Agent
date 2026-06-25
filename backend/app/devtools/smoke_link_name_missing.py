@@ -88,6 +88,40 @@ CASES = [
     ("role=presentation icon link",
      '<a href="/home" role="presentation"><span class="icon"></span></a>',
      {NAME_MISSING: 0}),
+
+    # --- adversarial-review regression cases ---
+    # Descendant aria-labelledby resolving to real text -> named (was a FP).
+    ("descendant aria-labelledby (resolved -> named)",
+     '<span id="t1">Home</span><a href="/home"><svg aria-labelledby="t1"><use href="#i"/></svg></a>',
+     {NAME_MISSING: 0}),
+    # aria-labelledby on the <a> pointing at a NON-EXISTENT id -> genuinely
+    # nameless (was a FN: presence-only check treated it as named).
+    ("broken aria-labelledby on link (-> still nameless)",
+     '<a href="/home" aria-labelledby="ghost"><span class="icon"></span></a>',
+     {NAME_MISSING: 1}),
+    # aria-labelledby pointing at an EMPTY element -> nameless.
+    ("empty aria-labelledby target (-> nameless)",
+     '<a href="/home" aria-labelledby="e1"><span class="icon"></span></a><span id="e1"></span>',
+     {NAME_MISSING: 1}),
+    # Inline display:none / visibility:hidden -> out of a11y tree, not flagged.
+    ("inline display:none icon link",
+     '<a href="/home" style="display:none"><span class="icon"></span></a>',
+     {NAME_MISSING: 0}),
+    ("inline visibility:hidden icon link",
+     '<a href="/home" style="visibility:hidden"><span class="icon"></span></a>',
+     {NAME_MISSING: 0}),
+    # Link wrapping ONLY <script>/<style> -> no visible name (was a FN: the
+    # CSS/JS source leaked through text_content).
+    ("link wrapping only <style> (-> nameless)",
+     '<a href="/home"><style>.c{color:red}</style></a>',
+     {NAME_MISSING: 1}),
+    ("link wrapping only <script> (-> nameless)",
+     '<a href="/home"><script>render()</script></a>',
+     {NAME_MISSING: 1}),
+    # Embedded image input with alt -> contributes the link's name (was a FP).
+    ("embedded image input with alt (named)",
+     '<a href="/home"><input type="image" src="s.png" alt="Go"></a>',
+     {NAME_MISSING: 0}),
 ]
 
 

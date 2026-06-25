@@ -519,37 +519,102 @@ def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> L
     return out
 
 
+_NAME_SKIP_TAGS = {"script", "style", "template", "noscript"}
+
+
+def _style_hides(el: Any) -> bool:
+    """True if an element's INLINE style removes it from the rendered/a11y tree."""
+    decls: Dict[str, str] = {}
+    for part in (el.get("style") or "").split(";"):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            decls[k.strip().lower()] = v.strip().lower()
+    return decls.get("display") == "none" or decls.get("visibility") == "hidden"
+
+
+def _visible_subtree_text(el: Any) -> str:
+    """Subtree text of ``el`` EXCLUDING non-rendered tags (script/style/...).
+
+    ``element.text_content()`` would fold in CSS/JS source, so a link wrapping
+    only a ``<style>``/``<script>`` would look "named". A ``.tail`` (text after a
+    skipped element but still inside the link) IS rendered, so it is kept.
+    """
+    parts = [el.text or ""]
+    for d in el.iter():
+        if d is el or not isinstance(d.tag, str):
+            continue
+        if d.tag.rsplit("}", 1)[-1].lower() not in _NAME_SKIP_TAGS:
+            parts.append(d.text or "")
+        parts.append(d.tail or "")  # tail renders regardless of the element's tag
+    return "".join(parts).strip()
+
+
+def _labelledby_text(el: Any, ref: str) -> str:
+    """Resolve an ``aria-labelledby`` token list to the referenced elements' text.
+
+    Returns the concatenated non-empty text of the targets (empty if none
+    resolve or all are empty) — so a broken/empty reference is correctly treated
+    as supplying NO name.
+    """
+    try:
+        root = el.getroottree().getroot()
+    except Exception:
+        return ""
+    parts: List[str] = []
+    for token in ref.split():
+        try:
+            found = root.xpath("//*[@id=$v]", v=token)
+        except Exception:
+            found = []
+        for target in found:
+            txt = (_text(target) or "").strip()
+            if txt:
+                parts.append(txt)
+    return " ".join(parts).strip()
+
+
 def _link_is_nameless(el: Any) -> bool:
     """True iff an ``<a href>`` has NO accessible name from any source.
 
     Conservative (zero false-positive): returns True only when there is no
-    ``aria-label``/``aria-labelledby``/``title`` on the ``<a>``, no subtree text,
-    and no descendant that supplies a name — a descendant ``<img>`` with
-    non-empty ``alt``, any descendant with a non-empty ``aria-label``, or an
-    inline-SVG ``<title>``. A descendant ``<img>`` with a MISSING ``alt`` is
-    deferred to the alt-text detection (we never double-flag), so this targets
-    the genuinely-uncovered case: icon-font / inline-SVG / empty-element links.
+    accessible name on the ``<a>`` (``aria-label``/``title``, or an
+    ``aria-labelledby`` that RESOLVES to non-empty text), no visible subtree
+    text, and no descendant that supplies a name — a descendant ``<img>``/image
+    ``<input>`` with non-empty ``alt``/``value``, any descendant with a resolved
+    ``aria-label``/``aria-labelledby``, or an inline-SVG ``<title>``. A
+    descendant ``<img>`` with a MISSING ``alt`` is deferred to the alt-text
+    detection (we never double-flag), so this targets the genuinely-uncovered
+    case: icon-font / inline-SVG / empty-element links.
     """
     # A link removed from the accessibility tree (aria-hidden on it or any
-    # ancestor, role=presentation/none, or the boolean ``hidden`` attribute) is
-    # not announced at all, so a missing name there is not a real defect — and a
-    # decorative aria-hidden icon link duplicating a labelled one is common.
+    # ancestor, role=presentation/none, the boolean ``hidden`` attribute, or an
+    # inline display:none/visibility:hidden) is not announced at all, so a
+    # missing name there is not a real defect — and a decorative aria-hidden
+    # icon link duplicating a labelled one is common.
     if (el.get("role") or "").strip().lower() in {"presentation", "none"}:
         return False
-    if el.get("hidden") is not None:
+    if el.get("hidden") is not None or _style_hides(el):
         return False
     for anc in (el, *el.iterancestors()):
         if isinstance(anc.tag, str) and (anc.get("aria-hidden") or "").strip().lower() == "true":
             return False
-    for attr in ("aria-label", "aria-labelledby", "title"):
+    # aria-label / title: the attribute value IS the name.
+    for attr in ("aria-label", "title"):
         if (el.get(attr) or "").strip():
             return False
-    if (_text(el) or "").strip():
+    # aria-labelledby: resolve the referenced ids; a broken/empty ref names nothing.
+    lb = (el.get("aria-labelledby") or "").strip()
+    if lb and _labelledby_text(el, lb):
+        return False
+    if _visible_subtree_text(el):
         return False
     for d in el.iter():
         if d is el or not isinstance(d.tag, str):
             continue
         if (d.get("aria-label") or "").strip():
+            return False
+        dlb = (d.get("aria-labelledby") or "").strip()
+        if dlb and _labelledby_text(d, dlb):
             return False
         local = d.tag.rsplit("}", 1)[-1].lower()
         if local == "img":
@@ -558,6 +623,12 @@ def _link_is_nameless(el: Any) -> bool:
             if (d.get("alt") or "").strip():
                 return False  # a named image gives the link its name
             # alt="" (decorative) contributes no name — keep looking
+        elif local == "input":
+            itype = (d.get("type") or "").strip().lower()
+            if itype in {"image", "submit", "button", "reset"} and (
+                (d.get("alt") or "").strip() or (d.get("value") or "").strip()
+            ):
+                return False  # embedded named control contributes its name
         elif local == "title" and (d.text or "").strip():
             return False  # inline SVG <title>
     return True
