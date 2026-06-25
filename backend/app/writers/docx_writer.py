@@ -69,6 +69,7 @@ from app.parsers.docx_parser import (
     _iter_text_box_paragraphs,
     _link_elements_in_paragraph,
     _note_paragraphs,
+    _paragraph_caption_text,
     _run_color_hex,
     strip_fake_list_prefix,
 )
@@ -200,6 +201,9 @@ def write_remediated_docx(
             # source element, so insert a real <w:tr> (tblHeader + bold cells)
             # into the source table — otherwise the "fix" never reaches the file.
             _apply_synthetic_table_header(node, tables_by_id, applied, skipped)
+            # An AI-generated caption (GENERATE_TABLE_CAPTION) is materialized as
+            # a Caption-styled <w:p> immediately above the <w:tbl>.
+            _apply_table_caption(node, tables_by_id, applied, skipped)
 
     # Contrast recolour: the FixContrastExecutor leaves a {old_hex: new_hex} map
     # on each approved node naming only the runs that failed AA. Recolour just
@@ -954,6 +958,57 @@ def _apply_synthetic_table_header(
             "summary": f"inserted {len(texts)}-column header row (tblHeader)",
         }
     )
+
+
+def _apply_table_caption(
+    table: TableNode,
+    tables_by_id: Dict[str, Any],
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+) -> None:
+    """Insert a Caption-styled ``<w:p>`` above the table when one was generated.
+
+    ``GenerateTableCaptionExecutor`` stores the caption on
+    ``TableNode.metadata.properties['caption']``. We materialise it as a real
+    Word caption — a paragraph styled "Caption" placed immediately before the
+    ``<w:tbl>`` (where the Accessibility Checker and screen readers expect it).
+    Re-parsing the output reads that paragraph back via
+    :func:`_paragraph_caption_text`, so ``TABLE_CAPTION_MISSING`` clears.
+
+    Idempotent and source-safe: skips (recording it, so it is never
+    credited/charged) when the table can't be resolved or already has an
+    adjacent Caption paragraph — so a caption that came from the SOURCE document
+    is never duplicated.
+    """
+    caption = (table.metadata.properties or {}).get("caption")
+    if not (isinstance(caption, str) and caption.strip()):
+        return
+
+    docx_table = tables_by_id.get(table.id)
+    if docx_table is None:
+        skipped.append({"target_id": table.id, "reason": "table_not_found_in_source"})
+        return
+
+    tbl = docx_table._tbl
+    if _paragraph_caption_text(tbl.getprevious()) or _paragraph_caption_text(tbl.getnext()):
+        # Already captioned in the source — never double it (and never credit it).
+        skipped.append({"target_id": table.id, "reason": "caption_already_present"})
+        return
+
+    p = OxmlElement("w:p")
+    pPr = OxmlElement("w:pPr")
+    pStyle = OxmlElement("w:pStyle")
+    pStyle.set(qn("w:val"), "Caption")
+    pPr.append(pStyle)
+    p.append(pPr)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.set(qn("xml:space"), "preserve")
+    t.text = caption.strip()
+    run.append(t)
+    p.append(run)
+    tbl.addprevious(p)
+    applied.append({"action": "GENERATE_TABLE_CAPTION", "target_id": table.id})
 
 
 def _insert_docx_header_row(docx_table, texts: List[str]) -> None:

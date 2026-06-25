@@ -235,8 +235,9 @@ def main() -> int:
 
     # ----------------------------------- Case E: no AI spend on non-HTML tables
     # The executor must SKIP (before any provider call) when the table's source
-    # format can't persist a <caption> (Finding 2). We re-use the flagged DIRTY
-    # tree but stamp the table node as DOCX and run our own spy-backed executor.
+    # format can't persist a caption (Finding 2). HTML + DOCX persist; PPTX/PDF
+    # do not. We re-use the flagged DIRTY tree but stamp the table node as PPTX
+    # (a non-persistable format) and run our own spy-backed executor.
     esrc = tmp / "fmt.html"
     esrc.write_text(DIRTY, encoding="utf-8")
     re_ = parse_to_tree(str(esrc))
@@ -247,10 +248,10 @@ def main() -> int:
     e_table = next((n for n in iter_reading_order(re_.tree.root) if isinstance(n, TableNode)), None)
     spy = _SpyClient()
     if e_plans and e_table is not None:
-        e_table.metadata.source_format = "docx"  # pretend this came from a DOCX
+        e_table.metadata.source_format = "pptx"  # a format with no caption writer
         spy_exec = GenerateTableCaptionExecutor(client=spy)
         e_res = spy_exec.execute(e_plans[0], re_.tree)
-        check("E: non-HTML table SKIPPED (no caption generated)",
+        check("E: non-persistable-format table SKIPPED (no caption generated)",
               e_res.status == ExecutionStatus.SKIPPED, e_res.notes)
         check("E: AI provider was NOT called for a non-persistable format", spy.calls == 0,
               f"spy.calls={spy.calls}")

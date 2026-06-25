@@ -881,6 +881,12 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # flag). Counted only when the writer confirms it (see the FIX_CONTRAST
         # reconciliation against the applied list below).
         "FIX_CONTRAST",
+        # Caption-less data tables get an AI-generated caption inserted as a
+        # Caption-styled <w:p> above the <w:tbl> — verified by
+        # smoke_docx_table_caption (re-parse reads it back and the flag clears).
+        # Grounded in the table's own headers/rows. Reconciled against the
+        # writer's applied list (it is in _WRITER_CONFIRMED_ACTIONS).
+        "GENERATE_TABLE_CAPTION",
     },
     "pptx": {
         "SET_DOCUMENT_TITLE",

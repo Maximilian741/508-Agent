@@ -1111,6 +1111,41 @@ def _docx_row_is_header(row) -> bool:
     return bool(populated) and all(_cell_text_is_bold(c) for c in populated)
 
 
+_CAPTION_STYLE_VALS = {"caption"}  # Word built-in "Caption" paragraph style id
+
+
+def _paragraph_caption_text(p_el) -> Optional[str]:
+    """Return the text of ``p_el`` iff it is a ``Caption``-styled ``<w:p>``.
+
+    A Word table caption is a paragraph styled "Caption" sitting adjacent to the
+    table — that is the programmatic caption Word's Accessibility Checker and
+    screen readers read (a plain sentence above a table is NOT associated with
+    it). Returns ``None`` for anything that isn't a non-empty Caption paragraph.
+    """
+    if p_el is None or p_el.tag != qn("w:p"):
+        return None
+    pPr = p_el.find(qn("w:pPr"))
+    if pPr is None:
+        return None
+    pStyle = pPr.find(qn("w:pStyle"))
+    if pStyle is None:
+        return None
+    if (pStyle.get(qn("w:val")) or "").strip().lower() not in _CAPTION_STYLE_VALS:
+        return None
+    text = "".join(t.text or "" for t in p_el.iterfind(f".//{qn('w:t')}")).strip()
+    return text or None
+
+
+def _docx_table_caption(table) -> Optional[str]:
+    """The caption text for a Word table, if a Caption paragraph is adjacent.
+
+    Word convention puts a table's caption immediately ABOVE it; some authors
+    place it below. We check both immediate XML siblings of the ``<w:tbl>``.
+    """
+    tbl = table._tbl
+    return _paragraph_caption_text(tbl.getprevious()) or _paragraph_caption_text(tbl.getnext())
+
+
 def _table_to_node(table, ids: _IdCounter) -> TableNode:
     # Decide once whether row 0 is a header. Word marks real headers with
     # w:tblHeader or styles them bold; if neither AND the table is a clear data
@@ -1162,10 +1197,12 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
                 accessibility_flags=[],
             )
         )
+    caption = _docx_table_caption(table)
+    table_props = {"caption": caption} if caption else {}
     return TableNode(
         id=ids("docx-table"),
         content=NodeContent(kind=ContentKind.NONE),
-        metadata=NodeMetadata(source_format="docx"),
+        metadata=NodeMetadata(source_format="docx", properties=table_props),
         children=rows,
         accessibility_flags=[],
     )

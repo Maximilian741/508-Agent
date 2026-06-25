@@ -29,11 +29,12 @@ from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 # Formats whose writer actually materializes the generated caption into the
-# output bytes. MUST stay in sync with the GENERATE_TABLE_CAPTION entry in
-# pipeline._PERSISTED_ACTIONS — only HTML inserts a <caption> today. For any
-# other format the caption would never persist, so we must NOT spend an AI call
-# on it (margin leak) nor leave a phantom caption in the in-memory tree.
-_PERSISTABLE_FORMATS = {"html"}
+# output bytes. MUST stay in sync with the GENERATE_TABLE_CAPTION entries in
+# pipeline._PERSISTED_ACTIONS: HTML inserts a <caption>; DOCX inserts a
+# Caption-styled <w:p> above the <w:tbl>. For any other format the caption would
+# never persist, so we must NOT spend an AI call on it (margin leak) nor leave a
+# phantom caption in the in-memory tree.
+_PERSISTABLE_FORMATS = {"html", "docx"}
 
 
 class GenerateTableCaptionExecutor(RemediationExecutor):
