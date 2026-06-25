@@ -52,16 +52,36 @@ def _bold_header(cell, text):
     cell.paragraphs[0].runs[0].font.bold = True  # makes row 0 a real header row
 
 
-def _build_uncaptioned(path: Path) -> None:
-    """A 3x3 data table (bold header row + 2 data rows), no caption."""
-    doc = Document()
-    table = doc.add_table(rows=3, cols=3)
+def _strip_caption_style(doc) -> None:
+    """Remove any defined Caption style — mimics a real authored .docx that
+    never had a caption (Word adds the style only on first caption insert)."""
+    styles_el = doc.styles.element
+    for st in list(styles_el.findall(qn("w:style"))):
+        if (st.get(qn("w:styleId")) or "").strip().lower() == "caption":
+            styles_el.remove(st)
+
+
+def _has_caption_style(doc) -> bool:
+    return any(
+        (st.get(qn("w:styleId")) or "").strip().lower() == "caption"
+        for st in doc.styles.element.findall(qn("w:style"))
+    )
+
+
+def _fill_3x3(table) -> None:
     for c, txt in zip(table.rows[0].cells, ["Region", "Q1", "Q2"]):
         _bold_header(c, txt)
     for c, txt in zip(table.rows[1].cells, ["North", "120", "140"]):
         c.text = txt
     for c, txt in zip(table.rows[2].cells, ["South", "90", "110"]):
         c.text = txt
+
+
+def _build_uncaptioned(path: Path) -> None:
+    """A 3x3 data table (bold header row + 2 data rows), no caption."""
+    doc = Document()
+    table = doc.add_table(rows=3, cols=3)
+    _fill_3x3(table)
     doc.save(str(path))
 
 
@@ -185,6 +205,84 @@ def main() -> int:
                              target_node_id="docx-table-1", status=ExecutionStatus.SUCCESS, notes="")
     check("C: caption NOT counted on a writer no-op (empty applied) — no overcharge",
           _count_persisted_fixes([cap_ok], [], "docx") == 0)
+
+    # ------- Case D: undefined Caption style is created so the fix is a REAL
+    # caption (not Normal body text). Build a source with NO Caption style.
+    dsrc = tmp / "no_style.docx"
+    ddoc = Document()
+    _strip_caption_style(ddoc)
+    _fill_3x3(ddoc.add_table(rows=3, cols=3))
+    ddoc.save(str(dsrc))
+    check("D: source genuinely has no Caption style", not _has_caption_style(Document(str(dsrc))))
+    rd = parse_to_tree(str(dsrc))
+    run_analyzers(rd.tree)
+    check("D: caption-less table flagged", _flag_count(rd.tree, FLAG) == 1)
+    execute_plans(rd.tree, plan_remediations(rd.tree, policy))
+    dout = tmp / "no_style.fixed.docx"
+    write_remediated_docx(dsrc, rd.tree, dout)
+    check("D: output now DEFINES a real Caption style (pStyle reference resolves)",
+          _has_caption_style(Document(str(dout))))
+    rd2 = parse_to_tree(str(dout))
+    run_analyzers(rd2.tree)
+    check("D: re-parse clears the flag", _flag_count(rd2.tree, FLAG) == 0)
+
+    # ------- Case E: a 5x2 layout grid (no role signal in DOCX) must NOT be
+    # flagged — we never fabricate a data-table caption for a layout table.
+    esrc = tmp / "layout.docx"
+    edoc = Document()
+    etable = edoc.add_table(rows=5, cols=2)
+    for r, (a, b) in enumerate([("2020", "Senior Engineer"), ("2018", "Engineer"),
+                                ("2016", "Junior Engineer"), ("2014", "Intern"),
+                                ("2012", "Student")]):
+        etable.rows[r].cells[0].text = a
+        etable.rows[r].cells[1].text = b
+    edoc.save(str(esrc))
+    re_ = parse_to_tree(str(esrc))
+    run_analyzers(re_.tree)
+    check("E: 5x2 layout grid NOT flagged TABLE_CAPTION_MISSING (>=3 cols required)",
+          _flag_count(re_.tree, FLAG) == 0, f"got {_flag_count(re_.tree, FLAG)}")
+
+    # ------- Case F: a control char in the caption must not abort the write.
+    fsrc = tmp / "ctrl.docx"
+    _build_uncaptioned(fsrc)
+    rf = parse_to_tree(str(fsrc))
+    ftable = next((n for n in iter_reading_order(rf.tree.root) if isinstance(n, TableNode)), None)
+    ftable.metadata.properties["caption"] = "Sales\x07 report"  # injected control char
+    fout = tmp / "ctrl.fixed.docx"
+    try:
+        fres = write_remediated_docx(fsrc, rf.tree, fout)
+        wrote = True
+    except Exception as exc:  # pragma: no cover
+        wrote = False
+        fres = {"applied": [], "skipped": [str(exc)]}
+    check("F: write completes despite a control char in the caption", wrote)
+    rf2 = parse_to_tree(str(fout)) if wrote else None
+    check("F: caption persisted with the control char stripped",
+          bool(rf2) and _first_table_caption(rf2.tree) == "Sales report",
+          str(_first_table_caption(rf2.tree)) if rf2 else "no output")
+
+    # ------- Case G: caption between two tables belongs to the LOWER table;
+    # the upper table is still correctly flagged as uncaptioned.
+    gsrc = tmp / "between.docx"
+    gdoc = Document()
+    _fill_3x3(gdoc.add_table(rows=3, cols=3))  # table A (uncaptioned)
+    capg = gdoc.add_paragraph("Caption for table B")
+    pPr = capg._p.get_or_add_pPr()
+    ps = OxmlElement("w:pStyle")
+    ps.set(qn("w:val"), "Caption")
+    pPr.append(ps)
+    _fill_3x3(gdoc.add_table(rows=3, cols=3))  # table B (its caption is above it)
+    gdoc.save(str(gsrc))
+    rg = parse_to_tree(str(gsrc))
+    run_analyzers(rg.tree)
+    tables = [n for n in iter_reading_order(rg.tree.root) if isinstance(n, TableNode)]
+    check("G: two tables parsed", len(tables) == 2, f"got {len(tables)}")
+    check("G: upper table did NOT absorb the lower table's caption",
+          not (tables[0].metadata.properties or {}).get("caption"))
+    check("G: lower table reads its caption",
+          (tables[1].metadata.properties or {}).get("caption") == "Caption for table B")
+    check("G: exactly one TABLE_CAPTION_MISSING (the uncaptioned upper table)",
+          _flag_count(rg.tree, FLAG) == 1, f"got {_flag_count(rg.tree, FLAG)}")
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

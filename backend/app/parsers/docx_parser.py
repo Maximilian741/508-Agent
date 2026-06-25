@@ -1141,9 +1141,27 @@ def _docx_table_caption(table) -> Optional[str]:
 
     Word convention puts a table's caption immediately ABOVE it; some authors
     place it below. We check both immediate XML siblings of the ``<w:tbl>``.
+
+    Guard for two adjacent tables ``[tableA][caption][tableB]``: a Caption
+    paragraph that is itself immediately followed by another ``<w:tbl>`` is, by
+    the caption-above convention, tableB's caption — so tableA must not absorb
+    it via ``getnext`` (which would mask tableA's own missing caption).
+
+    Scope: only top-level body tables (``doc.tables``) — like every other table
+    fix, tables nested inside cells and tables in headers/footers are out of
+    scope.
     """
     tbl = table._tbl
-    return _paragraph_caption_text(tbl.getprevious()) or _paragraph_caption_text(tbl.getnext())
+    prev_cap = _paragraph_caption_text(tbl.getprevious())
+    if prev_cap:
+        return prev_cap
+    nxt = tbl.getnext()
+    nxt_cap = _paragraph_caption_text(nxt)
+    if nxt_cap and nxt is not None:
+        after = nxt.getnext()
+        if after is not None and after.tag == qn("w:tbl"):
+            return None  # that caption belongs to the following table
+    return nxt_cap
 
 
 def _table_to_node(table, ids: _IdCounter) -> TableNode:
