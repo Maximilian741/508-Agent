@@ -51,8 +51,9 @@ export default function ScanUrlScreen() {
       if (err.status === 401) {
         setError("Please sign in to use the URL scanner.");
       } else {
-        // Backend returns a clear, user-safe message for SSRF/fetch failures.
-        setError(err.message?.replace(/^\{.*"detail":"?/, "").replace(/"?\}$/, "") || "Could not scan that URL.");
+        // The client already extracted the backend's structured {detail}; it's a
+        // clear, user-safe message for SSRF/fetch failures.
+        setError(err.message || "Could not scan that URL.");
       }
     } finally {
       setLoading(false);

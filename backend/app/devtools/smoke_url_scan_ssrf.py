@@ -99,6 +99,58 @@ def main() -> int:
         except Exception as exc:  # any other exception = wrong/leaky handling
             check(f"reject: {url[:48]!r}", False, f"raised {type(exc).__name__}: {exc}")
 
+    # --- DNS-rebinding is closed: the host is resolved ONCE and the connection
+    # is PINNED to that validated IP (no second, attacker-controlled resolution).
+    import socket as _S
+
+    import app.security.url_fetch as _uf
+    from app.security.url_fetch import UrlFetchError
+
+    state = {"gai": 0, "connected": None}
+    real_gai, real_cc = _S.getaddrinfo, _S.create_connection
+    try:
+        def fake_gai(host, *a, **k):
+            state["gai"] += 1
+            # public on the first (validation) lookup; would rebind to loopback on any later one
+            ip = "93.184.216.34" if state["gai"] == 1 else "127.0.0.1"
+            return [(_S.AF_INET, _S.SOCK_STREAM, 6, "", (ip, 0))]
+
+        def fake_cc(addr, *a, **k):
+            state["connected"] = addr[0]
+            raise OSError("smoke: no real egress")
+
+        _S.getaddrinfo = fake_gai
+        _S.create_connection = fake_cc
+        try:
+            _uf.fetch_url_html("http://rebind.example/")
+        except UrlFetchError:
+            pass  # the sentinel OSError from fake_cc surfaces as UrlFetchError
+        except Exception as exc:
+            check("rebind: only the sentinel error escapes", False, repr(exc))
+        check("rebind: host resolved exactly once (no connect-time re-resolve)", state["gai"] == 1,
+              f"getaddrinfo calls={state['gai']}")
+        check("rebind: connected to the VALIDATED public IP, never the rebind target",
+              state["connected"] == "93.184.216.34", str(state["connected"]))
+    finally:
+        _S.getaddrinfo, _S.create_connection = real_gai, real_cc
+
+    # --- scan score is page-QUALITY (as-found), never the remediation 0/'F' ---
+    from app.api.pipeline import _build_scan_score
+
+    class _V:
+        def __init__(self, sev):
+            self.severity = sev
+
+    check("score: clean page = 100/A+", _build_scan_score([]).score == 100.0)
+    one_warn = _build_scan_score([_V("warning")])
+    check("score: a single warning is NOT 0/'F'", one_warn.score >= 95 and one_warn.grade != "F",
+          f"{one_warn.score}/{one_warn.grade}")
+    few = _build_scan_score([_V("error"), _V("error"), _V("error")])
+    check("score: a few errors -> mid range (not 0, not 100)", 0 < few.score < 100, str(few.score))
+    many = _build_scan_score([_V("error")] * 30)
+    check("score: a badly-broken page floors at 0", many.score == 0.0, str(many.score))
+    check("score: scan never reports auto-fixes", _build_scan_score([_V("error")]).fixedAutomatically == 0)
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

@@ -528,8 +528,17 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             headers: { ...authHeaders(), "Content-Type": "application/json" },
         });
         if (!response.ok) {
-            const message = await response.text();
-            const err = new Error(message || "URL scan failed") as Error & { status?: number };
+            // Parse the structured {detail} defensively — never surface a raw
+            // proxy/HTML/stack body to the user.
+            const text = await response.text();
+            let detail = "";
+            try {
+                const j = JSON.parse(text);
+                detail = typeof j?.detail === "string" ? j.detail : "";
+            } catch {
+                /* non-JSON error body (e.g. an upstream 502) — fall back to generic */
+            }
+            const err = new Error(detail || "URL scan failed") as Error & { status?: number };
             err.status = response.status;
             throw err;
         }

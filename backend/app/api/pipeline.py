@@ -372,7 +372,7 @@ async def analyze_url(
                 recommendedActions=[],
             )
         )
-    score = _build_score(violations=violations, executions=[], source_format=result.format)
+    score = _build_scan_score(violations)
 
     provider_name = "heuristic"
     try:
@@ -1130,6 +1130,32 @@ def _count_persisted_fixes(executions, applied, source_format: str) -> int:
             continue
         count += 1
     return count
+
+
+def _build_scan_score(violations) -> PipelineScore:
+    """Page-QUALITY score for a read-only URL scan (nothing is remediated).
+
+    ``_build_score`` measures remediation PROGRESS (% of issues auto-fixed), so
+    with zero executions it returns 0/'F' for any page with a single issue — a
+    dishonest headline for a scan. This instead grades the page AS FOUND:
+    start at 100 and deduct by severity, so one minor issue stays near the top
+    and a badly-broken page sinks. Nothing is fixed, so fixedAutomatically=0 and
+    every issue is pendingManual.
+    """
+    n = len(violations)
+    if n == 0:
+        return PipelineScore(initialIssues=0, fixedAutomatically=0, pendingManual=0, score=100.0, grade="A+")
+    errors = sum(1 for v in violations if v.severity == Severity.ERROR.value)
+    warnings = sum(1 for v in violations if v.severity == Severity.WARNING.value)
+    penalty = 6.0 * errors + 2.5 * warnings  # errors hurt more than warnings
+    score = max(0.0, 100.0 - penalty)
+    return PipelineScore(
+        initialIssues=n,
+        fixedAutomatically=0,
+        pendingManual=n,
+        score=round(score, 2),
+        grade=_grade(score),
+    )
 
 
 def _build_score(*, violations, executions, source_format: str = "") -> PipelineScore:
