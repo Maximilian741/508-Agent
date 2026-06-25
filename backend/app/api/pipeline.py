@@ -41,6 +41,7 @@ from app.api.deps import require_user_id, require_user_id_or_api_key
 from app.config import get_settings
 from app.security.signing import sign_file_url, verify_file_signature
 from app.security.uploads import stream_to_tempfile
+from app.security.url_fetch import SsrfError, UrlFetchError, fetch_url_html
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -285,6 +286,132 @@ async def analyze(
     )
 
 
+class AnalyzeUrlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(min_length=1, max_length=2048)
+
+
+@router.post("/analyze-url", response_model=PipelineResponse)
+async def analyze_url(
+    request: Request,
+    payload: AnalyzeUrlRequest,
+    user_id: str = Depends(require_user_id_or_api_key),
+) -> PipelineResponse:
+    """Free, read-only accessibility scan of a PUBLIC web page given its URL.
+
+    The page is fetched through the SSRF-hardened :func:`fetch_url_html` (public
+    addresses only, no redirects to internal hosts, size/time-capped) and run
+    through the same HTML analyzers as an upload. Analyze-only by nature: a live
+    page cannot be remediated here (we can't write back to someone's site), so
+    nothing is executed, persisted, or charged — the response shape matches
+    /analyze so the UI can render it identically.
+    """
+    import tempfile
+
+    try:
+        html_bytes, final_url = await run_in_threadpool(fetch_url_html, payload.url)
+    except SsrfError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except UrlFetchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".html")
+    tmp_path = Path(tmp_name)
+    try:
+        import os as _os
+
+        _os.close(fd)
+        tmp_path.write_bytes(html_bytes)
+        try:
+            result = await run_in_threadpool(parse_to_tree, str(tmp_path))
+        except Exception as exc:
+            logger.exception("url scan parse failed: %s", exc)
+            raise HTTPException(status_code=422, detail="Could not parse that page's HTML.")
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    tree = result.tree
+    engine = RemediationEngine()
+    violations = await run_in_threadpool(engine.detect_violations, tree)
+
+    from app.models.accessibility import FLAG_DEFINITIONS
+
+    summary = PipelineSummary(
+        documentId=result.document_id,
+        sourceFormat=result.format,
+        title=tree.root.metadata.properties.get("title"),
+        language=tree.root.metadata.language,
+        pageCount=0,
+        nodeCount=_count_nodes(tree),
+        imageCount=_count_nodes_of(tree, ImageNode),
+        tableCount=_count_nodes_of(tree, TableNode),
+    )
+    api_violations: List[PipelineViolation] = []
+    for v in violations:
+        flag_code = AccessibilityFlagCode(v.rule_id)
+        definition = FLAG_DEFINITIONS[flag_code]
+        api_violations.append(
+            PipelineViolation(
+                id=v.violation_id,
+                ruleId=v.rule_id,
+                severity=v.severity,
+                description=v.description,
+                nodeId=v.location.node_id,
+                page=v.evidence.get("page"),
+                standards={
+                    "wcag_2_1": list(definition.standards.wcag_2_1),
+                    "section_508": list(definition.standards.section_508),
+                    "pdf_ua": list(definition.standards.pdf_ua),
+                },
+                evidence=v.evidence,
+                # A live page isn't remediated here, so we don't advertise auto-fix
+                # actions — the UI tells the user to upload the file to fix them.
+                recommendedActions=[],
+            )
+        )
+    score = _build_score(violations=violations, executions=[], source_format=result.format)
+
+    provider_name = "heuristic"
+    try:
+        from app.ai.semantic_inference import build_default_provider
+
+        provider_name = build_default_provider().name
+    except Exception:
+        pass
+
+    # Audit: record the scan with the HOST ONLY — never the full URL (it can
+    # carry query-string PII), matching the project's logging-privacy rule.
+    try:
+        from urllib.parse import urlparse as _urlparse
+
+        ctx = _audit.context_from_request(request)
+        _audit.record_event(
+            event="analyze_url",
+            request_id=ctx.get("request_id"),
+            actor_email=ctx.get("actor_email"),
+            actor_sub=ctx.get("actor_sub"),
+            ip=ctx.get("ip"),
+            doc_id=summary.documentId,
+            details={
+                "host": _urlparse(final_url).hostname or "",
+                "violationCount": len(api_violations),
+                "score": score.score,
+                "grade": score.grade,
+            },
+        )
+    except Exception:
+        pass
+
+    return PipelineResponse(
+        summary=summary,
+        violations=api_violations,
+        executions=[],
+        score=score,
+        aiProvider=provider_name,
+    )
 
 
 def _charge_credits(user_id: str, doc_format: str, doc_id: str | None = None) -> int:

@@ -345,6 +345,7 @@ export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     runPipeline: (file: File, execute?: boolean) => Promise<PipelineResponse>;
+    runPipelineUrl: (url: string) => Promise<PipelineResponse>;
     runPipelineRemediate: (
         file: File,
         approvedViolationIds: string[],
@@ -500,6 +501,35 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             // Attach the HTTP status (like runPipelineRemediate does) so the UI
             // can branch on 401/402 instead of string-matching raw JSON.
             const err = new Error(message || "Pipeline analyze failed") as Error & { status?: number };
+            err.status = response.status;
+            throw err;
+        }
+        return (await response.json()) as PipelineResponse;
+    };
+
+    // Free, read-only accessibility scan of a public web page by URL. Server
+    // fetches it (SSRF-guarded) and runs the same HTML analyzers as an upload.
+    const runPipelineUrl = async (url: string): Promise<PipelineResponse> => {
+        if (mockMode) {
+            return {
+                summary: {
+                    documentId: url, sourceFormat: "html", title: "Example Page",
+                    language: "en", pageCount: 0, nodeCount: 12, imageCount: 2, tableCount: 1,
+                },
+                violations: [],
+                executions: [],
+                score: { initialIssues: 0, fixedAutomatically: 0, pendingManual: 0, score: 100, grade: "A+" },
+                aiProvider: "heuristic",
+            };
+        }
+        const response = await fetch(`${baseUrl}/pipeline/analyze-url`, {
+            method: "POST",
+            body: JSON.stringify({ url }),
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            const err = new Error(message || "URL scan failed") as Error & { status?: number };
             err.status = response.status;
             throw err;
         }
@@ -888,6 +918,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         scan,
         remediate,
         runPipeline,
+        runPipelineUrl,
         runPipelineRemediate,
         getPipelineFileUrl,
         batchZip,
