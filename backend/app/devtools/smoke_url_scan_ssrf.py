@@ -151,6 +151,70 @@ def main() -> int:
     check("score: a badly-broken page floors at 0", many.score == 0.0, str(many.score))
     check("score: scan never reports auto-fixes", _build_scan_score([_V("error")]).fixedAutomatically == 0)
 
+    # --- site discovery: sitemap parsing is same-ORIGIN-locked (a hostile
+    # sitemap must never aim our fetcher at third-party URLs) and bounded.
+    from app.security.url_fetch import discover_site_urls, same_origin
+
+    check("origin: same host+scheme+port", same_origin("https://a.com/x", "https://a.com/y"))
+    check("origin: different host rejected", not same_origin("https://a.com/x", "https://evil.com/y"))
+    check("origin: different scheme rejected", not same_origin("https://a.com/x", "http://a.com/y"))
+    check("origin: different port rejected", not same_origin("https://a.com:8443/x", "https://a.com/y"))
+
+    SITEMAP = (
+        b'<?xml version="1.0"?><urlset>'
+        b"<loc>https://site.example/</loc>"
+        b"<loc>https://site.example/about</loc>"
+        b"<loc>https://site.example/contact</loc>"
+        b"<loc>http://site.example/insecure</loc>"       # scheme mismatch -> dropped
+        b"<loc>https://evil.example/steal</loc>"          # cross-origin -> dropped
+        b"<loc>https://site.example/about</loc>"          # duplicate -> dropped
+        b"</urlset>"
+    )
+    fetched: list = []
+
+    def fake_fetch(url, allowed, err):
+        fetched.append(url)
+        return SITEMAP, url
+
+    real_fetch = _uf._fetch
+    try:
+        _uf._fetch = fake_fetch
+        urls = discover_site_urls("https://site.example/", limit=10)
+    finally:
+        _uf._fetch = real_fetch
+
+    check("sitemap: fetched /sitemap.xml at the site root",
+          fetched and fetched[0] == "https://site.example/sitemap.xml", str(fetched[:1]))
+    check("sitemap: seed URL is always first", urls[0] == "https://site.example/", str(urls[:1]))
+    check("sitemap: cross-origin <loc> DROPPED (no fetch-proxy abuse)",
+          not any("evil.example" in u for u in urls), str(urls))
+    check("sitemap: scheme-mismatched <loc> dropped", not any(u.startswith("http://") for u in urls), str(urls))
+    check("sitemap: same-origin pages discovered",
+          "https://site.example/about" in urls and "https://site.example/contact" in urls, str(urls))
+    check("sitemap: de-duplicated (seed + about + contact only)", len(urls) == 3, str(urls))
+
+    def fake_fetch_many(url, allowed, err):
+        locs = b"".join(f"<loc>https://site.example/p{i}</loc>".encode() for i in range(500))
+        return b"<urlset>" + locs + b"</urlset>", url
+
+    try:
+        _uf._fetch = fake_fetch_many
+        capped = discover_site_urls("https://site.example/", limit=10)
+    finally:
+        _uf._fetch = real_fetch
+    check("sitemap: hard-capped at the requested limit", len(capped) == 10, str(len(capped)))
+
+    def fake_fetch_missing(url, allowed, err):
+        raise UrlFetchError("404")
+
+    try:
+        _uf._fetch = fake_fetch_missing
+        seed_only = discover_site_urls("https://site.example/page", limit=10)
+    finally:
+        _uf._fetch = real_fetch
+    check("sitemap: missing sitemap -> seed-only (not an error)",
+          seed_only == ["https://site.example/page"], str(seed_only))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

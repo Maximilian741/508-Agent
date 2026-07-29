@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import time
@@ -176,6 +177,11 @@ def fetch_url_html(raw_url: str) -> Tuple[bytes, str]:
     Raises :class:`SsrfError` for a disallowed target and :class:`UrlFetchError`
     (generic message) for any fetch failure.
     """
+    return _fetch(raw_url, _HTML_CONTENT_TYPES, "That URL is not an HTML page.")
+
+
+def _fetch(raw_url: str, allowed_types: set, type_error: str) -> Tuple[bytes, str]:
+    """Pinned, SSRF-guarded GET. Shared by the HTML page fetch and the sitemap fetch."""
     url = (raw_url or "").strip()
     if not url:
         raise SsrfError("Please enter a URL.")
@@ -220,8 +226,8 @@ def fetch_url_html(raw_url: str) -> Tuple[bytes, str]:
                 # Generic — never leak the upstream status code (blind-SSRF oracle).
                 raise UrlFetchError("That page could not be fetched.")
             ctype = (resp.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
-            if ctype not in _HTML_CONTENT_TYPES:
-                raise UrlFetchError("That URL is not an HTML page.")
+            if ctype not in allowed_types:
+                raise UrlFetchError(type_error)
             data = resp.read(MAX_BYTES + 1)
         except (ssl.SSLError, socket.timeout, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise UrlFetchError("Could not reach that URL.") from exc
@@ -235,3 +241,75 @@ def fetch_url_html(raw_url: str) -> Tuple[bytes, str]:
         return data, current
 
     raise UrlFetchError("That URL has too many redirects.")
+
+
+# ---------------------------------------------------------------------------
+# Site discovery (sitemap.xml) for the whole-site scan
+# ---------------------------------------------------------------------------
+
+MAX_SITEMAP_URLS = 50          # hard cap on pages discovered from a sitemap
+_SITEMAP_CONTENT_TYPES = {"application/xml", "text/xml", "application/xhtml+xml", "text/html", ""}
+_LOC_RE = re.compile(rb"<loc>\s*([^<\s][^<]*?)\s*</loc>", re.IGNORECASE)
+
+
+def same_origin(a: str, b: str) -> bool:
+    """True if two URLs share scheme+host+port (the discovery trust boundary)."""
+    pa, pb = urlparse(a), urlparse(b)
+    if (pa.scheme or "").lower() != (pb.scheme or "").lower():
+        return False
+    if (pa.hostname or "").lower() != (pb.hostname or "").lower():
+        return False
+    da = pa.port or (443 if pa.scheme == "https" else 80)
+    db = pb.port or (443 if pb.scheme == "https" else 80)
+    return da == db
+
+
+def discover_site_urls(seed_url: str, limit: int = MAX_SITEMAP_URLS) -> list:
+    """Discover page URLs for a site from its ``sitemap.xml`` (best-effort).
+
+    Returns a de-duplicated list that ALWAYS includes the seed URL first. The
+    sitemap is third-party, attacker-influenceable content, so every discovered
+    URL is (a) restricted to the seed's ORIGIN — otherwise a hostile sitemap
+    could aim our fetcher at arbitrary third-party URLs, turning the scanner
+    into a request proxy/amplifier — and (b) still re-validated + IP-pinned by
+    the normal fetch path when it is actually scanned. A missing/!unparseable
+    sitemap is not an error: we just scan the seed page alone.
+
+    One level of sitemap-index nesting is followed (a ``<sitemapindex>`` whose
+    ``<loc>`` entries are themselves sitemaps).
+    """
+    seed = (seed_url or "").strip()
+    if "://" not in seed:
+        seed = "https://" + seed
+    parsed = urlparse(seed)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    out: list = [seed]
+    seen = {seed.rstrip("/")}
+
+    def _collect(sitemap_url: str, allow_nested: bool) -> None:
+        if len(out) >= limit:
+            return
+        try:
+            data, _final = _fetch(sitemap_url, _SITEMAP_CONTENT_TYPES, "Not a sitemap.")
+        except (SsrfError, UrlFetchError):
+            return  # no sitemap / unreachable / blocked -> seed-only scan
+        locs = [m.decode("utf-8", "ignore").strip() for m in _LOC_RE.findall(data)]
+        is_index = b"<sitemapindex" in data[:4096].lower()
+        for loc in locs:
+            if len(out) >= limit:
+                return
+            if not loc or "://" not in loc:
+                continue
+            if not same_origin(loc, seed):
+                continue  # never leave the seed's origin
+            if is_index and allow_nested:
+                _collect(loc, allow_nested=False)  # one level of nesting only
+                continue
+            key = loc.rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(loc)
+
+    _collect(f"{root}/sitemap.xml", allow_nested=True)
+    return out[:limit]

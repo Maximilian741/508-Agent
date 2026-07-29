@@ -41,7 +41,12 @@ from app.api.deps import require_user_id, require_user_id_or_api_key
 from app.config import get_settings
 from app.security.signing import sign_file_url, verify_file_signature
 from app.security.uploads import stream_to_tempfile
-from app.security.url_fetch import SsrfError, UrlFetchError, fetch_url_html
+from app.security.url_fetch import (
+    SsrfError,
+    UrlFetchError,
+    discover_site_urls,
+    fetch_url_html,
+)
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -411,6 +416,213 @@ async def analyze_url(
         executions=[],
         score=score,
         aiProvider=provider_name,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Whole-site scan (free, read-only) — the agency/gov version of the URL scan
+# ---------------------------------------------------------------------------
+
+# Bounded by construction: a free endpoint must never become an unbounded
+# outbound crawler. Pages are also capped by a total wall-clock budget.
+SITE_SCAN_MAX_PAGES = 25
+SITE_SCAN_DEFAULT_PAGES = 10
+SITE_SCAN_BUDGET_SECONDS = 90.0
+
+
+class SiteScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(min_length=1, max_length=2048)
+    maxPages: int = Field(default=SITE_SCAN_DEFAULT_PAGES, ge=1, le=SITE_SCAN_MAX_PAGES)
+
+
+class SitePageResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str
+    title: Optional[str] = None
+    status: str  # "scanned" | "failed"
+    note: Optional[str] = None
+    issueCount: int = 0
+    errorCount: int = 0
+    warningCount: int = 0
+    score: float = 0.0
+    grade: str = ""
+
+
+class SiteIssueRollup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ruleId: str
+    severity: str
+    totalCount: int
+    pageCount: int
+
+
+class SiteScanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seedUrl: str
+    pagesDiscovered: int
+    pagesScanned: int
+    pagesFailed: int
+    totalIssues: int
+    score: float
+    grade: str
+    issues: List[SiteIssueRollup]
+    pages: List[SitePageResult]
+
+
+def _scan_page_sync(url: str):
+    """Fetch + parse + analyze ONE page. Returns (violations, title).
+
+    Blocking by design (called via run_in_threadpool). Raises SsrfError /
+    UrlFetchError from the guarded fetcher, or ValueError on a parse failure.
+    """
+    import os as _os
+    import tempfile
+
+    html_bytes, _final = fetch_url_html(url)
+    fd, tmp_name = tempfile.mkstemp(suffix=".html")
+    tmp_path = Path(tmp_name)
+    try:
+        _os.close(fd)
+        tmp_path.write_bytes(html_bytes)
+        try:
+            result = parse_to_tree(str(tmp_path))
+        except Exception as exc:
+            raise ValueError("Could not parse that page's HTML.") from exc
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    tree = result.tree
+    violations = RemediationEngine().detect_violations(tree)
+    return violations, tree.root.metadata.properties.get("title")
+
+
+@router.post("/scan-site", response_model=SiteScanResponse)
+async def scan_site(
+    request: Request,
+    payload: SiteScanRequest,
+    user_id: str = Depends(require_user_id_or_api_key),
+) -> SiteScanResponse:
+    """Free, read-only accessibility scan of a whole PUBLIC site.
+
+    Discovers pages from the site's ``sitemap.xml`` (same-origin only; a missing
+    sitemap simply scans the one page), scans up to ``maxPages`` through the same
+    SSRF-hardened fetcher as the single-page scan, and returns a per-page
+    breakdown plus a site-wide issue rollup. Analyze-only: nothing is executed,
+    persisted, or charged.
+    """
+    try:
+        urls = await run_in_threadpool(discover_site_urls, payload.url, payload.maxPages)
+    except SsrfError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except UrlFetchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if not urls:
+        raise HTTPException(status_code=422, detail="No pages could be discovered for that site.")
+
+    deadline = time.monotonic() + SITE_SCAN_BUDGET_SECONDS
+    pages: List[SitePageResult] = []
+    rollup: Dict[str, Dict[str, Any]] = {}
+    total_issues = 0
+    scanned = failed = 0
+    first_error: Optional[HTTPException] = None
+
+    for url in urls:
+        if time.monotonic() >= deadline:
+            break  # wall-clock budget spent; report what we have
+        try:
+            violations, title = await run_in_threadpool(_scan_page_sync, url)
+        except (SsrfError, UrlFetchError, ValueError) as exc:
+            failed += 1
+            if first_error is None and not pages:
+                # If the very first (seed) page fails, surface it as the request
+                # error instead of returning an empty "successful" report.
+                first_error = HTTPException(
+                    status_code=400 if isinstance(exc, SsrfError) else 422, detail=str(exc)
+                )
+            pages.append(SitePageResult(url=url, status="failed", note=str(exc)))
+            continue
+        except Exception as exc:  # never let one bad page kill the run
+            logger.exception("site scan page failed: %s", exc)
+            failed += 1
+            pages.append(SitePageResult(url=url, status="failed", note="Could not scan this page."))
+            continue
+
+        scanned += 1
+        errs = sum(1 for v in violations if v.severity == Severity.ERROR.value)
+        warns = sum(1 for v in violations if v.severity == Severity.WARNING.value)
+        total_issues += len(violations)
+        page_score = _build_scan_score(violations)
+        pages.append(
+            SitePageResult(
+                url=url,
+                title=title,
+                status="scanned",
+                issueCount=len(violations),
+                errorCount=errs,
+                warningCount=warns,
+                score=page_score.score,
+                grade=page_score.grade,
+            )
+        )
+        for v in violations:
+            slot = rollup.setdefault(v.rule_id, {"severity": v.severity, "total": 0, "pages": set()})
+            slot["total"] += 1
+            slot["pages"].add(url)
+
+    if scanned == 0 and first_error is not None:
+        raise first_error
+
+    # Site score = the average of the scanned pages' quality scores (honest:
+    # nothing was remediated, so this is purely "how the site reads today").
+    avg = sum(p.score for p in pages if p.status == "scanned") / max(scanned, 1)
+    site_score = round(avg, 2) if scanned else 0.0
+    issues = sorted(
+        (
+            SiteIssueRollup(
+                ruleId=rid,
+                severity=str(d["severity"]),
+                totalCount=int(d["total"]),
+                pageCount=len(d["pages"]),
+            )
+            for rid, d in rollup.items()
+        ),
+        key=lambda i: (0 if i.severity == "error" else 1, -i.totalCount),
+    )
+
+    try:
+        from urllib.parse import urlparse as _urlparse
+
+        ctx = _audit.context_from_request(request)
+        _audit.record_event(
+            event="scan_site",
+            request_id=ctx.get("request_id"),
+            actor_email=ctx.get("actor_email"),
+            actor_sub=ctx.get("actor_sub"),
+            ip=ctx.get("ip"),
+            doc_id=None,
+            details={
+                "host": _urlparse(urls[0]).hostname or "",
+                "pagesScanned": scanned,
+                "pagesFailed": failed,
+                "totalIssues": total_issues,
+            },
+        )
+    except Exception:
+        pass
+
+    return SiteScanResponse(
+        seedUrl=urls[0],
+        pagesDiscovered=len(urls),
+        pagesScanned=scanned,
+        pagesFailed=failed,
+        totalIssues=total_issues,
+        score=site_score,
+        grade=_grade(site_score) if scanned else "",
+        issues=issues,
+        pages=pages,
     )
 
 

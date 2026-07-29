@@ -327,6 +327,37 @@ export interface PipelineResponse {
     aiProvider: string;
 }
 
+export interface SitePageResult {
+    url: string;
+    title?: string | null;
+    status: "scanned" | "failed";
+    note?: string | null;
+    issueCount: number;
+    errorCount: number;
+    warningCount: number;
+    score: number;
+    grade: string;
+}
+
+export interface SiteIssueRollup {
+    ruleId: string;
+    severity: string;
+    totalCount: number;
+    pageCount: number;
+}
+
+export interface SiteScanResponse {
+    seedUrl: string;
+    pagesDiscovered: number;
+    pagesScanned: number;
+    pagesFailed: number;
+    totalIssues: number;
+    score: number;
+    grade: string;
+    issues: SiteIssueRollup[];
+    pages: SitePageResult[];
+}
+
 export interface PipelineRemediateResult {
     jobId: string;
     filename: string;
@@ -346,6 +377,7 @@ export interface ApiClient {
     remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     runPipeline: (file: File, execute?: boolean) => Promise<PipelineResponse>;
     runPipelineUrl: (url: string) => Promise<PipelineResponse>;
+    runSiteScan: (url: string, maxPages?: number) => Promise<SiteScanResponse>;
     runPipelineRemediate: (
         file: File,
         approvedViolationIds: string[],
@@ -543,6 +575,40 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             throw err;
         }
         return (await response.json()) as PipelineResponse;
+    };
+
+    // Free, read-only accessibility scan of a whole public SITE (sitemap-discovered,
+    // same-origin only). Server-side fetching is SSRF-guarded and page-capped.
+    const runSiteScan = async (url: string, maxPages: number = 10): Promise<SiteScanResponse> => {
+        if (mockMode) {
+            return {
+                seedUrl: url, pagesDiscovered: 3, pagesScanned: 3, pagesFailed: 0,
+                totalIssues: 4, score: 88, grade: "B",
+                issues: [{ ruleId: "MISSING_ALT_TEXT", severity: "error", totalCount: 3, pageCount: 2 }],
+                pages: [
+                    { url, title: "Home", status: "scanned", issueCount: 2, errorCount: 2, warningCount: 0, score: 88, grade: "B" },
+                ],
+            };
+        }
+        const response = await fetch(`${baseUrl}/pipeline/scan-site`, {
+            method: "POST",
+            body: JSON.stringify({ url, maxPages }),
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            let detail = "";
+            try {
+                const j = JSON.parse(text);
+                detail = typeof j?.detail === "string" ? j.detail : "";
+            } catch {
+                /* non-JSON error body — fall back to generic */
+            }
+            const err = new Error(detail || "Site scan failed") as Error & { status?: number };
+            err.status = response.status;
+            throw err;
+        }
+        return (await response.json()) as SiteScanResponse;
     };
 
     const runPipelineRemediate = async (
@@ -928,6 +994,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         remediate,
         runPipeline,
         runPipelineUrl,
+        runSiteScan,
         runPipelineRemediate,
         getPipelineFileUrl,
         batchZip,
