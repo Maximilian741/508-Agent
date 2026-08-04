@@ -61,6 +61,7 @@ from app.persistence.db import get_repo
 from app.services.fix_guidance import guidance_for
 from app.services.remediation_engine import RemediationEngine
 from app.services.scan_fixes import derive_scan_fixes
+from app.services.scan_history import build_change_report, save_scan
 from app.services.remediation_planner import plan_remediations, RemediationPolicy
 from app.services.remediators.registry import execute_plans
 from app.writers import write_remediated
@@ -148,6 +149,25 @@ class PipelineScore(BaseModel):
     grade: str
 
 
+class ScanChangeReport(BaseModel):
+    """What changed since this URL was last scanned by this user.
+
+    Matching is by content-derived FINGERPRINT (see services/scan_history.py) —
+    a best-effort match, not per-issue lineage, because a page that rewrites its
+    copy reads as "old fixed, new appeared".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    previousScanAt: Optional[str] = None
+    previousIssueCount: int = 0
+    previousScore: float = 0.0
+    previousGrade: str = ""
+    newIssues: int = 0
+    resolvedIssues: int = 0
+    unchangedIssues: int = 0
+
+
 class PipelineResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -156,6 +176,8 @@ class PipelineResponse(BaseModel):
     executions: List[PipelineExecutionResult]
     score: PipelineScore
     aiProvider: str
+    # Only set by the URL scan, and only on a re-scan of the same URL.
+    changes: Optional[ScanChangeReport] = None
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +435,18 @@ async def analyze_url(
         )
     score = _build_scan_score(violations)
 
+    # "What changed since last time" — the reason to come back and re-scan.
+    # Best-effort: any failure just omits the report.
+    changes = None
+    try:
+        report, fingerprints = await run_in_threadpool(
+            build_change_report, user_id, final_url, violations, tree, score
+        )
+        changes = ScanChangeReport(**report) if report else None
+        await run_in_threadpool(save_scan, user_id, final_url, fingerprints, score)
+    except Exception as exc:
+        logger.warning("scan history failed (scan continues): %s", exc)
+
     provider_name = "heuristic"
     try:
         from app.ai.semantic_inference import build_default_provider
@@ -450,6 +484,7 @@ async def analyze_url(
         executions=[],
         score=score,
         aiProvider=provider_name,
+        changes=changes,
     )
 
 

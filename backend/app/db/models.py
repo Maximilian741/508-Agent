@@ -338,3 +338,31 @@ class AnalysisResultRow(Base):
     grade: Mapped[str] = mapped_column(String(8), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ScanHistoryRow(Base):
+    """One URL scan, kept so the NEXT scan can report what changed.
+
+    Stores the set of issue FINGERPRINTS (content-derived, not node ids — node
+    ids are ordinal counters that shift whenever the page changes) so a re-scan
+    can honestly say "3 new, 5 fixed" instead of a wall of phantom regressions.
+    Only the fingerprints and counts are kept — never the page's content.
+    """
+
+    __tablename__ = "scan_history"
+    __table_args__ = (
+        Index("idx_scan_history_user_url", "user_id", "url_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Normalized URL (scheme+host+path, no query/fragment) — the identity a
+    # re-scan is matched on.
+    url_key: Mapped[str] = mapped_column(String(600), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    issue_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    grade: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    # JSON array of fingerprint strings.
+    fingerprints: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

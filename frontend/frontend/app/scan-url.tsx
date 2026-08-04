@@ -22,6 +22,19 @@ import { useTheme } from "../src/ui/useTheme";
 
 const SEV_ORDER: Record<string, number> = { error: 0, warning: 1, info: 2 };
 
+/** " · 3 days ago" style suffix for the previous-scan timestamp. */
+function sinceLabel(iso?: string | null): string {
+  if (!iso) return "";
+  const then = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (!Number.isFinite(then)) return "";
+  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (mins < 60) return ` · ${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return ` · ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return ` · ${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 export default function ScanUrlScreen() {
   const theme = useTheme();
   const router = useRouter();
@@ -277,6 +290,37 @@ export default function ScanUrlScreen() {
             </View>
           </View>
 
+          {result.changes ? (
+            <View
+              style={[
+                styles.changeBar,
+                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+              ]}
+            >
+              <Text style={[styles.changeTitle, { color: theme.colors.text }]}>
+                Since your last scan{sinceLabel(result.changes.previousScanAt)}
+              </Text>
+              <View style={styles.changeRow}>
+                <Text style={[styles.changeStat, { color: theme.colors.danger }]}>
+                  {result.changes.newIssues} new
+                </Text>
+                <Text style={[styles.changeStat, { color: theme.colors.textMuted }]}>·</Text>
+                <Text style={[styles.changeStat, { color: theme.colors.accent }]}>
+                  {result.changes.resolvedIssues} fixed
+                </Text>
+                <Text style={[styles.changeStat, { color: theme.colors.textMuted }]}>·</Text>
+                <Text style={[styles.changeStat, { color: theme.colors.textMuted }]}>
+                  {result.changes.unchangedIssues} still open
+                </Text>
+              </View>
+              <Text style={[styles.fixMeta, { color: theme.colors.textMuted }]}>
+                Previously {result.changes.previousIssueCount} issue
+                {result.changes.previousIssueCount === 1 ? "" : "s"} (grade {result.changes.previousGrade || "—"}).
+                Issues are matched by content, so a page that rewrites its wording may show items as fixed and new.
+              </Text>
+            </View>
+          ) : null}
+
           {grouped.map((g) => {
             const entry = lookupIssue(g.ruleId);
             const fix = g.fix;
@@ -393,6 +437,10 @@ const styles = StyleSheet.create({
   finding: { flexDirection: "row", gap: 10, paddingTop: 12, borderTopWidth: 1 },
   dot: { width: 10, height: 10, borderRadius: 5, marginTop: 5 },
   findingTitle: { fontSize: 15, fontWeight: "600" },
+  changeBar: { borderWidth: 1, borderRadius: 8, padding: 12, gap: 6 },
+  changeTitle: { fontSize: 14, fontWeight: "700" },
+  changeRow: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  changeStat: { fontSize: 15, fontWeight: "700" },
   fixBox: { marginTop: 10, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 },
   fixHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   fixBadge: {

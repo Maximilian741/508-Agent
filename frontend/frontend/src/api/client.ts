@@ -336,12 +336,24 @@ export interface PipelineScore {
     grade: string;
 }
 
+/** What changed since this URL was last scanned (only on a re-scan). */
+export interface ScanChangeReport {
+    previousScanAt?: string | null;
+    previousIssueCount: number;
+    previousScore: number;
+    previousGrade: string;
+    newIssues: number;
+    resolvedIssues: number;
+    unchangedIssues: number;
+}
+
 export interface PipelineResponse {
     summary: PipelineSummary;
     violations: PipelineViolation[];
     executions: PipelineExecutionResult[];
     score: PipelineScore;
     aiProvider: string;
+    changes?: ScanChangeReport | null;
 }
 
 export interface SitePageResult {
