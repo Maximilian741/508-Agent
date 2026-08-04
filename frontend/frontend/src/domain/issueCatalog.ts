@@ -185,6 +185,25 @@ const C: Record<string, IssueCatalogEntry> = {
     learnMoreUrl: "https://www.w3.org/WAI/tips/writing/#make-link-text-meaningful",
   },
 
+  LINK_NAME_MISSING: {
+    ruleId: "LINK_NAME_MISSING",
+    title: "Link has no accessible name",
+    summary: "An icon or image-only link with nothing a screen reader can announce.",
+    why:
+      "A link with no text, image alt, or aria-label is announced as just \"link\" — the user has no idea where it goes. This is common with icon-font and SVG icon links (a bare hamburger menu, a social-media glyph). WCAG 2.4.4 and 4.1.2 require every link to have a discernible name.",
+    autoFix:
+      "We can't auto-fix this without inventing the link's purpose, so it's flagged for you. Add an aria-label to the link (e.g. aria-label=\"Open menu\"), give an icon image real alt text, or add visible link text.",
+    manualJudgment:
+      "Decide what the link actually does, then name it for that action — describe the destination or action, not the icon (\"Search\", not \"magnifying glass\").",
+    severity: "error",
+    standards: {
+      wcag: ["2.4.4 Link Purpose (In Context)", "4.1.2 Name, Role, Value"],
+      section508: ["E205.4"],
+      pdfUa: ["7.18.1"],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value.html",
+  },
+
   DOCUMENT_LANGUAGE_MISSING: {
     ruleId: "DOCUMENT_LANGUAGE_MISSING",
     title: "Document language not declared",

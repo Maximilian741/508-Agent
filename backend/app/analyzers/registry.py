@@ -22,7 +22,7 @@ from app.analyzers.image_analyzer import (
     MissingAltTextAnalyzer,
     NonDescriptiveAltTextAnalyzer,
 )
-from app.analyzers.link_analyzer import LinkTextAnalyzer
+from app.analyzers.link_analyzer import LinkNameMissingAnalyzer, LinkTextAnalyzer
 from app.analyzers.link_target_analyzer import LinkTargetBrokenAnalyzer
 from app.analyzers.list_analyzer import ListStructureAnalyzer
 from app.analyzers.reading_order_analyzer import ReadingOrderAnalyzer
@@ -53,6 +53,7 @@ def get_default_analyzers() -> List[Analyzer]:
         NestedTableAnalyzer(),
         ListStructureAnalyzer(),
         LinkTextAnalyzer(),
+        LinkNameMissingAnalyzer(),
         LinkTargetBrokenAnalyzer(),
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
