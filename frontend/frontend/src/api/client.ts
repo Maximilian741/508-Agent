@@ -292,6 +292,21 @@ export interface PipelineSummary {
     tableCount: number;
 }
 
+/**
+ * How to fix one finding on a surface we can't remediate ourselves (a live page).
+ * `source: "writer"` = a REAL diff our engine produced on a throwaway copy.
+ * `source: "guidance"` = a hand-written example pattern (never has `before`).
+ */
+export interface PipelineFix {
+    source: "writer" | "guidance";
+    kind: "element" | "structural" | "css" | "advice";
+    before?: string | null;
+    after?: string | null;
+    action?: string | null;
+    note?: string | null;
+    requiresHumanVerification: boolean;
+}
+
 export interface PipelineViolation {
     id: string;
     ruleId: string;
@@ -302,6 +317,8 @@ export interface PipelineViolation {
     standards: { wcag_2_1: string[]; section_508: string[]; pdf_ua: string[] };
     evidence: Record<string, unknown>;
     recommendedActions: string[];
+    /** Only set by the URL/site scan. */
+    fix?: PipelineFix | null;
 }
 
 export interface PipelineExecutionResult {

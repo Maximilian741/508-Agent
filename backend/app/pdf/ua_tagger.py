@@ -366,6 +366,45 @@ def _looks_like_data_cells(run) -> bool:
     return True
 
 
+_NUMERICISH_RE = re.compile(
+    r"^[\s$€£¥(+-]*\d[\d,._/\\:%-]*\s*[)%]?$"  # 1,234  $12.50  (3)  45%  12/31/2025
+)
+
+
+def _cell_is_numericish(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(t) and bool(_NUMERICISH_RE.match(t))
+
+
+def _row0_is_header(run) -> bool:
+    """Whether row 0 should be typed ``/TH`` for a DETECTED data grid.
+
+    PDF carries no header semantics — a grid is just positioned text — so this
+    is unavoidably an INFERENCE, and both possible answers are a claim. We pick
+    the one that errs best:
+
+    * Labels in the top row is the dominant convention for the strict data
+      grids our detectors accept (>=3 aligned rows, consistent column count,
+      short data-like cells), and leaving a genuine header untagged is itself a
+      WCAG/PDF-UA defect — so the default is "header".
+    * But we REFUSE when the content contradicts it, which is where the real
+      fabrication risk lives: a row of numbers is data, not labels. Asserting
+      ``/TH`` (plus a ``/Scope``) over a numeric matrix would invent a
+      relationship that does not exist in the source.
+
+    A grid that fails the test is still tagged as a real ``/Table`` with rows
+    and cells — we simply don't claim any cell is a header.
+    """
+    if len(run) < 2:
+        return False
+    row0 = [str(blk[3]).strip() for blk in run[0]]
+    if not any(row0):
+        return False  # a blank top row labels nothing
+    if any(_cell_is_numericish(t) for t in row0):
+        return False  # numbers on top -> this is data, not a header row
+    return True
+
+
 def _detect_table_groups(segments, exclude=frozenset()):
     """Reconstruct DATA tables from positioned text blocks (high-precision).
 
@@ -430,7 +469,9 @@ def _detect_table_groups(segments, exclude=frozenset()):
         for rr, r in enumerate(run):
             for cc, blk in enumerate(r):
                 cell_of[blk[0]] = (tid, rr, cc)
-        tables[tid] = {"nrows": len(run), "ncols": ncols}
+        # ``has_header`` is an INFERENCE, not a fact read from the file — record
+        # it so the tagger only asserts /TH + /Scope when it's plausible.
+        tables[tid] = {"nrows": len(run), "ncols": ncols, "has_header": _row0_is_header(run)}
         return True
 
     # Find maximal runs of consecutive multi-cell rows, then split each run where
@@ -733,9 +774,10 @@ def _tables_from_grids(grids, segments, cell_of_existing):
         x, y = _block_origin(ops)
         if x is None or y is None:
             continue
-        if not _block_text(ops).strip():
+        btext = _block_text(ops).strip()
+        if not btext:
             continue
-        blocks.append((idx, x, y))
+        blocks.append((idx, x, y, btext))
 
     # Pick first ruling tid AFTER any text-geometry tids.
     next_tid = (max((t for t, _r, _c in cell_of_existing.values()), default=-1)) + 1
@@ -748,7 +790,8 @@ def _tables_from_grids(grids, segments, cell_of_existing):
             continue  # not a real table grid
 
         claimed: Dict[tuple, int] = {}  # (row,col) -> seg idx (first wins)
-        for (idx, bx, by) in blocks:
+        cell_text: Dict[tuple, str] = {}
+        for (idx, bx, by, btext) in blocks:
             if bx < grid["x0"] - _CLUSTER_TOL or bx > grid["x1"] + _CLUSTER_TOL:
                 continue
             if by < grid["y0"] - _CLUSTER_TOL or by > grid["y1"] + _CLUSTER_TOL:
@@ -768,7 +811,9 @@ def _tables_from_grids(grids, segments, cell_of_existing):
                     break
             if col is None:
                 continue
-            claimed.setdefault((row, col), idx)
+            if (row, col) not in claimed:
+                claimed[(row, col)] = idx
+                cell_text[(row, col)] = btext
 
         fill_ratio = len(claimed) / max(1, nrows * ncols)
         if fill_ratio < _GRID_MIN_FILL:
@@ -778,7 +823,18 @@ def _tables_from_grids(grids, segments, cell_of_existing):
         next_tid += 1
         for (r, c), idx in claimed.items():
             cell_of[idx] = (tid, r, c)
-        tables[tid] = {"nrows": nrows, "ncols": ncols}
+        # Same header INFERENCE as the geometry path — rebuild a run-shaped view
+        # (only text matters to the test) so a ruling grid with no header row is
+        # not given a fabricated /TH.
+        run_view = [
+            [(0, 0, 0, cell_text.get((r, c), "")) for c in range(ncols)]
+            for r in range(nrows)
+        ]
+        tables[tid] = {
+            "nrows": nrows,
+            "ncols": ncols,
+            "has_header": _row0_is_header(run_view),
+        }
     return cell_of, tables
 
 
@@ -1084,7 +1140,10 @@ def _tag_page_elements(
         grp = group_of.get(idx) if kind == "text" else None
         if kind == "text":
             if tcell is not None:
-                tag = "/TH" if tcell[1] == 0 else "/TD"  # first row = header
+                # Row 0 is a header only when the detector found a positive
+                # signal (see _row0_is_header). Never fabricate one.
+                _has_hdr = bool((tables.get(tcell[0]) or {}).get("has_header"))
+                tag = "/TH" if (_has_hdr and tcell[1] == 0) else "/TD"
             elif grp is not None:
                 tag = "/LBody"
             else:
@@ -1139,6 +1198,7 @@ def _tag_page_elements(
             if tid not in emitted_tables:
                 emitted_tables.add(tid)
                 dims = tables[tid]
+                has_hdr = bool(dims.get("has_header"))
                 trs = []
                 for r in range(dims["nrows"]):
                     tcs = []
@@ -1146,7 +1206,9 @@ def _tag_page_elements(
                         mc = table_cell_mcid.get((tid, r, c))
                         if mc is None:
                             continue
-                        tcs.append({"s": "/TH" if r == 0 else "/TD", "mcid": mc})
+                        # Only assert a header cell when the detector inferred
+                        # one; otherwise every cell is plain data (/TD).
+                        tcs.append({"s": "/TH" if (has_hdr and r == 0) else "/TD", "mcid": mc})
                     if tcs:
                         trs.append({"s": "/TR", "kids": tcs})
                 if trs:
@@ -1192,7 +1254,9 @@ def _build_struct_elem(
     )
     ref = writer._add_object(elem)  # noqa: SLF001
     if spec["s"] == "/TH":
-        # Column-header scope (we only ever type row 0 as TH) — PDF/UA table
+        # Column-header scope. A /TH is only ever emitted for row 0 AND only
+        # when _row0_is_header found a positive signal, so /Column is the
+        # correct scope for every header cell we produce — PDF/UA table
         # attribute so AT can associate data cells with their header.
         elem[NameObject("/A")] = DictionaryObject(
             {

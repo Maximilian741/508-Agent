@@ -58,7 +58,9 @@ from app.models.accessibility import (
 from app.parsers import parse_to_tree
 from app.persistence import audit_log as _audit
 from app.persistence.db import get_repo
+from app.services.fix_guidance import guidance_for
 from app.services.remediation_engine import RemediationEngine
+from app.services.scan_fixes import derive_scan_fixes
 from app.services.remediation_planner import plan_remediations, RemediationPolicy
 from app.services.remediators.registry import execute_plans
 from app.writers import write_remediated
@@ -90,6 +92,26 @@ class PipelineSummary(BaseModel):
     tableCount: int = 0
 
 
+class PipelineFix(BaseModel):
+    """How to fix ONE finding, for surfaces we can't remediate ourselves.
+
+    ``source="writer"`` means our remediation engine actually produced this
+    change on a throwaway copy (a real diff). ``source="guidance"`` means it is
+    a hand-written pattern — an example, not something we verified — and carries
+    no ``before``. See app/services/fix_guidance.py + scan_fixes.py.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str                       # "writer" | "guidance"
+    kind: str                         # "element" | "structural" | "css" | "advice"
+    before: Optional[str] = None
+    after: Optional[str] = None
+    action: Optional[str] = None
+    note: Optional[str] = None
+    requiresHumanVerification: bool = True
+
+
 class PipelineViolation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -102,6 +124,9 @@ class PipelineViolation(BaseModel):
     standards: Dict[str, List[str]] = Field(default_factory=dict)
     evidence: Dict[str, Any] = Field(default_factory=dict)
     recommendedActions: List[str] = Field(default_factory=list)
+    # Only populated by the URL/site scan (a live page we can't remediate).
+    # Defaults to None so /analyze and every existing caller is unaffected.
+    fix: Optional[PipelineFix] = None
 
 
 class PipelineExecutionResult(BaseModel):
@@ -332,15 +357,21 @@ async def analyze_url(
         except Exception as exc:
             logger.exception("url scan parse failed: %s", exc)
             raise HTTPException(status_code=422, detail="Could not parse that page's HTML.")
+
+        tree = result.tree
+        engine = RemediationEngine()
+        violations = await run_in_threadpool(engine.detect_violations, tree)
+
+        # "Fix it yourself": run our real remediation engine against a throwaway
+        # copy so each finding can carry the exact diff it produced. Analyze-only
+        # and AI-free (see scan_fixes) — nothing is charged, persisted, or sent
+        # back to the scanned site. Failures degrade to guidance-only.
+        fixes_by_node = await run_in_threadpool(derive_scan_fixes, tmp_path, tree)
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
-
-    tree = result.tree
-    engine = RemediationEngine()
-    violations = await run_in_threadpool(engine.detect_violations, tree)
 
     from app.models.accessibility import FLAG_DEFINITIONS
 
@@ -375,6 +406,9 @@ async def analyze_url(
                 # A live page isn't remediated here, so we don't advertise auto-fix
                 # actions — the UI tells the user to upload the file to fix them.
                 recommendedActions=[],
+                # ...but we DO hand over exactly what to change: a real diff from
+                # our engine when it produced one, else static guidance.
+                fix=_fix_for_violation(v, fixes_by_node),
             )
         )
     score = _build_scan_score(violations)
@@ -428,6 +462,23 @@ async def analyze_url(
 SITE_SCAN_MAX_PAGES = 25
 SITE_SCAN_DEFAULT_PAGES = 10
 SITE_SCAN_BUDGET_SECONDS = 90.0
+
+
+def _fix_for_violation(v, fixes_by_node: Dict[str, Dict[str, Any]]) -> Optional[PipelineFix]:
+    """Best fix for one finding: a real writer diff if we produced one, else guidance.
+
+    A writer diff is only ever present when the writer's own ``applied`` list
+    confirmed the change, so we never show a fix that didn't happen.
+    """
+    raw = fixes_by_node.get(v.location.node_id)
+    if raw is None:
+        raw = guidance_for(v.rule_id, v.evidence)
+    if not raw:
+        return None
+    try:
+        return PipelineFix(**raw)
+    except Exception:  # a malformed guidance entry must never break a scan
+        return None
 
 
 class SiteScanRequest(BaseModel):
