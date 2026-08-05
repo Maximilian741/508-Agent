@@ -1383,6 +1383,12 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # reads the <caption> back and TABLE_CAPTION_MISSING clears). Grounded in
         # the table's own headers/rows; routes to review like alt text.
         "GENERATE_TABLE_CAPTION",
+        # WCAG 1.3.5: fields whose purpose is unambiguous get the standard
+        # autocomplete token; WCAG 2.4.3: positive tabindex values are reset to
+        # 0. Both are written by iterators the parser counted with, so the count
+        # claimed equals the count written — verified by smoke_html_semantics.
+        "SET_INPUT_AUTOCOMPLETE",
+        "FIX_POSITIVE_TABINDEX",
     },
 }
 

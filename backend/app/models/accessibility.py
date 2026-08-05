@@ -91,6 +91,9 @@ class AccessibilityFlagCode(str, Enum):
     TABLE_COMPLEX_NEEDS_SUMMARY = "TABLE_COMPLEX_NEEDS_SUMMARY"
     TABLE_NESTED = "TABLE_NESTED"
     LINK_NAME_MISSING = "LINK_NAME_MISSING"
+    IFRAME_TITLE_MISSING = "IFRAME_TITLE_MISSING"
+    INPUT_AUTOCOMPLETE_MISSING = "INPUT_AUTOCOMPLETE_MISSING"
+    POSITIVE_TABINDEX = "POSITIVE_TABINDEX"
 
 
 class StandardReference(BaseModel):
@@ -199,6 +202,36 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             wcag_2_1=["2.4.4", "4.1.2"],
             section_508=["E205.4"],
             pdf_ua=["7.18.1"],
+        ),
+    ),
+    AccessibilityFlagCode.IFRAME_TITLE_MISSING: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.IFRAME_TITLE_MISSING,
+        severity=Severity.ERROR,
+        message="Embedded frame has no title, so its content is unidentified.",
+        standards=StandardReference(
+            wcag_2_1=["4.1.2", "2.4.1"],
+            section_508=["E205.4"],
+            pdf_ua=[],
+        ),
+    ),
+    AccessibilityFlagCode.INPUT_AUTOCOMPLETE_MISSING: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.INPUT_AUTOCOMPLETE_MISSING,
+        severity=Severity.WARNING,
+        message="Form field collecting personal data has no autocomplete attribute.",
+        standards=StandardReference(
+            wcag_2_1=["1.3.5"],
+            section_508=["E205.4"],
+            pdf_ua=[],
+        ),
+    ),
+    AccessibilityFlagCode.POSITIVE_TABINDEX: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.POSITIVE_TABINDEX,
+        severity=Severity.WARNING,
+        message="Positive tabindex forces an unnatural keyboard focus order.",
+        standards=StandardReference(
+            wcag_2_1=["2.4.3"],
+            section_508=["E205.4"],
+            pdf_ua=[],
         ),
     ),
     AccessibilityFlagCode.DOCUMENT_LANGUAGE_MISSING: AccessibilityFlagDefinition(
@@ -618,6 +651,8 @@ class ActionCode(str, Enum):
     ADD_OCR_TEXT_LAYER = "ADD_OCR_TEXT_LAYER"
     FIX_CONTRAST = "FIX_CONTRAST"
     GENERATE_TABLE_CAPTION = "GENERATE_TABLE_CAPTION"
+    SET_INPUT_AUTOCOMPLETE = "SET_INPUT_AUTOCOMPLETE"
+    FIX_POSITIVE_TABINDEX = "FIX_POSITIVE_TABINDEX"
     FLAG_FOR_MANUAL_REVIEW = "FLAG_FOR_MANUAL_REVIEW"
 
 
@@ -921,6 +956,41 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.LINK],
             related_flag_code=AccessibilityFlagCode.LINK_NAME_MISSING,
+        ),
+    ],
+    # Naming a frame requires knowing what's inside it (a map? a video? a
+    # payment widget?), which we can't read across the frame boundary — manual.
+    AccessibilityFlagCode.IFRAME_TITLE_MISSING: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.IFRAME_TITLE_MISSING,
+        ),
+    ],
+    AccessibilityFlagCode.INPUT_AUTOCOMPLETE_MISSING: [
+        RemediationAction(
+            action_code=ActionCode.SET_INPUT_AUTOCOMPLETE,
+            description="Add the standard autocomplete token for each field whose purpose is unambiguous.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.INPUT_AUTOCOMPLETE_MISSING,
+        ),
+    ],
+    AccessibilityFlagCode.POSITIVE_TABINDEX: [
+        RemediationAction(
+            action_code=ActionCode.FIX_POSITIVE_TABINDEX,
+            description="Reset positive tabindex values to 0 so focus follows document order.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.POSITIVE_TABINDEX,
         ),
     ],
     # Sole action (no FLAG_FOR_MANUAL_REVIEW fallback), mirroring MISSING_ALT_TEXT:

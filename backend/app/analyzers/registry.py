@@ -22,6 +22,11 @@ from app.analyzers.image_analyzer import (
     MissingAltTextAnalyzer,
     NonDescriptiveAltTextAnalyzer,
 )
+from app.analyzers.html_semantics_analyzer import (
+    IframeTitleAnalyzer,
+    InputAutocompleteAnalyzer,
+    PositiveTabindexAnalyzer,
+)
 from app.analyzers.link_analyzer import LinkNameMissingAnalyzer, LinkTextAnalyzer
 from app.analyzers.link_target_analyzer import LinkTargetBrokenAnalyzer
 from app.analyzers.list_analyzer import ListStructureAnalyzer
@@ -55,6 +60,12 @@ def get_default_analyzers() -> List[Analyzer]:
         LinkTextAnalyzer(),
         LinkNameMissingAnalyzer(),
         LinkTargetBrokenAnalyzer(),
+        # HTML-only: frames without a name, undeclared input purpose (1.3.5),
+        # and focus-order-breaking positive tabindex. All three fire off root
+        # counts the parser derived with the writer's own iterators.
+        IframeTitleAnalyzer(),
+        InputAutocompleteAnalyzer(),
+        PositiveTabindexAnalyzer(),
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
         DocumentHeadingsAnalyzer(),

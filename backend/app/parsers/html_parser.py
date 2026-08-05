@@ -424,6 +424,19 @@ class HTMLParser:
             # (the honesty invariant) — see iter_derivable_form_labels.
             properties["form_fields_derivable"] = ff_derivable
 
+        # Counted with the SAME iterators the writer applies, so what we claim is
+        # exactly what gets written (see iter_autocomplete_candidates /
+        # iter_positive_tabindex).
+        ac_count = sum(1 for _ in iter_autocomplete_candidates(doc))
+        if ac_count:
+            properties["inputs_missing_autocomplete"] = ac_count
+        tabindex_count = sum(1 for _ in iter_positive_tabindex(doc))
+        if tabindex_count:
+            properties["positive_tabindex_count"] = tabindex_count
+        untitled_frames = count_untitled_iframes(doc)
+        if untitled_frames:
+            properties["iframes_missing_title"] = untitled_frames
+
         root = DocumentNode(
             id="doc-1",
             content=NodeContent(kind=ContentKind.NONE),
@@ -915,6 +928,139 @@ def _count_form_fields(doc: Any) -> Tuple[int, int, int]:
         if _derive_html_label(ctrl, labels_for):
             derivable += 1
     return total, unlabeled, derivable
+
+
+# ---------------------------------------------------------------------------
+# WCAG 1.3.5 — Identify Input Purpose (autocomplete)
+# ---------------------------------------------------------------------------
+
+# input name/id/type fragment -> the WCAG-listed autocomplete token. Only
+# UNAMBIGUOUS mappings: a wrong autocomplete token actively harms a user whose
+# browser autofills the wrong value, so anything doubtful is left alone.
+_AUTOCOMPLETE_HINTS: List[Tuple[str, str]] = [
+    ("emailaddress", "email"), ("email", "email"), ("e-mail", "email"),
+    ("firstname", "given-name"), ("givenname", "given-name"), ("fname", "given-name"),
+    ("lastname", "family-name"), ("familyname", "family-name"), ("surname", "family-name"),
+    ("lname", "family-name"),
+    ("fullname", "name"), ("yourname", "name"),
+    ("phonenumber", "tel"), ("telephone", "tel"), ("phone", "tel"), ("mobile", "tel"),
+    ("streetaddress", "street-address"), ("address1", "address-line1"),
+    ("addressline1", "address-line1"), ("address2", "address-line2"),
+    ("addressline2", "address-line2"),
+    ("postalcode", "postal-code"), ("zipcode", "postal-code"), ("postcode", "postal-code"),
+    ("zip", "postal-code"),
+    ("country", "country-name"),
+    ("organization", "organization"), ("company", "organization"),
+    ("birthday", "bday"), ("dateofbirth", "bday"),
+    ("username", "username"),
+]
+# <input type> that maps directly, regardless of the field's name.
+_AUTOCOMPLETE_BY_TYPE = {"email": "email", "tel": "tel"}
+# Fields we must NEVER guess for: a wrong token here is a security/UX hazard.
+_AUTOCOMPLETE_SKIP_TYPES = {
+    "password", "hidden", "submit", "button", "reset", "image", "file",
+    "checkbox", "radio", "search", "range", "color",
+}
+
+
+def _autocomplete_token_for(ctrl: Any) -> Optional[str]:
+    """The unambiguous autocomplete token for a control, or None.
+
+    Conservative by design (WCAG 1.3.5 asks for the field's PURPOSE): we only
+    return a token when the control's type or its name/id contains a
+    well-known, unambiguous fragment.
+    """
+    if not isinstance(ctrl.tag, str) or ctrl.tag.lower() != "input":
+        return None  # <select>/<textarea> purposes are far less predictable
+    itype = (ctrl.get("type") or "text").strip().lower()
+    if itype in _AUTOCOMPLETE_SKIP_TYPES:
+        return None
+    if (ctrl.get("autocomplete") or "").strip():
+        return None  # already declared (including autocomplete="off")
+    by_type = _AUTOCOMPLETE_BY_TYPE.get(itype)
+    if by_type:
+        return by_type
+    if itype not in {"text", "tel", "email", "url", "number", ""}:
+        return None
+    haystack = " ".join(
+        (ctrl.get(a) or "") for a in ("name", "id", "autocorrect", "placeholder")
+    ).lower()
+    haystack = re.sub(r"[^a-z0-9]+", "", haystack)
+    if not haystack:
+        return None
+    for fragment, token in _AUTOCOMPLETE_HINTS:
+        if fragment in haystack:
+            return token
+    return None
+
+
+def iter_autocomplete_candidates(doc: Any):
+    """Yield ``(input_element, token)`` for inputs whose purpose is unambiguous.
+
+    Shared by the parser (which COUNTS them) and the writer (which APPLIES
+    them) so the number we claim is exactly the number we write — the same
+    honesty contract as :func:`iter_derivable_form_labels`.
+    """
+    for ctrl in doc.iter("input"):
+        token = _autocomplete_token_for(ctrl)
+        if token:
+            yield ctrl, token
+
+
+# ---------------------------------------------------------------------------
+# WCAG 2.4.3 — Focus Order (positive tabindex)
+# ---------------------------------------------------------------------------
+
+
+def iter_positive_tabindex(doc: Any):
+    """Yield elements with a POSITIVE tabindex.
+
+    ``tabindex="3"`` yanks an element out of DOM order and to the front of the
+    whole page's tab sequence, so keyboard focus jumps unpredictably. The fix is
+    always the same and is safe: ``tabindex="0"`` keeps the element focusable
+    but restores natural order. ``tabindex="-1"`` (programmatic focus) and
+    ``tabindex="0"`` are both fine and never yielded.
+    """
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        raw = (el.get("tabindex") or "").strip()
+        if not raw:
+            continue
+        try:
+            if int(raw) > 0:
+                yield el
+        except ValueError:
+            continue
+
+
+# ---------------------------------------------------------------------------
+# WCAG 4.1.2 / 2.4.1 — frames need an accessible name
+# ---------------------------------------------------------------------------
+
+
+def count_untitled_iframes(doc: Any) -> int:
+    """How many <iframe>/<frame> elements have no accessible name.
+
+    An embedded map, video or widget with no ``title`` is announced only as
+    "frame", so a screen reader user cannot tell what is inside or whether to
+    enter it. Frames hidden from the a11y tree don't count.
+    """
+    n = 0
+    for tag in ("iframe", "frame"):
+        for el in doc.iter(tag):
+            if (el.get("title") or "").strip():
+                continue
+            if (el.get("aria-label") or "").strip():
+                continue
+            if (el.get("aria-labelledby") or "").strip():
+                continue
+            if (el.get("aria-hidden") or "").strip().lower() == "true":
+                continue
+            if el.get("hidden") is not None:
+                continue
+            n += 1
+    return n
 
 
 def iter_derivable_form_labels(doc: Any):

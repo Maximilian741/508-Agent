@@ -11,6 +11,10 @@ from app.services.remediators.add_table_headers_executor import AddTableHeadersE
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 from app.services.remediators.flag_for_manual_review_executor import FlagForManualReviewExecutor
 from app.services.remediators.fill_form_field_labels_executor import FillFormFieldLabelsExecutor
+from app.services.remediators.html_semantics_executors import (
+    FixPositiveTabindexExecutor,
+    SetInputAutocompleteExecutor,
+)
 from app.services.remediators.fix_contrast_executor import FixContrastExecutor
 from app.services.remediators.fix_list_structure_executor import FixListStructureExecutor
 from app.services.remediators.generate_alt_text_executor import GenerateAltTextExecutor
@@ -39,6 +43,8 @@ def get_default_executors() -> List[RemediationExecutor]:
         GenerateTableCaptionExecutor(),
         FixListStructureExecutor(),
         FillFormFieldLabelsExecutor(),
+        SetInputAutocompleteExecutor(),
+        FixPositiveTabindexExecutor(),
         FixContrastExecutor(),
         ImproveLinkTextExecutor(),
         SetDocumentLanguageExecutor(),

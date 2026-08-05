@@ -51,7 +51,12 @@ from app.models.accessibility import (
     TableRowNode,
     iter_reading_order,
 )
-from app.parsers.html_parser import _parse_document, iter_derivable_form_labels
+from app.parsers.html_parser import (
+    _parse_document,
+    iter_autocomplete_candidates,
+    iter_derivable_form_labels,
+    iter_positive_tabindex,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +200,22 @@ def write_remediated_html(
                 continue  # already has an accessible name — never clobber
             ctrl.set("aria-label", label_text)
             applied.append({"action": "FILL_FORM_FIELD_LABELS", "target_id": root.id})
+
+    # WCAG 1.3.5: declare each field's purpose. Same contract as above —
+    # iter_autocomplete_candidates is the helper the parser COUNTED with, so we
+    # write exactly as many tokens as were reported, and only for fields whose
+    # purpose is unambiguous.
+    if props.get("apply_input_autocomplete"):
+        for ctrl, token in iter_autocomplete_candidates(doc):
+            ctrl.set("autocomplete", token)
+            applied.append({"action": "SET_INPUT_AUTOCOMPLETE", "target_id": root.id})
+
+    # WCAG 2.4.3: a positive tabindex drags an element to the front of the whole
+    # page's tab order. Resetting to 0 keeps it focusable in natural DOM order.
+    if props.get("apply_tabindex_reset"):
+        for el in iter_positive_tabindex(doc):
+            el.set("tabindex", "0")
+            applied.append({"action": "FIX_POSITIVE_TABINDEX", "target_id": root.id})
 
     # Fake-list -> real list: each approved run becomes a <ul>/<ol>. Done LAST so
     # the element removals can't disturb other held references.
