@@ -405,6 +405,81 @@ def _row0_is_header(run) -> bool:
     return True
 
 
+# --- Column-aware reading order -------------------------------------------
+# A multi-column PDF whose content stream interleaves the columns (line 1 left,
+# line 1 right, line 2 left, ...) is read out by AT as alternating fragments of
+# two unrelated texts — one of the most severe and most common failures in
+# government PDFs (WCAG 1.3.2).
+#
+# We can fix it WITHOUT touching a single rendered byte: the visual output comes
+# from the content stream, but PDF/UA reading order comes from the STRUCTURE
+# TREE, and we build that. So we leave the stream exactly as-is (marked-content
+# ids and painting order unchanged) and emit the structure elements in corrected
+# visual order instead.
+_MIN_COLUMN_BLOCKS = 8        # too few blocks to be confident about a layout
+_MIN_COLUMN_SHARE = 0.30      # each column must hold >=30% of the blocks
+_MIN_GUTTER = 40.0            # points of clear horizontal space between columns
+
+
+def _detect_two_columns(points) -> Optional[float]:
+    """Return the gutter x of a clear 2-column layout, or None.
+
+    ``points`` is ``[(x, y), ...]``. Deliberately strict: reordering a page that
+    is NOT two-column would CREATE the very defect we're fixing, so anything
+    ambiguous returns None and the original order is kept.
+    """
+    xs = sorted(p[0] for p in points)
+    n = len(xs)
+    if n < _MIN_COLUMN_BLOCKS:
+        return None
+    best_gap, best_at = 0.0, None
+    lo, hi = int(n * _MIN_COLUMN_SHARE), int(n * (1 - _MIN_COLUMN_SHARE))
+    for i in range(max(lo, 1), max(hi, 1)):
+        gap = xs[i] - xs[i - 1]
+        if gap > best_gap:
+            best_gap, best_at = gap, (xs[i] + xs[i - 1]) / 2.0
+    if best_at is None or best_gap < _MIN_GUTTER:
+        return None
+    left = sum(1 for x in xs if x < best_at)
+    right = n - left
+    if min(left, right) < n * _MIN_COLUMN_SHARE:
+        return None
+    return best_at
+
+
+def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
+    """Reorder structure leaves into visual reading order for 2-column pages.
+
+    Returns ``(leaves, changed)``. Conservative — returns the input untouched
+    unless the page is unambiguously two-column AND the current order actually
+    interleaves them. Pages containing a detected table or list are left alone:
+    those constructs span columns and already carry their own ordering.
+    """
+    positioned = [lf for lf in leaves if lf.get("by") is not None and lf.get("bx") is not None]
+    if len(positioned) != len(leaves) or len(leaves) < _MIN_COLUMN_BLOCKS:
+        return leaves, False
+    if any(lf.get("table") is not None or lf.get("group") is not None for lf in leaves):
+        return leaves, False
+
+    gutter = _detect_two_columns([(lf["bx"], lf["by"]) for lf in leaves])
+    if gutter is None:
+        return leaves, False
+
+    cols = [0 if lf["bx"] < gutter else 1 for lf in leaves]
+    # Already column-major (all of column 0, then all of column 1)? Nothing to do.
+    transitions = sum(1 for a, b in zip(cols, cols[1:]) if a != b)
+    if transitions <= 1:
+        return leaves, False
+
+    left = [lf for lf, c in zip(leaves, cols) if c == 0]
+    right = [lf for lf, c in zip(leaves, cols) if c == 1]
+    # PDF user space puts the origin at the bottom-left, so larger y is higher
+    # on the page: sort descending for top-to-bottom.
+    left.sort(key=lambda lf: (-lf["by"], lf["bx"]))
+    right.sort(key=lambda lf: (-lf["by"], lf["bx"]))
+    return left + right, True
+
+
 def _detect_table_groups(segments, exclude=frozenset()):
     """Reconstruct DATA tables from positioned text blocks (high-precision).
 
@@ -1153,12 +1228,18 @@ def _tag_page_elements(
         else:  # figure
             tag = "/Figure"
             alt = meta
+        # Block origin: x indents nested list items, and (x, y) together drive
+        # the column-aware reading-order correction below.
+        bx, by = _block_origin(seg_ops)
         # x-indent is used to nest list items (deeper x => sub-list).
-        lx = _block_origin(seg_ops)[0] if (kind == "text" and grp is not None) else None
+        lx = bx if (kind == "text" and grp is not None) else None
         new_ops.append(([NameObject(tag), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
         new_ops.extend(seg_ops)
         new_ops.append(([], b"EMC"))
-        leaves.append({"mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell, "x": lx})
+        leaves.append({
+            "mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell,
+            "x": lx, "bx": bx, "by": by,
+        })
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
         mcid += 1
@@ -1182,6 +1263,16 @@ def _tag_page_elements(
     ns = DecodedStreamObject()
     ns.set_data(new_data)
     page[NameObject("/Contents")] = pdf._add_object(ns)  # noqa: SLF001
+
+    # Reading order: the content stream (and therefore the rendered page and
+    # every MCID) is left EXACTLY as produced above — we only choose the order
+    # in which the structure elements reference those MCIDs, which is what
+    # PDF/UA reading order actually is. On a two-column page whose stream
+    # interleaves the columns, this turns an alternating jumble into the order a
+    # sighted reader sees (WCAG 1.3.2).
+    leaves, reordered = _reorder_leaves_for_columns(leaves)
+    if reordered and counters is not None:
+        counters["reading_order_fixed"] = counters.get("reading_order_fixed", 0) + 1
 
     # Pass 3 — build nested specs. A table emits one /Table -> /TR -> /TH|/TD at
     # the position of its first cell; a list run emits /L -> /LI -> /LBody;
@@ -1514,6 +1605,13 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["formWidgets"] = forms_tagged
         report["artifacts"] = page_counters.get("artifacts", 0)
         report["perElementPages"] = per_element_pages
+        # Pages whose two columns were interleaved in the content stream and are
+        # now presented in correct visual reading order by the structure tree.
+        report["readingOrderFixedPages"] = page_counters.get("reading_order_fixed", 0)
+        # Table-like grids we DECLINED to tag (merged cells, too sparse) vs the
+        # ones we did — surfaced so "N tables tagged" is never read as "all of
+        # your tables were handled".
+        report["tablesDetected"] = page_counters.get("tables_detected", tables_tagged)
         applied.append("struct_tree")
         applied.append("mark_info")
     except Exception as exc:
