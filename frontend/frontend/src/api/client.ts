@@ -347,6 +347,19 @@ export interface ScanChangeReport {
     unchangedIssues: number;
 }
 
+/** A URL the user asked us to re-check on a schedule. */
+export interface Monitor {
+    id: string;
+    url: string;
+    frequency: "daily" | "weekly";
+    enabled: boolean;
+    notifyEmail: string;
+    lastRunAt?: string | null;
+    nextRunAt?: string | null;
+    lastIssueCount: number;
+    lastStatus: string;
+}
+
 export interface PipelineResponse {
     summary: PipelineSummary;
     violations: PipelineViolation[];
@@ -407,6 +420,10 @@ export interface ApiClient {
     runPipeline: (file: File, execute?: boolean) => Promise<PipelineResponse>;
     runPipelineUrl: (url: string) => Promise<PipelineResponse>;
     runSiteScan: (url: string, maxPages?: number) => Promise<SiteScanResponse>;
+    listMonitors: () => Promise<Monitor[]>;
+    createMonitor: (url: string, frequency: string, notifyEmail: string) => Promise<Monitor>;
+    updateMonitor: (id: string, patch: Partial<Pick<Monitor, "enabled" | "frequency" | "notifyEmail">>) => Promise<Monitor>;
+    deleteMonitor: (id: string) => Promise<void>;
     runPipelineRemediate: (
         file: File,
         approvedViolationIds: string[],
@@ -638,6 +655,59 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             throw err;
         }
         return (await response.json()) as SiteScanResponse;
+    };
+
+    // --- Monitored sites (scheduled re-scans + regression alerts) ---
+    const _monitorErr = async (response: Response, fallback: string) => {
+        const text = await response.text();
+        let detail = "";
+        try {
+            const j = JSON.parse(text);
+            detail = typeof j?.detail === "string" ? j.detail : "";
+        } catch {
+            /* non-JSON body — use the generic fallback */
+        }
+        const err = new Error(detail || fallback) as Error & { status?: number };
+        err.status = response.status;
+        return err;
+    };
+
+    const listMonitors = async (): Promise<Monitor[]> => {
+        if (mockMode) return [];
+        const response = await fetch(`${baseUrl}/monitors`, { headers: authHeaders() });
+        if (!response.ok) throw await _monitorErr(response, "Could not load your monitors");
+        return (await response.json()) as Monitor[];
+    };
+
+    const createMonitor = async (url: string, frequency: string, notifyEmail: string): Promise<Monitor> => {
+        const response = await fetch(`${baseUrl}/monitors`, {
+            method: "POST",
+            body: JSON.stringify({ url, frequency, notifyEmail }),
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+        });
+        if (!response.ok) throw await _monitorErr(response, "Could not start monitoring that URL");
+        return (await response.json()) as Monitor;
+    };
+
+    const updateMonitor = async (
+        id: string,
+        patch: Partial<Pick<Monitor, "enabled" | "frequency" | "notifyEmail">>,
+    ): Promise<Monitor> => {
+        const response = await fetch(`${baseUrl}/monitors/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify(patch),
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+        });
+        if (!response.ok) throw await _monitorErr(response, "Could not update that monitor");
+        return (await response.json()) as Monitor;
+    };
+
+    const deleteMonitor = async (id: string): Promise<void> => {
+        const response = await fetch(`${baseUrl}/monitors/${id}`, {
+            method: "DELETE",
+            headers: authHeaders(),
+        });
+        if (!response.ok) throw await _monitorErr(response, "Could not remove that monitor");
     };
 
     const runPipelineRemediate = async (
@@ -1024,6 +1094,10 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         runPipeline,
         runPipelineUrl,
         runSiteScan,
+        listMonitors,
+        createMonitor,
+        updateMonitor,
+        deleteMonitor,
         runPipelineRemediate,
         getPipelineFileUrl,
         batchZip,
