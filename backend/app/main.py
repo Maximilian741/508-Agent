@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.admin_metrics import router as admin_metrics_router
 from app.api.api_keys import router as api_keys_router
+from app.api.monitors import router as monitors_router
 from app.api.audit_log import router as audit_log_router
 from app.api.auth import router as auth_router
 from app.api.credits import router as credits_router
@@ -38,6 +39,7 @@ from app.security import (
 from app.security.rate_limit import RateLimitMiddleware
 from app.storage.router import router as storage_router
 from app.tasks.cleanup import schedule_cleanup_task
+from app.tasks.monitor_runner import schedule_monitor_task
 
 _log = logging.getLogger(__name__)
 
@@ -103,6 +105,9 @@ async def _on_startup() -> None:
     else:
         _log.info("[auth] CF Access enforcement is OFF (dev mode)")
     schedule_cleanup_task()
+    # Safe to start in every worker: due monitors are claimed via a DB lease so
+    # exactly one worker ever runs a given check (see services/monitoring.py).
+    schedule_monitor_task()
 
 
 app.include_router(health_router, tags=["health"])
@@ -113,6 +118,7 @@ app.include_router(teams_router, tags=["teams"])
 app.include_router(admin_metrics_router, tags=["admin"])
 app.include_router(metrics_router, tags=["metrics"])
 app.include_router(api_keys_router, tags=["api-keys"])
+app.include_router(monitors_router, tags=["monitors"])
 app.include_router(documents_router, tags=["documents"])
 app.include_router(scan_router, tags=["scan"])
 app.include_router(tools_router, tags=["tools"])

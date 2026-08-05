@@ -171,6 +171,27 @@ def _validate_url(url: str) -> Tuple[str, str, int, str]:
     return scheme, host, port, req_path
 
 
+def validate_scan_target(raw_url: str) -> str:
+    """Full pre-flight check for a URL we intend to fetch LATER (e.g. a monitor).
+
+    Runs BOTH gates a live fetch would: the scheme/credentials/length check AND
+    the DNS resolution + public-IP check. Storing a target that will only be
+    rejected at fetch time is a bad experience (a monitor that silently never
+    works) and leaves an internal address parked in the scheduler, so callers
+    that persist a URL should validate it here first.
+
+    Returns the normalized URL. Raises :class:`SsrfError` if it isn't scannable.
+    """
+    url = (raw_url or "").strip()
+    if not url:
+        raise SsrfError("Please enter a URL.")
+    if "://" not in url:
+        url = "https://" + url
+    _scheme, host, _port, _path = _validate_url(url)
+    _resolve_validated_ip(host)  # raises SsrfError for any non-public address
+    return url
+
+
 def fetch_url_html(raw_url: str) -> Tuple[bytes, str]:
     """Fetch ``raw_url`` (a public web page) and return ``(html_bytes, final_url)``.
 

@@ -340,6 +340,42 @@ class AnalysisResultRow(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class MonitoredSiteRow(Base):
+    """A URL the user asked us to re-check on a schedule.
+
+    MULTI-WORKER SAFETY: the backend runs ``uvicorn --workers 2``, so every
+    worker has its own event loop and would fire the same due monitor
+    simultaneously — duplicate crawls of a customer's site and duplicate alert
+    emails. ``claimed_by``/``claimed_at`` implement a lease: a worker takes a
+    monitor with a single atomic conditional UPDATE and only proceeds if it won
+    the row. A lease older than the stale cutoff is reclaimable, so a crashed
+    worker can't strand a monitor forever.
+    """
+
+    __tablename__ = "monitored_sites"
+    __table_args__ = (
+        Index("idx_monitor_user", "user_id"),
+        Index("idx_monitor_due", "enabled", "next_run_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # "daily" | "weekly"
+    frequency: Mapped[str] = mapped_column(String(16), nullable=False, default="weekly")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notify_email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_issue_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_status: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Lease fields — see the class docstring.
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ScanHistoryRow(Base):
     """One URL scan, kept so the NEXT scan can report what changed.
 
