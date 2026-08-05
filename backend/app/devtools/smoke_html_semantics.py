@@ -109,6 +109,65 @@ def main() -> int:
     check("autocomplete: PASSWORD field is never guessed (security)", "password" not in tokens, str(tokens))
     check("autocomplete: unknown-purpose field is left alone (no wrong token)",
           "favourite_colour" not in tokens, str(tokens))
+
+    # --- COLLISION CORPUS (regression lock) -------------------------------
+    # An adversarial review proved substring matching wrote personal-data tokens
+    # onto unrelated fields — the browser would then silently prefill the user's
+    # real name/phone/address into the wrong box, which is strictly WORSE than
+    # the missing attribute. Every identifier below must yield NO token.
+    from app.parsers.html_parser import _autocomplete_token_for
+
+    class _Fake:
+        tag = "input"
+
+        def __init__(self, name, itype="text"):
+            self._a = {"name": name, "type": itype}
+
+        def get(self, k, d=None):
+            return self._a.get(k, d)
+
+    COLLISIONS = [
+        "email_subject", "emailBody", "email_template_name",   # 'email'
+        "phone_model", "telephone_provider", "headphone_model",
+        "smartphone_brand", "microphone_input",                 # 'phone'
+        "mobile_carrier", "automobile_make",                    # 'mobile'
+        "zip_file", "unzip_path", "zipper_size",                # 'zip'
+        "countryside_tour", "country_music_artist",             # 'country'
+        "accompanying_guest", "company_size",                   # 'company'
+        "model_name", "hotel_name", "label_name", "channel_name",
+        "school_name", "tool_name",                             # 'lname'
+        "pdf_name", "conf_name", "ref_name",                    # 'fname'
+        "birthday_message",                                     # 'birthday'
+    ]
+    bad = {c: _autocomplete_token_for(_Fake(c)) for c in COLLISIONS}
+    offenders = {k: v for k, v in bad.items() if v}
+    check("autocomplete: NO collision produces a wrong token (26 identifiers)",
+          not offenders, f"WRONG TOKENS: {offenders}")
+
+    # Fields holding a THIRD PARTY's data are out of WCAG 1.3.5 scope.
+    third = {c: _autocomplete_token_for(_Fake(c)) for c in
+             ("recipient_email", "friend_email", "emergency_phone", "guest_name", "referral_email")}
+    check("autocomplete: third-party fields are never autofilled with the user's data",
+          not any(third.values()), str(third))
+
+    # Types that can only produce a wrong token are excluded outright.
+    check("autocomplete: type=url is never given a name/org token",
+          _autocomplete_token_for(_Fake("company_website", "url")) is None)
+    check("autocomplete: type=number is never given a name token",
+          _autocomplete_token_for(_Fake("name", "number")) is None)
+
+    # ...while the genuine positives still work (recall didn't collapse).
+    POSITIVES = {
+        "email_address": "email", "phoneNumber": "tel", "zipcode": "postal-code",
+        "first_name": "given-name", "last_name": "family-name", "full_name": "name",
+        "postal_code": "postal-code", "street_address": "street-address",
+        "user_email": "email", "billing_zip": "postal-code", "company_name": "organization",
+    }
+    got = {k: _autocomplete_token_for(_Fake(k)) for k in POSITIVES}
+    check("autocomplete: real purpose fields still detected (recall intact)",
+          got == POSITIVES, f"got {got}")
+    check("autocomplete: full_name -> 'name' (not shadowed by 'lname')",
+          got.get("full_name") == "name", str(got.get("full_name")))
     check("tabindex: only the POSITIVE one is selected",
           [e.get("tabindex") for e in iter_positive_tabindex(doc)] == ["3"])
     check("iframe: untitled frame counted", count_untitled_iframes(doc) == 1)

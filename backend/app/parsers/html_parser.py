@@ -934,26 +934,53 @@ def _count_form_fields(doc: Any) -> Tuple[int, int, int]:
 # WCAG 1.3.5 — Identify Input Purpose (autocomplete)
 # ---------------------------------------------------------------------------
 
-# input name/id/type fragment -> the WCAG-listed autocomplete token. Only
-# UNAMBIGUOUS mappings: a wrong autocomplete token actively harms a user whose
-# browser autofills the wrong value, so anything doubtful is left alone.
-_AUTOCOMPLETE_HINTS: List[Tuple[str, str]] = [
-    ("emailaddress", "email"), ("email", "email"), ("e-mail", "email"),
-    ("firstname", "given-name"), ("givenname", "given-name"), ("fname", "given-name"),
-    ("lastname", "family-name"), ("familyname", "family-name"), ("surname", "family-name"),
-    ("lname", "family-name"),
-    ("fullname", "name"), ("yourname", "name"),
-    ("phonenumber", "tel"), ("telephone", "tel"), ("phone", "tel"), ("mobile", "tel"),
-    ("streetaddress", "street-address"), ("address1", "address-line1"),
-    ("addressline1", "address-line1"), ("address2", "address-line2"),
-    ("addressline2", "address-line2"),
-    ("postalcode", "postal-code"), ("zipcode", "postal-code"), ("postcode", "postal-code"),
-    ("zip", "postal-code"),
-    ("country", "country-name"),
-    ("organization", "organization"), ("company", "organization"),
-    ("birthday", "bday"), ("dateofbirth", "bday"),
-    ("username", "username"),
-]
+# EXACT identifier -> the WCAG-listed autocomplete token.
+#
+# These are matched EXACTLY against a normalized field identifier — never as
+# substrings. An adversarial review proved substring matching is actively
+# dangerous here: "mobile" lives inside "automobile", "lname" inside
+# "hotel_name"/"model_name", "company" inside "accompanying", "zip" inside
+# "zip_file", "email" inside "email_subject". Each of those wrote a
+# personal-data token onto an unrelated field, so the browser would silently
+# prefill the user's real name/phone/address into the wrong box — strictly worse
+# than the missing attribute we set out to fix.
+_AUTOCOMPLETE_EXACT: Dict[str, str] = {
+    # email
+    "email": "email", "emailaddress": "email", "emailaddr": "email",
+    "mail": "email", "mailaddress": "email", "useremail": "email",
+    # names
+    "firstname": "given-name", "givenname": "given-name", "fname": "given-name",
+    "forename": "given-name",
+    "lastname": "family-name", "familyname": "family-name", "surname": "family-name",
+    "lname": "family-name",
+    "fullname": "name", "yourname": "name", "name": "name",
+    # phone
+    "phone": "tel", "phonenumber": "tel", "telephone": "tel", "telephonenumber": "tel",
+    "tel": "tel", "mobile": "tel", "mobilenumber": "tel", "mobilephone": "tel",
+    "cellphone": "tel", "cell": "tel",
+    # address
+    "streetaddress": "street-address", "street": "street-address",
+    "address": "street-address",
+    "address1": "address-line1", "addressline1": "address-line1",
+    "address2": "address-line2", "addressline2": "address-line2",
+    "postalcode": "postal-code", "zipcode": "postal-code", "postcode": "postal-code",
+    "zip": "postal-code",
+    "country": "country-name", "countryname": "country-name",
+    # org / misc
+    "organization": "organization", "organisation": "organization",
+    "organizationname": "organization", "company": "organization",
+    "companyname": "organization", "employer": "organization",
+    "birthday": "bday", "dateofbirth": "bday", "dob": "bday", "bday": "bday",
+    "username": "username", "userid": "username",
+}
+
+# Noise wrappers commonly put AROUND a real purpose token ("user_email",
+# "billing_zip"). Stripped only at the ends, so the anchor is preserved.
+_AUTOCOMPLETE_AFFIXES = (
+    "user", "contact", "billing", "shipping", "home", "work", "your", "my",
+    "customer", "input", "field", "txt", "text", "the",
+)
+
 # <input type> that maps directly, regardless of the field's name.
 _AUTOCOMPLETE_BY_TYPE = {"email": "email", "tel": "tel"}
 # Fields we must NEVER guess for: a wrong token here is a security/UX hazard.
@@ -961,14 +988,48 @@ _AUTOCOMPLETE_SKIP_TYPES = {
     "password", "hidden", "submit", "button", "reset", "image", "file",
     "checkbox", "radio", "search", "range", "color",
 }
+# Only these types can carry a personal-data purpose. url/number are excluded:
+# a URL field is never a person's name or postal code, and a number field is
+# never a name — including them could ONLY produce wrong tokens.
+_AUTOCOMPLETE_OK_TYPES = {"text", "tel", "email", ""}
+
+# A field holding SOMEONE ELSE'S data is out of scope for WCAG 1.3.5, which is
+# explicitly about "collecting information about the USER". Autofilling the
+# user's own details there is wrong.
+_THIRD_PARTY_MARKERS = (
+    "recipient", "friend", "colleague", "referral", "refer", "guest", "invitee",
+    "emergency", "nextofkin", "beneficiary", "dependent", "spouse", "parent",
+    "child", "employee", "candidate", "patient", "client", "student", "member",
+    "sender", "to", "cc", "bcc",
+)
+
+
+def _normalize_ident(raw: str) -> str:
+    """camelCase/snake_case/kebab -> a bare lowercase identifier."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw or "")
+    return re.sub(r"[^a-z0-9]+", "", spaced.lower())
+
+
+def _strip_affixes(ident: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        for aff in _AUTOCOMPLETE_AFFIXES:
+            if ident.startswith(aff) and len(ident) > len(aff):
+                ident, changed = ident[len(aff):], True
+            elif ident.endswith(aff) and len(ident) > len(aff):
+                ident, changed = ident[: -len(aff)], True
+    return ident
 
 
 def _autocomplete_token_for(ctrl: Any) -> Optional[str]:
     """The unambiguous autocomplete token for a control, or None.
 
-    Conservative by design (WCAG 1.3.5 asks for the field's PURPOSE): we only
-    return a token when the control's type or its name/id contains a
-    well-known, unambiguous fragment.
+    EXACT-matches a normalized ``name``/``id`` (each independently — never
+    concatenated, since joining two attributes manufactures adjacencies present
+    in neither). Anything not an exact, known purpose is left alone: a missing
+    autocomplete is a WCAG 1.3.5 warning, a wrong one autofills the user's real
+    personal data into the wrong field.
     """
     if not isinstance(ctrl.tag, str) or ctrl.tag.lower() != "input":
         return None  # <select>/<textarea> purposes are far less predictable
@@ -977,19 +1038,24 @@ def _autocomplete_token_for(ctrl: Any) -> Optional[str]:
         return None
     if (ctrl.get("autocomplete") or "").strip():
         return None  # already declared (including autocomplete="off")
+
+    # WCAG 1.3.5 covers the USER'S OWN data. A "recipient email" or "emergency
+    # contact phone" collects someone else's, so we must not autofill it.
+    scope_hay = _normalize_ident(" ".join((ctrl.get(a) or "") for a in ("name", "id")))
+    if any(marker in scope_hay for marker in _THIRD_PARTY_MARKERS if len(marker) > 2):
+        return None
+
     by_type = _AUTOCOMPLETE_BY_TYPE.get(itype)
     if by_type:
         return by_type
-    if itype not in {"text", "tel", "email", "url", "number", ""}:
+    if itype not in _AUTOCOMPLETE_OK_TYPES:
         return None
-    haystack = " ".join(
-        (ctrl.get(a) or "") for a in ("name", "id", "autocorrect", "placeholder")
-    ).lower()
-    haystack = re.sub(r"[^a-z0-9]+", "", haystack)
-    if not haystack:
-        return None
-    for fragment, token in _AUTOCOMPLETE_HINTS:
-        if fragment in haystack:
+    # ``placeholder`` is deliberately NOT consulted: it is prose ("we'll never
+    # share your email"), not an identifier, and matching it turns search boxes
+    # and free-text notes into personal-data fields.
+    for attr in ("name", "id"):
+        token = _AUTOCOMPLETE_EXACT.get(_strip_affixes(_normalize_ident(ctrl.get(attr) or "")))
+        if token:
             return token
     return None
 
@@ -1055,10 +1121,33 @@ def count_untitled_iframes(doc: Any) -> int:
                 continue
             if (el.get("aria-labelledby") or "").strip():
                 continue
-            if (el.get("aria-hidden") or "").strip().lower() == "true":
+            # Explicitly removed from the a11y tree — nothing to name.
+            if (el.get("role") or "").strip().lower() in {"presentation", "none"}:
                 continue
             if el.get("hidden") is not None:
                 continue
+            if _style_hides(el):
+                continue
+            # aria-hidden or display:none on ANY ancestor also removes it.
+            if any(
+                isinstance(a.tag, str)
+                and (
+                    (a.get("aria-hidden") or "").strip().lower() == "true"
+                    or a.get("hidden") is not None
+                    or _style_hides(a)
+                )
+                for a in el.iterancestors()
+            ):
+                continue
+            # A 0x0 / 1x1 frame is a tracking pixel or a hidden RPC channel, not
+            # content a user could enter — naming it would be noise.
+            try:
+                w = int(float((el.get("width") or "").strip() or -1))
+                h = int(float((el.get("height") or "").strip() or -1))
+                if 0 <= w <= 1 and 0 <= h <= 1:
+                    continue
+            except (TypeError, ValueError):
+                pass
             n += 1
     return n
 

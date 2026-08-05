@@ -34,19 +34,51 @@ logger = logging.getLogger(__name__)
 
 _WS_RE = re.compile(r"\s+")
 _MAX_FINGERPRINTS = 400  # bound the stored payload
+# Bumping this invalidates stored fingerprints. A version MISMATCH suppresses
+# the diff entirely rather than reporting a false "everything fixed, everything
+# new" — see load_previous_scan.
+FINGERPRINT_VERSION = "v1"
 
 
 def normalize_url_key(url: str) -> str:
-    """Identity a re-scan is matched on: scheme+host+path, no query/fragment."""
+    """Identity a re-scan is matched on.
+
+    scheme+host+path, plus a short HASH of the query string when there is one.
+    Hashing (rather than keeping or dropping the query) satisfies both needs:
+    ``?page=2`` stays a distinct page with its own history, while no raw query
+    — which routinely carries tokens, emails and other PII — is ever stored.
+    """
     try:
         p = urlparse((url or "").strip())
         host = (p.hostname or "").lower()
         path = (p.path or "/").rstrip("/") or "/"
         scheme = (p.scheme or "https").lower()
         port = f":{p.port}" if p.port and p.port not in (80, 443) else ""
-        return f"{scheme}://{host}{port}{path}"[:600]
+        key = f"{scheme}://{host}{port}{path}"
+        if p.query:
+            key += "?" + hashlib.sha1(p.query.encode("utf-8", "ignore")).hexdigest()[:10]
+        return key[:600]
     except Exception:
-        return (url or "")[:600]
+        return (url or "").split("?", 1)[0][:600]
+
+
+def sanitized_url(url: str) -> str:
+    """The URL with its query string and fragment removed, for storage/display."""
+    try:
+        p = urlparse((url or "").strip())
+        host = (p.hostname or "").lower()
+        port = f":{p.port}" if p.port and p.port not in (80, 443) else ""
+        return f"{(p.scheme or 'https').lower()}://{host}{port}{p.path or '/'}"[:2048]
+    except Exception:
+        return (url or "").split("?", 1)[0][:2048]
+
+
+def _log_safe(url: str) -> str:
+    """Host only — never log a full URL (query strings carry tokens/PII)."""
+    try:
+        return urlparse((url or "").strip()).hostname or "?"
+    except Exception:
+        return "?"
 
 
 def _norm(text: str, limit: int = 80) -> str:
@@ -85,8 +117,24 @@ def _node_signature(node: Any) -> str:
     if child_bits:
         return f"{kind}|" + ",".join(child_bits[:6])
 
+    # Last resort (images carry no text): the xpath TAIL, not the full path.
+    # A full path is anchored at <html>, so wrapping the page in one extra
+    # <div> — a routine CSS/layout edit — changes every path and the diff would
+    # report every finding as simultaneously new AND resolved. The last couple
+    # of steps identify the element's local position and survive ancestor
+    # restructuring.
     xpath = ((getattr(node, "metadata", None) and node.metadata.properties) or {}).get("__xpath")
-    return f"{kind}|{xpath or ''}"
+    if xpath:
+        steps = [s for s in str(xpath).split("/") if s]
+        # Only the element's OWN tag, with its positional index stripped. A full
+        # path is anchored at <html>, so wrapping the page in one <div> — a
+        # routine layout edit — would change every path and make the diff report
+        # every finding as simultaneously new AND resolved. Same-tag siblings
+        # are then separated by the occurrence index applied below, which
+        # follows document order and is stable under ancestor restructuring.
+        own = re.sub(r"\[\d+\]$", "", steps[-1]) if steps else ""
+        return f"{kind}|~{own}"
+    return f"{kind}|"
 
 
 def fingerprint_violations(violations: List[Any], tree: Any) -> List[str]:
@@ -144,18 +192,31 @@ def load_previous_scan(user_id: str, url: str) -> Optional[Dict[str, Any]]:
             if row is None:
                 return None
             try:
-                fps = json.loads(row.fingerprints or "[]")
+                payload = json.loads(row.fingerprints or "[]")
             except Exception:
-                fps = []
+                payload = []
+            # v1 rows were a bare list; newer rows are {version, truncated, items}.
+            if isinstance(payload, dict):
+                version = payload.get("version")
+                fps = payload.get("items") or []
+                truncated = bool(payload.get("truncated"))
+            else:
+                version, fps, truncated = FINGERPRINT_VERSION, payload, False
+            if version != FINGERPRINT_VERSION:
+                # The signature algorithm changed, so old fingerprints are not
+                # comparable. Suppress the diff rather than report a bogus
+                # "everything fixed, everything new".
+                return None
             return {
                 "scannedAt": row.created_at.isoformat() if row.created_at else None,
                 "issueCount": int(row.issue_count or 0),
                 "score": float(row.score or 0),
                 "grade": row.grade or "",
                 "fingerprints": fps if isinstance(fps, list) else [],
+                "truncated": truncated,
             }
     except Exception as exc:  # history is a bonus, never a hard dependency
-        logger.warning("load_previous_scan failed: %s", exc)
+        logger.warning("load_previous_scan failed for %s: %s", _log_safe(url), exc)
         return None
 
 
@@ -169,28 +230,111 @@ def save_scan(user_id: str, url: str, fingerprints: List[str], score: Any) -> No
         from app.db.models import ScanHistoryRow
         from app.db.session_sqlalchemy import session_scope
 
+        truncated = len(fingerprints) > _MAX_FINGERPRINTS
+        payload = {
+            "version": FINGERPRINT_VERSION,
+            # A truncated set can't support an honest "resolved" count later.
+            "truncated": truncated,
+            "items": fingerprints[:_MAX_FINGERPRINTS],
+        }
         with session_scope() as session:
             session.add(
                 ScanHistoryRow(
                     id=uuid.uuid4().hex,
                     user_id=user_id,
+                    # Query string is deliberately NOT persisted (tokens/PII);
+                    # url_key keeps a hash of it so pages stay distinguishable.
                     url_key=normalize_url_key(url),
-                    url=(url or "")[:2048],
+                    url=sanitized_url(url),
                     issue_count=len(fingerprints),
                     score=int(round(float(getattr(score, "score", 0) or 0))),
                     grade=str(getattr(score, "grade", "") or "")[:8],
-                    fingerprints=json.dumps(fingerprints[:_MAX_FINGERPRINTS]),
+                    fingerprints=json.dumps(payload),
                     created_at=datetime.utcnow(),
                 )
             )
+        _prune_history(user_id, normalize_url_key(url))
     except Exception as exc:
-        logger.warning("save_scan failed: %s", exc)
+        logger.warning("save_scan failed for %s: %s", _log_safe(url), exc)
+
+
+_KEEP_PER_URL = 20
+
+
+def _prune_history(user_id: str, url_key: str) -> None:
+    """Keep only the most recent scans per (user, url).
+
+    Only the latest row is ever read, so unbounded retention would grow the
+    table forever for exactly the daily-scanner use case this feature targets.
+    """
+    try:
+        from app.db.models import ScanHistoryRow
+        from app.db.session_sqlalchemy import session_scope
+
+        with session_scope() as session:
+            stale = (
+                session.query(ScanHistoryRow)
+                .filter(ScanHistoryRow.user_id == user_id, ScanHistoryRow.url_key == url_key)
+                .order_by(ScanHistoryRow.created_at.desc())
+                .offset(_KEEP_PER_URL)
+                .all()
+            )
+            for row in stale:
+                session.delete(row)
+    except Exception as exc:
+        logger.warning("_prune_history failed: %s", exc)
+
+
+def diff_against_previous(
+    user_id: str, url: str, fingerprints: List[str]
+) -> Optional[Dict[str, Any]]:
+    """Diff already-computed fingerprints against the previous scan.
+
+    Takes fingerprints rather than a tree on purpose: the caller must capture
+    them BEFORE anything mutates the tree, otherwise the diff describes a
+    remediated page the user doesn't actually have.
+    """
+    previous = load_previous_scan(user_id, url)
+    if previous is None:
+        return None
+    prev_fps = previous.get("fingerprints") or []
+    # A truncated previous scan can't support an honest "resolved" count: issues
+    # beyond the cap were never recorded, so they'd read as fixed. Report only
+    # what we can stand behind.
+    if previous.get("truncated"):
+        cur = set(fingerprints)
+        return {
+            "previousScanAt": previous.get("scannedAt"),
+            "previousIssueCount": previous.get("issueCount", 0),
+            "previousScore": previous.get("score", 0.0),
+            "previousGrade": previous.get("grade", ""),
+            "newIssues": len(cur - set(prev_fps)),
+            "resolvedIssues": 0,
+            "unchangedIssues": len(cur & set(prev_fps)),
+            "partial": True,
+        }
+    counts = diff_fingerprints(prev_fps, fingerprints)
+    return {
+        "previousScanAt": previous.get("scannedAt"),
+        "previousIssueCount": previous.get("issueCount", 0),
+        "previousScore": previous.get("score", 0.0),
+        "previousGrade": previous.get("grade", ""),
+        "newIssues": counts["new"],
+        "resolvedIssues": counts["resolved"],
+        "unchangedIssues": counts["unchanged"],
+        "partial": False,
+    }
 
 
 def build_change_report(
     user_id: str, url: str, violations: List[Any], tree: Any, score: Any
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
-    """Diff this scan against the previous one. Returns (report|None, fingerprints)."""
+    """Diff this scan against the previous one. Returns (report|None, fingerprints).
+
+    Convenience wrapper for callers (the monitor runner) that hold an
+    unmutated tree. Interactive scans should fingerprint first and call
+    :func:`diff_against_previous` instead.
+    """
     fingerprints = fingerprint_violations(violations, tree)
     previous = load_previous_scan(user_id, url)
     if previous is None:

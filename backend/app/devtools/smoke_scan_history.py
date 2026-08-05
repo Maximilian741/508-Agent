@@ -34,6 +34,7 @@ from app.services.scan_history import (  # noqa: E402
     diff_fingerprints,
     fingerprint_violations,
     normalize_url_key,
+    sanitized_url,
 )
 
 # Baseline page: a generic link + an image with no alt.
@@ -125,8 +126,21 @@ def main() -> int:
           len(set(tw)) == len(tw_viol), f"{len(set(tw))} unique of {len(tw_viol)}")
 
     # --- url identity ---
-    check("url key ignores query + fragment",
-          normalize_url_key("https://a.com/p?x=1#frag") == normalize_url_key("https://a.com/p"))
+    check("url key ignores the fragment",
+          normalize_url_key("https://a.com/p#frag") == normalize_url_key("https://a.com/p"))
+    # A query string often selects a genuinely DIFFERENT page (?page=2, ?id=5),
+    # so those must not share one history — but the raw query (tokens, emails)
+    # must never be stored, so the key carries only a hash of it.
+    check("url key DISTINGUISHES pages by query string",
+          normalize_url_key("https://a.com/p?page=2") != normalize_url_key("https://a.com/p?page=3"))
+    check("url key is stable for the same query",
+          normalize_url_key("https://a.com/p?page=2") == normalize_url_key("https://a.com/p?page=2"))
+    check("url key never contains the raw query (no token/PII leak)",
+          "secret" not in normalize_url_key("https://a.com/p?token=secret123"),
+          normalize_url_key("https://a.com/p?token=secret123"))
+    check("stored url strips the query entirely",
+          sanitized_url("https://a.com/p?token=secret123&email=x@y.z") == "https://a.com/p",
+          sanitized_url("https://a.com/p?token=secret123&email=x@y.z"))
     check("url key ignores a trailing slash",
           normalize_url_key("https://a.com/p/") == normalize_url_key("https://a.com/p"))
     check("url key is case-insensitive on host",
@@ -149,9 +163,56 @@ def main() -> int:
     prev = load_previous_scan(uid, url)
     check("scan is persisted and read back", prev is not None and prev["issueCount"] == len(v1), str(prev))
     check("fingerprints survive the round-trip", prev and prev["fingerprints"] == v1)
-    check("history matches on the NORMALIZED url (query ignored)",
-          load_previous_scan(uid, url + "?utm=abc") is not None)
+    check("history matches the same page again (fragment ignored)",
+          load_previous_scan(uid, url + "#section") is not None)
+    check("a different query is a DIFFERENT page (its own history)",
+          load_previous_scan(uid, url + "?page=7") is None)
     check("history is per-user (no cross-tenant leak)", load_previous_scan("other-user", url) is None)
+
+    # --- adversarial-review regression locks ---------------------------------
+    # A layout-only edit (wrapping the page in one <div>) must NOT read as a
+    # page full of regressions. Full xpaths are anchored at <html>, so they all
+    # change; the fingerprint uses the xpath TAIL for text-less nodes instead.
+    WRAPPED = PAGE_V1.replace("<body>", '<body><div class="layout"><div class="inner">').replace(
+        "</body>", "</div></div></body>"
+    )
+    vw, _ = _fps(WRAPPED, tmp, "wrapped.html")
+    dw = diff_fingerprints(v1, vw)
+    check("wrapping the page in divs does NOT report phantom regressions",
+          dw["new"] == 0 and dw["resolved"] == 0, str(dw))
+
+    # A stored set from a DIFFERENT fingerprint version is not comparable —
+    # suppress the diff rather than claim everything was fixed and re-broken.
+    import json as _json
+
+    from app.db.models import ScanHistoryRow
+    from app.db.session_sqlalchemy import session_scope as _scope
+
+    with _scope() as s:
+        row = (
+            s.query(ScanHistoryRow)
+            .filter(ScanHistoryRow.user_id == uid)
+            .order_by(ScanHistoryRow.created_at.desc())
+            .first()
+        )
+        row.fingerprints = _json.dumps({"version": "v0-old", "truncated": False, "items": ["abc"]})
+    check("a fingerprint-version mismatch suppresses the diff (no false 'all fixed')",
+          load_previous_scan(uid, url) is None)
+
+    # Retention: only the most recent scans per (user,url) are kept.
+    from app.services.scan_history import _KEEP_PER_URL
+
+    ruser, rurl = "retention-user", "https://example.com/keep"
+    for i in range(_KEEP_PER_URL + 6):
+        save_scan(ruser, rurl, [f"fp{i}"], _Score())
+    with _scope() as s:
+        kept = (
+            s.query(ScanHistoryRow)
+            .filter(ScanHistoryRow.user_id == ruser)
+            .count()
+        )
+    check(f"history is pruned to the most recent {_KEEP_PER_URL} scans (no unbounded growth)",
+          kept <= _KEEP_PER_URL, f"kept {kept}")
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

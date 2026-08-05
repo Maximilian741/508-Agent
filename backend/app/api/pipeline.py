@@ -384,6 +384,21 @@ async def analyze_url(
         engine = RemediationEngine()
         violations = await run_in_threadpool(engine.detect_violations, tree)
 
+        # SNAPSHOT the page AS FOUND before anything can mutate the tree.
+        # derive_scan_fixes below runs the real executors on THIS SAME tree
+        # object to produce diffs, and some of them write the very fields we
+        # report (SET_DOCUMENT_TITLE writes properties["title"],
+        # SET_DOCUMENT_LANGUAGE writes metadata.language). Reading them
+        # afterwards would show the user the FIXED page — a title their page
+        # doesn't have — and would fingerprint a page that doesn't exist.
+        page_title = (tree.root.metadata.properties or {}).get("title")
+        page_language = tree.root.metadata.language
+        page_node_count = _count_nodes(tree)
+        page_image_count = _count_nodes_of(tree, ImageNode)
+        page_table_count = _count_nodes_of(tree, TableNode)
+        # Fingerprints must describe the page AS SCANNED, not as remediated.
+        scan_fingerprints = await run_in_threadpool(fingerprint_violations, violations, tree)
+
         # "Fix it yourself": run our real remediation engine against a throwaway
         # copy so each finding can carry the exact diff it produced. Analyze-only
         # and AI-free (see scan_fixes) — nothing is charged, persisted, or sent
@@ -400,12 +415,12 @@ async def analyze_url(
     summary = PipelineSummary(
         documentId=result.document_id,
         sourceFormat=result.format,
-        title=tree.root.metadata.properties.get("title"),
-        language=tree.root.metadata.language,
+        title=page_title,
+        language=page_language,
         pageCount=0,
-        nodeCount=_count_nodes(tree),
-        imageCount=_count_nodes_of(tree, ImageNode),
-        tableCount=_count_nodes_of(tree, TableNode),
+        nodeCount=page_node_count,
+        imageCount=page_image_count,
+        tableCount=page_table_count,
     )
     api_violations: List[PipelineViolation] = []
     for v in violations:
@@ -439,11 +454,13 @@ async def analyze_url(
     # Best-effort: any failure just omits the report.
     changes = None
     try:
-        report, fingerprints = await run_in_threadpool(
-            build_change_report, user_id, final_url, violations, tree, score
+        # Uses the fingerprints captured BEFORE derive_scan_fixes touched the
+        # tree, so the diff describes the page the user actually has.
+        report = await run_in_threadpool(
+            diff_against_previous, user_id, final_url, scan_fingerprints
         )
         changes = ScanChangeReport(**report) if report else None
-        await run_in_threadpool(save_scan, user_id, final_url, fingerprints, score)
+        await run_in_threadpool(save_scan, user_id, final_url, scan_fingerprints, score)
     except Exception as exc:
         logger.warning("scan history failed (scan continues): %s", exc)
 
@@ -503,9 +520,23 @@ def _fix_for_violation(v, fixes_by_node: Dict[str, Dict[str, Any]]) -> Optional[
     """Best fix for one finding: a real writer diff if we produced one, else guidance.
 
     A writer diff is only ever present when the writer's own ``applied`` list
-    confirmed the change, so we never show a fix that didn't happen.
+    confirmed the change, so we never show a fix that didn't happen. Matching is
+    by (node, ACTION) and only against actions THIS rule maps to — otherwise
+    every document-level finding would display the same unrelated diff, since
+    they all share ``target_id = root.id``.
     """
-    raw = fixes_by_node.get(v.location.node_id)
+    from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG
+
+    raw = None
+    try:
+        flag = AccessibilityFlagCode(v.rule_id)
+        for action in REMEDIATION_ACTIONS_BY_FLAG.get(flag, []):
+            candidate = fixes_by_node.get(f"{v.location.node_id}|{action.action_code.value}")
+            if candidate:
+                raw = candidate
+                break
+    except Exception:
+        raw = None
     if raw is None:
         raw = guidance_for(v.rule_id, v.evidence)
     if not raw:

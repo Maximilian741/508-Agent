@@ -68,6 +68,18 @@ _SCAN_ACTION_CODES = [
 
 _SNIPPET_LIMIT = 600
 
+# Actions whose output is GUESSED CONTENT (a title derived from the filename, a
+# link label derived from its href) rather than a mechanical, provably-correct
+# edit. The diff is real — the writer made it — but the WORDING is a heuristic
+# guess, so it must be flagged for human verification instead of being presented
+# as settled. Mechanical edits (lang attribute, heading level, tabindex reset,
+# autocomplete token, contrast recolour) carry no such judgement.
+_CONTENT_GUESS_ACTIONS = {
+    "SET_DOCUMENT_TITLE",
+    "IMPROVE_LINK_TEXT",
+    "FILL_FORM_FIELD_LABELS",
+}
+
 
 def _offline_dispatcher():
     """Executors wired to a forced OFFLINE (heuristic) inference client.
@@ -170,7 +182,12 @@ def derive_scan_fixes(source_path: Path, tree: Any) -> Dict[str, Dict[str, Any]]
                 continue
             action = entry.get("action")
             node_id = entry.get("target_id")
-            if not action or not node_id or node_id in out:
+            # Key by (node, ACTION): every document-level fix shares
+            # target_id = root.id, so keying on the node alone would show the
+            # SAME unrelated diff for every root-level finding (a language fix
+            # displayed under "document has no headings", etc).
+            key = f"{node_id}|{action}"
+            if not action or not node_id or key in out:
                 continue
             xp = xpath_by_id.get(node_id)
             before = _snippet(_resolve(pristine, xp))
@@ -178,19 +195,27 @@ def derive_scan_fixes(source_path: Path, tree: Any) -> Dict[str, Dict[str, Any]]
                 after = _snippet(_resolve(remediated, xp))
                 if not before or not after or before == after:
                     continue
-                out[node_id] = {
+                out[key] = {
                     "source": "writer",
                     "kind": "element",
                     "action": action,
                     "before": before,
                     "after": after,
-                    "requiresHumanVerification": False,
+                    # A guessed title/label is a real edit but not a settled
+                    # answer — say so instead of badging it as verified.
+                    "requiresHumanVerification": action in _CONTENT_GUESS_ACTIONS,
+                    "note": (
+                        "We derived this wording automatically — check it reads correctly "
+                        "for your page before using it."
+                        if action in _CONTENT_GUESS_ACTIONS
+                        else None
+                    ),
                 }
             else:
                 # Structural rewrite: the element moved, so an after-snippet
                 # resolved by the pre-mutation xpath could be the WRONG node.
                 # Report the change honestly without fabricating markup.
-                out[node_id] = {
+                out[key] = {
                     "source": "writer",
                     "kind": "structural",
                     "action": action,
