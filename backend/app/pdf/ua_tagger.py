@@ -821,8 +821,60 @@ def _detect_ruling_grids(horiz, vert):
             "ys": sorted(ys, reverse=True),
             "x0": x_min, "x1": x_max,
             "y0": y_bot, "y1": y_top,
+            # Keep the actual drawn segments: a MISSING rule between two grid
+            # positions is ground truth that the cell there spans (merged), so
+            # spans are read off the page rather than guessed. See _cell_spans.
+            "v_lines": relevant,
+            "h_lines": list(band),
         })
     return grids
+
+
+def _has_vertical_rule(grid, x: float, y_lo: float, y_hi: float) -> bool:
+    """True if a drawn vertical rule at ``x`` covers most of ``[y_lo, y_hi]``."""
+    need = (y_hi - y_lo) * 0.6  # tolerate small gaps where rules don't quite meet
+    for v in grid.get("v_lines") or []:
+        if abs(v[0] - x) > _CLUSTER_TOL:
+            continue
+        overlap = min(v[3], y_hi) - max(v[1], y_lo)
+        if overlap >= need:
+            return True
+    return False
+
+
+def _has_horizontal_rule(grid, y: float, x_lo: float, x_hi: float) -> bool:
+    """True if a drawn horizontal rule at ``y`` covers most of ``[x_lo, x_hi]``."""
+    need = (x_hi - x_lo) * 0.6
+    for h in grid.get("h_lines") or []:
+        if abs(h[1] - y) > _CLUSTER_TOL:
+            continue
+        overlap = min(h[2], x_hi) - max(h[0], x_lo)
+        if overlap >= need:
+            return True
+    return False
+
+
+def _cell_spans(grid, r: int, c: int, nrows: int, ncols: int) -> Tuple[int, int]:
+    """``(colspan, rowspan)`` for the cell at ``(r, c)``, read from the rules.
+
+    A merged cell is one whose separating rule was never drawn: if there is no
+    vertical line between column ``c`` and ``c+1`` across this row's band, the
+    cell genuinely continues into the next column. That is evidence on the page,
+    not an inference — which is why this is safe to assert as ``/ColSpan`` in the
+    structure tree (PDF/UA 7.5, Matterhorn 15-003).
+    """
+    xs, ys = grid["xs"], grid["ys"]
+    y_hi, y_lo = ys[r], ys[r + 1]
+
+    colspan = 1
+    while c + colspan < ncols and not _has_vertical_rule(grid, xs[c + colspan], y_lo, y_hi):
+        colspan += 1
+
+    x_lo, x_hi = xs[c], xs[min(c + colspan, ncols)]
+    rowspan = 1
+    while r + rowspan < nrows and not _has_horizontal_rule(grid, ys[r + rowspan], x_lo, x_hi):
+        rowspan += 1
+    return colspan, rowspan
 
 
 def _tables_from_grids(grids, segments, cell_of_existing):
@@ -896,6 +948,21 @@ def _tables_from_grids(grids, segments, cell_of_existing):
 
         tid = next_tid
         next_tid += 1
+        # Merged cells: read each cell's span off the drawn rules, and mark the
+        # positions it covers so they don't emit phantom empty cells.
+        spans: Dict[tuple, tuple] = {}
+        covered: set = set()
+        for r in range(nrows):
+            for c in range(ncols):
+                if (r, c) in covered:
+                    continue
+                cs, rs = _cell_spans(grid, r, c, nrows, ncols)
+                if cs > 1 or rs > 1:
+                    spans[(tid, r, c)] = (cs, rs)
+                    for rr in range(r, min(r + rs, nrows)):
+                        for cc in range(c, min(c + cs, ncols)):
+                            if (rr, cc) != (r, c):
+                                covered.add((rr, cc))
         for (r, c), idx in claimed.items():
             cell_of[idx] = (tid, r, c)
         # Same header INFERENCE as the geometry path — rebuild a run-shaped view
@@ -909,6 +976,8 @@ def _tables_from_grids(grids, segments, cell_of_existing):
             "nrows": nrows,
             "ncols": ncols,
             "has_header": _row0_is_header(run_view),
+            "spans": spans,      # (tid,r,c) -> (colspan, rowspan)
+            "covered": covered,  # (r,c) positions absorbed by a merged cell
         }
     return cell_of, tables
 
@@ -1290,16 +1359,29 @@ def _tag_page_elements(
                 emitted_tables.add(tid)
                 dims = tables[tid]
                 has_hdr = bool(dims.get("has_header"))
+                cell_spans = dims.get("spans") or {}
+                covered_cells = dims.get("covered") or set()
                 trs = []
                 for r in range(dims["nrows"]):
                     tcs = []
                     for c in range(dims["ncols"]):
+                        # Absorbed by a merged neighbour — it has no cell of
+                        # its own, so emitting one would invent a structure the
+                        # page doesn't have.
+                        if (r, c) in covered_cells:
+                            continue
                         mc = table_cell_mcid.get((tid, r, c))
                         if mc is None:
                             continue
                         # Only assert a header cell when the detector inferred
                         # one; otherwise every cell is plain data (/TD).
-                        tcs.append({"s": "/TH" if (has_hdr and r == 0) else "/TD", "mcid": mc})
+                        cell = {"s": "/TH" if (has_hdr and r == 0) else "/TD", "mcid": mc}
+                        cs, rs = cell_spans.get((tid, r, c), (1, 1))
+                        if cs > 1:
+                            cell["colspan"] = cs
+                        if rs > 1:
+                            cell["rowspan"] = rs
+                        tcs.append(cell)
                     if tcs:
                         trs.append({"s": "/TR", "kids": tcs})
                 if trs:
@@ -1344,17 +1426,24 @@ def _build_struct_elem(
         }
     )
     ref = writer._add_object(elem)  # noqa: SLF001
-    if spec["s"] == "/TH":
-        # Column-header scope. A /TH is only ever emitted for row 0 AND only
-        # when _row0_is_header found a positive signal, so /Column is the
-        # correct scope for every header cell we produce — PDF/UA table
-        # attribute so AT can associate data cells with their header.
-        elem[NameObject("/A")] = DictionaryObject(
-            {
-                NameObject("/O"): NameObject("/Table"),
-                NameObject("/Scope"): NameObject("/Column"),
-            }
-        )
+    if spec["s"] in ("/TH", "/TD"):
+        # Table cell attributes (PDF/UA 7.5, Matterhorn 15-003):
+        #   /Scope   — only on a /TH, and only /Column since a /TH is emitted
+        #              solely for row 0 and only when _row0_is_header found a
+        #              positive signal.
+        #   /ColSpan, /RowSpan — merged cells. These come from MISSING drawn
+        #              rules (see _cell_spans), i.e. evidence on the page, not
+        #              an inference, so asserting them is safe.
+        attrs = {NameObject("/O"): NameObject("/Table")}
+        if spec["s"] == "/TH":
+            attrs[NameObject("/Scope")] = NameObject("/Column")
+        if int(spec.get("colspan") or 1) > 1:
+            attrs[NameObject("/ColSpan")] = NumberObject(int(spec["colspan"]))
+        if int(spec.get("rowspan") or 1) > 1:
+            attrs[NameObject("/RowSpan")] = NumberObject(int(spec["rowspan"]))
+        # A plain /TD with no span carries no attribute at all.
+        if len(attrs) > 1:
+            elem[NameObject("/A")] = DictionaryObject(attrs)
     elif spec.get("ln"):
         # Numbered list: /ListNumbering tells AT how the labels are generated
         # (Matterhorn 16-003).
