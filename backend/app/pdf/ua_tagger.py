@@ -877,7 +877,7 @@ def _cell_spans(grid, r: int, c: int, nrows: int, ncols: int) -> Tuple[int, int]
     return colspan, rowspan
 
 
-def _tables_from_grids(grids, segments, cell_of_existing):
+def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
     """Assign text blocks to cells defined by ruling-line grids.
 
     Skips blocks already claimed by text-geometry tables (no double-tagging).
@@ -914,7 +914,7 @@ def _tables_from_grids(grids, segments, cell_of_existing):
         nrows = len(ys) - 1
         ncols = len(xs) - 1
         if nrows < 2 or ncols < 2:
-            continue  # not a real table grid
+            continue  # not a real table grid — too small to even be a candidate
 
         claimed: Dict[tuple, int] = {}  # (row,col) -> seg idx (first wins)
         cell_text: Dict[tuple, str] = {}
@@ -944,6 +944,11 @@ def _tables_from_grids(grids, segments, cell_of_existing):
 
         fill_ratio = len(claimed) / max(1, nrows * ncols)
         if fill_ratio < _GRID_MIN_FILL:
+            # A table-SHAPED grid we deliberately declined (too sparse to be
+            # sure it's data). Counted so the report can say "found N, tagged
+            # M" instead of implying every table was handled.
+            if stats is not None:
+                stats["declined"] = stats.get("declined", 0) + 1
             continue  # mostly empty grid -> probably card layout, not a table
 
         tid = next_tid
@@ -1198,9 +1203,14 @@ def _tag_page_elements(
     # the structure. Existing text-geometry cells are NEVER overwritten.
     try:
         h_lines, v_lines = _collect_ruling_lines(ops)
+        _grid_stats: Dict[str, int] = {}
         ring_cells, ring_tables = _tables_from_grids(
-            _detect_ruling_grids(h_lines, v_lines), segments, cell_of
+            _detect_ruling_grids(h_lines, v_lines), segments, cell_of, stats=_grid_stats
         )
+        if counters is not None and _grid_stats.get("declined"):
+            counters["tables_declined"] = (
+                counters.get("tables_declined", 0) + _grid_stats["declined"]
+            )
         cell_of.update(ring_cells)
         tables.update(ring_tables)
     except Exception:
@@ -1697,10 +1707,11 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         # Pages whose two columns were interleaved in the content stream and are
         # now presented in correct visual reading order by the structure tree.
         report["readingOrderFixedPages"] = page_counters.get("reading_order_fixed", 0)
-        # Table-like grids we DECLINED to tag (merged cells, too sparse) vs the
-        # ones we did — surfaced so "N tables tagged" is never read as "all of
-        # your tables were handled".
-        report["tablesDetected"] = page_counters.get("tables_detected", tables_tagged)
+        # Table-SHAPED grids we deliberately DECLINED to tag (too sparse to be
+        # sure they're data). Surfaced so "N tables tagged" is never read as
+        # "all of your tables were handled" — a silent under-count is the kind
+        # of quiet overclaim this project refuses.
+        report["tablesDeclined"] = page_counters.get("tables_declined", 0)
         applied.append("struct_tree")
         applied.append("mark_info")
     except Exception as exc:

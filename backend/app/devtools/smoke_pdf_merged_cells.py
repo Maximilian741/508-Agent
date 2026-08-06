@@ -171,6 +171,20 @@ def main() -> int:
             i = blob.find(token, i + 1)
     check("no /ColSpan or /RowSpan is ever written as 0 or 1", ok_spans)
 
+    # Reporting honesty: "tables tagged" must never be read as "all your tables
+    # were handled", so declined candidates are counted SEPARATELY — and the
+    # counter has to be real, not a placeholder that mirrors the tagged count.
+    import inspect
+
+    from app.pdf import ua_tagger as _uat
+
+    src_text = inspect.getsource(_uat)
+    check("the declined-tables counter is actually incremented somewhere",
+          'stats["declined"] = stats.get("declined"' in src_text)
+    check("the report exposes declined tables separately from tagged ones",
+          "tablesDeclined" in src_text and "tablesDetected" not in src_text)
+    check("a clean tagged table reports zero declined", rep.get("tablesDeclined", 0) == 0, str(rep))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

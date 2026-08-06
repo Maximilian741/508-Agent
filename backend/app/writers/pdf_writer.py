@@ -61,6 +61,7 @@ def write_remediated_pdf(
 
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    pdfua_summary: Dict[str, Any] = {}
 
     # Always start by copying source → output so we never mutate the source.
     try:
@@ -201,6 +202,26 @@ def write_remediated_pdf(
             applied.append({"kind": f"pdfua_{kind}", "target_id": "document", "summary": kind})
         if not ua_report.get("structTree"):
             skipped.append({"target_id": "document", "reason": "pdfua_struct_tree_skipped"})
+        # Surface WHAT the tagger actually did. These counts were previously
+        # computed and thrown away, so a user could not tell whether their
+        # tables were handled — and "tagged" silently read as "all of them".
+        # tablesDeclined is the honest counterpart: grids we deliberately did
+        # NOT tag because we weren't sure they were data.
+        pdfua_summary = {
+            k: ua_report.get(k, 0)
+            for k in (
+                "pages", "elements", "figures", "lists", "tables", "tablesDeclined",
+                "links", "formWidgets", "artifacts", "readingOrderFixedPages",
+            )
+        }
+        if ua_report.get("tablesDeclined"):
+            skipped.append({
+                "target_id": "document",
+                "reason": (
+                    f"pdfua_tables_declined: {ua_report['tablesDeclined']} table-like "
+                    "grid(s) were too sparse to tag confidently — check them by hand"
+                ),
+            })
     except Exception as exc:
         skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
 
@@ -210,7 +231,10 @@ def write_remediated_pdf(
     except Exception as exc:
         skipped.append({"target_id": str(output_path), "reason": f"failed_to_save_pdf: {exc}"})
 
-    return {"applied": applied, "skipped": skipped}
+    result: Dict[str, Any] = {"applied": applied, "skipped": skipped}
+    if pdfua_summary:
+        result["pdfua"] = pdfua_summary
+    return result
 
 
 def _resolve(obj: Any) -> Any:
