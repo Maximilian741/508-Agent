@@ -223,6 +223,25 @@ const C: Record<string, IssueCatalogEntry> = {
     learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/identify-input-purpose.html",
   },
 
+  LABEL_IN_NAME_MISMATCH: {
+    ruleId: "LABEL_IN_NAME_MISMATCH",
+    title: "Button's name doesn't match its visible text",
+    summary: "An aria-label replaces the words on the button instead of extending them.",
+    why:
+      "People who use speech input say what they see — \"click Send order\". If the button's aria-label says something else (\"Submit form\"), the spoken command never matches its accessible name and the control simply can't be operated by voice. WCAG 2.5.3 is Level A, and this failure is almost always *caused* by a well-meaning aria-label.",
+    autoFix:
+      "We flag it rather than fix it: choosing which wording wins — the visible text or your aria-label — is a content decision only you can make.",
+    manualJudgment:
+      "Make the accessible name start with the visible text. \"Read more\" → aria-label=\"Read more about pensions\" is correct; \"Learn about pensions\" is not, because the words \"read more\" are gone.",
+    severity: "error",
+    standards: {
+      wcag: ["2.5.3 Label in Name"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/label-in-name.html",
+  },
+
   POSITIVE_TABINDEX: {
     ruleId: "POSITIVE_TABINDEX",
     title: "Positive tabindex breaks keyboard order",

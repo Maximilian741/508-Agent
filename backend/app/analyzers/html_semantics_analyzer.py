@@ -55,3 +55,19 @@ class PositiveTabindexAnalyzer(Analyzer):
     def analyze(self, tree: AccessibilityTree) -> None:
         if int(_props(tree).get("positive_tabindex_count") or 0) > 0:
             attach_flag(tree.root, AccessibilityFlagCode.POSITIVE_TABINDEX)
+
+
+class LabelInNameAnalyzer(Analyzer):
+    """Flags controls whose accessible name omits their visible text (2.5.3).
+
+    A speech-input user says the words they can see. When an ``aria-label``
+    replaces rather than extends that text, the spoken command never matches the
+    accessible name and the control cannot be operated by voice at all — a
+    Level A failure usually CAUSED by a well-meaning aria-label.
+    """
+
+    name = "label_in_name_mismatch"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        if int(_props(tree).get("label_in_name_mismatches") or 0) > 0:
+            attach_flag(tree.root, AccessibilityFlagCode.LABEL_IN_NAME_MISMATCH)

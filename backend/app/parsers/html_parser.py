@@ -436,6 +436,9 @@ class HTMLParser:
         untitled_frames = count_untitled_iframes(doc)
         if untitled_frames:
             properties["iframes_missing_title"] = untitled_frames
+        label_mismatches = count_label_in_name_mismatches(doc)
+        if label_mismatches:
+            properties["label_in_name_mismatches"] = label_mismatches
 
         root = DocumentNode(
             id="doc-1",
@@ -1103,6 +1106,50 @@ def iter_positive_tabindex(doc: Any):
 # ---------------------------------------------------------------------------
 # WCAG 4.1.2 / 2.4.1 — frames need an accessible name
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# WCAG 2.5.3 — Label in Name
+# ---------------------------------------------------------------------------
+
+_LABEL_IN_NAME_TAGS = ("a", "button")
+_PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+
+
+def _speech_normalize(text: str) -> str:
+    """Lowercase, strip punctuation/whitespace — how a voice command is matched."""
+    return re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", (text or "").lower())).strip()
+
+
+def count_label_in_name_mismatches(doc: Any) -> int:
+    """Controls whose accessible name omits their own VISIBLE text (WCAG 2.5.3).
+
+    Speech-input users activate a control by saying the words they can see
+    ("click Submit order"). If the ``aria-label`` says something different, the
+    spoken command doesn't match the accessible name and the control simply
+    cannot be operated by voice — a Level A failure, and one that a
+    well-meaning ``aria-label`` usually CAUSES.
+
+    Deliberately narrow, so this is a fact rather than a judgement: we only look
+    at controls that have BOTH visible text and an explicit ``aria-label``, and
+    flag only when the visible text is not contained in the label at all. An
+    ``aria-label`` that merely ADDS context ("Read more about pensions" over
+    "Read more") is correct and is never flagged.
+    """
+    n = 0
+    for tag in _LABEL_IN_NAME_TAGS:
+        for el in doc.iter(tag):
+            label = (el.get("aria-label") or "").strip()
+            if not label:
+                continue  # no override -> the visible text IS the name
+            visible = _speech_normalize(_visible_subtree_text(el))
+            if not visible:
+                continue  # icon-only control: LINK_NAME_MISSING's territory
+            if len(visible) < 2:
+                continue  # single character ("x", ">") — not a spoken command
+            if _speech_normalize(label).find(visible) == -1:
+                n += 1
+    return n
 
 
 def count_untitled_iframes(doc: Any) -> int:

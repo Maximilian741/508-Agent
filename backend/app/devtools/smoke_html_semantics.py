@@ -172,6 +172,37 @@ def main() -> int:
           [e.get("tabindex") for e in iter_positive_tabindex(doc)] == ["3"])
     check("iframe: untitled frame counted", count_untitled_iframes(doc) == 1)
 
+    # ---- WCAG 2.5.3 Label in Name -----------------------------------------
+    # A speech user says the words they SEE. An aria-label that REPLACES the
+    # visible text makes the control unusable by voice; one that EXTENDS it is
+    # correct and must never be flagged.
+    from app.parsers.html_parser import count_label_in_name_mismatches
+
+    def _mismatches(body: str) -> int:
+        html = (
+            '<!DOCTYPE html><html lang="en"><head><title>t</title></head>'
+            f"<body>{body}</body></html>"
+        )
+        return count_label_in_name_mismatches(_parse_document(html.encode()))
+
+    check("2.5.3: aria-label REPLACING visible text is flagged",
+          _mismatches('<button aria-label="Submit form">Send order</button>') == 1)
+    check("2.5.3: aria-label EXTENDING visible text is NOT flagged",
+          _mismatches('<a href="/p" aria-label="Read more about pensions">Read more</a>') == 0)
+    check("2.5.3: exact match is not flagged",
+          _mismatches('<button aria-label="Search">Search</button>') == 0)
+    check("2.5.3: case and punctuation differences are not a mismatch",
+          _mismatches('<button aria-label="search now!">Search Now</button>') == 0)
+    check("2.5.3: a control with no aria-label is never flagged",
+          _mismatches("<button>Send order</button>") == 0)
+    check("2.5.3: icon-only control is left to LINK_NAME_MISSING, not double-flagged",
+          _mismatches('<a href="/x" aria-label="Home"><span class="icon"></span></a>') == 0)
+    check("2.5.3: single-character labels are not treated as spoken commands",
+          _mismatches('<button aria-label="Close dialog">x</button>') == 0)
+    check("2.5.3: counts each offending control",
+          _mismatches('<button aria-label="A">Send order</button>'
+                      '<button aria-label="B">Cancel request</button>') == 2)
+
     # ---- flags fire ----
     src = tmp / "dirty.html"
     src.write_text(DIRTY, encoding="utf-8")

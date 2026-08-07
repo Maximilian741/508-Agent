@@ -94,6 +94,7 @@ class AccessibilityFlagCode(str, Enum):
     IFRAME_TITLE_MISSING = "IFRAME_TITLE_MISSING"
     INPUT_AUTOCOMPLETE_MISSING = "INPUT_AUTOCOMPLETE_MISSING"
     POSITIVE_TABINDEX = "POSITIVE_TABINDEX"
+    LABEL_IN_NAME_MISMATCH = "LABEL_IN_NAME_MISMATCH"
 
 
 class StandardReference(BaseModel):
@@ -230,6 +231,16 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
         message="Positive tabindex forces an unnatural keyboard focus order.",
         standards=StandardReference(
             wcag_2_1=["2.4.3"],
+            section_508=["E205.4"],
+            pdf_ua=[],
+        ),
+    ),
+    AccessibilityFlagCode.LABEL_IN_NAME_MISMATCH: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.LABEL_IN_NAME_MISMATCH,
+        severity=Severity.ERROR,
+        message="A control's accessible name omits its own visible text, so it can't be operated by voice.",
+        standards=StandardReference(
+            wcag_2_1=["2.5.3"],
             section_508=["E205.4"],
             pdf_ua=[],
         ),
@@ -980,6 +991,19 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.DOCUMENT],
             related_flag_code=AccessibilityFlagCode.INPUT_AUTOCOMPLETE_MISSING,
+        ),
+    ],
+    # Fixing this means choosing which wording is authoritative — the visible
+    # text or the author's aria-label. That's a content decision, so manual.
+    AccessibilityFlagCode.LABEL_IN_NAME_MISMATCH: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Flag issue for manual review.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.LABEL_IN_NAME_MISMATCH,
         ),
     ],
     AccessibilityFlagCode.POSITIVE_TABINDEX: [

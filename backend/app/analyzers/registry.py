@@ -25,6 +25,7 @@ from app.analyzers.image_analyzer import (
 from app.analyzers.html_semantics_analyzer import (
     IframeTitleAnalyzer,
     InputAutocompleteAnalyzer,
+    LabelInNameAnalyzer,
     PositiveTabindexAnalyzer,
 )
 from app.analyzers.link_analyzer import LinkNameMissingAnalyzer, LinkTextAnalyzer
@@ -66,6 +67,7 @@ def get_default_analyzers() -> List[Analyzer]:
         IframeTitleAnalyzer(),
         InputAutocompleteAnalyzer(),
         PositiveTabindexAnalyzer(),
+        LabelInNameAnalyzer(),
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
         DocumentHeadingsAnalyzer(),
