@@ -14,6 +14,15 @@ Pinned here:
   * the position it absorbs emits NO phantom cell
   * a plain grid still emits plain cells with NO span attributes
   * a row-spanning stub cell emits /RowSpan
+  * a rule drawn in SEGMENTS (per-cell stroking, very common) still counts as
+    a rule — measuring the longest single segment read it as absent, and an
+    absent rule means "merged", so ordinary tables grew phantom spans
+  * an unmeasurable band fails CLOSED (no merge), because a merge is the
+    answer that can swallow content
+  * a full-width TITLE band above a table is not mistaken for its header row:
+    it stays /TD without a /Scope, and the real header row beneath it keeps
+    its /TH — previously the title took the header role and the genuine
+    header was demoted to data
 
 Usage:
     python -m app.devtools.smoke_pdf_merged_cells
@@ -84,6 +93,42 @@ def main() -> int:
     check("merged header: the second data cell is normal",
           _cell_spans(g_span, 1, 1, 2, 2) == (1, 1), str(_cell_spans(g_span, 1, 1, 2, 2)))
 
+    # --- a rule drawn in PIECES is still a rule ----------------------------
+    # Tables are routinely stroked cell by cell, so the divider between two
+    # columns exists as N short segments rather than one long line. Measuring
+    # only the longest segment reported the rule ABSENT — and an absent rule is
+    # read as a merge, so an ordinary per-cell-ruled table grew phantom
+    # /ColSpans and lost the cells they absorbed.
+    pieced_v = [
+        _v(0, 0, 200), _v(200, 0, 200),
+        _v(100, 0, 95), _v(100, 105, 200),   # same divider, drawn in two goes
+    ]
+    g_pieced = _grid(xs, ys, pieced_v, all_h)
+    check("a divider drawn in two segments is NOT read as a merge",
+          _cell_spans(g_pieced, 0, 0, 2, 2) == (1, 1),
+          str(_cell_spans(g_pieced, 0, 0, 2, 2)))
+    pieced_h = [
+        _h(200, 0, 200), _h(0, 0, 200),
+        _h(100, 0, 95), _h(100, 105, 200),
+    ]
+    g_pieced_h = _grid(xs, ys, full_v, pieced_h)
+    check("a row rule drawn in two segments is NOT read as a merge",
+          _cell_spans(g_pieced_h, 0, 0, 2, 2) == (1, 1),
+          str(_cell_spans(g_pieced_h, 0, 0, 2, 2)))
+
+    # A genuinely absent divider must still be detected — the union test has to
+    # stay capable of finding a real merge, not just refuse them all.
+    check("a genuinely missing divider is still read as a merge",
+          _cell_spans(g_full, 0, 0, 2, 2) == (1, 1)
+          and _cell_spans(_grid(xs, ys, [_v(0, 0, 200), _v(200, 0, 200)], all_h),
+                          0, 0, 2, 2) == (2, 1))
+
+    # A degenerate (zero-height) band can't be measured. It must fail CLOSED —
+    # "rule present, no merge" — because a merge is the answer that deletes
+    # content, and an unmeasurable band is never evidence for one.
+    check("an unmeasurable band never produces a merge",
+          _cell_spans(_grid(xs, [200.0, 200.0, 0.0], [], all_h), 0, 0, 2, 2) == (1, 1))
+
     # --- stub column spanning both rows: the middle horizontal is missing ---
     # Horizontal at y=100 only exists on the RIGHT half (x 100..200).
     rowspan_h = [_h(200, 0, 200), _h(100, 100, 200), _h(0, 0, 200)]
@@ -97,7 +142,7 @@ def main() -> int:
     import io
 
     from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
     from app.models.accessibility import (
         AccessibilityTree,
@@ -184,6 +229,86 @@ def main() -> int:
     check("the report exposes declined tables separately from tagged ones",
           "tablesDeclined" in src_text and "tablesDetected" not in src_text)
     check("a clean tagged table reports zero declined", rep.get("tablesDeclined", 0) == 0, str(rep))
+
+    # The merged band here is a TITLE ("Quarterly results summary"), not a
+    # column header. Typing it /TH with /Scope=/Column would claim a title
+    # labels one column of the table.
+    check("a full-width title band is never given /Scope=/Column",
+          b"/Scope" not in blob)
+
+    # --- title band ABOVE a real header row --------------------------------
+    # The regression this locks: row 0 spanned the table, took /TH + /Scope for
+    # itself, and pushed the genuine header row down to /TD — so the table came
+    # out with a fabricated header and no real one.
+    titled = b"\n".join([
+        b"40 400 240 120 re S",
+        b"40 440 m 280 440 l S",
+        b"40 480 m 280 480 l S",
+        b"160 400 m 160 480 l S",      # divider spans the header + data rows only
+        _bt(10, 60, 495, b"Regional summary table"),      # full-width title band
+        _bt(10, 60, 455, b"Region"), _bt(10, 180, 455, b"Category"),   # real header
+        _bt(10, 60, 415, b"North"), _bt(10, 180, 415, b"Central"),     # data
+    ])
+    w2 = PdfWriter()
+    f2 = DictionaryObject()
+    f2.update({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fs2 = DictionaryObject()
+    fs2[NameObject("/F1")] = w2._add_object(f2)  # noqa: SLF001
+    r2 = DictionaryObject()
+    r2[NameObject("/Font")] = fs2
+    p2 = w2.add_blank_page(width=360, height=560)
+    c2 = DecodedStreamObject()
+    c2.set_data(titled)
+    p2[NameObject("/Contents")] = w2._add_object(c2)  # noqa: SLF001
+    p2[NameObject("/Resources")] = r2
+    rep2 = tag_pdf(w2, tree)
+    b2 = io.BytesIO()
+    w2.write(b2)
+    blob2 = b2.getvalue()
+    check("title-band table still tags", bool(rep2 and rep2.get("structTree")), str(rep2))
+    check("the title band is emitted as a spanning cell", b"/ColSpan" in blob2)
+
+    # Walk the actual structure tree — byte-counting "/TH" would also hit the
+    # matching BDC operator in the content stream and double every cell.
+    b2.seek(0)
+    rows = []   # per /TR: the list of (structure type, colspan) for its cells
+
+    def _walk(node, out_rows):
+        node = node.get_object()
+        s = str(node.get("/S") or "")
+        if s == "/TR":
+            cells = []
+            kids = node.get("/K")
+            kids = kids.get_object() if hasattr(kids, "get_object") else kids
+            for kid in (kids if isinstance(kids, list) else [kids]):
+                kid = kid.get_object()
+                attrs = kid.get("/A")
+                attrs = attrs.get_object() if hasattr(attrs, "get_object") else (attrs or {})
+                cells.append((str(kid.get("/S") or ""), str(attrs.get("/Scope") or "")))
+            out_rows.append(cells)
+            return
+        kids = node.get("/K")
+        kids = kids.get_object() if hasattr(kids, "get_object") else kids
+        if kids is None or isinstance(kids, (int, NumberObject)):
+            return
+        for kid in (kids if isinstance(kids, list) else [kids]):
+            if hasattr(kid, "get_object") and isinstance(kid.get_object(), DictionaryObject):
+                _walk(kid, out_rows)
+
+    st2 = PdfReader(b2).trailer["/Root"]["/StructTreeRoot"].get_object()
+    _walk(st2["/K"][0], rows)
+    check("the table emits three rows (title band, header, data)", len(rows) == 3, str(rows))
+    check("the TITLE band is NOT a header cell",
+          bool(rows) and all(s == "/TD" for s, _sc in rows[0]), str(rows[:1]))
+    check("the REAL header row beneath it IS /TH with a column scope",
+          len(rows) > 1 and len(rows[1]) == 2
+          and all(s == "/TH" and sc == "/Column" for s, sc in rows[1]), str(rows[1:2]))
+    check("the data row stays /TD",
+          len(rows) > 2 and all(s == "/TD" for s, _sc in rows[2]), str(rows[2:3]))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

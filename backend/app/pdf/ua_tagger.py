@@ -419,6 +419,26 @@ def _row0_is_header(run) -> bool:
 _MIN_COLUMN_BLOCKS = 8        # too few blocks to be confident about a layout
 _MIN_COLUMN_SHARE = 0.30      # each column must hold >=30% of the blocks
 _MIN_GUTTER = 40.0            # points of clear horizontal space between columns
+_MAX_COLUMN_DEPTH = 3         # recursion cap: up to 8 columns, far past real layouts
+_SPAN_MARGIN = 6.0            # points a block must reach INTO the next column
+
+
+def _estimate_block_width(text: str, size) -> Optional[float]:
+    """Rough painted width of a text block, in points, or None if unknowable.
+
+    Used only to decide whether a block CROSSES a gutter, so it deliberately
+    UNDER-estimates (0.45 em per character, against a ~0.5 em average advance
+    for the faces these documents use). Under-estimating can only fail to spot
+    a full-width block, which falls back to the previous behaviour;
+    over-estimating would invent one and re-band the page around it.
+    """
+    if not text or not size:
+        return None
+    try:
+        pt = float(size)
+    except (TypeError, ValueError):
+        return None
+    return len(text) * pt * 0.45 if pt > 0 else None
 
 
 def _detect_two_columns(points) -> Optional[float]:
@@ -477,13 +497,54 @@ def _detect_two_columns(points) -> Optional[float]:
     return best_at
 
 
+def _top_to_bottom(leaves) -> list:
+    """Leaves in visual order. PDF user space origins at the bottom-left, so
+    larger y is HIGHER on the page — descending y reads top to bottom."""
+    return sorted(leaves, key=lambda lf: (-lf["by"], lf["bx"]))
+
+
+def _split_columns(leaves, depth: int = 0) -> Optional[list]:
+    """Column-major order for ``leaves``, or None if they are a single column.
+
+    Recurses, so a three-or-more-column page is handled properly rather than
+    declined. Every split must pass the full strictness of
+    :func:`_detect_two_columns` on its own, so recursing cannot loosen a single
+    guard — it only lets them apply again to a side that is itself multi-column.
+    Previously such a page was refused outright, because splitting only at the
+    widest gutter separated one column and left the rest interleaved while
+    still REPORTING the page as fixed.
+    """
+    if depth >= _MAX_COLUMN_DEPTH:
+        return None
+    gutter = _detect_two_columns(
+        [(lf["bx"], lf["by"], lf.get("text") or "") for lf in leaves]
+    )
+    if gutter is None:
+        return None
+    out: list = []
+    for side in (
+        [lf for lf in leaves if lf["bx"] < gutter],
+        [lf for lf in leaves if lf["bx"] >= gutter],
+    ):
+        sub = _split_columns(side, depth + 1)
+        out.extend(sub if sub is not None else _top_to_bottom(side))
+    return out
+
+
 def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
-    """Reorder structure leaves into visual reading order for 2-column pages.
+    """Reorder structure leaves into visual reading order for columned pages.
 
     Returns ``(leaves, changed)``. Conservative — returns the input untouched
-    unless the page is unambiguously two-column AND the current order actually
-    interleaves them. Pages containing a detected table or list are left alone:
-    those constructs span columns and already carry their own ordering.
+    unless the page is unambiguously columned AND the resulting order actually
+    differs from the one already there. Pages containing a detected table or
+    list are left alone: those constructs span columns and carry their own
+    ordering.
+
+    Full-width blocks (a page title, a section heading, a pull quote across the
+    columns) are not column members. Left in the point set their own x drags
+    the gutter estimate, and left in a column they are announced somewhere in
+    the middle of it. They are treated as SEPARATORS instead: each one ends the
+    band above it, is read at its own place in the flow, and starts a new band.
     """
     positioned = [lf for lf in leaves if lf.get("by") is not None and lf.get("bx") is not None]
     if len(positioned) != len(leaves) or len(leaves) < _MIN_COLUMN_BLOCKS:
@@ -491,34 +552,69 @@ def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
     if any(lf.get("table") is not None or lf.get("group") is not None for lf in leaves):
         return leaves, False
 
+    def _crossing(g: float) -> set:
+        """Indices of blocks that run into the NEXT column's territory.
+
+        Note what this is NOT: ``g`` is the midpoint between the two columns'
+        ORIGINS, which lands inside the left column's own text — every ordinary
+        left-column line crosses it, so testing against ``g`` would call the
+        whole column full-width. A block is only spanning when its painted
+        extent reaches past where the right column actually starts.
+        """
+        right_x0 = min((lf["bx"] for lf in leaves if lf["bx"] >= g), default=None)
+        if right_x0 is None:
+            return set()
+        reach = right_x0 + _SPAN_MARGIN
+        out = set()
+        for i, lf in enumerate(leaves):
+            w = lf.get("w")
+            if w is not None and lf["bx"] < g and lf["bx"] + w > reach:
+                out.add(i)
+        return out
+
     points = [(lf["bx"], lf["by"], lf.get("text") or "") for lf in leaves]
-    gutter = _detect_two_columns(points)
-    if gutter is None:
+    provisional = _detect_two_columns(points)
+    if provisional is None:
         return leaves, False
 
-    # THREE-or-more columns: splitting only at the widest gap would separate one
-    # column and leave the rest interleaved — a partial reorder that is still
-    # wrong but would be REPORTED as fixed. Detect a second real gutter inside
-    # either side and decline the page entirely.
-    left_pts = [p for p in points if p[0] < gutter]
-    right_pts = [p for p in points if p[0] >= gutter]
-    for side in (left_pts, right_pts):
-        if len(side) >= _MIN_COLUMN_BLOCKS and _detect_two_columns(side) is not None:
-            return leaves, False
-
-    cols = [0 if lf["bx"] < gutter else 1 for lf in leaves]
-    # Already column-major (all of column 0, then all of column 1)? Nothing to do.
-    transitions = sum(1 for a, b in zip(cols, cols[1:]) if a != b)
-    if transitions <= 1:
+    # Spanners and the gutter define each other, so settle it in one pass: find
+    # the blocks crossing a provisional gutter, re-derive the gutter from the
+    # rest, and require the two answers to agree. If they don't, the layout is
+    # ambiguous and the page is left exactly as it is.
+    span_idx = _crossing(provisional)
+    body = [lf for i, lf in enumerate(leaves) if i not in span_idx]
+    if len(body) < _MIN_COLUMN_BLOCKS:
+        return leaves, False
+    gutter = _detect_two_columns(
+        [(lf["bx"], lf["by"], lf.get("text") or "") for lf in body]
+    )
+    if gutter is None or _crossing(gutter) != span_idx:
         return leaves, False
 
-    left = [lf for lf, c in zip(leaves, cols) if c == 0]
-    right = [lf for lf, c in zip(leaves, cols) if c == 1]
-    # PDF user space puts the origin at the bottom-left, so larger y is higher
-    # on the page: sort descending for top-to-bottom.
-    left.sort(key=lambda lf: (-lf["by"], lf["bx"]))
-    right.sort(key=lambda lf: (-lf["by"], lf["bx"]))
-    return left + right, True
+    out: list = []
+    band: list = []
+
+    def _flush() -> None:
+        if not band:
+            return
+        ordered = _split_columns(band)
+        out.extend(ordered if ordered is not None else _top_to_bottom(band))
+        band.clear()
+
+    span_ids = {id(leaves[i]) for i in span_idx}
+    for lf in _top_to_bottom(leaves):
+        if id(lf) in span_ids:
+            _flush()
+            out.append(lf)
+        else:
+            band.append(lf)
+    _flush()
+
+    # Report a fix only when the order genuinely moved. Deriving `changed` from
+    # the result rather than from the geometry is what stops the tagger
+    # claiming a reading-order correction it did not actually make.
+    changed = [id(lf) for lf in out] != [id(lf) for lf in leaves]
+    return (out, True) if changed else (leaves, False)
 
 
 def _detect_table_groups(segments, exclude=frozenset()):
@@ -871,28 +967,64 @@ def _detect_ruling_grids(horiz, vert):
     return grids
 
 
+_RULE_COVERAGE = 0.6  # fraction of the span a rule must cover to count as present
+
+
+def _interval_union_len(intervals) -> float:
+    """Total length covered by 1-D ``(lo, hi)`` intervals, overlaps counted once."""
+    total = 0.0
+    cur_lo = cur_hi = None
+    for lo, hi in sorted(intervals):
+        if cur_hi is None or lo > cur_hi:
+            if cur_hi is not None:
+                total += cur_hi - cur_lo
+            cur_lo, cur_hi = lo, hi
+        elif hi > cur_hi:
+            cur_hi = hi
+    if cur_hi is not None:
+        total += cur_hi - cur_lo
+    return total
+
+
 def _has_vertical_rule(grid, x: float, y_lo: float, y_hi: float) -> bool:
-    """True if a drawn vertical rule at ``x`` covers most of ``[y_lo, y_hi]``."""
-    need = (y_hi - y_lo) * 0.6  # tolerate small gaps where rules don't quite meet
-    for v in grid.get("v_lines") or []:
-        if abs(v[0] - x) > _CLUSTER_TOL:
-            continue
-        overlap = min(v[3], y_hi) - max(v[1], y_lo)
-        if overlap >= need:
-            return True
-    return False
+    """True if drawn vertical rules at ``x`` cover most of ``[y_lo, y_hi]``.
+
+    Measures the UNION of every collinear segment rather than the longest
+    single one. Tables are routinely stroked cell by cell, so the boundary
+    between two columns exists on the page as N short strokes, not one long
+    line; measuring only the best of them reported the rule ABSENT. An absent
+    rule is read as a merge (see :func:`_cell_spans`), so an ordinary
+    per-cell-ruled table produced phantom ``/ColSpan``s.
+
+    Fails CLOSED — a degenerate band returns True (rule present, no merge),
+    because claiming a merge is the answer that can destroy content.
+    """
+    span = y_hi - y_lo
+    if span <= 0:
+        return True
+    ivs = [
+        (max(v[1], y_lo), min(v[3], y_hi))
+        for v in (grid.get("v_lines") or [])
+        if abs(v[0] - x) <= _CLUSTER_TOL and min(v[3], y_hi) > max(v[1], y_lo)
+    ]
+    return _interval_union_len(ivs) >= span * _RULE_COVERAGE
 
 
 def _has_horizontal_rule(grid, y: float, x_lo: float, x_hi: float) -> bool:
-    """True if a drawn horizontal rule at ``y`` covers most of ``[x_lo, x_hi]``."""
-    need = (x_hi - x_lo) * 0.6
-    for h in grid.get("h_lines") or []:
-        if abs(h[1] - y) > _CLUSTER_TOL:
-            continue
-        overlap = min(h[2], x_hi) - max(h[0], x_lo)
-        if overlap >= need:
-            return True
-    return False
+    """True if drawn horizontal rules at ``y`` cover most of ``[x_lo, x_hi]``.
+
+    Union-measured and fail-closed for the same reasons as
+    :func:`_has_vertical_rule`.
+    """
+    span = x_hi - x_lo
+    if span <= 0:
+        return True
+    ivs = [
+        (max(h[0], x_lo), min(h[2], x_hi))
+        for h in (grid.get("h_lines") or [])
+        if abs(h[1] - y) <= _CLUSTER_TOL and min(h[2], x_hi) > max(h[0], x_lo)
+    ]
+    return _interval_union_len(ivs) >= span * _RULE_COVERAGE
 
 
 def _cell_spans(grid, r: int, c: int, nrows: int, ncols: int) -> Tuple[int, int]:
@@ -916,6 +1048,11 @@ def _cell_spans(grid, r: int, c: int, nrows: int, ncols: int) -> Tuple[int, int]
     while r + rowspan < nrows and not _has_horizontal_rule(grid, ys[r + rowspan], x_lo, x_hi):
         rowspan += 1
     return colspan, rowspan
+
+
+def _spans_full_width(spans, tid: int, row: int, ncols: int) -> bool:
+    """True if ``row``'s leading cell stretches across the whole table."""
+    return int(spans.get((tid, row, 0), (1, 1))[0]) >= ncols
 
 
 def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
@@ -1039,10 +1176,23 @@ def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
             [(0, 0, 0, cell_text.get((r, c), "")) for c in range(ncols)]
             for r in range(nrows)
         ]
+        # A full-width row 0 is a TITLE band, not a header row. Typing it /TH
+        # with /Scope=/Column asserts it labels a single column when it labels
+        # the whole table — and it demotes the REAL header row beneath it to
+        # /TD, so the table loses its headers entirely. When row 0 spans the
+        # table, judge the row below it instead.
+        header_row = 0
+        if _spans_full_width(spans, tid, 0, ncols) and nrows >= 3:
+            header_row = 1
+        has_header = (
+            not _spans_full_width(spans, tid, header_row, ncols)
+            and _row0_is_header(run_view[header_row:])
+        )
         tables[tid] = {
             "nrows": nrows,
             "ncols": ncols,
-            "has_header": _row0_is_header(run_view),
+            "has_header": has_header,
+            "header_row": header_row,
             "spans": spans,      # (tid,r,c) -> (colspan, rowspan)
             "covered": covered,  # (r,c) positions absorbed by a merged cell
         }
@@ -1203,8 +1353,14 @@ def _tag_page_elements(
     each image ``/Figure`` with ``/Alt``. Repeated header/footer/page-number
     blocks (``artifact_sigs``) are wrapped as ``/Artifact`` and kept OUT of the
     structure tree. ``doc_heading_levels`` (document-wide size→level map) keeps
-    heading ranks consistent across pages. Returns specs (mcid = list index) or
-    ``None`` to signal the caller to fall back to safe page-level wrapping.
+    heading ranks consistent across pages.
+
+    Returns the page's specs in READING ORDER, or ``None`` to signal the caller
+    to fall back to safe page-level wrapping. A spec's position in that list is
+    NOT its MCID: nested specs (``/Table``, ``/L``) carry their MCIDs on inner
+    cells, and a columned page has its specs reordered relative to the stream.
+    Each spec's MCID is always read from its own ``"mcid"`` key — the content
+    stream and every marked-content id in it are left exactly as emitted.
     """
     try:
         contents = page.get_contents()
@@ -1255,6 +1411,10 @@ def _tag_page_elements(
 
     height = _page_height(page)
 
+    # Page-local counter accumulator. Merged into the shared `counters` only
+    # after the page commits its rewritten stream (see the end of Pass 2).
+    pending: Dict[str, int] = {}
+
     # Pass 1.4 — reconstruct tables from positioned text (cells get tagged
     # TH/TD and are excluded from list/heading/paragraph/artifact handling).
     cell_of, tables = _detect_table_groups(segments)
@@ -1269,10 +1429,12 @@ def _tag_page_elements(
         ring_cells, ring_tables = _tables_from_grids(
             _detect_ruling_grids(h_lines, v_lines), segments, cell_of, stats=_grid_stats
         )
-        if counters is not None and _grid_stats.get("declined"):
-            counters["tables_declined"] = (
-                counters.get("tables_declined", 0) + _grid_stats["declined"]
-            )
+        # Accumulated locally, merged into `counters` only once this page has
+        # COMMITTED its new content stream. Every check below can still bail to
+        # the page-level fallback, which discards all of this analysis — so
+        # counting it here would describe work the output does not contain.
+        if _grid_stats.get("declined"):
+            pending["tables_declined"] = _grid_stats["declined"]
         cell_of.update(ring_cells)
         tables.update(ring_tables)
     except Exception:
@@ -1356,10 +1518,13 @@ def _tag_page_elements(
         grp = group_of.get(idx) if kind == "text" else None
         if kind == "text":
             if tcell is not None:
-                # Row 0 is a header only when the detector found a positive
-                # signal (see _row0_is_header). Never fabricate one.
-                _has_hdr = bool((tables.get(tcell[0]) or {}).get("has_header"))
-                tag = "/TH" if (_has_hdr and tcell[1] == 0) else "/TD"
+                # A row is a header only when the detector found a positive
+                # signal (see _row0_is_header). Never fabricate one. The header
+                # is usually row 0, but a full-width title band pushes it down.
+                _dims = tables.get(tcell[0]) or {}
+                _has_hdr = bool(_dims.get("has_header"))
+                _hdr_row = int(_dims.get("header_row") or 0)
+                tag = "/TH" if (_has_hdr and tcell[1] == _hdr_row) else "/TD"
             elif grp is not None:
                 tag = "/LBody"
             else:
@@ -1377,12 +1542,16 @@ def _tag_page_elements(
         new_ops.append(([NameObject(tag), DictionaryObject({NameObject("/MCID"): NumberObject(mcid)})], b"BDC"))
         new_ops.extend(seg_ops)
         new_ops.append(([], b"EMC"))
+        btext = _block_text(seg_ops) if kind == "text" else ""
         leaves.append({
             "mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell,
             "x": lx, "bx": bx, "by": by,
             # Needed by the column detector's prose test — a page of short
             # labels must never be linearized as two columns.
-            "text": _block_text(seg_ops) if kind == "text" else "",
+            "text": btext,
+            # Estimated painted width, so a full-width title can be recognised
+            # as spanning the columns instead of being filed inside one.
+            "w": _estimate_block_width(btext, meta) if kind == "text" else None,
         })
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
@@ -1396,8 +1565,7 @@ def _tag_page_elements(
     # tagged segment AND per artifact. Anything else means an op was lost/dupd.
     if len(new_ops) != len(ops) + 2 * (len(leaves) + n_artifacts):
         return None
-    if counters is not None:
-        counters["artifacts"] = counters.get("artifacts", 0) + n_artifacts
+    pending["artifacts"] = pending.get("artifacts", 0) + n_artifacts
 
     cs.operations = new_ops
     try:
@@ -1407,6 +1575,14 @@ def _tag_page_elements(
     ns = DecodedStreamObject()
     ns.set_data(new_data)
     page[NameObject("/Contents")] = pdf._add_object(ns)  # noqa: SLF001
+
+    # COMMIT POINT — the page's new stream is in the file, so everything the
+    # analysis found above is now genuinely reflected in the output bytes and
+    # may be counted. Before this line the page could still return None and be
+    # replaced by the page-level fallback.
+    if counters is not None:
+        for k, v in pending.items():
+            counters[k] = counters.get(k, 0) + v
 
     # Reading order: the content stream (and therefore the rendered page and
     # every MCID) is left EXACTLY as produced above — we only choose the order
@@ -1442,6 +1618,7 @@ def _tag_page_elements(
                 emitted_tables.add(tid)
                 dims = tables[tid]
                 has_hdr = bool(dims.get("has_header"))
+                hdr_row = int(dims.get("header_row") or 0)
                 cell_spans = dims.get("spans") or {}
                 covered_cells = dims.get("covered") or set()
                 trs = []
@@ -1458,12 +1635,16 @@ def _tag_page_elements(
                             continue
                         # Only assert a header cell when the detector inferred
                         # one; otherwise every cell is plain data (/TD).
-                        cell = {"s": "/TH" if (has_hdr and r == 0) else "/TD", "mcid": mc}
+                        cell = {"s": "/TH" if (has_hdr and r == hdr_row) else "/TD", "mcid": mc}
                         cs, rs = cell_spans.get((tid, r, c), (1, 1))
                         if cs > 1:
                             cell["colspan"] = cs
                         if rs > 1:
                             cell["rowspan"] = rs
+                        # A header cell stretching the whole table heads no
+                        # single column, so /Scope=/Column would be a lie.
+                        if cs >= dims["ncols"]:
+                            cell["no_scope"] = True
                         tcs.append(cell)
                     if tcs:
                         trs.append({"s": "/TR", "kids": tcs})
@@ -1512,13 +1693,15 @@ def _build_struct_elem(
     if spec["s"] in ("/TH", "/TD"):
         # Table cell attributes (PDF/UA 7.5, Matterhorn 15-003):
         #   /Scope   — only on a /TH, and only /Column since a /TH is emitted
-        #              solely for row 0 and only when _row0_is_header found a
-        #              positive signal.
+        #              solely for the header row and only when _row0_is_header
+        #              found a positive signal. Suppressed (``no_scope``) when
+        #              the cell spans the entire table: it heads no single
+        #              column, so claiming /Column would be a fabrication.
         #   /ColSpan, /RowSpan — merged cells. These come from MISSING drawn
         #              rules (see _cell_spans), i.e. evidence on the page, not
         #              an inference, so asserting them is safe.
         attrs = {NameObject("/O"): NameObject("/Table")}
-        if spec["s"] == "/TH":
+        if spec["s"] == "/TH" and not spec.get("no_scope"):
             attrs[NameObject("/Scope")] = NameObject("/Column")
         if int(spec.get("colspan") or 1) > 1:
             attrs[NameObject("/ColSpan")] = NumberObject(int(spec["colspan"]))
@@ -1777,7 +1960,14 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["formWidgets"] = forms_tagged
         report["artifacts"] = page_counters.get("artifacts", 0)
         report["perElementPages"] = per_element_pages
-        # Pages whose two columns were interleaved in the content stream and are
+        # ...and its honest complement: pages we could NOT segment (malformed or
+        # unparseable content streams, nested text objects, an op count that
+        # didn't reconcile) and had to wrap as a single page-level /P. They are
+        # tagged and valid, but carry no per-element structure — so reporting
+        # only perElementPages would let a mostly-unstructured document read as
+        # a fully structured one.
+        report["pagesPageLevelOnly"] = len(taggable) - per_element_pages
+        # Pages whose columns were interleaved in the content stream and are
         # now presented in correct visual reading order by the structure tree.
         report["readingOrderFixedPages"] = page_counters.get("reading_order_fixed", 0)
         # Table-SHAPED grids we deliberately DECLINED to tag (too sparse to be

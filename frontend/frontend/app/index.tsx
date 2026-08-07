@@ -141,7 +141,9 @@ export default function HomeScreen() {
           router.push("/audit");
         }}
         accessibilityRole="button"
-        accessibilityLabel="Start an audit"
+        // Must CONTAIN the visible label below (WCAG 2.5.3 Label in Name), or a
+        // speech-input user can't activate it by saying what they see.
+        accessibilityLabel={ready ? "Start an audit" : "Start in demo mode"}
         style={({ hovered }: any) => [
           styles.bench,
           {
@@ -190,13 +192,21 @@ export default function HomeScreen() {
           >
             .PDF   .DOCX   .PPTX   .HTML
           </Text>
-          <Button
-            title={ready ? "Start an audit" : "Start in demo mode"}
-            onPress={() => {
-              if (!ready) setMockMode(true);
-              router.push("/audit");
-            }}
-          />
+          {/* VISUAL affordance only — NOT a control. The whole bench panel is
+              already the button; rendering a real <Button> here nested a
+              <button> inside a <button>, which is invalid HTML, produced a
+              duplicate tab stop, and is announced unpredictably by screen
+              readers. One panel, one control. */}
+          <View
+            style={[
+              styles.benchCta,
+              { backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm },
+            ]}
+          >
+            <Text style={styles.benchCtaText}>
+              {ready ? "Start an audit" : "Start in demo mode"}
+            </Text>
+          </View>
         </View>
       </Pressable>
 
@@ -606,6 +616,19 @@ const styles = StyleSheet.create({
     ...(Platform.OS === "web"
       ? ({ transition: "border-color 180ms ease" } as any)
       : {}),
+  },
+  benchCta: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  benchCtaText: {
+    // Matches Button's filled-variant treatment; on the ember accent this is
+    // the same near-black the design system uses for AA contrast.
+    color: "#1A1008",
+    fontSize: 15,
+    fontWeight: "700",
   },
   benchFooter: {
     flexDirection: "row",
