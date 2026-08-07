@@ -246,8 +246,8 @@ def main() -> int:
         b"40 480 m 280 480 l S",
         b"160 400 m 160 480 l S",      # divider spans the header + data rows only
         _bt(10, 60, 495, b"Regional summary table"),      # full-width title band
-        _bt(10, 60, 455, b"Region"), _bt(10, 180, 455, b"Category"),   # real header
-        _bt(10, 60, 415, b"North"), _bt(10, 180, 415, b"Central"),     # data
+        _bt(10, 60, 455, b"Region"), _bt(10, 180, 455, b"Total"),   # real header
+        _bt(10, 60, 415, b"North"), _bt(10, 180, 415, b"120"),      # data
     ])
     w2 = PdfWriter()
     f2 = DictionaryObject()
@@ -309,6 +309,46 @@ def main() -> int:
           and all(s == "/TH" and sc == "/Column" for s, sc in rows[1]), str(rows[1:2]))
     check("the data row stays /TD",
           len(rows) > 2 and all(s == "/TD" for s, _sc in rows[2]), str(rows[2:3]))
+
+    # ...and the relocated header needs EVIDENCE, not just position. The
+    # labels-on-top convention is what licenses typing row 0 as a header; it
+    # does not license promoting an arbitrary interior row. A title band over
+    # rows of plain text must yield NO header rather than an invented one.
+    prose_titled = b"\n".join([
+        b"40 400 240 120 re S",
+        b"40 440 m 280 440 l S",
+        b"40 480 m 280 480 l S",
+        b"160 400 m 160 480 l S",
+        _bt(10, 60, 495, b"Team directory"),
+        _bt(10, 60, 455, b"Alice Nguyen"), _bt(10, 180, 455, b"Operations"),
+        _bt(10, 60, 415, b"Bob Carter"), _bt(10, 180, 415, b"Finance"),
+    ])
+    w3 = PdfWriter()
+    f3 = DictionaryObject()
+    f3.update({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fs3 = DictionaryObject()
+    fs3[NameObject("/F1")] = w3._add_object(f3)  # noqa: SLF001
+    r3 = DictionaryObject()
+    r3[NameObject("/Font")] = fs3
+    p3 = w3.add_blank_page(width=360, height=560)
+    c3 = DecodedStreamObject()
+    c3.set_data(prose_titled)
+    p3[NameObject("/Contents")] = w3._add_object(c3)  # noqa: SLF001
+    p3[NameObject("/Resources")] = r3
+    tag_pdf(w3, tree)
+    b3 = io.BytesIO()
+    w3.write(b3)
+    rows3 = []
+    b3.seek(0)
+    st3 = PdfReader(b3).trailer["/Root"]["/StructTreeRoot"].get_object()
+    _walk(st3["/K"][0], rows3)
+    check("a title band over PLAIN TEXT rows invents no header",
+          bool(rows3) and all(s == "/TD" for row in rows3 for s, _sc in row), str(rows3))
+
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

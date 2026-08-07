@@ -15,11 +15,11 @@ This pins both halves of that claim:
   * the content stream is byte-identical afterwards (nothing moved visually)
   * single-column, already-correct, table and list pages are NOT touched
     (reordering a page that didn't need it would CREATE the defect)
-  * a full-width block (page title, section heading) is a band SEPARATOR, not
-    a column member — otherwise its origin files the document's title partway
-    down column 1, and nothing below it may be read above it
-  * a THREE-column page is separated properly rather than declined; splitting
-    only at the widest gutter left the rest interleaved while reporting a fix
+  * a THREE-column page, and any page below the detector's confidence floor,
+    is DECLINED rather than half-ordered — a partial reorder reported as a fix
+    manufactures the very defect this feature removes
+  * `changed` describes the RESULT, so an already-correct page is never
+    credited with a correction it did not need
 
 Usage:
     python -m app.devtools.smoke_pdf_reading_order
@@ -258,54 +258,42 @@ def main() -> int:
     check("a page with any unpositioned block is left alone (never guess)",
           _reorder_leaves_for_columns(missing_pos)[1] is False)
 
-    # ---- full-width blocks are separators, not column members --------------
-    # A page title stretched across both columns: its origin sits in column 0,
-    # so filing it there would announce the document's title partway down the
-    # left column. It has to be read where it appears — above both columns.
-    PROSE_W = 200.0  # a body line: wide enough to be prose, never crosses
-    titled = [_leaf(0, 55, 730, text="A Full Width Report Title Across Both Columns", w=460.0)]
-    m = 1
-    for row in range(5):
-        titled.append(_leaf(m, 60, 700 - 20 * row, w=PROSE_W)); m += 1
-        titled.append(_leaf(m, 330, 690 - 20 * row, w=PROSE_W)); m += 1
-    out, changed = _reorder_leaves_for_columns(titled)
-    order = [lf["mcid"] for lf in out]
-    check("a full-width title is read FIRST, not filed inside column 1",
-          changed and order[0] == 0, str(order))
-    check("the columns below the title are still separated",
-          order[1:6] == [1, 3, 5, 7, 9] and order[6:] == [2, 4, 6, 8, 10], str(order))
-
-    # A spanner in the MIDDLE splits the page into two bands, each ordered on
-    # its own — the text after it must not be pulled above it.
-    banded = []
-    m = 0
-    for row in range(4):
-        banded.append(_leaf(m, 60, 700 - 20 * row, w=PROSE_W)); m += 1
-        banded.append(_leaf(m, 330, 690 - 20 * row, w=PROSE_W)); m += 1
-    banded.append(_leaf(m, 55, 600, text="A Full Width Section Heading Spanning The Page", w=460.0))
-    mid = m; m += 1
-    for row in range(4):
-        banded.append(_leaf(m, 60, 560 - 20 * row, w=PROSE_W)); m += 1
-        banded.append(_leaf(m, 330, 550 - 20 * row, w=PROSE_W)); m += 1
-    out, changed = _reorder_leaves_for_columns(banded)
-    order = [lf["mcid"] for lf in out]
-    check("a mid-page spanner splits the page into bands", changed, str(order))
-    check("nothing from below the spanner is read above it",
-          order.index(mid) == 8 and set(order[:8]) == set(range(8)), str(order))
-    check("no leaf is lost or duplicated across bands",
-          sorted(order) == list(range(len(banded))), str(order))
-
-    # ---- three columns are now ORDERED, not declined -----------------------
+    # ---- regions we cannot vouch for are NEVER reordered -----------------
+    # An adversarial review confirmed six output-corrupting defects in a
+    # richer version of this feature (full-width blocks as band separators,
+    # plus recursion for 3+ columns). Every one had the same shape: a region
+    # the detector could not vouch for got ordered anyway, which MANUFACTURED
+    # the interleave this code exists to remove and then reported it as a fix.
+    # Both were removed. These pin the conservative behaviour that replaced
+    # them, so the same feature cannot be reintroduced without noticing.
     three = []
     m = 0
     for row in range(5):
-        three.append(_leaf(m, 55, 700 - 20 * row, w=120.0)); m += 1
-        three.append(_leaf(m, 230, 694 - 20 * row, w=120.0)); m += 1
-        three.append(_leaf(m, 405, 688 - 20 * row, w=120.0)); m += 1
-    out, changed = _reorder_leaves_for_columns(three)
-    order = [lf["mcid"] for lf in out]
-    check("a THREE-column page is fully separated (was declined outright)",
-          changed and order == [0, 3, 6, 9, 12, 1, 4, 7, 10, 13, 2, 5, 8, 11, 14], str(order))
+        three.append(_leaf(m, 55, 700 - 20 * row)); m += 1
+        three.append(_leaf(m, 230, 694 - 20 * row)); m += 1
+        three.append(_leaf(m, 405, 688 - 20 * row)); m += 1
+    check("a THREE-column page is DECLINED, not half-reordered",
+          _reorder_leaves_for_columns(three)[1] is False)
+
+    # A small two-column band is exactly the case the removed code got wrong:
+    # too few blocks for the detector to be confident, so it was y-sorted —
+    # which interleaves it. Below the confidence floor we do nothing at all.
+    small = []
+    m = 0
+    for row in range(3):
+        small.append(_leaf(m, 60, 700 - 20 * row)); m += 1
+        small.append(_leaf(m, 330, 690 - 20 * row)); m += 1
+    out, changed = _reorder_leaves_for_columns(small)
+    check("a page below the confidence floor is left exactly as it was",
+          changed is False and [lf["mcid"] for lf in out] == list(range(6)))
+
+    # `changed` must describe the RESULT, not the geometry: a page that is
+    # already column-major must never be credited with a correction.
+    correct = [_leaf(i, 60, 700 - 20 * i) for i in range(5)] + [
+        _leaf(5 + i, 330, 690 - 20 * i) for i in range(5)
+    ]
+    check("an already-correct 2-column page is not credited with a fix",
+          _reorder_leaves_for_columns(correct)[1] is False)
 
     # ---- end to end through the real tagger ----
     rep, reader = _tag_two_column()

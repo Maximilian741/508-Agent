@@ -266,7 +266,7 @@ export function OnboardingTour() {
                 hovered ? { opacity: 0.92 } : null,
               ]}
             >
-              <Text style={{ color: "#FFFFFF", fontWeight: "800", fontSize: 13 }}>
+              <Text style={{ color: theme.colors.onAccent, fontWeight: "800", fontSize: 13 }}>
                 {isLast ? "Got it" : "Next"}
               </Text>
             </Pressable>

@@ -225,7 +225,7 @@ function AccountChip() {
             focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
           ]}
         >
-          <Text style={{ color: "#FFFFFF", fontWeight: "700", fontSize: 12 }}>Sign in</Text>
+          <Text style={{ color: theme.colors.onAccent, fontWeight: "700", fontSize: 12 }}>Sign in</Text>
         </Pressable>
         <SignInModal open={signInOpen} onCancel={() => setSignInOpen(false)} />
       </>
@@ -276,7 +276,7 @@ function AccountChip() {
         ]}
       >
         <View style={[styles.avatar, { backgroundColor: theme.colors.accent }]}>
-          <PixelIcon name="user" size={3} color="#FFFFFF" />
+          <PixelIcon name="user" size={3} color={theme.colors.onAccent} />
         </View>
         <Text
           style={{ color: theme.colors.text, fontWeight: "700", fontSize: 12 }}
@@ -385,7 +385,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  logoText: { color: "#FFFFFF", fontWeight: "800", fontSize: 11, letterSpacing: 0.5 },
   brandText: { fontSize: 13, fontWeight: "800", letterSpacing: 1.4 },
   links: { flexDirection: "row", gap: 4, alignItems: "center", flexShrink: 1, flexWrap: "wrap" },
   link: {
@@ -419,7 +418,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  avatarText: { color: "#FFFFFF", fontWeight: "800", fontSize: 11 },
   creditPill: {
     paddingHorizontal: 8,
     paddingVertical: 2,

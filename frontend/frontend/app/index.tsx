@@ -203,7 +203,9 @@ export default function HomeScreen() {
               { backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm },
             ]}
           >
-            <Text style={styles.benchCtaText}>
+            {/* onAccent, not a hardcoded dark: the accent is a deep burnt
+                orange in the light palette, where dark-on-dark fails 1.4.3. */}
+            <Text style={[styles.benchCtaText, { color: theme.colors.onAccent }]}>
               {ready ? "Start an audit" : "Start in demo mode"}
             </Text>
           </View>
@@ -629,9 +631,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   benchCtaText: {
-    // Matches Button's filled-variant treatment; on the ember accent this is
-    // the same near-black the design system uses for AA contrast.
-    color: "#1A1008",
+    // Colour comes from theme.colors.onAccent at the call site — the readable
+    // foreground for the accent differs per palette.
     fontSize: 15,
     fontWeight: "700",
   },

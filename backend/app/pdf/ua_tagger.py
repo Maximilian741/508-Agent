@@ -419,26 +419,7 @@ def _row0_is_header(run) -> bool:
 _MIN_COLUMN_BLOCKS = 8        # too few blocks to be confident about a layout
 _MIN_COLUMN_SHARE = 0.30      # each column must hold >=30% of the blocks
 _MIN_GUTTER = 40.0            # points of clear horizontal space between columns
-_MAX_COLUMN_DEPTH = 3         # recursion cap: up to 8 columns, far past real layouts
-_SPAN_MARGIN = 6.0            # points a block must reach INTO the next column
 
-
-def _estimate_block_width(text: str, size) -> Optional[float]:
-    """Rough painted width of a text block, in points, or None if unknowable.
-
-    Used only to decide whether a block CROSSES a gutter, so it deliberately
-    UNDER-estimates (0.45 em per character, against a ~0.5 em average advance
-    for the faces these documents use). Under-estimating can only fail to spot
-    a full-width block, which falls back to the previous behaviour;
-    over-estimating would invent one and re-band the page around it.
-    """
-    if not text or not size:
-        return None
-    try:
-        pt = float(size)
-    except (TypeError, ValueError):
-        return None
-    return len(text) * pt * 0.45 if pt > 0 else None
 
 
 def _detect_two_columns(points) -> Optional[float]:
@@ -503,48 +484,29 @@ def _top_to_bottom(leaves) -> list:
     return sorted(leaves, key=lambda lf: (-lf["by"], lf["bx"]))
 
 
-def _split_columns(leaves, depth: int = 0) -> Optional[list]:
-    """Column-major order for ``leaves``, or None if they are a single column.
-
-    Recurses, so a three-or-more-column page is handled properly rather than
-    declined. Every split must pass the full strictness of
-    :func:`_detect_two_columns` on its own, so recursing cannot loosen a single
-    guard — it only lets them apply again to a side that is itself multi-column.
-    Previously such a page was refused outright, because splitting only at the
-    widest gutter separated one column and left the rest interleaved while
-    still REPORTING the page as fixed.
-    """
-    if depth >= _MAX_COLUMN_DEPTH:
-        return None
-    gutter = _detect_two_columns(
-        [(lf["bx"], lf["by"], lf.get("text") or "") for lf in leaves]
-    )
-    if gutter is None:
-        return None
-    out: list = []
-    for side in (
-        [lf for lf in leaves if lf["bx"] < gutter],
-        [lf for lf in leaves if lf["bx"] >= gutter],
-    ):
-        sub = _split_columns(side, depth + 1)
-        out.extend(sub if sub is not None else _top_to_bottom(side))
-    return out
-
-
 def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
-    """Reorder structure leaves into visual reading order for columned pages.
+    """Reorder structure leaves into visual reading order for 2-column pages.
 
     Returns ``(leaves, changed)``. Conservative — returns the input untouched
-    unless the page is unambiguously columned AND the resulting order actually
+    unless the page is unambiguously two-column AND the resulting order really
     differs from the one already there. Pages containing a detected table or
     list are left alone: those constructs span columns and carry their own
     ordering.
 
-    Full-width blocks (a page title, a section heading, a pull quote across the
-    columns) are not column members. Left in the point set their own x drags
-    the gutter estimate, and left in a column they are announced somewhere in
-    the middle of it. They are treated as SEPARATORS instead: each one ends the
-    band above it, is read at its own place in the flow, and starts a new band.
+    Scope note, learned the expensive way. A previous revision tried to do more
+    here: estimate each block's painted width so a full-width title could be
+    treated as a band separator, and recurse so three-column pages were ordered
+    instead of declined. An adversarial review confirmed six independent
+    output-corrupting defects in it, and the shape of every one was the same —
+    a region the detector could NOT vouch for was ordered anyway, which
+    manufactured the very WCAG 1.3.2 interleave this function exists to remove
+    and then reported it as a fix. The width estimate summed a whole BT..ET
+    block, so ordinary multi-line paragraphs measured wider than the page and
+    became "spanners"; the recursion y-sorted any side too small for the
+    detector's own confidence floor. Both were removed rather than patched.
+
+    The rule that survives: only ever reorder a region this module can
+    positively prove is one column, and otherwise leave the document alone.
     """
     positioned = [lf for lf in leaves if lf.get("by") is not None and lf.get("bx") is not None]
     if len(positioned) != len(leaves) or len(leaves) < _MIN_COLUMN_BLOCKS:
@@ -552,67 +514,26 @@ def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
     if any(lf.get("table") is not None or lf.get("group") is not None for lf in leaves):
         return leaves, False
 
-    def _crossing(g: float) -> set:
-        """Indices of blocks that run into the NEXT column's territory.
-
-        Note what this is NOT: ``g`` is the midpoint between the two columns'
-        ORIGINS, which lands inside the left column's own text — every ordinary
-        left-column line crosses it, so testing against ``g`` would call the
-        whole column full-width. A block is only spanning when its painted
-        extent reaches past where the right column actually starts.
-        """
-        right_x0 = min((lf["bx"] for lf in leaves if lf["bx"] >= g), default=None)
-        if right_x0 is None:
-            return set()
-        reach = right_x0 + _SPAN_MARGIN
-        out = set()
-        for i, lf in enumerate(leaves):
-            w = lf.get("w")
-            if w is not None and lf["bx"] < g and lf["bx"] + w > reach:
-                out.add(i)
-        return out
-
     points = [(lf["bx"], lf["by"], lf.get("text") or "") for lf in leaves]
-    provisional = _detect_two_columns(points)
-    if provisional is None:
+    gutter = _detect_two_columns(points)
+    if gutter is None:
         return leaves, False
 
-    # Spanners and the gutter define each other, so settle it in one pass: find
-    # the blocks crossing a provisional gutter, re-derive the gutter from the
-    # rest, and require the two answers to agree. If they don't, the layout is
-    # ambiguous and the page is left exactly as it is.
-    span_idx = _crossing(provisional)
-    body = [lf for i, lf in enumerate(leaves) if i not in span_idx]
-    if len(body) < _MIN_COLUMN_BLOCKS:
-        return leaves, False
-    gutter = _detect_two_columns(
-        [(lf["bx"], lf["by"], lf.get("text") or "") for lf in body]
+    # THREE-or-more columns: splitting only at the widest gap would separate one
+    # column and leave the rest interleaved — a partial reorder that is still
+    # wrong but would be REPORTED as fixed. Detect a second real gutter inside
+    # either side and decline the page entirely.
+    for side in ([p for p in points if p[0] < gutter], [p for p in points if p[0] >= gutter]):
+        if len(side) >= _MIN_COLUMN_BLOCKS and _detect_two_columns(side) is not None:
+            return leaves, False
+
+    out = (
+        _top_to_bottom([lf for lf in leaves if lf["bx"] < gutter])
+        + _top_to_bottom([lf for lf in leaves if lf["bx"] >= gutter])
     )
-    if gutter is None or _crossing(gutter) != span_idx:
-        return leaves, False
-
-    out: list = []
-    band: list = []
-
-    def _flush() -> None:
-        if not band:
-            return
-        ordered = _split_columns(band)
-        out.extend(ordered if ordered is not None else _top_to_bottom(band))
-        band.clear()
-
-    span_ids = {id(leaves[i]) for i in span_idx}
-    for lf in _top_to_bottom(leaves):
-        if id(lf) in span_ids:
-            _flush()
-            out.append(lf)
-        else:
-            band.append(lf)
-    _flush()
-
     # Report a fix only when the order genuinely moved. Deriving `changed` from
-    # the result rather than from the geometry is what stops the tagger
-    # claiming a reading-order correction it did not actually make.
+    # the RESULT rather than from the geometry that suggested it is what stops
+    # the tagger crediting itself with a correction it did not make.
     changed = [id(lf) for lf in out] != [id(lf) for lf in leaves]
     return (out, True) if changed else (leaves, False)
 
@@ -1055,6 +976,36 @@ def _spans_full_width(spans, tid: int, row: int, ncols: int) -> bool:
     return int(spans.get((tid, row, 0), (1, 1))[0]) >= ncols
 
 
+def _header_row_for_grid(run_view, spans, tid: int, nrows: int, ncols: int) -> Optional[int]:
+    """Which row may be typed ``/TH``, or None to claim no header at all.
+
+    Row 0 by convention, when it reads like labels (see :func:`_row0_is_header`).
+
+    But a row 0 that SPANS the whole table is a title band, not a header: typing
+    it ``/TH`` with ``/Scope=/Column`` asserts it labels one column when it
+    labels the table, and it pushes the genuine header row beneath it down to
+    ``/TD`` — so the table ends up with a fabricated header and no real one.
+
+    The row below a title band may take the role, but only on POSITIVE
+    evidence. The labels-on-top convention is what carries the claim for row 0;
+    it does not carry an arbitrary interior row. So we additionally require the
+    rows underneath to actually look like data (at least one numeric cell).
+    Without that, a title over two rows of ordinary text would have its first
+    text row promoted to a header on no evidence whatsoever. We would rather
+    claim no header than invent one.
+    """
+    if not _spans_full_width(spans, tid, 0, ncols):
+        return 0 if _row0_is_header(run_view) else None
+    if nrows < 3 or _spans_full_width(spans, tid, 1, ncols):
+        return None
+    if not _row0_is_header(run_view[1:]):
+        return None
+    below = run_view[2:]
+    if not any(_cell_is_numericish(str(cell[3])) for row in below for cell in row):
+        return None
+    return 1
+
+
 def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
     """Assign text blocks to cells defined by ruling-line grids.
 
@@ -1176,23 +1127,12 @@ def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
             [(0, 0, 0, cell_text.get((r, c), "")) for c in range(ncols)]
             for r in range(nrows)
         ]
-        # A full-width row 0 is a TITLE band, not a header row. Typing it /TH
-        # with /Scope=/Column asserts it labels a single column when it labels
-        # the whole table — and it demotes the REAL header row beneath it to
-        # /TD, so the table loses its headers entirely. When row 0 spans the
-        # table, judge the row below it instead.
-        header_row = 0
-        if _spans_full_width(spans, tid, 0, ncols) and nrows >= 3:
-            header_row = 1
-        has_header = (
-            not _spans_full_width(spans, tid, header_row, ncols)
-            and _row0_is_header(run_view[header_row:])
-        )
+        header_row = _header_row_for_grid(run_view, spans, tid, nrows, ncols)
         tables[tid] = {
             "nrows": nrows,
             "ncols": ncols,
-            "has_header": has_header,
-            "header_row": header_row,
+            "has_header": header_row is not None,
+            "header_row": header_row or 0,
             "spans": spans,      # (tid,r,c) -> (colspan, rowspan)
             "covered": covered,  # (r,c) positions absorbed by a merged cell
         }
@@ -1549,9 +1489,6 @@ def _tag_page_elements(
             # Needed by the column detector's prose test — a page of short
             # labels must never be linearized as two columns.
             "text": btext,
-            # Estimated painted width, so a full-width title can be recognised
-            # as spanning the columns instead of being filed inside one.
-            "w": _estimate_block_width(btext, meta) if kind == "text" else None,
         })
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
@@ -1641,10 +1578,6 @@ def _tag_page_elements(
                             cell["colspan"] = cs
                         if rs > 1:
                             cell["rowspan"] = rs
-                        # A header cell stretching the whole table heads no
-                        # single column, so /Scope=/Column would be a lie.
-                        if cs >= dims["ncols"]:
-                            cell["no_scope"] = True
                         tcs.append(cell)
                     if tcs:
                         trs.append({"s": "/TR", "kids": tcs})
@@ -1692,16 +1625,17 @@ def _build_struct_elem(
     ref = writer._add_object(elem)  # noqa: SLF001
     if spec["s"] in ("/TH", "/TD"):
         # Table cell attributes (PDF/UA 7.5, Matterhorn 15-003):
-        #   /Scope   — only on a /TH, and only /Column since a /TH is emitted
-        #              solely for the header row and only when _row0_is_header
-        #              found a positive signal. Suppressed (``no_scope``) when
-        #              the cell spans the entire table: it heads no single
-        #              column, so claiming /Column would be a fabrication.
+        #   /Scope   — only on a /TH, and only /Column. A /TH is emitted solely
+        #              for the row _header_row_for_grid picked, and that
+        #              function never picks a row whose leading cell spans the
+        #              whole table — a cell that wide heads no single column, so
+        #              /Column would be a fabrication. That guard lives there,
+        #              in one place, rather than being re-checked here.
         #   /ColSpan, /RowSpan — merged cells. These come from MISSING drawn
         #              rules (see _cell_spans), i.e. evidence on the page, not
         #              an inference, so asserting them is safe.
         attrs = {NameObject("/O"): NameObject("/Table")}
-        if spec["s"] == "/TH" and not spec.get("no_scope"):
+        if spec["s"] == "/TH":
             attrs[NameObject("/Scope")] = NameObject("/Column")
         if int(spec.get("colspan") or 1) > 1:
             attrs[NameObject("/ColSpan")] = NumberObject(int(spec["colspan"]))

@@ -157,6 +157,15 @@ export type ThemeColors = {
   border: string;
   shadow: string;
   accent: string;
+  /**
+   * Text/icon colour to place ON TOP of `accent`. NOT always white: the accent
+   * is light in the twilight and dark palettes, where white text measures
+   * 1.76:1 and 2.13:1 against it — both far below the 4.5:1 that WCAG 1.4.3
+   * Level AA requires, on this product's own primary buttons.
+   */
+  onAccent: string;
+  /** Same idea for `danger`, which is a LIGHT red in the dark palettes. */
+  onDanger: string;
   accentSecondary: string;
   success: string;
   warning: string;
@@ -181,14 +190,19 @@ export const lightColors: ThemeColors = {
   textMuted: "#6B5840",   // warm taupe
   border: "#E0CFB0",      // soft sand
   shadow: "rgba(60, 30, 10, 0.16)",
-  accent: "#C2410C",      // burnt orange (ember)
+  accent: "#A83A08",      // burnt orange (ember) — deepened from #C2410C,
+                          // which measured 4.1-4.3:1 as text on this palette's
+                          // own tinted surfaces, just under the 4.5:1 AA floor
+  onAccent: "#FFFFFF",    // 5.2:1 on the burnt orange
+  onDanger: "#FFFFFF",    // 6.5:1 on #B91C1C
   accentSecondary: "#9A1842", // deep magenta
-  success: "#15803D",
-  warning: "#A16207",     // dark amber
+  success: "#116634",     // deepened from #15803D (3.6:1 on the success chip)
+  warning: "#8F5606",     // dark amber — deepened from #A16207, which
+                          // measured 4.38:1 on this palette's own background
   danger: "#B91C1C",
   info: "#1E5C8E",        // teal-leaning blue
-  successSoft: "rgba(21, 128, 61, 0.10)",
-  warningSoft: "rgba(161, 98, 7, 0.12)",
+  successSoft: "rgba(17, 102, 52, 0.10)",
+  warningSoft: "rgba(143, 86, 6, 0.12)",
   dangerSoft: "rgba(185, 28, 28, 0.10)",
   infoSoft: "rgba(30, 92, 142, 0.10)",
 } as const;
@@ -209,11 +223,14 @@ export const twilightColors: ThemeColors = {
   border: "#7A5C84",      // amethyst border
   shadow: "rgba(20, 8, 24, 0.42)",
   accent: "#FFB36B",      // warm peach (pops against violet bg)
+  onAccent: "#2B1B0E",    // 9.4:1 — white would be 1.76:1 here
+  onDanger: "#2B1B0E",    // 8.7:1 on #FCA5A5
   accentSecondary: "#F472B6", // rose
   success: "#86EFAC",
   warning: "#FCD34D",
   danger: "#FCA5A5",
-  info: "#A5B4FC",        // periwinkle
+  info: "#C7D2FE",        // periwinkle (lightened: #A5B4FC measured 3.9:1
+                          // as chip text on this palette, under the 4.5:1 AA floor)
   successSoft: "rgba(134, 239, 172, 0.16)",
   warningSoft: "rgba(252, 211, 77, 0.16)",
   dangerSoft: "rgba(252, 165, 165, 0.16)",
@@ -236,6 +253,8 @@ export const darkColors: ThemeColors = {
   border: "#3D2D1E",      // warm umber border (replaces navy)
   shadow: "rgba(0, 0, 0, 0.55)",
   accent: "#F59E4A",      // ember orange (warm primary)
+  onAccent: "#2B1B0E",    // 7.8:1 — white would be 2.13:1 here
+  onDanger: "#2B1B0E",    // 6.0:1 on #F87171
   accentSecondary: "#E04D7A", // hot magenta secondary
   success: "#5BD394",
   warning: "#FBBF24",
