@@ -1283,7 +1283,10 @@ export default function AuditScreen() {
         {Platform.OS === "web" && !filename && !busy ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Upload a document - click to choose, or drag a file onto this area"
+            // Contains the zone's visible headline and its "Choose file" call
+            // to action verbatim, so a speech-input user can activate it by
+            // saying what they see (WCAG 2.5.3 Label in Name).
+            accessibilityLabel="Drop a PDF, Word, PowerPoint, or HTML file here — or click to choose file from your computer"
             onPress={handlePick}
             style={({ hovered, pressed }: any) => [
               styles.dropZone,
@@ -1434,7 +1437,9 @@ export default function AuditScreen() {
                 <Pressable accessibilityRole="button"
                   key={sample.id}
                   onPress={() => loadSample(sample)}
-                  accessibilityLabel={`Load sample document: ${sample.title}`}
+                  // Leads with the card's visible title (WCAG 2.5.3) — the
+                  // name has to contain what the user can see and say.
+                  accessibilityLabel={`${sample.title} — load this sample document`}
                   style={[
                     styles.sampleCard,
                     { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },

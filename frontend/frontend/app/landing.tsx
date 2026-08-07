@@ -108,9 +108,11 @@ export default function LandingScreen() {
           untagged PDFs and documents to remediate, and at manual rates of $5–25 per page, that's
           a wall. 508 Agent fixes them in bulk, automatically.
         </Text>
+        {/* No accessibilityLabel: the visible text below is already a complete
+            label, and an aria-label that merely paraphrases it REPLACES the
+            name a speech-input user can say (WCAG 2.5.3 Label in Name). */}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Estimate how much you would save versus manual remediation"
           onPress={() => router.push("/savings" as any)}
           style={({ hovered }: any) => [{ marginTop: 12, alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
         >
@@ -213,7 +215,9 @@ export default function LandingScreen() {
           <Pressable accessibilityRole="button" accessibilityLabel="Open the Section 508 standards (external link)" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          {/* "PDF/UA", not "PDF" — the label has to contain the chip's own
+              words to satisfy WCAG 2.5.3, same as the two chips above. */}
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF/UA accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>

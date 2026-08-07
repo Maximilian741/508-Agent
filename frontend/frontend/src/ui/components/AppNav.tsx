@@ -52,7 +52,9 @@ export function AppNav() {
     >
       <Pressable accessibilityRole="button"
         onPress={() => router.push("/" as any)}
-        accessibilityLabel="Home"
+        // Must contain the visible wordmark (WCAG 2.5.3): a speech-input user
+        // says what they see — "508 Agent" — not "Home".
+        accessibilityLabel="508 Agent — home"
         style={({ focused }: any) => [styles.brand, focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null]}
       >
         <View style={[styles.logoFrame, { borderRadius: theme.radius.none }]}>

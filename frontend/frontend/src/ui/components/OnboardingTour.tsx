@@ -160,17 +160,28 @@ export function OnboardingTour() {
 
   return (
     <Portal>
+      {/* The backdrop is a click-outside-to-dismiss affordance, not a control.
+          Left focusable it adds a tab stop that announces as a button and sits
+          in FRONT of the dialog's own buttons. Keyboard users close the guide
+          with the Close button.
+          tabIndex, not focusable: react-native-web's Pressable reads `tabIndex`
+          and defaults everything else to 0, so `focusable={false}` silently
+          leaves tabindex="0" on the div. */}
       <Pressable
         onPress={finish}
-        accessibilityLabel="How it works"
-        // @ts-ignore web aria role
-        accessibilityRole={"dialog" as any}
+        tabIndex={-1}
+        accessible={false}
         style={[styles.dim, { backgroundColor: theme.colors.shadow }]}
       >
         <Pressable
-          // Swallow backdrop taps inside the card.
+          // Swallow backdrop taps inside the card. This is the dialog itself,
+          // so it carries the role and the name — but it is still not a
+          // control, so it must not be a tab stop either.
           onPress={(e: any) => e?.stopPropagation && e.stopPropagation()}
-          accessibilityLabel="Guide content"
+          tabIndex={-1}
+          accessibilityLabel="How it works"
+          // @ts-ignore web aria role
+          accessibilityRole={"dialog" as any}
           style={[styles.card, { borderRadius: theme.radius.md, backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
         >
           <View style={styles.row}>
@@ -179,7 +190,15 @@ export function OnboardingTour() {
                 {current.badge}
               </Text>
             </View>
-            <Pressable accessibilityRole="button" onPress={finish} accessibilityLabel="Close guide">
+            {/* Every accessibilityLabel below must CONTAIN the button's visible
+                word (WCAG 2.5.3 Label in Name) — otherwise a speech-input user
+                who says what they see cannot activate it. This is a criterion
+                the product itself detects; our own UI has to pass it. */}
+            <Pressable
+              accessibilityRole="button"
+              onPress={finish}
+              accessibilityLabel={isLast ? "Close the guide" : "Skip the guide"}
+            >
               <Text style={{ color: theme.colors.textMuted, fontSize: 12 }}>
                 {isLast ? "Close" : "Skip"}
               </Text>
@@ -223,7 +242,7 @@ export function OnboardingTour() {
           <View style={styles.actions}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Previous step"
+              accessibilityLabel="Back to the previous step"
               onPress={back}
               disabled={step === 0}
               style={({ hovered }: any) => [
@@ -239,7 +258,7 @@ export function OnboardingTour() {
             </Text>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={isLast ? "Finish guide" : "Next step"}
+              accessibilityLabel={isLast ? "Got it — finish the guide" : "Next step"}
               onPress={advance}
               style={({ hovered }: any) => [
                 styles.primaryBtn,

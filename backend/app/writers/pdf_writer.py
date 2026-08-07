@@ -212,6 +212,7 @@ def write_remediated_pdf(
             for k in (
                 "pages", "elements", "figures", "lists", "tables", "tablesDeclined",
                 "links", "formWidgets", "artifacts", "readingOrderFixedPages",
+                "perElementPages", "pagesPageLevelOnly",
             )
         }
         if ua_report.get("tablesDeclined"):
@@ -220,6 +221,19 @@ def write_remediated_pdf(
                 "reason": (
                     f"pdfua_tables_declined: {ua_report['tablesDeclined']} table-like "
                     "grid(s) were too sparse to tag confidently — check them by hand"
+                ),
+            })
+        # Pages we could only wrap as one page-level block (unparseable or
+        # malformed content stream). They are valid and tagged, but carry no
+        # headings, lists or tables — so counting them alongside fully
+        # structured pages would overstate the result.
+        if ua_report.get("pagesPageLevelOnly"):
+            skipped.append({
+                "target_id": "document",
+                "reason": (
+                    f"pdfua_page_level_only: {ua_report['pagesPageLevelOnly']} page(s) "
+                    "could not be broken into elements — they are tagged, but their "
+                    "headings, lists and tables were not identified"
                 ),
             })
     except Exception as exc:
