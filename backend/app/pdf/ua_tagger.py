@@ -422,11 +422,25 @@ _MIN_GUTTER = 40.0            # points of clear horizontal space between columns
 
 
 def _detect_two_columns(points) -> Optional[float]:
-    """Return the gutter x of a clear 2-column layout, or None.
+    """Return the gutter x of a clear 2-column layout of FLOWING TEXT, or None.
 
-    ``points`` is ``[(x, y), ...]``. Deliberately strict: reordering a page that
-    is NOT two-column would CREATE the very defect we're fixing, so anything
-    ambiguous returns None and the original order is kept.
+    ``points`` is ``[(x, y, text), ...]``.
+
+    Deliberately strict, because reordering a page that is NOT two-column
+    CREATES the very defect we're fixing. An adversarial review proved that a
+    gap-in-x test alone is nowhere near enough: a label/value form (labels at
+    x=72, values at x=300) and a table of contents (entry at x=72, page number
+    at x=500) both match "two clusters of origins", and linearizing them
+    column-major separates every label from its value — catastrophic, and
+    reported as a fix. Neither is rescued by the table/list guards, because the
+    table detector deliberately rejects forms and TOCs.
+
+    So a gutter must ALSO survive two content tests:
+      * both sides must read like PROSE (median >3 words), which a column of
+        short labels or bare page numbers never does; and
+      * the sides must not be ROW-PAIRED — if most left blocks have a right
+        block on the same baseline, the page is row-structured (form, TOC,
+        data sheet), not two flowing columns.
     """
     xs = sorted(p[0] for p in points)
     n = len(xs)
@@ -440,9 +454,25 @@ def _detect_two_columns(points) -> Optional[float]:
             best_gap, best_at = gap, (xs[i] + xs[i - 1]) / 2.0
     if best_at is None or best_gap < _MIN_GUTTER:
         return None
-    left = sum(1 for x in xs if x < best_at)
-    right = n - left
-    if min(left, right) < n * _MIN_COLUMN_SHARE:
+    left_pts = [p for p in points if p[0] < best_at]
+    right_pts = [p for p in points if p[0] >= best_at]
+    if min(len(left_pts), len(right_pts)) < n * _MIN_COLUMN_SHARE:
+        return None
+
+    # --- content test: both sides must be prose, not labels/numbers ---
+    def _median_words(pts) -> int:
+        counts = sorted(len((str(p[2]) or "").split()) for p in pts)
+        return counts[len(counts) // 2] if counts else 0
+
+    if _median_words(left_pts) <= 3 or _median_words(right_pts) <= 3:
+        return None
+
+    # --- structure test: row-paired content is a form/TOC, never two columns ---
+    paired = 0
+    for lp in left_pts:
+        if any(abs(rp[1] - lp[1]) <= _ROW_TOL for rp in right_pts):
+            paired += 1
+    if paired > len(left_pts) / 2:
         return None
     return best_at
 
@@ -461,9 +491,20 @@ def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
     if any(lf.get("table") is not None or lf.get("group") is not None for lf in leaves):
         return leaves, False
 
-    gutter = _detect_two_columns([(lf["bx"], lf["by"]) for lf in leaves])
+    points = [(lf["bx"], lf["by"], lf.get("text") or "") for lf in leaves]
+    gutter = _detect_two_columns(points)
     if gutter is None:
         return leaves, False
+
+    # THREE-or-more columns: splitting only at the widest gap would separate one
+    # column and leave the rest interleaved — a partial reorder that is still
+    # wrong but would be REPORTED as fixed. Detect a second real gutter inside
+    # either side and decline the page entirely.
+    left_pts = [p for p in points if p[0] < gutter]
+    right_pts = [p for p in points if p[0] >= gutter]
+    for side in (left_pts, right_pts):
+        if len(side) >= _MIN_COLUMN_BLOCKS and _detect_two_columns(side) is not None:
+            return leaves, False
 
     cols = [0 if lf["bx"] < gutter else 1 for lf in leaves]
     # Already column-major (all of column 0, then all of column 1)? Nothing to do.
@@ -957,11 +998,32 @@ def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
         # positions it covers so they don't emit phantom empty cells.
         spans: Dict[tuple, tuple] = {}
         covered: set = set()
+        def _absorbs_text(r0: int, c0: int, cs0: int, rs0: int) -> bool:
+            """True if this span would swallow a position that has its OWN text."""
+            for rr in range(r0, min(r0 + rs0, nrows)):
+                for cc in range(c0, min(c0 + cs0, ncols)):
+                    if (rr, cc) != (r0, c0) and (rr, cc) in claimed:
+                        return True
+            return False
+
         for r in range(nrows):
             for c in range(ncols):
                 if (r, c) in covered:
                     continue
                 cs, rs = _cell_spans(grid, r, c, nrows, ncols)
+                # HARD INVARIANT — a span may NEVER absorb a position that holds
+                # its own text. Span detection infers a merge from a MISSING
+                # rule, and that inference is only as good as the grid: a column
+                # boundary drawn in one row defines that boundary for every row,
+                # and rules shorter than _MIN_RULE_LEN are discarded entirely.
+                # An adversarial review showed an ordinary per-cell-ruled table
+                # losing 8 of 12 cells this way — real text made unreachable by
+                # assistive tech. Shrinking here makes content loss impossible
+                # by construction, however wrong the geometry heuristic gets.
+                while cs > 1 and _absorbs_text(r, c, cs, rs):
+                    cs -= 1
+                while rs > 1 and _absorbs_text(r, c, cs, rs):
+                    rs -= 1
                 if cs > 1 or rs > 1:
                     spans[(tid, r, c)] = (cs, rs)
                     for rr in range(r, min(r + rs, nrows)):
@@ -1318,6 +1380,9 @@ def _tag_page_elements(
         leaves.append({
             "mcid": mcid, "tag": tag, "alt": alt, "group": grp, "table": tcell,
             "x": lx, "bx": bx, "by": by,
+            # Needed by the column detector's prose test — a page of short
+            # labels must never be linearized as two columns.
+            "text": _block_text(seg_ops) if kind == "text" else "",
         })
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
@@ -1349,9 +1414,17 @@ def _tag_page_elements(
     # PDF/UA reading order actually is. On a two-column page whose stream
     # interleaves the columns, this turns an alternating jumble into the order a
     # sighted reader sees (WCAG 1.3.2).
-    leaves, reordered = _reorder_leaves_for_columns(leaves)
-    if reordered and counters is not None:
-        counters["reading_order_fixed"] = counters.get("reading_order_fixed", 0) + 1
+    # /Rotate turns the page, so "x" and "y" no longer mean horizontal and
+    # vertical — column logic on a rotated page sorts on the wrong axes and
+    # scrambles a correctly-ordered landscape document. Only reorder upright pages.
+    try:
+        _rotation = int(page.get("/Rotate", 0) or 0) % 360
+    except Exception:
+        _rotation = 0
+    if _rotation == 0:
+        leaves, reordered = _reorder_leaves_for_columns(leaves)
+        if reordered and counters is not None:
+            counters["reading_order_fixed"] = counters.get("reading_order_fixed", 0) + 1
 
     # Pass 3 — build nested specs. A table emits one /Table -> /TR -> /TH|/TD at
     # the position of its first cell; a list run emits /L -> /LI -> /LBody;

@@ -72,11 +72,14 @@ def _bt(size, x, y, text):
 
 def _tag_two_column():
     """A page whose stream INTERLEAVES two columns: L1 R1 L2 R2 ..."""
+    # Real flowing columns do NOT share baselines line-for-line — content that
+    # does is a form/data sheet, which must never be reordered (see the CRITICAL
+    # locks). So the right column is offset half a line.
     lines = []
     for row in range(5):
         y = 700 - 24 * row
-        lines.append(_bt(11, 60, y, f"L{row + 1} left column sentence".encode()))
-        lines.append(_bt(11, 330, y, f"R{row + 1} right column sentence".encode()))
+        lines.append(_bt(11, 60, y, f"L{row + 1} left column running sentence".encode()))
+        lines.append(_bt(11, 330, y - 11, f"R{row + 1} right column running sentence".encode()))
     content = b"\n".join(lines)
 
     w = PdfWriter()
@@ -135,10 +138,11 @@ def _struct_text_order(reader):
     return out
 
 
-def _leaf(mcid, x, y, group=None, table=None):
+def _leaf(mcid, x, y, group=None, table=None, text=None):
     return {
         "mcid": mcid, "tag": "/P", "alt": None,
         "group": group, "table": table, "x": None, "bx": x, "by": y,
+        "text": text if text is not None else "a genuine sentence of running body text",
     }
 
 
@@ -151,23 +155,65 @@ def main() -> int:
         if not cond:
             failures += 1
 
-    # ---- gutter detection ----
-    two_col = [(60, 700 - 20 * i) for i in range(6)] + [(330, 700 - 20 * i) for i in range(6)]
+    # ---- gutter detection (points are (x, y, text)) ----
+    PROSE = "a genuine sentence of running body text here"
+    two_col = [(60, 700 - 20 * i, PROSE) for i in range(6)] + [
+        (330, 690 - 20 * i, PROSE) for i in range(6)
+    ]
     check("detects the gutter of a clear 2-column page", _detect_two_columns(two_col) is not None)
     check("single-column page has no gutter",
-          _detect_two_columns([(60, 700 - 15 * i) for i in range(14)]) is None)
-    check("too few blocks -> no claim", _detect_two_columns([(60, 700), (330, 700)]) is None)
-    # A slightly-indented paragraph is NOT a second column.
+          _detect_two_columns([(60, 700 - 15 * i, PROSE) for i in range(14)]) is None)
+    check("too few blocks -> no claim",
+          _detect_two_columns([(60, 700, PROSE), (330, 700, PROSE)]) is None)
     check("small indents are not treated as columns",
-          _detect_two_columns([(60, 700), (72, 680), (60, 660), (72, 640),
-                               (60, 620), (72, 600), (60, 580), (72, 560)]) is None)
+          _detect_two_columns([(60 if i % 2 else 72, 700 - 20 * i, PROSE) for i in range(8)]) is None)
+
+    # --- CRITICAL regression locks from the adversarial review ---------------
+    # A label/value FORM has two x-clusters and a wide gap, but linearizing it
+    # column-major separates every label from its value. The table detector
+    # deliberately rejects forms, so nothing else rescues this page.
+    form = []
+    labels = ["Applicant name:", "Date of birth:", "Street address:", "City:",
+              "State:", "ZIP code:", "Phone:", "Email:"]
+    values = ["Jane Q Public", "01/02/1980", "100 Main Street", "Springfield",
+              "OR", "97477", "555-0100", "jane@example.gov"]
+    for i, (lab, val) in enumerate(zip(labels, values)):
+        y = 680 - 26 * i
+        form.append((72, y, lab))
+        form.append((300, y, val))
+    check("CRITICAL: a label/value FORM is never split into columns",
+          _detect_two_columns(form) is None)
+
+    # A table of contents: entry text left, bare page number right.
+    toc = []
+    entries = ["Introduction", "Scope and purpose", "Eligibility criteria",
+               "How to apply", "Appeals process", "Contact information",
+               "Appendix A", "Appendix B", "Glossary of terms"]
+    for i, e in enumerate(entries):
+        y = 680 - 24 * i
+        toc.append((72, y, e))
+        toc.append((500, y, str(3 + i * 4)))
+    check("CRITICAL: a table of CONTENTS is never split into columns",
+          _detect_two_columns(toc) is None)
+
+    # Row-paired data sheet with prose-length cells on both sides — the prose
+    # test alone would pass it, so the row-pairing veto must catch it.
+    sheet = []
+    for i in range(8):
+        y = 680 - 24 * i
+        sheet.append((72, y, "a reasonably long descriptive label for the field"))
+        sheet.append((320, y, "a reasonably long corresponding value for it"))
+    check("CRITICAL: row-PAIRED content is never split (form/data sheet)",
+          _detect_two_columns(sheet) is None)
 
     # ---- the core fix: interleaved -> column-major ----
+    # Two flowing columns whose lines do NOT share baselines (a form would —
+    # and a form must never be reordered; see the CRITICAL locks above).
     interleaved = []
     mcid = 0
     for row in range(5):
         interleaved.append(_leaf(mcid, 60, 700 - 20 * row)); mcid += 1
-        interleaved.append(_leaf(mcid, 330, 700 - 20 * row)); mcid += 1
+        interleaved.append(_leaf(mcid, 330, 690 - 20 * row)); mcid += 1
     out, changed = _reorder_leaves_for_columns(interleaved)
     order = [lf["mcid"] for lf in out]
     check("interleaved 2-column page IS reordered", changed)
