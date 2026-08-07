@@ -2367,7 +2367,11 @@ function IssueCard(props: {
               <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
             ))}
             {catalog.learnMoreUrl ? (
-              <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(catalog.learnMoreUrl)}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Learn more about: ${catalog.title} (external link)`}
+                onPress={() => Linking.openURL(catalog.learnMoreUrl)}
+              >
                 <Chip label="Learn more" tone="info" />
               </Pressable>
             ) : null}

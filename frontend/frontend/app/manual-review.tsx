@@ -308,11 +308,15 @@ export default function ManualReviewScreen() {
             tone="warning"
           />
           <View style={styles.linkRow}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => originalUrl && Linking.openURL(originalUrl)}>
+            {/* No accessibilityLabel: the visible text already says which
+                document each link opens, and "Open external link" both
+                erased that distinction (WCAG 2.4.4) and replaced the words
+                the user can see and say (WCAG 2.5.3). */}
+            <Pressable accessibilityRole="button" onPress={() => originalUrl && Linking.openURL(originalUrl)}>
               <Text style={[styles.link, { color: theme.colors.accent }]}>Open original document</Text>
             </Pressable>
             {fixedUrl && (
-              <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(fixedUrl)}>
+              <Pressable accessibilityRole="button" onPress={() => Linking.openURL(fixedUrl)}>
                 <Text style={[styles.link, { color: theme.colors.accent }]}>Open fixed document</Text>
               </Pressable>
             )}

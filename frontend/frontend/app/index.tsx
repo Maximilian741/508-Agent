@@ -210,9 +210,14 @@ export default function HomeScreen() {
         </View>
       </Pressable>
 
-      {/* Quiet row of side tools - secondary to the bench */}
+      {/* Quiet row of side tools - secondary to the bench.
+          None of these carry an accessibilityLabel on purpose: each panel's
+          visible title and subtitle ARE its name. Hand-written labels here
+          ("Go to batch" over a panel reading "Batch mode") replaced the words
+          a speech-input user can see and say, which is a WCAG 2.5.3 failure —
+          and they drifted from the visible text as the panels were renamed. */}
       <View style={styles.toolRow}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to batch"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/batch")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -223,7 +228,7 @@ export default function HomeScreen() {
             A folder at a time
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to readability checker"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/readability")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -234,7 +239,7 @@ export default function HomeScreen() {
             Plain-language score (3.1.5)
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to tools contrast"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/contrast")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -245,7 +250,7 @@ export default function HomeScreen() {
             WCAG ratios, side-by-side
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to palette matrix"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/palette")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -256,7 +261,7 @@ export default function HomeScreen() {
             Which colour pairs pass AA
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to accessibility statement generator"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/accessibility-statement")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -267,7 +272,7 @@ export default function HomeScreen() {
             Publish-ready, in seconds
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to AI alt-text generator"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/alt-text")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -278,7 +283,7 @@ export default function HomeScreen() {
             Drop an image, get alt text
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to link text checker"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/link-text")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -289,7 +294,7 @@ export default function HomeScreen() {
             Is “click here” hurting you?
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to heading structure checker"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/tools/headings")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -300,7 +305,7 @@ export default function HomeScreen() {
             Missing H1? Skipped levels?
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to professional assessment service"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/assessment")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
@@ -311,7 +316,7 @@ export default function HomeScreen() {
             Want a human in the loop?
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
+        <Pressable accessibilityRole="button"
           onPress={() => router.push("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >

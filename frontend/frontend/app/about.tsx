@@ -121,13 +121,13 @@ export default function AboutScreen() {
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards we evaluate</Text>
         <View style={styles.standardsRow}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the WCAG 2.1 specification (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
             <Chip label="WCAG 2.1" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.access-board.gov" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the Section 508 standards (external link)" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF/UA accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>
@@ -143,13 +143,15 @@ export default function AboutScreen() {
           {"You can request a copy of your audit log, request deletion of your account's data, or ask a question about how your documents are handled."}
         </Text>
         <View style={[styles.standardsRow, { marginTop: 8 }]}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Go to admin" onPress={() => router.push("/admin" as any)}>
+          {/* No accessibilityLabel — the chip text below is already the label.
+              "Go to admin" replaced the words the user can see and say. */}
+          <Pressable accessibilityRole="button" onPress={() => router.push("/admin" as any)}>
             <Chip label="Admins: open Admin screen" tone="info" />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Email privacy@508-agent.app" onPress={() => Linking.openURL("mailto:privacy@508-agent.app")}>
             <Chip label="Email privacy@508-agent.app" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Go to security" onPress={() => router.push("/security" as any)}>
+          <Pressable accessibilityRole="button" onPress={() => router.push("/security" as any)}>
             <Chip label="Read the Security page" tone="default" />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Read the privacy policy" onPress={() => router.push("/privacy" as any)}>

@@ -421,8 +421,18 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
         {entry.standards.pdfUa.map((id) => (
           <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
         ))}
+        {/* The link below names the rule it belongs to. Every one of these
+            used to be "Open external link", so a screen-reader user pulling up
+            this page's link list saw the same words 29 times with nothing to
+            choose between (WCAG 2.4.4) — and none of them contained the
+            visible "Read W3C" (WCAG 2.5.3). Both are defects this product
+            detects in other people's documents. */}
         {entry.learnMoreUrl ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(entry.learnMoreUrl)}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Read W3C reference for: ${entry.title} (external link)`}
+            onPress={() => Linking.openURL(entry.learnMoreUrl)}
+          >
             <Chip label="Read W3C" tone="info" />
           </Pressable>
         ) : null}

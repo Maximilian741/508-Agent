@@ -1045,10 +1045,18 @@ export default function ScanScreen() {
                               </Text>
                             </View>
                             <View style={styles.summaryRow}>
-                              <Pressable accessibilityRole="button" accessibilityLabel="Open document" onPress={() => void handleOpenPersistedDocument(doc)}>
+                              {/* Both names carry the filename. In a list of
+                                  documents every row's buttons are otherwise
+                                  identical ("Open", "Exports"), so a screen
+                                  reader user cannot tell which document they
+                                  belong to (WCAG 2.4.4 / 4.1.2). The Exports
+                                  label was also a plain string containing a
+                                  literal "${doc.docId}" — never interpolated,
+                                  so it was announced verbatim. */}
+                              <Pressable accessibilityRole="button" accessibilityLabel={`Open ${doc.filename}`} onPress={() => void handleOpenPersistedDocument(doc)}>
                                 <Chip label="Open" tone="default" />
                               </Pressable>
-                              <Pressable accessibilityRole="button" accessibilityLabel="Go to exports?docId=${doc.docId}" onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
+                              <Pressable accessibilityRole="button" accessibilityLabel={`Exports for ${doc.filename}`} onPress={() => router.push(`/exports?docId=${doc.docId}`)}>
                                 <Chip label="Exports" tone="info" />
                               </Pressable>
                               <Chip label={section.label} tone={section.tone} />
