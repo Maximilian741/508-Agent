@@ -7,12 +7,17 @@
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
+import { CATALOG_ENTRIES } from "../src/domain/issueCatalog";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
+import { ScreenReaderPreview } from "../src/ui/components/ScreenReaderPreview";
 import { useTheme } from "../src/ui/useTheme";
+
+/** Real number of checks, derived from the catalog so it can never drift. */
+const ISSUE_COUNT = CATALOG_ENTRIES.length;
 
 const STEPS = [
   {
@@ -113,6 +118,24 @@ export default function LandingScreen() {
             Calculate your savings vs. manual remediation
           </Text>
         </Pressable>
+      </Card>
+
+      {/* The single most persuasive thing we can show: the SAME content as a
+          sighted reader sees it and as a screen reader announces it. The damage
+          is invisible to whoever published the file — this makes it visible. */}
+      <Card variant="data">
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+          Your document looks fine. Here's what it sounds like.
+        </Text>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8, marginBottom: 18 }]}>
+          Accessibility problems are invisible to the person who published the file — the page
+          looks perfect. These are five of the {ISSUE_COUNT} issues 508 Agent checks for, shown as
+          a sighted reader sees them and as assistive technology actually reads them out.
+        </Text>
+        <ScreenReaderPreview />
+        <View style={{ marginTop: 20 }}>
+          <Button title="Scan my document free" onPress={() => router.push("/audit" as any)} />
+        </View>
       </Card>
 
       <Card>
