@@ -583,6 +583,21 @@ const C: Record<string, IssueCatalogEntry> = {
     },
     learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html",
   },
+
+  ANALYSIS_TRUNCATED: {
+    ruleId: "ANALYSIS_TRUNCATED",
+    title: "Only part of this document was analyzed",
+    summary: "The file is longer than the per-upload page limit, so the score and findings do not cover the whole document.",
+    why:
+      "To keep the service responsive, each upload is analyzed up to a fixed number of pages (400 by default). Everything past that point was not read at all — so a clean score here says nothing about the pages we did not see. This finding exists so that gap is never silent.",
+    autoFix:
+      "There is no automatic fix for pages we did not read. Split the document at the page limit and audit each part on its own; each part gets its own complete score.",
+    manualJudgment:
+      "If your documents are routinely this long, the operator can raise the limit (MAX_PDF_PAGES) on the deployment.",
+    severity: "error",
+    standards: { wcag: [], section508: [], pdfUa: [] },
+    learnMoreUrl: "",
+  },
 };
 
 export function lookupIssue(ruleId: string): IssueCatalogEntry {

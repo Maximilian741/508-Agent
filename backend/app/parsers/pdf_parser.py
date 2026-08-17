@@ -628,8 +628,14 @@ class PDFParser:
         # truncation honestly rather than hanging.
         pages_to_process = min(page_count, _MAX_PDF_PAGES)
         if page_count > _MAX_PDF_PAGES:
-            properties["pages_truncated"] = True
-            properties["pages_processed"] = pages_to_process
+            # Write to root.metadata.properties, NOT the local `properties`
+            # dict: NodeMetadata is a pydantic model and COPIES the dict at
+            # construction (line ~590), so the two diverged the moment the
+            # root was built. Writing to the local here recorded the
+            # truncation into a dict nothing ever read again — the disclosure
+            # was dead on arrival for every over-cap document.
+            root.metadata.properties["pages_truncated"] = True
+            root.metadata.properties["pages_processed"] = pages_to_process
 
         for page_index in range(pages_to_process):
             page = reader.pages[page_index]

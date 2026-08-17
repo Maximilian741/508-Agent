@@ -95,6 +95,7 @@ class AccessibilityFlagCode(str, Enum):
     INPUT_AUTOCOMPLETE_MISSING = "INPUT_AUTOCOMPLETE_MISSING"
     POSITIVE_TABINDEX = "POSITIVE_TABINDEX"
     LABEL_IN_NAME_MISMATCH = "LABEL_IN_NAME_MISMATCH"
+    ANALYSIS_TRUNCATED = "ANALYSIS_TRUNCATED"
 
 
 class StandardReference(BaseModel):
@@ -411,6 +412,20 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
         standards=StandardReference(
             wcag_2_1=["1.3.1"],
             section_508=["E207.2"],
+            pdf_ua=[],
+        ),
+    ),
+    AccessibilityFlagCode.ANALYSIS_TRUNCATED: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.ANALYSIS_TRUNCATED,
+        severity=Severity.ERROR,
+        message=(
+            "This document is longer than the per-upload page limit, so only the "
+            "first part was analyzed. The score and findings below do NOT cover "
+            "the whole document — split it and audit each part."
+        ),
+        standards=StandardReference(
+            wcag_2_1=[],
+            section_508=[],
             pdf_ua=[],
         ),
     ),
@@ -1090,6 +1105,20 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.PARAGRAPH],
             related_flag_code=AccessibilityFlagCode.LOW_CONTRAST_TEXT,
+        ),
+    ],
+    AccessibilityFlagCode.ANALYSIS_TRUNCATED: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description=(
+                "Split the document at the page limit and audit each part "
+                "separately; there is no automatic fix for pages we did not read."
+            ),
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.DOCUMENT],
+            related_flag_code=AccessibilityFlagCode.ANALYSIS_TRUNCATED,
         ),
     ],
 }

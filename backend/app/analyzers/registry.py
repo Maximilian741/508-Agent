@@ -7,6 +7,7 @@ from typing import Iterable, List, Optional
 from app.analyzers.base import Analyzer
 from app.analyzers.contrast_analyzer import ContrastAnalyzer
 from app.analyzers.document_analyzer import (
+    AnalysisTruncatedAnalyzer,
     DocumentHeadingsAnalyzer,
     DocumentLanguageAnalyzer,
     DocumentTitleAnalyzer,
@@ -80,6 +81,9 @@ def get_default_analyzers() -> List[Analyzer]:
         SlideTitleAnalyzer(),
         ScannedDocumentAnalyzer(),
         UntaggedPdfAnalyzer(),
+        # Last, so it is attached to the root AFTER any other document-level
+        # flags; the frontend sorts document-level errors first regardless.
+        AnalysisTruncatedAnalyzer(),
     ]
 
 

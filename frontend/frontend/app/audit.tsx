@@ -529,10 +529,17 @@ export default function AuditScreen() {
         const past = loadHistory();
         if (past.length >= 10) unlockAchievement("ten_audits");
         checkStreakFromHistory(past.map((h) => h.ranAt));
+        // Never let "across N pages" imply the whole file was read when the
+        // page cap truncated the analysis — say "400 of 512" out loud.
+        const analyzed = response.summary.pagesAnalyzed;
+        const pagesPhrase =
+          analyzed && analyzed < response.summary.pageCount
+            ? `the first ${analyzed} of ${response.summary.pageCount} pages`
+            : `${response.summary.pageCount} page(s)`;
         toast.success(`Audit complete: ${response.score.grade}`, {
           description: `${response.violations.length} finding${
             response.violations.length === 1 ? "" : "s"
-          } across ${response.summary.pageCount} page(s).`,
+          } across ${pagesPhrase}.`,
         });
         notify(`Audit complete: ${response.score.grade}`, file.name);
         playChime();

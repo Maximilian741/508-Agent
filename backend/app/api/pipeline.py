@@ -88,6 +88,12 @@ class PipelineSummary(BaseModel):
     title: Optional[str] = None
     language: Optional[str] = None
     pageCount: int = 0
+    # How many of those pages the parser actually READ. Equal to pageCount
+    # except when the per-upload page cap truncated the analysis, in which
+    # case ANALYSIS_TRUNCATED is also raised as a finding. Surfaced separately
+    # so the UI can say "analyzed 400 of 512 pages" rather than imply a score
+    # covers the whole file.
+    pagesAnalyzed: Optional[int] = None
     nodeCount: int = 0
     imageCount: int = 0
     tableCount: int = 0
@@ -240,6 +246,7 @@ async def analyze(
         title=tree.root.metadata.properties.get("title"),
         language=tree.root.metadata.language,
         pageCount=int(result.raw_metadata.get("page_count") or result.raw_metadata.get("slide_count") or 0),
+        pagesAnalyzed=_pages_analyzed(tree),
         nodeCount=_count_nodes(tree),
         imageCount=_count_nodes_of(tree, ImageNode),
         tableCount=_count_nodes_of(tree, TableNode),
@@ -1297,6 +1304,17 @@ def _media_type_for(name: str) -> str:
     if lower.endswith((".html", ".htm")):
         return "text/html; charset=utf-8"
     return "application/octet-stream"
+
+
+def _pages_analyzed(tree) -> Optional[int]:
+    """Pages the parser actually read, or None when it read them all."""
+    props = getattr(getattr(tree.root, "metadata", None), "properties", None) or {}
+    if not props.get("pages_truncated"):
+        return None
+    try:
+        return int(props.get("pages_processed") or 0) or None
+    except (TypeError, ValueError):
+        return None
 
 
 def _count_nodes(tree: AccessibilityTree) -> int:

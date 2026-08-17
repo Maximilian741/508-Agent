@@ -287,6 +287,8 @@ export interface PipelineSummary {
     title?: string | null;
     language?: string | null;
     pageCount: number;
+    /** Pages actually read. Present only when the page cap truncated analysis. */
+    pagesAnalyzed?: number | null;
     nodeCount: number;
     imageCount: number;
     tableCount: number;

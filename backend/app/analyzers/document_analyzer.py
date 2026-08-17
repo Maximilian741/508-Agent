@@ -168,6 +168,31 @@ class ScannedDocumentAnalyzer(Analyzer):
             attach_flag(tree.root, AccessibilityFlagCode.SCANNED_DOCUMENT_NO_TEXT)
 
 
+class AnalysisTruncatedAnalyzer(Analyzer):
+    """Flag a document the parser did NOT read to the end.
+
+    The PDF parser caps work at ``MAX_PDF_PAGES`` (default 400) so one huge
+    upload cannot tie up a worker for minutes, and it records the truncation
+    in the tree's metadata (``pages_truncated`` / ``pages_processed``). Until
+    this analyzer existed nothing READ that record: a 512-page PDF got 400
+    pages analyzed and the user was shown a score and a fix count exactly as
+    if it covered the whole file. That is a silent overclaim — the precise
+    thing the honesty invariant forbids — on the "large documents" axis.
+
+    Raised as an ERROR at the document level, ahead of everything else, so it
+    reads first in the review list. There is no automatic fix for pages we did
+    not look at; the remediation is to split the file.
+    """
+
+    name = "analysis_truncated"
+
+    def analyze(self, tree: AccessibilityTree) -> None:
+        props = tree.root.metadata.properties or {}
+        if not props.get("pages_truncated"):
+            return
+        attach_flag(tree.root, AccessibilityFlagCode.ANALYSIS_TRUNCATED)
+
+
 class UntaggedPdfAnalyzer(Analyzer):
     """Flag text PDFs that have NO structure tree (untagged PDFs).
 
