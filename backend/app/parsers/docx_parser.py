@@ -64,8 +64,9 @@ class DOCXParser:
         empty_heading_sections: List[int] = []
         prev_level: Optional[int] = None
         skipped_jumps: List[Dict[str, object]] = []
+        style_cache: Dict[Any, str] = {}
         for idx, para in enumerate(doc.paragraphs, start=1):
-            style_name = (para.style.name or "") if para.style else ""
+            style_name = paragraph_style_name(para, style_cache)
             if not style_name.lower().startswith("heading"):
                 continue
             level = 1
@@ -217,8 +218,9 @@ class DOCXParser:
         list_collector: List[ListItemNode] = []
         list_marker: Optional[str] = None
 
+        para_style_cache: Dict[Any, str] = {}
         for paragraph in doc.paragraphs:
-            style_name = (paragraph.style.name or "") if paragraph.style else ""
+            style_name = paragraph_style_name(paragraph, para_style_cache)
             text = (paragraph.text or "").strip()
 
             if _is_list_paragraph(paragraph):
@@ -695,6 +697,41 @@ class _IdCounter:
         i = self._counts.get(prefix, 0) + 1
         self._counts[prefix] = i
         return f"{prefix}-{i}"
+
+
+def paragraph_style_name(paragraph, cache: Dict[Any, str]) -> str:
+    """``paragraph.style.name`` without python-docx's per-paragraph cost.
+
+    ``paragraph.style`` resolves the *default* paragraph style — the case for
+    most body text, which carries no explicit ``w:pStyle`` — by walking every
+    style element in ``styles.xml`` and reading attributes off each one.
+    Profiling a 200-page document showed that single property at 89% of the
+    writer's wall time (5.7s of 6.4s, 1.7M attribute reads), and the parser
+    pays it again. At 500 pages that is ~40s across the two, most of the way
+    to a proxy timeout, for a lookup whose answer is the same for every
+    body paragraph in the file.
+
+    So: read the ``w:pStyle`` id straight off the XML and resolve it through
+    a per-document ``cache`` (style-id -> name); resolve the implicit default
+    ONCE and cache it under ``None``. Falls back to the slow property for any
+    id the cache cannot resolve, so the answer is always identical to what
+    python-docx would have said — the parser and writer must agree on ids,
+    and both call this.
+    """
+    pPr = paragraph._p.find(qn("w:pPr"))  # noqa: SLF001
+    style_id = None
+    if pPr is not None:
+        pStyle = pPr.find(qn("w:pStyle"))
+        if pStyle is not None:
+            style_id = pStyle.get(qn("w:val"))
+    if style_id in cache:
+        return cache[style_id]
+    try:
+        name = (paragraph.style.name or "") if paragraph.style else ""
+    except Exception:
+        name = ""
+    cache[style_id] = name
+    return name
 
 
 def _heading_level_from_style(style: str) -> int:

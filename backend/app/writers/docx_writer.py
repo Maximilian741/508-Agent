@@ -71,6 +71,7 @@ from app.parsers.docx_parser import (
     _note_paragraphs,
     _paragraph_caption_text,
     _run_color_hex,
+    paragraph_style_name,
     strip_fake_list_prefix,
 )
 
@@ -281,8 +282,9 @@ def _index_paragraphs_by_parser_id(doc) -> Dict[str, Any]:
 
     ids = _IdCounter()
     out: Dict[str, Any] = {}
+    style_cache: Dict[Any, str] = {}
     for paragraph in doc.paragraphs:
-        style_name = (paragraph.style.name or "") if paragraph.style else ""
+        style_name = paragraph_style_name(paragraph, style_cache)
         text = (paragraph.text or "").strip()
 
         # The parser groups numbered/bulleted runs into list nodes; those do
@@ -633,8 +635,9 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
             n += 1
             out[f"docx-link-{n}"] = el
 
+    style_cache: Dict[Any, str] = {}
     for para in doc.paragraphs:
-        style_name = (para.style.name or "") if para.style else ""
+        style_name = paragraph_style_name(para, style_cache)
         if _heading_level_from_style(style_name):
             continue  # parser's heading branch short-circuits before links
         pPr = para._p.find(qn("w:pPr"))
