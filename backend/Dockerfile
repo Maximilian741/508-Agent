@@ -29,8 +29,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 # curl is used for the healthcheck below.
+# tesseract-ocr + the English pack back OCR_ENABLED: pytesseract is already
+# in requirements, but the provider's available() check needs the BINARY, and
+# without it OCR_ENABLED=true silently did nothing (get_ocr_provider logs once
+# and returns None). Scanned government forms are common enough that shipping
+# the ~30MB is worth it. Add tesseract-ocr-<lang> packs here for other languages.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl poppler-utils libgl1 libxml2 libxslt1.1 \
+      tesseract-ocr tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 app \
  && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
