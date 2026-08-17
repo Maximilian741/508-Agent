@@ -194,17 +194,25 @@ def _is_taggable_page(pdf, page: Any) -> bool:
     return any(op in (b"Tj", b"TJ", b"'", b'"', b"Do") for _, op in ops)
 
 
-def _build_alt_by_xobject(tree: AccessibilityTree) -> Dict[str, str]:
-    """Map image XObject name -> alt text, for tagging Figures in the tree."""
-    out: Dict[str, str] = {}
+def _build_alt_by_xobject(tree: AccessibilityTree) -> Dict[int, Dict[str, str]]:
+    """Map 1-based page number -> {XObject name -> alt text}, for /Figure tagging.
+
+    Keyed by PAGE first. XObject names are per-page resource keys and
+    producers reuse them — every page of a scanned PDF is /Im0 — so a flat
+    {name: alt} map kept whichever page's node came last and stamped that
+    page's description onto every other page's figure. The ImageNode records
+    its 1-based page; the tagger passes each page its own slice.
+    """
+    out: Dict[int, Dict[str, str]] = {}
     try:
         from app.models.accessibility import ImageNode, iter_reading_order
 
         for node in iter_reading_order(tree.root):
             if isinstance(node, ImageNode) and not node.is_decorative and node.alt_text:
                 xname = (node.metadata.properties or {}).get("xobject")
-                if isinstance(xname, str) and xname:
-                    out[xname.lstrip("/")] = str(node.alt_text)
+                pg = getattr(node.metadata, "page", None)
+                if isinstance(xname, str) and xname and isinstance(pg, int):
+                    out.setdefault(pg, {})[xname.lstrip("/")] = str(node.alt_text)
     except Exception:  # pragma: no cover - defensive
         pass
     return out
@@ -1734,6 +1742,10 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
 
     # ---- Structure tree over taggable pages only --------------------------
     try:
+        # Keep each taggable page's TRUE 1-based document page number: the
+        # alt map is keyed by it, and `taggable` is a filtered subset whose
+        # own index would drift the moment any page is skipped.
+        page_numbers = {id(p): i for i, p in enumerate(writer.pages, start=1)}
         taggable = [p for p in writer.pages if _is_taggable_page(writer, p)]
         if not taggable:
             report["structSkipped"] = "no_taggable_pages"
@@ -1761,8 +1773,9 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         next_annot_key = len(taggable)
         annot_nums: List[Tuple[int, IndirectObject]] = []
         for key, page in enumerate(taggable):
+            page_alt = alt_by_xobject.get(page_numbers.get(id(page), -1), {})
             specs = _tag_page_elements(
-                writer, page, alt_by_xobject, artifact_info, page_counters, doc_levels
+                writer, page, page_alt, artifact_info, page_counters, doc_levels
             )
             if specs is None:
                 # Safe fallback: page-level single /P (original bytes untouched).

@@ -126,15 +126,22 @@ def write_remediated_pdf(
                 skipped.append({"target_id": "document", "reason": f"form_labels_failed: {exc}"})
 
     # ------- 2. Image alt text on /XObject entries --------------------
-    images_by_xobject_name: Dict[str, ImageNode] = {}
+    # Keyed by (page, XObject name), NOT by name alone. XObject names are
+    # per-page resource keys, and producers reuse them: a scanned PDF names
+    # every page's image /Im0. Keyed by name, the dict kept whichever node
+    # came LAST, and every page's /Im0 received the last page's alt text — a
+    # user's approved description of page 1 written onto page 40's picture,
+    # and reported as applied. The ImageNode records its 1-based page.
+    images_by_page_and_name: Dict[tuple, ImageNode] = {}
     for node in iter_reading_order(tree.root):
         if isinstance(node, ImageNode):
             xname = (node.metadata.properties or {}).get("xobject")
-            if isinstance(xname, str) and xname:
-                images_by_xobject_name[xname] = node
+            pg = getattr(node.metadata, "page", None)
+            if isinstance(xname, str) and xname and isinstance(pg, int):
+                images_by_page_and_name[(pg, xname)] = node
 
-    if images_by_xobject_name:
-        for page in writer.pages:
+    if images_by_page_and_name:
+        for page_index, page in enumerate(writer.pages, start=1):
             try:
                 resources = _resolve(page.get("/Resources"))
             except Exception:
@@ -150,7 +157,7 @@ def write_remediated_pdf(
                     continue
                 if obj.get("/Subtype") != "/Image":
                     continue
-                node = images_by_xobject_name.get(str(name))
+                node = images_by_page_and_name.get((page_index, str(name)))
                 if node is None:
                     continue
                 if node.is_decorative:
