@@ -46,6 +46,8 @@ interface AppState {
     backendUrlWarning: string | null;
     backendHealth: "unknown" | "ok" | "error";
     backendHealthMessage: string | null;
+    /** Upload cap the backend advertises on /healthz, in MB. null until probed. */
+    maxUploadMb: number | null;
     themeMode: "system" | "light" | "dark";
     mockMode: boolean;
     selectedDocument: DocumentPayload | null;
@@ -259,14 +261,25 @@ function storeAutoFixPolicy(value: "conservative" | "balanced" | "aggressive") {
     }
 }
 
-async function probeBackend(baseUrl: string): Promise<{ ok: boolean; message?: string; resolvedUrl?: string }> {
+async function probeBackend(
+    baseUrl: string,
+): Promise<{ ok: boolean; message?: string; resolvedUrl?: string; maxUploadMb?: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
     try {
         const response = await fetch(`${baseUrl}/healthz`, { signal: controller.signal });
         clearTimeout(timeout);
         if (response.ok) {
-            return { ok: true, resolvedUrl: baseUrl };
+            // The backend advertises its upload cap here so the UI can state
+            // it up front rather than letting the user find out via a 413.
+            let maxUploadMb: number | undefined;
+            try {
+                const body = await response.json();
+                if (typeof body?.maxUploadMb === "number") maxUploadMb = body.maxUploadMb;
+            } catch {
+                /* older backends return no body worth reading */
+            }
+            return { ok: true, resolvedUrl: baseUrl, maxUploadMb };
         }
         return { ok: false, message: "Backend responded but health check failed." };
     } catch (error) {
@@ -305,6 +318,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     backendUrlWarning: resolved.warning ?? null,
     backendHealth: "unknown",
     backendHealthMessage: null,
+    maxUploadMb: null,
     themeMode: "system",
     mockMode: false,
     selectedDocument: null,
@@ -365,6 +379,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         backendHealth: "ok",
                         backendHealthMessage: null,
                         backendUrlWarning: null,
+                        maxUploadMb: fallback.maxUploadMb ?? null,
                     });
                     return;
                 }
@@ -374,6 +389,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             backendHealth: primary.ok ? "ok" : "error",
             backendHealthMessage: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             backendUrlWarning: primary.ok ? null : primary.message ?? "Backend is unreachable.",
+            maxUploadMb: primary.ok ? primary.maxUploadMb ?? null : null,
         });
     },
     setBackendUrlInfo: (url, source, warning) =>
@@ -401,6 +417,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         backendHealth: "ok",
                         backendHealthMessage: null,
                         backendUrlWarning: null,
+                        maxUploadMb: fallback.maxUploadMb ?? null,
                     });
                     return;
                 }
@@ -410,6 +427,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             backendHealth: primary.ok ? "ok" : "error",
             backendHealthMessage: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             backendUrlWarning: primary.ok ? null : info.warning ?? primary.message ?? "Backend is unreachable.",
+            maxUploadMb: primary.ok ? primary.maxUploadMb ?? null : null,
         });
     },
     setMockMode: (value) => set({ mockMode: value }),

@@ -171,7 +171,13 @@ def _stream_to_quarantine(upload: UploadFile, dest_path: Path, *, max_bytes: int
                     dest_path.unlink(missing_ok=True)
                 except Exception:
                     pass
-                raise HTTPException(status_code=413, detail=f"File exceeds MAX_UPLOAD_MB ({SETTINGS.max_upload_mb}MB).")
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"That file is larger than the {SETTINGS.max_upload_mb} MB limit. "
+                        "Try compressing it, or split it into parts and audit each one."
+                    ),
+                )
             handle.write(chunk)
     return size, bytes(sniff[:64])
 

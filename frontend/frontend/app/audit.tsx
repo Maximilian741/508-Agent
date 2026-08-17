@@ -143,6 +143,7 @@ export default function AuditScreen() {
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
   const backendHealth = useAppStore((state) => state.backendHealth);
+  const maxUploadMb = useAppStore((state) => state.maxUploadMb);
   const backendUrlSource = useAppStore((state) => state.backendUrlSource);
   const refreshBackendUrl = useAppStore((state) => state.refreshBackendUrl);
   const setMockMode = useAppStore((state) => state.setMockMode);
@@ -465,6 +466,16 @@ export default function AuditScreen() {
       ) {
         return;
       }
+      // Fail an oversized pick immediately, with the number, instead of
+      // making the user sit through the whole upload to learn the cap. The
+      // server still enforces it; this is the courteous copy of the check.
+      if (maxUploadMb && file.size > maxUploadMb * 1024 * 1024) {
+        const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+        const msg = `That file is ${sizeMb} MB — the limit is ${maxUploadMb} MB. Try compressing it, or split it into parts and audit each one.`;
+        setError(msg);
+        toast.error("File too large", { description: msg });
+        return;
+      }
       const seq = ++analyzeSeqRef.current;
       const isStale = () => seq !== analyzeSeqRef.current;
       setBusy(true);
@@ -548,7 +559,7 @@ export default function AuditScreen() {
         if (!isStale()) setBusy(false);
       }
     },
-    [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy],
+    [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy, maxUploadMb],
   );
 
   /* ---- Decisions / undo --------------------------------------------------- */
@@ -1312,7 +1323,7 @@ export default function AuditScreen() {
               <Text style={styles.dropZoneCtaText}>Choose file</Text>
             </View>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 10 }]}>
-              .pdf · .docx · .pptx · .html
+              .pdf · .docx · .pptx · .html{maxUploadMb ? ` · up to ${maxUploadMb} MB` : ""}
             </Text>
           </Pressable>
         ) : (

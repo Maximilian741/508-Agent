@@ -28,7 +28,12 @@ async def health() -> dict:
 
 @router.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True}
+    """Liveness probe. Also advertises the operator-set upload limit so the
+    UI can state it up front instead of letting a user discover it via a 413
+    after waiting through a whole upload."""
+    from app.config import get_settings
+
+    return {"ok": True, "maxUploadMb": int(get_settings().max_upload_mb)}
 
 
 @router.get("/readyz")
