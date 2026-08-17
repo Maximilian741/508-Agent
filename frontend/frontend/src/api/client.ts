@@ -362,6 +362,21 @@ export interface Monitor {
     lastStatus: string;
 }
 
+/** One past remediation, from GET /pipeline/jobs. */
+export interface PipelineJob {
+    jobId: string;
+    filename: string;
+    sourceFormat: string;
+    createdAt?: string | null;
+    /** Freshly signed on every list call — safe to open directly. */
+    downloadUrl: string;
+    charged: boolean;
+    /** The client disconnected before /remediate could charge; the credit is
+     *  taken on first download instead. */
+    chargePending: boolean;
+    persistedFixes: number;
+}
+
 export interface PipelineResponse {
     summary: PipelineSummary;
     violations: PipelineViolation[];
@@ -423,6 +438,9 @@ export interface ApiClient {
     runPipelineUrl: (url: string) => Promise<PipelineResponse>;
     runSiteScan: (url: string, maxPages?: number) => Promise<SiteScanResponse>;
     listMonitors: () => Promise<Monitor[]>;
+    /** Recent remediations with fresh download URLs — the recovery path when
+     *  a /remediate response was lost (closed tab, proxy timeout). */
+    listJobs: () => Promise<PipelineJob[]>;
     createMonitor: (url: string, frequency: string, notifyEmail: string) => Promise<Monitor>;
     updateMonitor: (id: string, patch: Partial<Pick<Monitor, "enabled" | "frequency" | "notifyEmail">>) => Promise<Monitor>;
     deleteMonitor: (id: string) => Promise<void>;
@@ -679,6 +697,14 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         const response = await fetch(`${baseUrl}/monitors`, { headers: authHeaders() });
         if (!response.ok) throw await _monitorErr(response, "Could not load your monitors");
         return (await response.json()) as Monitor[];
+    };
+
+    const listJobs = async (): Promise<PipelineJob[]> => {
+        if (mockMode) return [];
+        const response = await fetch(`${baseUrl}/pipeline/jobs`, { headers: authHeaders() });
+        if (!response.ok) throw await _monitorErr(response, "Could not load your recent remediations");
+        const body = (await response.json()) as { jobs?: PipelineJob[] };
+        return Array.isArray(body?.jobs) ? body.jobs : [];
     };
 
     const createMonitor = async (url: string, frequency: string, notifyEmail: string): Promise<Monitor> => {
@@ -1097,6 +1123,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         runPipelineUrl,
         runSiteScan,
         listMonitors,
+        listJobs,
         createMonitor,
         updateMonitor,
         deleteMonitor,

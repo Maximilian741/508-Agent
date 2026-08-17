@@ -30,7 +30,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -1058,16 +1058,35 @@ async def remediate(
     # See ``_count_persisted_fixes`` / ``_WRITER_CONFIRMED_ACTIONS``.
     persisted_fixes = _count_persisted_fixes(executions, _applied, fmt)
     charged = False
+    client_gone = False
     if persisted_fixes > 0:
-        # Charge AFTER the file exists. On the rare race where the wallet was
-        # drained since the precheck, this 402s and we clean up without
-        # delivering a file.
+        # If the client already left — closed the tab, or the CDN cut the
+        # request at its timeout on a long document — the response carrying
+        # downloadUrl will never arrive. Charging then would take a credit for
+        # a file the user cannot reach. So: do NOT charge, but KEEP the
+        # artifact and its manifest; GET /pipeline/jobs lists it with a fresh
+        # signed URL, and the charge is taken on first download instead. The
+        # user pays exactly once, and only for a file they can actually get.
         try:
-            _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
-        except HTTPException:
-            _cleanup_job_dir(job_dir)
-            raise
-        charged = True
+            client_gone = await request.is_disconnected()
+        except Exception:
+            client_gone = False
+        if client_gone:
+            logger.warning(
+                "remediate: client disconnected before charge (job %s, user %s) — "
+                "artifact kept, credit deferred to first download",
+                job_id, user_id,
+            )
+        else:
+            # Charge AFTER the file exists. On the rare race where the wallet
+            # was drained since the precheck, this 402s and we clean up
+            # without delivering a file.
+            try:
+                _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
+            except HTTPException:
+                _cleanup_job_dir(job_dir)
+                raise
+            charged = True
 
     # Owner email comes from the CF Access middleware (when enabled).  We
     # persist it on the job manifest so /pipeline/files can compare against
@@ -1087,6 +1106,18 @@ async def remediate(
         "filename": output_name,
         "downloadUrl": signed_url,
         "ownerEmail": owner_email,
+        # The authenticated user, so /pipeline/jobs can list this job back to
+        # them even when the response below is lost. ownerEmail alone was not
+        # enough: it is only set behind Cloudflare Access.
+        "userId": user_id,
+        "sourceFormat": fmt,
+        "documentId": result.document_id,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        # Set when the client disconnected before we could charge; the debit
+        # is taken on first download so the user is never billed for a file
+        # they could not reach.
+        "chargePending": bool(client_gone and persisted_fixes > 0),
+        "persistedFixes": int(persisted_fixes),
         "approved": sorted(approved_ids),
         "rejected": sorted(rejected_ids),
         "executions": [
@@ -1233,6 +1264,86 @@ async def batch_zip(
     )
 
 
+class PipelineJobSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobId: str
+    filename: str
+    sourceFormat: str
+    createdAt: Optional[str] = None
+    downloadUrl: str
+    charged: bool
+    chargePending: bool
+    persistedFixes: int = 0
+
+
+class PipelineJobsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobs: List[PipelineJobSummary]
+
+
+@router.get("/jobs", response_model=PipelineJobsResponse)
+async def list_recent_jobs(
+    request: Request,
+    limit: int = 20,
+    user_id: str = Depends(require_user_id),
+) -> PipelineJobsResponse:
+    """The caller's recent remediations, newest first, with fresh signed URLs.
+
+    This exists because /remediate is synchronous and its response is the ONLY
+    place the download URL used to live. Close the tab, or have the CDN cut a
+    long request at its timeout, and the file was written, sitting on disk,
+    and unreachable. Now it is one call away — and if the charge was deferred
+    because the client had already left, that is visible here too.
+
+    Owner-scoped by the userId recorded on each job manifest; jobs written
+    before that field existed are not listed (they cannot be attributed).
+    """
+    settings = get_settings()
+    root = settings.materialized_root / "pipeline"
+    limit = max(1, min(int(limit or 20), 100))
+    out: List[PipelineJobSummary] = []
+    if not root.exists():
+        return PipelineJobsResponse(jobs=out)
+    candidates: List[Tuple[float, Path, dict]] = []
+    for job_dir in root.iterdir():
+        meta_path = job_dir / "meta.json"
+        if not job_dir.is_dir() or not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str((meta or {}).get("userId") or "") != user_id:
+            continue
+        filename = str((meta or {}).get("filename") or "")
+        if not filename or not (job_dir / filename).exists():
+            continue  # artifact expired or was cleaned up
+        try:
+            mtime = meta_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((mtime, job_dir, meta))
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    for _mtime, job_dir, meta in candidates[:limit]:
+        job_id = job_dir.name
+        filename = str(meta.get("filename"))
+        out.append(
+            PipelineJobSummary(
+                jobId=job_id,
+                filename=filename,
+                sourceFormat=str(meta.get("sourceFormat") or Path(filename).suffix.lstrip(".") or ""),
+                createdAt=meta.get("createdAt"),
+                downloadUrl=sign_file_url(job_id, filename, ttl=settings.pipeline_artifact_ttl_seconds),
+                charged=bool(meta.get("charged")),
+                chargePending=bool(meta.get("chargePending")),
+                persistedFixes=int(meta.get("persistedFixes") or 0),
+            )
+        )
+    return PipelineJobsResponse(jobs=out)
+
+
 @router.get("/files/{job_id}/{filename}")
 async def download_remediated_file(
     job_id: str,
@@ -1282,6 +1393,28 @@ async def download_remediated_file(
             requester_email = user.get("email") if isinstance(user, dict) else None
             if not requester_email or requester_email.lower() != str(owner_email).lower():
                 raise HTTPException(status_code=403, detail="not_owner")
+
+        # Deferred debit: the client disconnected before /remediate could
+        # charge, so the credit is taken here, on the first successful
+        # download, and the manifest is flipped so it is taken exactly once.
+        # If the wallet is now empty the file is withheld with a 402 — the
+        # user still has not paid for anything they did not receive.
+        if (meta or {}).get("chargePending"):
+            deferred_user = str((meta or {}).get("userId") or "")
+            deferred_fmt = str((meta or {}).get("sourceFormat") or "")
+            if deferred_user and deferred_fmt:
+                _charge_credits(
+                    user_id=deferred_user,
+                    doc_format=deferred_fmt,
+                    doc_id=(meta or {}).get("documentId"),
+                )
+                meta["chargePending"] = False
+                meta["charged"] = True
+                meta["chargedAtDownload"] = datetime.now(timezone.utc).isoformat()
+                try:
+                    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                except Exception:
+                    logger.exception("could not persist deferred-charge flag for job %s", safe_id)
 
     # Audit log: record the download.
     try:

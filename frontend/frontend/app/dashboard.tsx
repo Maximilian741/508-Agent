@@ -24,6 +24,7 @@ import {
 import { fuzzyFilter } from "../src/domain/fuzzy";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
+import { RecentRemediations } from "../src/ui/components/RecentRemediations";
 import { Chip } from "../src/ui/components/Chip";
 import { Dialog } from "../src/ui/components/Dialog";
 import { EmptyState } from "../src/ui/components/EmptyState";
@@ -262,6 +263,10 @@ export default function DashboardScreen() {
           onAction={() => router.push("/billing" as any)}
         />
       ) : null}
+
+      {/* Recovery path for a lost download — renders nothing when there is
+          nothing to recover. See RecentRemediations. */}
+      <RecentRemediations />
 
       <Card>
         <View style={styles.cardHeaderRow}>
