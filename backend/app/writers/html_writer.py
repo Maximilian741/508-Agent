@@ -29,6 +29,8 @@ nodes on a same-bytes re-parse).
 
 from __future__ import annotations
 
+import re
+
 import logging
 import shutil
 from pathlib import Path
@@ -230,12 +232,73 @@ def write_remediated_html(
 
     try:
         out_bytes = _serialize(doc)
-        Path(output_path).write_bytes(out_bytes)
     except Exception as exc:
         logger.exception("html_writer serialize failed: %s", exc)
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: serialize"}]}
 
+    # CONTENT-LOSS GATE. Every fix we make ADDS or REWRITES attributes, or
+    # wraps runs in list markup; the ONLY visible text any of them removes is
+    # a typed list marker ("- ", "1. ") when a fake list becomes a real one.
+    # So the output must carry every WORD the source did — if it lost any,
+    # some path dropped content, and shipping that as a "fixed" file would
+    # delete a customer's words while reporting success. Mirrors the PDF
+    # tagger's op-count guard: refuse, copy the source through unchanged, and
+    # say so in `skipped` (the pipeline reads that reason and does not charge).
+    # Word count, not character count: markers are not words, so a list
+    # conversion passes; a dropped paragraph or a truncated subtree never does.
+    src_words, out_words = _visible_word_count(data), _visible_word_count(out_bytes)
+    if out_words < src_words:
+        logger.error(
+            "html_writer: output has FEWER visible words than the source (%d < %d); "
+            "refusing to ship it — source copied through unchanged",
+            out_words, src_words,
+        )
+        return {
+            "applied": [],
+            "skipped": [{"target_id": str(source_path), "reason": "output_would_lose_content"}],
+        }
+
+    try:
+        Path(output_path).write_bytes(out_bytes)
+    except Exception as exc:
+        logger.exception("html_writer write failed: %s", exc)
+        return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: write"}]}
+
     return {"applied": applied, "skipped": skipped}
+
+
+_LIST_MARKER_TOKEN = re.compile(r"^(?:[-*•·]|\d{1,3}[.)])$")
+
+
+def _visible_word_count(html_bytes: bytes) -> int:
+    """Number of visible WORDS under <body>, for the loss gate.
+
+    Independent of our node tree on purpose: it re-parses the raw bytes with
+    lxml and tokenizes text under <body> minus script/style/template, so it
+    measures what a reader would see rather than what our parser chose to
+    model. Standalone list markers ("-", "1.") are not counted, because a
+    fake-list conversion legitimately removes them — the gate must catch lost
+    CONTENT, not a marker that became real list markup. Both sides of the
+    comparison go through this same function.
+    """
+    try:
+        root = _parse_document(html_bytes)
+        body = root.find("body")
+        scope = body if body is not None else root
+        total = 0
+        for el in scope.iter():
+            tag = el.tag if isinstance(el.tag, str) else ""
+            if tag.lower() in ("script", "style", "template", "noscript"):
+                continue
+            for chunk in (el.text, el.tail):
+                if not chunk:
+                    continue
+                total += sum(1 for tok in chunk.split() if not _LIST_MARKER_TOKEN.match(tok))
+        return total
+    except Exception:
+        # If we cannot measure, treat the output as suspect: 0 for the OUTPUT
+        # trips the gate (fail closed), while 0 for the SOURCE never blocks.
+        return 0
 
 
 def _apply_contrast(el: Any, fg: str) -> bool:

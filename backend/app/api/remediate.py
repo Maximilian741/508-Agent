@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import logging
 from datetime import datetime, timezone
 UTC = timezone.utc
@@ -48,9 +50,9 @@ class RemediateResponse(BaseModel):
 
 
 def _find_node(tree: AccessibilityTree, node_id: str) -> Optional[Any]:
-    stack = [tree.root]
+    stack = deque([tree.root])  # list.pop(0) is O(n) -> O(n^2) walk on flat bodies
     while stack:
-        node = stack.pop(0)
+        node = stack.popleft()
         if node.id == node_id:
             return node
         for child in getattr(node, "children", []) or []:

@@ -476,8 +476,15 @@ def _parse_document(data: bytes):
     """
     blob = data if data and data.strip() else b"<html><head></head><body></body></html>"
     src: Any = _decode_html_bytes(blob)
+    # huge_tree lifts libxml2's default 256-level depth clamp. Below that
+    # limit lxml silently DROPS everything nested deeper — no error — and the
+    # writer then serialized the truncated tree as the "fixed" file, deleting
+    # content from a customer's page while reporting success. Legacy pages
+    # with unclosed <font>/<div> chains reach 256 easily. Everything else in
+    # the docstring still holds: no entity expansion, no network.
+    parser = lxml_html.HTMLParser(huge_tree=True, no_network=True)
     try:
-        return lxml_html.document_fromstring(src)
+        return lxml_html.document_fromstring(src, parser=parser)
     except (etree.ParserError, etree.XMLSyntaxError, ValueError):
         return lxml_html.document_fromstring(b"<html><head></head><body></body></html>")
 
@@ -525,7 +532,11 @@ def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> L
             continue
         child_ctx = _merge_ctx(ctx, _inline_style(child))
         node = _build_node(child, tag, ids, roottree, child_ctx)
-        if node is not None:
+        if isinstance(node, list):
+            # A section-tag wrapper whose subtree was already walked and
+            # produced nothing. Extend by that result; never walk it again.
+            out.extend(node)
+        elif node is not None:
             out.append(node)
         else:
             # Transparent wrapper (span, strong, label, etc.): inline any
@@ -727,7 +738,15 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
     if tag in _SECTION_TAGS:
         children = _build_children(el, ids, roottree, ctx)
         if not children:
-            return None
+            # Return the (already-built, empty) child list — NOT None. None
+            # tells the caller "transparent wrapper, walk my subtree", and the
+            # caller then rebuilt this exact subtree a second time. For a
+            # chain of wrappers whose leaves yield no node (spans, icons,
+            # text) that made work(k) = 2 * work(k-1): a 684-byte page with
+            # 23 nested <div> took 17s, doubling per level; ~26 deep pinned a
+            # request-thread forever. And /scan-url takes arbitrary public
+            # URLs. Returning the list lets the caller extend by it in O(1).
+            return children
         return SectionNode(
             id=ids("html-section"),
             content=NodeContent(kind=ContentKind.NONE),

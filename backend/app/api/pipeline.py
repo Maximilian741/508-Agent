@@ -1018,6 +1018,23 @@ async def remediate(
         isinstance(s, dict) and str(s.get("reason", "")).startswith(("failed_to_open", "copy_failed"))
         for s in _skipped
     )
+    # The writer's content-loss gate: it built an output with LESS visible text
+    # than the source and refused to ship it. Distinct message, because the
+    # file is neither encrypted nor corrupt — we declined to risk it.
+    _lost_content = isinstance(_skipped, list) and any(
+        isinstance(s, dict) and str(s.get("reason", "")) == "output_would_lose_content"
+        for s in _skipped
+    )
+    if _lost_content and not _applied:
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "We stopped before writing this file: the fixed version came out with less "
+                "text than the original, and we will not ship a file that loses your content. "
+                "You were not charged. Please report this document so we can look at it."
+            ),
+        )
     if _hard_fail and not _applied:
         _cleanup_job_dir(job_dir)
         raise HTTPException(
