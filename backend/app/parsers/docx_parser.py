@@ -188,6 +188,15 @@ class DOCXParser:
 
         title = (core.title or "").strip()
         language = (getattr(core, "language", None) or "").strip()
+        if not language:
+            # dc:language is rarely set, but Word writes the document language
+            # into styles.xml docDefaults <w:lang w:val="en-US"/> on save — and
+            # per the writer's own docstring THAT is where screen readers and
+            # Word's Accessibility Checker read it. Reading only dc:language
+            # flagged DOCUMENT_LANGUAGE_MISSING on essentially every Word
+            # document, and the "fix" then overwrote en-US with a less
+            # specific en. Same source of truth for detector and fixer now.
+            language = _docx_default_lang(doc) or ""
         properties: Dict[str, Any] = {"filename": path.name}
         if title:
             properties["title"] = title
@@ -1197,6 +1206,33 @@ def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[str]:
                 return txt[:200]
             hops += 1
         prev = prev.getprevious()
+    return None
+
+
+def _docx_default_lang(doc) -> Optional[str]:
+    """The document's run-default language from styles.xml, or None.
+
+    Order: docDefaults/rPrDefault/rPr/w:lang@w:val, then the Normal style's
+    rPr/w:lang. These are what Word writes and what assistive tech reads.
+    """
+    try:
+        styles_el = doc.styles.element
+    except Exception:
+        return None
+    dd = styles_el.find(qn("w:docDefaults"))
+    if dd is not None:
+        lang = dd.find(f"./{qn('w:rPrDefault')}/{qn('w:rPr')}/{qn('w:lang')}")
+        if lang is not None:
+            val = (lang.get(qn("w:val")) or "").strip()
+            if val:
+                return val
+    for st in styles_el.iterfind(qn("w:style")):
+        if (st.get(qn("w:styleId")) or "").lower() == "normal":
+            lang = st.find(f"./{qn('w:rPr')}/{qn('w:lang')}")
+            if lang is not None:
+                val = (lang.get(qn("w:val")) or "").strip()
+                if val:
+                    return val
     return None
 
 

@@ -464,6 +464,12 @@ def _set_docx_default_lang(doc, language: str) -> None:
     if lang is None:
         lang = OxmlElement("w:lang")
         rpr.append(lang)
+    existing = (lang.get(qn("w:val")) or "").strip()
+    # Never DOWNGRADE: if the document already says "en-US" and we detected
+    # "en", the existing tag is the same language and more specific — keep it.
+    # Only overwrite when the existing value is empty or a different language.
+    if existing and existing.lower().split("-")[0] == (language or "").lower().split("-")[0] and len(existing) >= len(language or ""):
+        return
     lang.set(qn("w:val"), language)
 
 
