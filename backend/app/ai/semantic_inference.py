@@ -90,6 +90,65 @@ _LANGUAGE_PATTERNS = [
 ]
 
 
+# Unicode block -> BCP-47 tag, for scripts that identify a language on their
+# own. Han is deliberately absent from the single-language list: CJK ideographs
+# are shared by zh/ja/ko, so bare Han is only "zh" when NO kana/hangul appear.
+_SCRIPT_RANGES = [
+    ((0x3040, 0x30FF), "ja"),  # Hiragana + Katakana
+    ((0xAC00, 0xD7AF), "ko"),  # Hangul syllables
+    ((0x1100, 0x11FF), "ko"),  # Hangul Jamo
+    ((0x0600, 0x06FF), "ar"),  # Arabic
+    ((0x0590, 0x05FF), "he"),  # Hebrew
+    ((0x0400, 0x04FF), "ru"),  # Cyrillic (ru is the dominant case; still a guess)
+    ((0x0370, 0x03FF), "el"),  # Greek
+    ((0x0E00, 0x0E7F), "th"),  # Thai
+    ((0x0900, 0x097F), "hi"),  # Devanagari
+]
+_HAN_RANGE = (0x4E00, 0x9FFF)
+
+
+def _dominant_script_language(sample: str):
+    """``(bcp47, share)`` when one non-Latin script clearly dominates the
+    LETTERS of ``sample``, else None. Digits/punctuation are ignored so a
+    table of numbers cannot vote."""
+    counts: Dict[str, int] = {}
+    latin = 0
+    han = 0
+    letters = 0
+    for ch in sample:
+        if not ch.isalpha():
+            continue
+        letters += 1
+        cp = ord(ch)
+        if cp < 0x0250:
+            latin += 1
+            continue
+        if _HAN_RANGE[0] <= cp <= _HAN_RANGE[1]:
+            han += 1
+            continue
+        for (lo, hi), code in _SCRIPT_RANGES:
+            if lo <= cp <= hi:
+                counts[code] = counts.get(code, 0) + 1
+                break
+    if letters == 0:
+        return None
+    # Kana/hangul present -> that language owns any Han too.
+    if counts.get("ja"):
+        counts["ja"] += han
+        han = 0
+    elif counts.get("ko"):
+        counts["ko"] += han
+        han = 0
+    if han and not counts:
+        counts["zh"] = han
+    if not counts:
+        return None
+    code, n = max(counts.items(), key=lambda kv: kv[1])
+    share = n / letters
+    # Require a clear majority of LETTERS; below that we do not know.
+    return (code, share) if share >= 0.6 else None
+
+
 def _slugify(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", value or "").strip()
     if not cleaned:
@@ -154,14 +213,38 @@ class HeuristicProvider(SemanticInferenceProvider):
         return InferenceResult(text=cleaned, confidence=0.35, provider=self.name)
 
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
+        """Guess the language of ``sample``, or ABSTAIN (empty text).
+
+        Two sources of evidence, in order of reliability:
+
+        1. Script. Unicode block ranges are unambiguous: a page of Hiragana is
+           Japanese, of Hangul is Korean, of Arabic letters is Arabic. This is
+           checked FIRST because the word-list test below only knows Latin
+           languages, and it used to answer "en at 0.25" for anything it did
+           not recognize — which is how an all-Japanese PDF got /Lang en
+           written into it and credited as a fix.
+        2. Latin function words, for the handful of Latin languages we list.
+
+        When neither source finds anything, return an EMPTY text at zero
+        confidence rather than a default. Abstaining is a real answer; the
+        executor turns it into "needs a human", which is the truth.
+        """
         sample = str(payload.get("sample") or "")
         if not sample.strip():
-            return InferenceResult(text="en", confidence=0.2, provider=self.name)
+            return InferenceResult(text="", confidence=0.0, provider=self.name)
+
+        script = _dominant_script_language(sample)
+        if script is not None:
+            code, share = script
+            # Share of letters in that script -> confidence; a mixed page
+            # (e.g. English with a few CJK names) will not clear the bar.
+            return InferenceResult(text=code, confidence=min(0.9, 0.5 + 0.4 * share), provider=self.name)
+
         scores: Dict[str, int] = {}
         for pattern, code in _LANGUAGE_PATTERNS:
             scores[code] = scores.get(code, 0) + len(pattern.findall(sample))
         if not any(scores.values()):
-            return InferenceResult(text="en", confidence=0.25, provider=self.name)
+            return InferenceResult(text="", confidence=0.0, provider=self.name)
         best = max(scores.items(), key=lambda kv: kv[1])
         confidence = min(0.85, 0.3 + 0.05 * best[1])
         return InferenceResult(text=best[0], confidence=confidence, provider=self.name)

@@ -266,8 +266,18 @@ class DOCXParser:
             for link in link_nodes:
                 body_section.children.append(link)
 
-            # Inline images.
+            # Inline images. Hand each one nearby human text so the heuristic
+            # alt provider can derive a REAL description (the executor now
+            # refuses to write the "Image docx-img-N shown in document."
+            # placeholder). Word's own Caption-styled paragraph after the
+            # picture is best; else the paragraph's own text; else the nearest
+            # preceding paragraph with real words.
             for image in _inline_images_in_paragraph(paragraph, image_blobs, ids):
+                cap = _image_context_for_paragraph(paragraph, text)
+                if cap:
+                    if image.metadata.properties is None:
+                        image.metadata.properties = {}
+                    image.metadata.properties["caption"] = cap
                 body_section.children.append(image)
 
             if text and not link_nodes:
@@ -1146,6 +1156,37 @@ def _docx_row_is_header(row) -> bool:
             return True
     populated = [c for c in row.cells if (c.text or "").strip()]
     return bool(populated) and all(_cell_text_is_bold(c) for c in populated)
+
+
+def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[str]:
+    """Nearby human text describing a picture in ``paragraph``, or None.
+
+    1. The NEXT paragraph if it is Word's Caption style (that is how Word
+       itself associates a caption with a picture).
+    2. The picture paragraph's own text (an inline image in a sentence).
+    3. The nearest PRECEDING paragraph with at least three words (a lead-in
+       such as "Figure 2 shows quarterly revenue by region:").
+    Only ever text a human wrote near the image — never a filename.
+    """
+    p_el = paragraph._p  # noqa: SLF001
+    nxt = p_el.getnext()
+    if nxt is not None and nxt.tag == qn("w:p"):
+        cap = _paragraph_caption_text(nxt)
+        if cap:
+            return cap[:200]
+    own = " ".join((own_text or "").split())
+    if len(own.split()) >= 3:
+        return own[:200]
+    prev = p_el.getprevious()
+    hops = 0
+    while prev is not None and hops < 4:
+        if prev.tag == qn("w:p"):
+            txt = " ".join("".join(t.text or "" for t in prev.iter(qn("w:t"))).split())
+            if len(txt.split()) >= 3:
+                return txt[:200]
+            hops += 1
+        prev = prev.getprevious()
+    return None
 
 
 _CAPTION_STYLE_VALS = {"caption"}  # Word built-in "Caption" paragraph style id

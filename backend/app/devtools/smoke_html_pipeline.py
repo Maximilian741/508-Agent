@@ -24,11 +24,18 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_SMOKE_DB_DIR}/smoke.db"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+# The body carries one real English sentence on purpose. The language
+# executor now refuses to write a guess: the earlier fixture's whole text was
+# "Quarterly Report / Revenue / click here" — six words, no stop-words — which
+# the heuristic detector could not identify, and which used to be tagged
+# lang="en" at confidence 0.25 anyway. Asserting SET_DOCUMENT_LANGUAGE on
+# that was asserting the guess. With a real sentence the detection is honest.
 HTML = """<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
 <body>
 <h1>Quarterly Report</h1>
+<p>This report presents the results of the quarter and the outlook for the rest of the year.</p>
 <h3>Revenue</h3>
 <img src="chart.png">
 <p><a href="/full">click here</a></p>

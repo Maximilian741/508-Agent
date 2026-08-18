@@ -58,11 +58,12 @@ def _codes(tree: AccessibilityTree) -> set[str]:
     return found
 
 
-def _img_tree(alt: str) -> AccessibilityTree:
+def _img_tree(alt: str, caption: str | None = None) -> AccessibilityTree:
+    props = {"caption": caption} if caption else {}
     img = ImageNode(
         id="img-1",
         content=NodeContent(kind=ContentKind.NONE),
-        metadata=NodeMetadata(source_format="docx"),
+        metadata=NodeMetadata(source_format="docx", properties=props),
         is_decorative=False,
         alt_text=alt,
     )
@@ -122,9 +123,15 @@ def main() -> int:
           AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE.value not in _codes(run_analyzers(_img_tree(""))))
 
     # --- 1c. non-descriptive alt is AUTO-FIXABLE: the executor REPLACES it ---
+    # ...when there is something REAL to replace it with. The image carries a
+    # caption so the heuristic provider (no AI key in smokes) can derive a
+    # genuine description. Without any context the executor now refuses to
+    # write the "Image ... shown in document." placeholder — which is what
+    # this fixture used to receive, and which the "no loop" check below only
+    # passed because the classifier could not see it. See 1d.
     policy = RemediationPolicy(allow_ai_actions=True, require_human_review_for_all=False)
     ex = GenerateAltTextExecutor()
-    t_bad = _img_tree("image1.png")
+    t_bad = _img_tree("image1.png", caption="Bar chart of quarterly sales by region")
     run_analyzers(t_bad)
     bad_img = t_bad.root.children[0]
     plans = [p for p in plan_remediations(t_bad, policy)
@@ -139,6 +146,21 @@ def main() -> int:
               not is_nondescriptive_alt(bad_img.alt_text or ""))
         check("replacement marked pending human review",
               bad_img.metadata.properties.get("alt_text_pending_review") is True)
+
+    # --- 1d. no context at all -> the executor REFUSES the placeholder ---
+    t_bare = _img_tree("image1.png")
+    run_analyzers(t_bare)
+    bare_img = t_bare.root.children[0]
+    bare_plans = [p for p in plan_remediations(t_bare, policy)
+                  if p.flag.code == AccessibilityFlagCode.ALT_TEXT_NOT_DESCRIPTIVE]
+    if bare_plans:
+        res_b = ex.execute(bare_plans[0], t_bare)
+        check("no context: executor SKIPS rather than writing a location placeholder",
+              res_b.status.value == "skipped")
+        check("no context: the filename alt is left as-is (still flagged, honestly)",
+              bare_img.alt_text == "image1.png")
+        check("no context: the note names the reason",
+              "placeholder" in (res_b.notes or "").lower())
 
     # good alt must NEVER be overwritten (it carries no non-descriptive flag)
     t_good = _img_tree("A red car on a wet street at night")

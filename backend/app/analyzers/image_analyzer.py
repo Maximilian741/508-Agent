@@ -38,14 +38,17 @@ _PLACEHOLDER_RE = re.compile(
     r"^(?:" + "|".join(re.escape(w) for w in _PLACEHOLDER_WORDS) + r")[\s_\-#:]*\d*$",
     re.IGNORECASE,
 )
-# "Image page-3-img2 shown in page 3." / "Picture slide 4" — names WHERE the
-# image is, never WHAT it shows. This is exactly the string our own heuristic
-# alt provider emits when it has no caption or nearby text to work from, so
-# recognizing it here is what lets us refuse to ship it and lets a re-audit of
-# our own output stay honest.
+# "Image page-3-img2 shown in page 3." / "Image html-img-1 shown in the
+# document." / "Picture slide 4" — names WHERE the image is, never WHAT it
+# shows. This is exactly the string our own heuristic alt provider emits when
+# it has no caption or nearby text to work from (the HTML variant says "in the
+# document" because there is no page), so recognizing it here is what lets us
+# refuse to ship it and lets a re-audit of our own output stay honest.
+# "Image of the document signing ceremony" is NOT matched: no "shown in".
 _LOCATION_ONLY_RE = re.compile(
     r"^(?:image|picture|figure|graphic|photo|img)\b.*?"
-    r"\b(?:shown\s+(?:in|on)\s+)?(?:page|slide|sheet)\s*\d+\.?$",
+    r"\bshown\s+(?:in|on)\s+(?:the\s+)?(?:page|slide|sheet|document|deck|file)(?:\s*\d+)?\.?$"
+    r"|^(?:image|picture|figure|graphic|photo|img)\b.*?\b(?:page|slide|sheet)\s*\d+\.?$",
     re.IGNORECASE,
 )
 

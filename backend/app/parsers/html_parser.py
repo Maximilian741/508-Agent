@@ -760,6 +760,51 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
     return None
 
 
+def _image_caption(el: Any) -> Optional[str]:
+    """Nearby human text that describes an <img>, or None.
+
+    1. <figure><img><figcaption>…</figcaption></figure> — the HTML caption.
+    2. The <img>'s title attribute (a tooltip, but authored for humans).
+    3. The nearest PRECEDING text-bearing sibling or ancestor's preceding
+       sibling (a lead-in like "Figure 2 shows quarterly revenue:").
+    Kept short and only ever text a human wrote for the image's neighbourhood
+    — never the filename, never boilerplate."""
+    parent = el.getparent()
+    if parent is not None and _tag(parent) == "figure":
+        for child in parent:
+            if _tag(child) == "figcaption":
+                cap = " ".join((child.text_content() or "").split())
+                if cap:
+                    return cap[:200]
+    # figure may wrap the img in a link/span; look one level up too.
+    if parent is not None:
+        gp = parent.getparent()
+        if gp is not None and _tag(gp) == "figure":
+            for child in gp:
+                if _tag(child) == "figcaption":
+                    cap = " ".join((child.text_content() or "").split())
+                    if cap:
+                        return cap[:200]
+    title = (el.get("title") or "").strip()
+    if title:
+        return title[:200]
+    # Nearest preceding text: walk previous siblings of the img, then of its
+    # ancestors, up to a few hops, and take the first with real words.
+    node = el
+    for _hop in range(4):
+        prev = node.getprevious()
+        while prev is not None:
+            if isinstance(prev.tag, str) and prev.tag.lower() not in ("script", "style", "template", "noscript"):
+                txt = " ".join((prev.text_content() or "").split())
+                if len(txt.split()) >= 3:
+                    return txt[:200]
+            prev = prev.getprevious()
+        node = node.getparent()
+        if node is None or _tag(node) in ("body", "html"):
+            break
+    return None
+
+
 def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     alt = el.get("alt")  # None = attribute absent; "" = explicitly decorative
     role = (el.get("role") or "").strip().lower()
@@ -770,6 +815,16 @@ def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     is_decorative = (alt == "") or role in {"presentation", "none"} or aria_hidden
     node_id = ids("html-img")
     meta = _meta(el, roottree)
+    # Context for alt generation, so the heuristic provider (no AI key) can
+    # derive a REAL description instead of a location placeholder — which the
+    # executor now refuses to write. Prefer a <figcaption> sibling, then the
+    # <img>'s own title attribute, then the nearest preceding block of text.
+    if not is_decorative:
+        cap = _image_caption(el)
+        if cap:
+            if meta.properties is None:
+                meta.properties = {}
+            meta.properties["caption"] = cap
 
     if is_decorative:
         return ImageNode(

@@ -103,6 +103,60 @@ def _classify_paragraph(text: str) -> Optional[int]:
     return None
 
 
+def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Optional[str]:
+    """The largest-font text block on ``page_index``, if it reads as a title.
+
+    Reuses the tagger's block helpers (same segmentation the structure tree
+    is built from). Conservative: the block must be the strict maximum size
+    on the page, at least 1.25x the most common size (so it stands out from
+    body text), short (<= 120 chars, one line), and not a page number.
+    Anything less and we return None — a wrong title is worse than no title.
+    """
+    from pypdf.generic import ContentStream
+
+    from app.pdf.ua_tagger import _block_font_size, _block_text, _is_page_number
+
+    if page_index >= len(reader.pages):
+        return None
+    page = reader.pages[page_index]
+    try:
+        ops = ContentStream(page.get_contents(), reader).operations
+    except Exception:
+        return None
+    blocks = []
+    block = None
+    for operands, op in ops:
+        if op == b"BT":
+            block = [(operands, op)]
+        elif op == b"ET" and block is not None:
+            block.append((operands, op))
+            blocks.append(block)
+            block = None
+        elif block is not None:
+            block.append((operands, op))
+    sized = []
+    for b in blocks:
+        size = _block_font_size(b)
+        text = _block_text(b).strip()
+        if size and size > 0 and text:
+            sized.append((round(float(size), 1), text))
+    if len(sized) < 2:
+        return None
+    from collections import Counter
+
+    common = Counter(sz for sz, _ in sized).most_common(1)[0][0]
+    top = max(sz for sz, _ in sized)
+    if top < common * 1.25:
+        return None
+    tops = [t for sz, t in sized if sz == top]
+    if len(tops) != 1:
+        return None  # several equally-large blocks: no single title stands out
+    text = tops[0]
+    if len(text) > 120 or "\n" in text or _is_page_number(text):
+        return None
+    return text
+
+
 # ---------------------------------------------------------------------------
 # PDF metadata helpers
 # ---------------------------------------------------------------------------
@@ -575,6 +629,19 @@ class PDFParser:
             # Unlabeled fields whose /T is a real label → auto-write /TU. The
             # writer re-derives with the SAME helper so credit == what's written.
             properties["form_fields_derivable"] = ff_derivable
+        # A title CANDIDATE for SetDocumentTitleExecutor: the largest-font
+        # text block on page 1, when it is short and clearly larger than the
+        # page's body size. The heading classifier here is text-shape only
+        # (numbering / ALL CAPS / trailing colon), so an 18pt "Annual Report
+        # 2025" produced no HeadingNode and the executor fell through to
+        # "Untitled Document" — a placeholder our own analyzer flags —
+        # wrote it as the /Title, and credited it.
+        try:
+            cand = _title_candidate_from_page(reader)
+            if cand:
+                properties["title_candidate"] = cand
+        except Exception:
+            pass
         # Text colours from the content stream → contrast analysis (vs white).
         text_colors = _pdf_text_colors(reader)
         if text_colors:
