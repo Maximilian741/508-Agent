@@ -50,6 +50,7 @@ from app.security.url_fetch import (
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
+    ActionCode,
     ImageNode,
     Severity,
     TableNode,
@@ -63,6 +64,7 @@ from app.services.remediation_engine import RemediationEngine
 from app.services.scan_fixes import derive_scan_fixes
 from app.services.scan_history import build_change_report, save_scan
 from app.services.remediation_planner import plan_remediations, RemediationPolicy
+from app.services.remediators.base import ExecutionStatus
 from app.services.remediators.registry import execute_plans
 from app.writers import write_remediated
 from app.api.credits import (
@@ -1057,6 +1059,30 @@ async def remediate(
     # target already had the fix (writer no-op), must NOT be counted or charged.
     # See ``_count_persisted_fixes`` / ``_WRITER_CONFIRMED_ACTIONS``.
     persisted_fixes = _count_persisted_fixes(executions, _applied, fmt)
+
+    # Reconcile the TAG_PDF_STRUCTURE note with what the tagger ACTUALLY did.
+    # The executor runs before the writer and can only promise; the writer's
+    # pdfua summary knows how many pages fell back to a single page-level /P
+    # (unparseable stream, nested BT, op count that would not reconcile).
+    # Those pages are tagged and valid but carry NO headings/lists/tables. The
+    # disclosure lived only in writer.skipped, while the execution note the
+    # user reads still promised the full structure. Append it to the note
+    # so PipelineExecutionResult carries the truth, not just the manifest.
+    try:
+        _pdfua = write_result.get("pdfua") if isinstance(write_result, dict) else None
+        _plo = int((_pdfua or {}).get("pagesPageLevelOnly") or 0)
+        _tot = int((_pdfua or {}).get("pages") or 0)
+        if _plo > 0:
+            for _e in executions:
+                if _e.action_code == ActionCode.TAG_PDF_STRUCTURE and _e.status == ExecutionStatus.SUCCESS:
+                    _e.notes = (
+                        f"{_e.notes.rstrip('.')}. NOTE: {_plo} of {_tot} page(s) could not be broken "
+                        "into elements and were tagged as a single page-level block instead — their "
+                        "headings, lists and tables were NOT identified. The document is tagged and "
+                        "valid, but those pages need a source-application pass for full structure."
+                    )
+    except Exception:
+        pass
     charged = False
     client_gone = False
     if persisted_fixes > 0:
