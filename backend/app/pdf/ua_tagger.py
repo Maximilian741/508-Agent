@@ -1030,13 +1030,20 @@ def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
     if not grids:
         return cell_of, tables
 
-    # Snapshot block positions once; expensive otherwise.
+    # Snapshot block positions once; expensive otherwise. Blocks the
+    # text-geometry detector already claimed are kept SEPARATELY (not tagged
+    # again) so a ruling grid that merely coincides with an already-tagged
+    # table can be recognized as such rather than counted as "declined".
     blocks = []
+    already_tagged = []  # (x, y) of blocks that belong to a geometry table
     for idx, (kind, ops, _meta) in enumerate(segments):
-        if kind != "text" or idx in cell_of_existing:
+        if kind != "text":
             continue
         x, y = _block_origin(ops)
         if x is None or y is None:
+            continue
+        if idx in cell_of_existing:
+            already_tagged.append((x, y))
             continue
         btext = _block_text(ops).strip()
         if not btext:
@@ -1081,6 +1088,20 @@ def _tables_from_grids(grids, segments, cell_of_existing, stats=None):
 
         fill_ratio = len(claimed) / max(1, nrows * ncols)
         if fill_ratio < _GRID_MIN_FILL:
+            # Is this grid just the RULING around a table the text-geometry
+            # detector already tagged? Then nothing was declined — the table
+            # is in the output — and counting it here made the report say
+            # "N table-like grids too sparse to tag, check by hand" for the
+            # very tables it had tagged, on every tabular document. Only a
+            # grid with claimable text of its own that still came up sparse is
+            # a genuine decline.
+            coincides = any(
+                grid["x0"] - _CLUSTER_TOL <= x <= grid["x1"] + _CLUSTER_TOL
+                and grid["y0"] - _CLUSTER_TOL <= y <= grid["y1"] + _CLUSTER_TOL
+                for (x, y) in already_tagged
+            )
+            if coincides:
+                continue  # duplicate of a tagged table; not a decline
             # A table-SHAPED grid we deliberately declined (too sparse to be
             # sure it's data). Counted so the report can say "found N, tagged
             # M" instead of implying every table was handled.
@@ -1519,6 +1540,16 @@ def _tag_page_elements(
         return None
     ns = DecodedStreamObject()
     ns.set_data(new_data)
+    # Flate-compress the rewritten stream. Real-world PDFs arrive with
+    # FlateDecode content; emitting our rewritten copy uncompressed inflated
+    # a 2.7 MB text-heavy document to 12.8 MB (up to 19x on dense pages) —
+    # slower downloads, and 24h of artifact storage per job at 4-5x. The
+    # bytes are byte-identical after decode; the op-count guard above already
+    # ran against `new_data`, so nothing here can hide a content change.
+    try:
+        ns = ns.flate_encode()
+    except Exception:  # pragma: no cover - keep the uncompressed stream rather than fail
+        logger.debug("flate_encode failed; writing uncompressed content stream", exc_info=True)
     page[NameObject("/Contents")] = pdf._add_object(ns)  # noqa: SLF001
 
     # COMMIT POINT — the page's new stream is in the file, so everything the

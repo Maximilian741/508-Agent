@@ -230,6 +230,41 @@ def main() -> int:
           "tablesDeclined" in src_text and "tablesDetected" not in src_text)
     check("a clean tagged table reports zero declined", rep.get("tablesDeclined", 0) == 0, str(rep))
 
+    # tablesDeclined must not count the RULING around a table the text-geometry
+    # detector already tagged. It did: those blocks are excluded from the grid
+    # pass, so the grid looked empty, was "declined", and the report told the
+    # user "N table-like grids too sparse to tag — check by hand" for the very
+    # tables it had tagged, on every tabular document.
+    ruled_data = b"\n".join([
+        b"40 180 m 320 180 l S", b"40 220 m 320 220 l S", b"40 260 m 320 260 l S",
+        b"40 300 m 320 300 l S", b"40 340 m 320 340 l S",
+        b"40 180 m 40 340 l S", b"160 180 m 160 340 l S", b"240 180 m 240 340 l S", b"320 180 m 320 340 l S",
+        _bt(10, 48, 315, b"Region"), _bt(10, 168, 315, b"Q1"), _bt(10, 248, 315, b"Q2"),
+        _bt(10, 48, 275, b"North"), _bt(10, 168, 275, b"120"), _bt(10, 248, 275, b"140"),
+        _bt(10, 48, 235, b"South"), _bt(10, 168, 235, b"90"), _bt(10, 248, 235, b"110"),
+        _bt(10, 48, 195, b"East"), _bt(10, 168, 195, b"75"), _bt(10, 248, 195, b"95"),
+    ])
+    w4 = PdfWriter()
+    f4 = DictionaryObject()
+    f4.update({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fs4 = DictionaryObject()
+    fs4[NameObject("/F1")] = w4._add_object(f4)  # noqa: SLF001
+    r4 = DictionaryObject()
+    r4[NameObject("/Font")] = fs4
+    p4 = w4.add_blank_page(width=400, height=400)
+    c4 = DecodedStreamObject()
+    c4.set_data(ruled_data)
+    p4[NameObject("/Contents")] = w4._add_object(c4)  # noqa: SLF001
+    p4[NameObject("/Resources")] = r4
+    rep4 = tag_pdf(w4, tree)
+    check("a RULED data table is tagged once and declined ZERO times (no double count)",
+          rep4.get("tables") == 1 and rep4.get("tablesDeclined", 0) == 0,
+          f"tables={rep4.get('tables')} declined={rep4.get('tablesDeclined')}")
+
     # The merged band here is a TITLE ("Quarterly results summary"), not a
     # column header. Typing it /TH with /Scope=/Column would claim a title
     # labels one column of the table.
