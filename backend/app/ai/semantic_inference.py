@@ -854,6 +854,28 @@ class SemanticInferenceClient:
         return self._dispatch("document_language", payload)
 
 
+def vision_provider_configured() -> bool:
+    """True when the resolved default provider can LOOK at an image.
+
+    Cheap, no network, no client construction — mirrors the precedence in
+    :func:`build_default_provider`. Parsers use it to decide whether inlining
+    image bytes into the tree could ever pay off: under the heuristic
+    provider nothing reads them, and a 24 MB scan-like PDF was costing +94 MB
+    RSS per /analyze request (four concurrent: +250 MB) for bytes that were
+    then discarded.
+    """
+    forced = (os.getenv("SEMANTIC_PROVIDER") or "").strip().lower()
+    if forced == "heuristic":
+        return False
+    anthropic_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if forced == "claude":
+        return bool(anthropic_key)
+    if forced == "openai":
+        return bool(openai_key)
+    return bool(anthropic_key or openai_key)
+
+
 def build_default_provider() -> SemanticInferenceProvider:
     """Pick a provider based on environment variables.
 
@@ -890,6 +912,7 @@ def build_default_provider() -> SemanticInferenceProvider:
 
 __all__ = [
     "SemanticInferenceClient",
+    "vision_provider_configured",
     "SemanticInferenceProvider",
     "HeuristicProvider",
     "ClaudeProvider",

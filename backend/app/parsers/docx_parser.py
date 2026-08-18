@@ -44,6 +44,17 @@ from app.models.accessibility import (
 )
 
 
+# Decided once per process: is there a vision provider that could ever read
+# inlined image bytes? Under the heuristic provider nothing consumes them, and
+# base64-inflating every image into the tree cost tens of MB per request.
+try:
+    from app.ai.semantic_inference import vision_provider_configured as _vpc
+
+    _WANT_IMAGE_BYTES = bool(_vpc())
+except Exception:  # pragma: no cover - never let the AI module break parsing
+    _WANT_IMAGE_BYTES = True
+
+
 class DOCXParser:
     def parse(self, file_path: str) -> Dict[str, object]:
         doc = Document(file_path)
@@ -810,7 +821,7 @@ def _collect_image_blobs(doc) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
             mime = "image/bmp"
         else:
             mime = "image/png"
-        blobs[rel_id] = (base64.b64encode(blob).decode("ascii"), mime)
+        blobs[rel_id] = ((base64.b64encode(blob).decode("ascii") if _WANT_IMAGE_BYTES else None), mime)
     return blobs
 
 

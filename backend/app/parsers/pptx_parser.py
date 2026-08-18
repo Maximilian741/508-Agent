@@ -42,6 +42,17 @@ from app.models.accessibility import (
 )
 
 
+# Decided once per process: is there a vision provider that could ever read
+# inlined image bytes? Under the heuristic provider nothing consumes them, and
+# base64-inflating every image into the tree cost tens of MB per request.
+try:
+    from app.ai.semantic_inference import vision_provider_configured as _vpc
+
+    _WANT_IMAGE_BYTES = bool(_vpc())
+except Exception:  # pragma: no cover - never let the AI module break parsing
+    _WANT_IMAGE_BYTES = True
+
+
 class PPTXParser:
     def parse(self, file_path: str) -> Dict[str, object]:
         prs = Presentation(file_path)
@@ -698,7 +709,7 @@ def _picture_to_image_node(shape, slide_index: int, ids: "_IdCounter", extra_pro
     image_mime: Optional[str] = None
     try:
         blob = shape.image.blob
-        if blob and len(blob) <= 2_000_000:
+        if _WANT_IMAGE_BYTES and blob and len(blob) <= 2_000_000:
             image_b64 = base64.b64encode(blob).decode("ascii")
             content_type = getattr(shape.image, "content_type", None)
             image_mime = str(content_type) if content_type else "image/png"

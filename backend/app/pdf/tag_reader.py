@@ -167,8 +167,20 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
                         pass
         return got
 
+    truncated = {"hit": False, "max_depth": 0}
+
     def walk(elem: Any, page_ctx: Optional[int], depth: int = 0) -> None:
+        # Bounds recursion on pathologically nested trees. `depth` used to be
+        # dropped on the recursive call, so this guard never fired: the walk
+        # ran until Python's RecursionError, which the outer `except` below
+        # swallowed into "return None" — and the parser then treated a TAGGED
+        # PDF as untagged, discarding every /Alt the author had written, with
+        # no disclosure. Now the guard actually bounds it and the truncation
+        # is reported so the caller can say so.
+        if depth > truncated["max_depth"]:
+            truncated["max_depth"] = depth
         if depth > 64:
+            truncated["hit"] = True
             return
         el = _resolve(elem)
         if not isinstance(el, DictionaryObject):
@@ -226,7 +238,7 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
         for kid in kids:
             kr = _resolve(kid)
             if isinstance(kr, DictionaryObject) and "/MCID" not in kr and str(kr.get("/Type") or "") != "/OBJR":
-                walk(kr, page)
+                walk(kr, page, depth + 1)
 
     try:
         k = _resolve(st.get("/K"))
@@ -234,7 +246,16 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
         for elem in top:
             walk(elem, None)
     except Exception:
-        return None
+        # The tree EXISTS but could not be walked. Say so, rather than
+        # returning None and letting the parser treat the document as
+        # untagged. An empty-but-marked result keeps the caller honest.
+        return {
+            "headings": [],
+            "figure_alt_by_xobject": {},
+            "tables": [],
+            "lists": [],
+            "struct_tree_unreadable": True,
+        }
 
     # Recover heading text + figure->xobject mapping from marked content.
     needed_pages: Set[int] = set()
@@ -264,9 +285,16 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
             for xname in mc_by_page.get(p, {}).get(m, {}).get("xobjects", set()):
                 figure_alt_by_xobject[xname] = f["alt"]
 
-    return {
+    out: Dict[str, Any] = {
         "headings": headings_out,
         "figure_alt_by_xobject": figure_alt_by_xobject,
         "tables": tables,
         "lists": lists,
     }
+    if truncated["hit"]:
+        # Some of the tree was beyond the depth bound and was NOT read. The
+        # parts we did read are real; the caller must not conclude that
+        # anything absent from them is absent from the document.
+        out["struct_tree_truncated"] = True
+        out["struct_tree_max_depth"] = truncated["max_depth"]
+    return out

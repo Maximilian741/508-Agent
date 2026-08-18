@@ -73,6 +73,15 @@ try:
 except (TypeError, ValueError):
     _MAX_PDF_PAGES = 400
 
+# Decided once per process: is there a vision provider that could ever read
+# inlined image bytes? See _extract_image_bytes call site.
+try:
+    from app.ai.semantic_inference import vision_provider_configured as _vpc
+
+    _WANT_IMAGE_BYTES = bool(_vpc())
+except Exception:  # pragma: no cover - never let the AI module break parsing
+    _WANT_IMAGE_BYTES = True
+
 _HEADING_RE = re.compile(r"^(?P<num>\d+(?:\.\d+){0,5})\s+(?P<text>.+)$")
 _ALL_CAPS_RE = re.compile(r"^[A-Z0-9][A-Z0-9 \-:&,'\".]+$")
 
@@ -675,6 +684,16 @@ class PDFParser:
             struct_info = read_struct_info(reader)
         except Exception:
             struct_info = None
+        # Disclose a structure tree we could not fully read. Downstream, the
+        # UntaggedPdfAnalyzer must NOT flag this document as untagged (it is
+        # tagged; we just could not read all of it), and the report should
+        # say the tags were only partly consulted.
+        # (root.metadata.properties, not the local dict — NodeMetadata copied
+        # the dict when the root was built above; see the pages_truncated fix.)
+        if struct_info and (struct_info.get("struct_tree_unreadable") or struct_info.get("struct_tree_truncated")):
+            root.metadata.properties["struct_tree_partial"] = True
+            if struct_info.get("struct_tree_unreadable"):
+                root.metadata.properties["struct_tree_unreadable"] = True
         tree_alt_by_xobject = (struct_info or {}).get("figure_alt_by_xobject", {})
         struct_headings = (struct_info or {}).get("headings", [])
         struct_tables = (struct_info or {}).get("tables", [])
@@ -848,7 +867,15 @@ class PDFParser:
                     tree_alt = tree_alt_by_xobject.get(str(name).lstrip("/"))
                     if tree_alt:
                         alt_text = tree_alt
-                image_b64, image_mime = _extract_image_bytes(xobject)
+                # Only inline image bytes when a vision provider could read
+                # them. Under the heuristic provider (no AI key, or the free
+                # analyze path in most deployments) nothing consumes them, and
+                # base64-inflating up to 2 MB per image into the tree cost
+                # +94 MB RSS per request on a scan-like PDF.
+                if _WANT_IMAGE_BYTES:
+                    image_b64, image_mime = _extract_image_bytes(xobject)
+                else:
+                    image_b64, image_mime = None, None
                 section.children.append(
                     _build_image_node(
                         node_id=next_id(f"{page_label}-img{image_idx}"),
