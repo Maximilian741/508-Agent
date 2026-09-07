@@ -20,6 +20,7 @@ import { Hero } from "../src/ui/components/Hero";
 import { Pressable } from "react-native";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 import {
   CERT_CREDITS,
   CREDIT_PACKS,
@@ -45,6 +46,10 @@ export default function PricingScreen() {
 
   return (
     <Screen scroll title="Pricing">
+      <Seo
+        title="Pricing — 508 Agent Document Accessibility Remediation"
+        description="Free scans forever. Pay-as-you-go credits from $9 or monthly plans for teams. A fixed, 508-compliant PDF typically costs a fraction of the $5–25 per page manual rate."
+      />
       <Hero
         eyebrow="PRICING"
         title="Honest, transparent pricing."

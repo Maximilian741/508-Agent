@@ -18,8 +18,13 @@ COPY . .
 # into the static bundle. Pass via --build-arg at docker build time.
 ARG EXPO_PUBLIC_API_URL
 ENV EXPO_PUBLIC_API_URL=${EXPO_PUBLIC_API_URL}
+# The public site origin (https://app.example.com). Needed at build time to
+# write an absolute-URL sitemap.xml; without it the sitemap step is skipped.
+ARG PUBLIC_BASE_URL
+ENV PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 
 RUN npx expo export -p web --output-dir dist
+RUN node scripts/generate-sitemap.mjs dist
 
 # ---------- Stage 2: runtime ----------
 FROM nginx:alpine AS runtime

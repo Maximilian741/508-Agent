@@ -2,6 +2,7 @@ import { Stack } from "expo-router";
 import { View } from "react-native";
 
 import { AppNav } from "../src/ui/components/AppNav";
+import { Seo } from "../src/ui/components/Seo";
 import { ErrorBoundary } from "../src/ui/components/ErrorBoundary";
 import { OnboardingTour } from "../src/ui/components/OnboardingTour";
 import { SystemCheckWizard } from "../src/ui/components/SystemCheckWizard";
@@ -25,6 +26,14 @@ export default function RootLayout() {
   const theme = useTheme();
   return (
     <ErrorBoundary>
+      {/* Site-wide default title/description. Helmet-managed, so any route
+          that renders its own <Seo> (landing, audit, pricing, …) REPLACES
+          these in the static export instead of duplicating them. +html.tsx
+          must not set these tags — a raw tag there does not dedupe. */}
+      <Seo
+        title="508 Agent — Automated document accessibility & remediation"
+        description="Automatically find and fix WCAG 2.1, Section 508 & PDF/UA accessibility issues in PDF, Word, PowerPoint, and HTML files — including AI-written alt text — and get a conformance report. First audits free."
+      />
       <View style={{ flex: 1, backgroundColor: theme.colors.bg }}>
         <SkipToContent />
         <AppNav />

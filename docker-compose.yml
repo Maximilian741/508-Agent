@@ -83,6 +83,9 @@ services:
       dockerfile: frontend/frontend/Dockerfile
       args:
         EXPO_PUBLIC_API_URL: ${EXPO_PUBLIC_API_URL:?EXPO_PUBLIC_API_URL is required - the public backend URL the web app calls, e.g. https://api.example.com}
+        # Public site origin for sitemap.xml (SEO). Optional: without it the
+        # build simply skips the sitemap.
+        PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     restart: unless-stopped
     ports:
       - "8080:8080"

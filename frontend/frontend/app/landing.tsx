@@ -15,6 +15,7 @@ import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
 import { ScreenReaderPreview } from "../src/ui/components/ScreenReaderPreview";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 /** Real number of checks, derived from the catalog so it can never drift. */
 const ISSUE_COUNT = CATALOG_ENTRIES.length;
@@ -76,6 +77,10 @@ export default function LandingScreen() {
   const router = useRouter();
   return (
     <Screen scroll>
+      <Seo
+        title="Make PDFs, Word & PowerPoint 508 Compliant — Accessibility Converter | 508 Agent"
+        description="Upload a PDF, Word, PowerPoint or HTML file and convert it into an accessible, Section 508 / WCAG 2.1 / PDF-UA compliant version. Free scan, automated fixes, honest reporting."
+      />
       <Hero
         eyebrow="508 AGENT"
         title="Make every document accessible, and prove it."

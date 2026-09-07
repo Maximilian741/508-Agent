@@ -15,6 +15,7 @@ import { Chip } from "../src/ui/components/Chip";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 export default function AboutScreen() {
   const theme = useTheme();
@@ -22,6 +23,10 @@ export default function AboutScreen() {
 
   return (
     <Screen scroll title="About">
+      <Seo
+        title="About 508 Agent — Honest, Automated Document Accessibility"
+        description="Why we built an accessibility remediation tool that never claims a fix it didn't make, which standards we evaluate, and how your documents are handled."
+      />
       <Hero
         eyebrow="ABOUT"
         title="Built for remediators, not bureaucrats"

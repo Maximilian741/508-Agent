@@ -1,0 +1,24 @@
+# 508 Agent — crawl the public pages, keep private app state out of the index.
+# The Sitemap line is appended at build time by scripts/generate-sitemap.mjs
+# (it needs the deployment's PUBLIC_BASE_URL, which a static file can't know).
+
+User-agent: *
+# Private, per-account app state — nothing useful to index and it would only
+# surface sign-in walls in search results.
+Disallow: /dashboard
+Disallow: /settings
+Disallow: /account
+Disallow: /admin
+Disallow: /billing
+Disallow: /exports
+Disallow: /documents
+Disallow: /monitors
+Disallow: /insights
+Disallow: /team
+Disallow: /achievements
+Disallow: /manual-review
+Disallow: /join
+Disallow: /reset-password
+Disallow: /verify
+
+Allow: /

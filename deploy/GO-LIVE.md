@@ -63,9 +63,12 @@ docker compose exec -T backend python -m app.devtools.verify_live_site \
 Expect `ALL CHECKS PASSED`. Then open `https://yourdomain.com`, sign up, and run
 the in-app **System check** (Dashboard → System check) — it should be all green.
 
-**5. Money test:** buy a Starter pack with Stripe **test** card
-`4242 4242 4242 4242` (in Stripe test mode), confirm your credit balance
-updates, then flip Stripe to live mode.
+**5. Money test:** work through **[`PAYMENTS-CHECKLIST.md`](./PAYMENTS-CHECKLIST.md)**
+top to bottom — it is the literal click-by-click bring-up: test-mode products,
+the webhook (the step everyone gets wrong), the `4242 4242 4242 4242` purchase,
+replay-safety check, subscription + cancel, portal, then the flip to live and
+one real refunded purchase. It also lists what is already machine-verified so
+you don't re-test it, and a symptom→fix table for when something is red.
 
 You're live.
 

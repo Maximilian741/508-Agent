@@ -86,6 +86,7 @@ import { LetterFromCurb } from "../src/ui/components/LetterFromCurb";
 import { UncertaintyChip } from "../src/ui/components/UncertaintyChip";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 const ACCEPTED_FILE_TYPES = [
   ".pdf",
@@ -1181,6 +1182,10 @@ export default function AuditScreen() {
       ) : null}
 
       {/* === Header ============================================================ */}
+      <Seo
+        title="Free Accessibility Checker — Scan a PDF, Word or PowerPoint for 508/WCAG Issues"
+        description="Drop in a document and get every Section 508, WCAG 2.1 and PDF/UA issue in seconds, with plain-English explanations and one-click automated fixes. First scan free, no card."
+      />
       <Hero
         eyebrow="AUDIT"
         title="508 Agent Audit"

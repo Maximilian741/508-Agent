@@ -18,6 +18,7 @@ import { Card } from "../../src/ui/components/Card";
 import { Chip } from "../../src/ui/components/Chip";
 import { Hero } from "../../src/ui/components/Hero";
 import { Screen } from "../../src/ui/components/Screen";
+import { Seo } from "../../src/ui/components/Seo";
 import { useTheme } from "../../src/ui/useTheme";
 
 /**
@@ -68,6 +69,10 @@ export default function ContrastChecker() {
 
   return (
     <Screen scroll title="Contrast checker">
+      <Seo
+        title="Free WCAG Color Contrast Checker — AA/AAA Ratios Side by Side"
+        description="Check any text and background color pair against WCAG 2.1 AA and AAA contrast ratios, with instant pass/fail for normal and large text and accessible alternatives."
+      />
       <Hero
         eyebrow="CONTRAST"
         title="Contrast checker"

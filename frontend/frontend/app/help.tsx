@@ -17,6 +17,7 @@ import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 const SEVERITY_ORDER: IssueCatalogEntry["severity"][] = ["error", "warning", "info"];
 
@@ -85,6 +86,10 @@ export default function HelpScreen() {
 
   return (
     <Screen scroll title="Help & Glossary">
+      <Seo
+        title="Accessibility Rules, in Plain English — WCAG 2.1, Section 508 & PDF/UA Glossary"
+        description="Every check 508 Agent runs, explained for humans: what breaks for screen-reader users, the exact WCAG/508/PDF-UA citation, and how the automated fix works."
+      />
       <Hero
         eyebrow="HELP"
         title="Help & glossary"

@@ -23,6 +23,7 @@ import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 function greetingFor(date: Date): string {
   const h = date.getHours();
@@ -117,6 +118,10 @@ export default function HomeScreen() {
 
   return (
     <Screen scroll title="Home">
+      <Seo
+        title="508 Agent — Document Accessibility Checker & Converter (PDF, Word, PPT)"
+        description="Scan any PDF, Word, PowerPoint or web page for accessibility issues free, then convert it into a 508/WCAG-compliant file with automated, reviewable fixes."
+      />
       {/* === 1. Welcome hero ============================================== */}
       <Hero
         eyebrow="HOME"

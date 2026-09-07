@@ -19,6 +19,7 @@ import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 const SEV_ORDER: Record<string, number> = { error: 0, warning: 1, info: 2 };
 
@@ -121,6 +122,10 @@ export default function ScanUrlScreen() {
 
   return (
     <Screen scroll>
+      <Seo
+        title="Website Accessibility Scanner — Check Any Page for WCAG / 508 Issues Free"
+        description="Enter a URL and get a free WCAG 2.1 / Section 508 accessibility report for that page: contrast, alt text, headings, links and forms, each with a concrete fix."
+      />
       <Hero
         eyebrow="Free tool"
         title="Scan a web page or whole site for accessibility issues"
