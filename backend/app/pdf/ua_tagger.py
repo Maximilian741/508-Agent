@@ -234,22 +234,42 @@ def _block_font_size(block_ops) -> float:
     return size
 
 
-def _heading_levels(sizes: List[float]) -> Dict[float, int]:
+def _heading_levels(sizes: List[float], weights: Optional[List[int]] = None) -> Dict[float, int]:
     """Map block font-size -> heading level (1..6); body-text sizes are absent.
 
-    Body text is taken as the most common block size; sizes meaningfully larger
-    than body are headings (largest -> H1). Returns {} when there is no clear
-    body size (so a page with one size yields only /P, never spurious headings).
+    Body text is the size that carries the most TEXT (sum of characters), and
+    sizes meaningfully larger than body are headings (largest -> H1). Returns
+    {} when there is no clear body size (so a page with one size yields only
+    /P, never spurious headings).
+
+    Weighted by characters, not by block count, on purpose. Counting blocks
+    let a data table decide what "body" was: an 8x10 grid is eighty tiny 8pt
+    blocks against ten 12pt body sentences, so 8pt "won", every 12pt paragraph
+    became /H3, and the output had zero /P — a fabricated outline, credited as
+    a fix. Characters measure where the prose actually is; eighty three-digit
+    cells are ~240 characters against ~800 of body text.
+
+    ``weights[i]`` is the character count of block ``i``; when omitted every
+    block weighs 1 (block-count behaviour, for callers that have no text).
     """
-    real = [round(s, 1) for s in sizes if s and s > 0]
+    real: List[Tuple[float, int]] = []
+    for i, s in enumerate(sizes):
+        if s and s > 0:
+            w = 1
+            if weights is not None and i < len(weights):
+                w = max(1, int(weights[i] or 0))
+            real.append((round(s, 1), w))
     if len(real) < 2:
         return {}
-    counts = Counter(real)
-    top = counts.most_common(1)[0][1]
-    # Body text = the most common size; on a tie (e.g. one title + one body line)
-    # prefer the SMALLER size as body so the larger is recognised as a heading.
-    body = min(s for s, c in counts.items() if c == top)
-    heading_sizes = sorted({s for s in real if s > body * 1.15}, reverse=True)
+    volume: Counter = Counter()
+    for sz, w in real:
+        volume[sz] += w
+    top = max(volume.values())
+    # Body text = the size carrying the most characters; on a tie (e.g. one
+    # title + one body line of equal length) prefer the SMALLER size as body
+    # so the larger is recognised as a heading.
+    body = min(s for s, v in volume.items() if v == top)
+    heading_sizes = sorted({s for s, _w in real if s > body * 1.15}, reverse=True)
     return {s: min(i + 1, 6) for i, s in enumerate(heading_sizes)}
 
 
@@ -1276,6 +1296,7 @@ def _collect_doc_heading_levels(pdf: PdfWriter, pages, artifact_info: tuple) -> 
     """
     text_keys, pagenum_positions = artifact_info
     sizes: List[float] = []
+    weights: List[int] = []
     for page in pages:
         height = _page_height(page)
         try:
@@ -1301,10 +1322,11 @@ def _collect_doc_heading_levels(pdf: PdfWriter, pages, artifact_info: tuple) -> 
                             is_artifact = True
                     if not is_artifact:
                         sizes.append(size)
+                        weights.append(len(_block_text(block).strip()))
                 block = None
             elif block is not None:
                 block.append((operands, op))
-    return _heading_levels(sizes)
+    return _heading_levels(sizes, weights)
 
 
 def _tag_page_elements(
@@ -1431,7 +1453,8 @@ def _tag_page_elements(
         doc_heading_levels
         if doc_heading_levels is not None
         else _heading_levels(
-            [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs]
+            [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
+            [len(_block_text(o).strip()) for i, (k, o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
         )
     )
 
