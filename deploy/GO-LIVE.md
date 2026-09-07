@@ -75,6 +75,14 @@ You're live.
 ---
 
 ## Optional, after launch
+- **Get into Google (do this launch week):** every page already ships its own
+  title, description, structured data, robots.txt and sitemap. What only you
+  can do: go to https://search.google.com/search-console, add your domain as
+  a property (verify via the DNS record Cloudflare makes this one click),
+  then Sitemaps → submit `https://yourdomain.com/sitemap.xml`. Indexing
+  starts in days; ranking for competitive queries ("pdf accessibility
+  checker", "508 converter") builds over weeks and is helped most by other
+  sites linking to you — the free scanner pages are the thing people link to.
 - **OCR for scanned PDFs:** on the server, `apt-get install -y tesseract-ocr`
   and set `OCR_ENABLED=true` (the admin dashboard will show "OCR: Active").
 - **Offsite storage:** set the `S3_*` / `AWS_*` vars to a Cloudflare R2 bucket.
