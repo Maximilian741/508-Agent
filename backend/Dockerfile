@@ -59,4 +59,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # Run migrations before boot. A failed migration MUST abort startup (no
 # `|| true`) rather than silently serving against a stale/half-migrated schema.
-CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]
+# UVICORN_WORKERS: analysis/remediation run synchronously in-request and are
+# CPU-bound, so under load capacity == worker count (measured: on 1 worker, 4
+# concurrent analyses each took 4.1x solo; on 2, 2.1x). 2 is right for a small
+# VPS; on a bigger box set UVICORN_WORKERS toward the core count in .env.
+CMD ["sh", "-c", "alembic -c /app/alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-2}"]
