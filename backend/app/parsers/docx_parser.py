@@ -76,7 +76,7 @@ class DOCXParser:
         prev_level: Optional[int] = None
         skipped_jumps: List[Dict[str, object]] = []
         style_cache: Dict[Any, str] = {}
-        for idx, para in enumerate(doc.paragraphs, start=1):
+        for idx, para in enumerate(iter_body_paragraphs(doc), start=1):
             style_name = paragraph_style_name(para, style_cache)
             if not style_name.lower().startswith("heading"):
                 continue
@@ -105,7 +105,7 @@ class DOCXParser:
         hyperlink_count = 0
         generic_links: List[Dict[str, object]] = []
         invalid_links: List[Dict[str, object]] = []
-        for idx, para in enumerate(doc.paragraphs, start=1):
+        for idx, para in enumerate(iter_body_paragraphs(doc), start=1):
             hyperlink_nodes = list(para._p.iterfind(f".//{w_ns}hyperlink"))
             if not hyperlink_nodes:
                 continue
@@ -130,15 +130,16 @@ class DOCXParser:
                 if invalid_reason:
                     invalid_links.append({"section": idx, "text": link_text, "target": target, "reason": invalid_reason})
 
-        tables = len(doc.tables)
+        tables = len(list(iter_body_tables(doc)))
         tables_missing_headers: List[int] = []
         table_header_scope_flags: List[Dict[str, object]] = []
         generic_headers = {"column", "column 1", "column 2", "header", "n/a", "na", "value"}
-        for table_index, table in enumerate(doc.tables, start=1):
-            if not table.rows:
+        for table_index, table in enumerate(iter_body_tables(doc), start=1):
+            _rows = list(iter_table_rows(table))
+            if not _rows:
                 tables_missing_headers.append(table_index)
                 continue
-            header_cells = table.rows[0].cells
+            header_cells = _rows[0].cells
             header_text = [(cell.text or "").strip() for cell in header_cells]
             if not any(header_text):
                 tables_missing_headers.append(table_index)
@@ -239,7 +240,7 @@ class DOCXParser:
         list_marker: Optional[str] = None
 
         para_style_cache: Dict[Any, str] = {}
-        for paragraph in doc.paragraphs:
+        for paragraph in iter_body_paragraphs(doc):
             style_name = paragraph_style_name(paragraph, para_style_cache)
             text = (paragraph.text or "").strip()
 
@@ -396,7 +397,7 @@ class DOCXParser:
                     )
 
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
-        for table in doc.tables:
+        for table in iter_body_tables(doc):
             body_section.children.append(_table_to_node(table, ids))
 
         # Ensure unique ids.
@@ -404,7 +405,7 @@ class DOCXParser:
             "filename": path.name,
             "title": title,
             "language": language,
-            "table_count": len(doc.tables),
+            "table_count": len(list(iter_body_tables(doc))),
         }
         return ParserResult(
             document_id=path.stem or "doc",
@@ -727,6 +728,67 @@ class _IdCounter:
         i = self._counts.get(prefix, 0) + 1
         self._counts[prefix] = i
         return f"{prefix}-{i}"
+
+
+def _iter_sdt_aware(parent_el, want_tag: str):
+    """Direct children of ``parent_el`` with tag ``want_tag``, in document
+    order, DESCENDING into block-level content controls (w:sdt/w:sdtContent,
+    possibly nested) — and into nothing else.
+
+    Word templates — government forms especially — wrap whole sections,
+    paragraphs and table rows in content controls. python-docx's
+    ``doc.paragraphs`` / ``doc.tables`` / ``table.rows`` read only DIRECT
+    children (``./w:p`` etc.), so everything inside an SDT was invisible: a
+    form built from content controls analyzed with fewer findings than the
+    same document without them, and its fixable issues were never even
+    detected. A manual walk (not ``.iter()``) so we never descend into a
+    nested table's subtree and double-count its paragraphs.
+    """
+    sdt = qn("w:sdt")
+    sdt_content = qn("w:sdtContent")
+    for child in parent_el:
+        tag = getattr(child, "tag", None)
+        if tag == want_tag:
+            yield child
+        elif tag == sdt:
+            content = child.find(sdt_content)
+            if content is not None:
+                yield from _iter_sdt_aware(content, want_tag)
+
+
+def iter_body_paragraphs(doc):
+    """Every body-level Paragraph in document order, SDT-descended.
+
+    The writer's id-pairing indexes MUST iterate with this same helper —
+    parser and writer agree on ``docx-p-N`` ids only because they walk the
+    body identically.
+    """
+    from docx.text.paragraph import Paragraph
+
+    for el in _iter_sdt_aware(doc.element.body, qn("w:p")):
+        yield Paragraph(el, doc._body)  # noqa: SLF001
+
+
+def iter_body_tables(doc):
+    """Every body-level Table in document order, SDT-descended (see above)."""
+    from docx.table import Table
+
+    for el in _iter_sdt_aware(doc.element.body, qn("w:tbl")):
+        yield Table(el, doc._body)  # noqa: SLF001
+
+
+def iter_table_rows(table):
+    """Every row of ``table`` in order, including SDT-wrapped rows.
+
+    ``table.rows`` reads direct ``w:tr`` only; a repeating-section content
+    control wraps its rows in w:sdt and they vanished from analysis. (An
+    SDT-wrapped individual CELL is still out of scope — rare, and cell
+    addressing runs through python-docx's grid logic we don't reimplement.)
+    """
+    from docx.table import _Row
+
+    for tr in _iter_sdt_aware(table._tbl, qn("w:tr")):  # noqa: SLF001
+        yield _Row(tr, table)
 
 
 def paragraph_style_name(paragraph, cache: Dict[Any, str]) -> str:
@@ -1295,7 +1357,7 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
     # grid (>=3 rows, >=2 cols), type row 0 as DATA so TABLE_MISSING_HEADERS can
     # fire. Small/ambiguous tables keep the legacy header assumption to avoid
     # false positives on layout tables.
-    all_rows = list(table.rows)
+    all_rows = list(iter_table_rows(table))
     n_cols = max((len(r.cells) for r in all_rows), default=0)
     looks_like_data_table = len(all_rows) >= 3 and n_cols >= 2
     first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
@@ -1306,7 +1368,7 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
     seen_tc_ids: set = set()
 
     rows: List[TableRowNode] = []
-    for row_index, row in enumerate(table.rows):
+    for row_index, row in enumerate(iter_table_rows(table)):
         cells: List[TableCellNode] = []
         for cell in row.cells:
             text = (cell.text or "").strip()

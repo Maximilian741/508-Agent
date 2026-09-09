@@ -71,6 +71,9 @@ from app.parsers.docx_parser import (
     _note_paragraphs,
     _paragraph_caption_text,
     _run_color_hex,
+    iter_body_paragraphs,
+    iter_body_tables,
+    iter_table_rows,
     paragraph_style_name,
     strip_fake_list_prefix,
 )
@@ -285,7 +288,7 @@ def _index_paragraphs_by_parser_id(doc) -> Dict[str, Any]:
     ids = _IdCounter()
     out: Dict[str, Any] = {}
     style_cache: Dict[Any, str] = {}
-    for paragraph in doc.paragraphs:
+    for paragraph in iter_body_paragraphs(doc):
         style_name = paragraph_style_name(paragraph, style_cache)
         text = (paragraph.text or "").strip()
 
@@ -346,7 +349,7 @@ def _index_image_doc_pr_by_parser_id(doc) -> Dict[str, Any]:
     """
     ids = _IdCounter()
     out: Dict[str, Any] = {}
-    for paragraph in doc.paragraphs:
+    for paragraph in iter_body_paragraphs(doc):
         for drawing in paragraph._p.iterfind(f".//{_DRAWING_NS}*"):  # noqa: SLF001
             blip = drawing.find(f".//{_DRAWINGML_NS}blip")
             if blip is None:
@@ -393,8 +396,8 @@ def _index_table_rows_by_parser_id(doc) -> Dict[str, Any]:
     # tables) then iterates ``doc.tables`` to assign row/cell ids.  Mirror
     # that order: we visit tables top-level, allocating cells then rows
     # exactly like ``_table_to_node`` does.
-    for table in doc.tables:
-        for row in table.rows:
+    for table in iter_body_tables(doc):
+        for row in iter_table_rows(table):
             for _ in row.cells:
                 ids("docx-cell")
             out[ids("docx-row")] = row
@@ -407,8 +410,8 @@ def _index_table_cells_by_parser_id(doc) -> Dict[str, Tuple[Any, Any]]:
 
     ids = _IdCounter()
     out: Dict[str, Tuple[Any, Any]] = {}
-    for table in doc.tables:
-        for row in table.rows:
+    for table in iter_body_tables(doc):
+        for row in iter_table_rows(table):
             for cell in row.cells:
                 out[ids("docx-cell")] = (row, cell)
             ids("docx-row")
@@ -425,8 +428,8 @@ def _index_tables_by_parser_id(doc) -> Dict[str, Any]:
 
     ids = _IdCounter()
     out: Dict[str, Any] = {}
-    for table in doc.tables:
-        for row in table.rows:
+    for table in iter_body_tables(doc):
+        for row in iter_table_rows(table):
             for _ in row.cells:
                 ids("docx-cell")
             ids("docx-row")
@@ -698,7 +701,7 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
             out[f"docx-link-{n}"] = el
 
     style_cache: Dict[Any, str] = {}
-    for para in doc.paragraphs:
+    for para in iter_body_paragraphs(doc):
         style_name = paragraph_style_name(para, style_cache)
         if _heading_level_from_style(style_name):
             continue  # parser's heading branch short-circuits before links
@@ -707,9 +710,9 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
             continue  # list paragraphs likewise never reach link emission
         take(para._p)
 
-    for table in doc.tables:
+    for table in iter_body_tables(doc):
         seen_tc: set = set()
-        for row in table.rows:
+        for row in iter_table_rows(table):
             for cell in row.cells:
                 tc_key = id(cell._tc)
                 if tc_key in seen_tc:
