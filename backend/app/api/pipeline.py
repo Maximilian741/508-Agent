@@ -71,6 +71,7 @@ from app.api.credits import (
     DOC_FORMAT_COSTS,
     InsufficientCreditsError,
     spend_credits_for_user,
+    spend_credits_once_for_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -783,7 +784,9 @@ def _charge_credits(user_id: str, doc_format: str, doc_id: str | None = None) ->
     try:
         from app.api.stripe_billing import ensure_balance_for
 
-        ensure_balance_for(target_id, cost)
+        # actor_id: only the wallet owner or a team admin may trigger an
+        # off-session overage charge on the owner's card — never a plain member.
+        ensure_balance_for(target_id, cost, actor_id=user_id)
     except Exception:
         pass
     try:
@@ -834,7 +837,7 @@ def _precheck_credits(user_id: str, doc_format: str) -> int:
         try:
             from app.api.stripe_billing import _overage_eligible
 
-            if _overage_eligible(target_id):
+            if _overage_eligible(target_id, actor_id=user_id):
                 return cost
         except Exception:
             pass
@@ -1090,6 +1093,51 @@ async def remediate(
                     )
     except Exception:
         pass
+
+    # TAG_PDF_STRUCTURE is writer-confirmed: the executor only records the
+    # request, and the writer can still build no tree (no taggable page, a
+    # tagger failure). Then the approved fix did not land — the note must not
+    # promise a structure tree, and _count_persisted_fixes has already left it
+    # uncounted and uncharged.
+    if fmt == "pdf":
+        _tag_confirmed = {
+            a.get("target_id")
+            for a in (_applied if isinstance(_applied, list) else [])
+            if isinstance(a, dict) and a.get("action") == ActionCode.TAG_PDF_STRUCTURE.value
+        }
+        for _e in executions:
+            if (
+                _e.action_code == ActionCode.TAG_PDF_STRUCTURE
+                and _e.status == ExecutionStatus.SUCCESS
+                and _e.target_node_id not in _tag_confirmed
+            ):
+                _e.status = ExecutionStatus.SKIPPED
+                _e.notes = (
+                    "The structure tree could not be written into this file, so it is still "
+                    "untagged. This fix was not applied and you were not charged for it."
+                )
+
+    # Not charged must mean not changed. With no persisted fix the run is free,
+    # so it may deliver nothing: writers re-serialize and re-assert metadata
+    # even when nothing was approved, and the PDF writer used to tag every file
+    # — approved_violations=[] returned the 5-credit tagged PDF, uncharged and
+    # byte-identical to the paid run. Hand back the uploaded bytes instead.
+    if persisted_fixes == 0:
+        try:
+            shutil.copyfile(str(source_path), str(output_path))
+        except Exception as exc:
+            logger.exception("remediate: could not restore the source bytes: %s", exc)
+            _cleanup_job_dir(job_dir)
+            raise HTTPException(
+                status_code=422,
+                detail="Failed to write the remediated file. You were not charged.",
+            )
+        write_result = {
+            "applied": [],
+            "skipped": [s for s in (_skipped if isinstance(_skipped, list) else []) if isinstance(s, dict)]
+            + [{"target_id": "document", "reason": "no_approved_fix_persisted: the original file is returned unchanged"}],
+        }
+
     charged = False
     client_gone = False
     if persisted_fixes > 0:
@@ -1205,6 +1253,77 @@ async def remediate(
     return response_meta
 
 
+def _collect_deferred_charge(job_id: str, meta_path: Path, meta: Dict[str, Any]) -> None:
+    """Take a chargePending job's deferred credit exactly once, or raise.
+
+    /remediate defers the debit when the client left before the response, so
+    nobody pays for a file they never received; the credit is then owed on
+    first delivery, by GET /pipeline/files OR POST /pipeline/batch-zip.
+
+    Exactly once across requests and worker processes: the debit goes through
+    ``spend_credits_once_for_user`` keyed on the job id, which records the key
+    in the ledger in the same transaction as the debit. The manifest flag is
+    only a fast path. It used to be the guard, and 10 concurrent downloads of
+    one job all read chargePending=true before any wrote it back: 10 debits for
+    one file. Failure order:
+      * the debit fails (402): nothing is recorded, the flag stays set and the
+        file is withheld — top up and download later; never free, never stuck;
+      * the debit commits but the manifest write fails, or the worker dies:
+        the ledger row already carries the key, so the next delivery finds it
+        and does not charge again.
+    """
+    if not (meta or {}).get("chargePending"):
+        return
+    owner = str(meta.get("userId") or "")
+    fmt = str(meta.get("sourceFormat") or "").lstrip(".").lower()
+    if not owner or not fmt:
+        # A pending charge nobody can be billed for: withhold, don't give away.
+        raise HTTPException(status_code=404, detail="file_not_found")
+    cost = DOC_FORMAT_COSTS.get(fmt) or 5
+    # Team members draw on the team owner's shared wallet, as _charge_credits does.
+    try:
+        from app.api.teams import resolve_credit_user_id
+
+        wallet_id = resolve_credit_user_id(owner)
+    except Exception:
+        wallet_id = owner
+    key = f"pipeline-job:{job_id}"
+    try:
+        try:
+            spend_credits_once_for_user(wallet_id, cost, f"remediate_{fmt}", idempotency_key=key)
+        except InsufficientCreditsError:
+            # Short: an overage subscriber gets the usual auto top-up, then one
+            # retry. Tried AFTER the idempotent spend, so a job that is already
+            # paid can never trigger a top-up purchase.
+            try:
+                from app.api.stripe_billing import ensure_balance_for
+
+                # The payer of a deferred charge is the job's owner (the signed
+                # download has no session), so the owner is the actor: a plain
+                # team member's job can't trigger overage on the team owner's card.
+                ensure_balance_for(wallet_id, cost, actor_id=owner)
+            except Exception:
+                pass
+            spend_credits_once_for_user(wallet_id, cost, f"remediate_{fmt}", idempotency_key=key)
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=402, detail="Insufficient credits")
+
+    meta["chargePending"] = False
+    meta["charged"] = True
+    meta.setdefault("chargedAtDownload", datetime.now(timezone.utc).isoformat())
+    tmp = meta_path.with_name(f"meta.json.{uuid.uuid4().hex}.tmp")
+    try:
+        # Atomic replace: a concurrent reader never sees a torn manifest.
+        tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        tmp.replace(meta_path)
+    except Exception:
+        logger.exception("could not persist deferred-charge flag for job %s", job_id)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 class BatchZipJob(BaseModel):
     model_config = ConfigDict(extra="forbid")
     jobId: str
@@ -1224,11 +1343,19 @@ async def batch_zip(
 ):
     """Bundle several remediated files into a single ZIP download.
 
-    Each job must be one the caller produced via /pipeline/remediate. We
-    validate that the job directory + file exist and — when CF Access
-    recorded an owner on the job's meta.json — that it matches the requester,
-    mirroring the per-file download authz. Jobs that don't validate are
-    silently skipped; a ZIP with at least one file streams, else 404.
+    Each job must be one the CALLER produced via /pipeline/remediate: its
+    manifest's userId must equal the caller, the same scoping GET
+    /pipeline/jobs (where these ids come from) applies. Another tenant's job,
+    a job with no readable manifest, or a name that isn't the job's recorded
+    artifact is treated as not found and skipped. This route used to check
+    only ``ownerEmail`` — empty unless Cloudflare Access is on — so any
+    signed-in account could zip another tenant's file, or its meta.json, with
+    no signature.
+
+    A chargePending job's deferred credit is taken here exactly as GET
+    /pipeline/files takes it (``_collect_deferred_charge``); a job the wallet
+    can't cover is left out. A ZIP with at least one file streams; otherwise
+    402 when payment was the only obstacle, else 404.
     """
     import io
     import zipfile
@@ -1248,6 +1375,7 @@ async def batch_zip(
 
     buf = io.BytesIO()
     added = 0
+    unpaid = 0
     used_names: set = set()
     seen_jobs: set = set()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1260,20 +1388,32 @@ async def batch_zip(
                 continue  # exact-duplicate job passed twice — bundle once
             seen_jobs.add((safe_id, safe_name))
             job_dir = settings.materialized_root / "pipeline" / safe_id
-            target = job_dir / safe_name
-            if not target.exists():
-                continue
             meta_path = job_dir / "meta.json"
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                except Exception:
-                    meta = {}
-                owner_email = (meta or {}).get("ownerEmail")
-                if owner_email and (
-                    not requester_email or requester_email.lower() != str(owner_email).lower()
-                ):
-                    continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue  # no manifest, no owner on record: fail closed
+            if not isinstance(meta, dict) or str(meta.get("userId") or "") != user_id:
+                continue
+            owner_email = meta.get("ownerEmail")
+            if owner_email and (
+                not requester_email or requester_email.lower() != str(owner_email).lower()
+            ):
+                continue
+            # Only the job's recorded artifact — never meta.json or the upload.
+            if safe_name != str(meta.get("filename") or ""):
+                continue
+            try:
+                data = (job_dir / safe_name).read_bytes()
+            except Exception:
+                continue
+            # Bytes in hand first, then the deferred debit (if one is owed).
+            try:
+                _collect_deferred_charge(safe_id, meta_path, meta)
+            except HTTPException as exc:
+                if exc.status_code == 402:
+                    unpaid += 1
+                continue
             # De-duplicate names inside the archive (two "report-remediated.pdf").
             arc = safe_name
             n = 1
@@ -1281,13 +1421,12 @@ async def batch_zip(
                 arc = f"{Path(safe_name).stem} ({n}){Path(safe_name).suffix}"
                 n += 1
             used_names.add(arc)
-            try:
-                zf.write(str(target), arcname=arc)
-                added += 1
-            except Exception:
-                continue
+            zf.writestr(arc, data)
+            added += 1
 
     if added == 0:
+        if unpaid:
+            raise HTTPException(status_code=402, detail="Insufficient credits")
         raise HTTPException(status_code=404, detail="no_files_available")
     buf.seek(0)
     return StreamingResponse(
@@ -1429,25 +1568,12 @@ async def download_remediated_file(
 
         # Deferred debit: the client disconnected before /remediate could
         # charge, so the credit is taken here, on the first successful
-        # download, and the manifest is flipped so it is taken exactly once.
+        # download — exactly once even when downloads race, because the
+        # ledger (not this manifest) is the guard; see _collect_deferred_charge.
         # If the wallet is now empty the file is withheld with a 402 — the
         # user still has not paid for anything they did not receive.
-        if (meta or {}).get("chargePending"):
-            deferred_user = str((meta or {}).get("userId") or "")
-            deferred_fmt = str((meta or {}).get("sourceFormat") or "")
-            if deferred_user and deferred_fmt:
-                _charge_credits(
-                    user_id=deferred_user,
-                    doc_format=deferred_fmt,
-                    doc_id=(meta or {}).get("documentId"),
-                )
-                meta["chargePending"] = False
-                meta["charged"] = True
-                meta["chargedAtDownload"] = datetime.now(timezone.utc).isoformat()
-                try:
-                    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-                except Exception:
-                    logger.exception("could not persist deferred-charge flag for job %s", safe_id)
+        if isinstance(meta, dict):
+            _collect_deferred_charge(safe_id, meta_path, meta)
 
     # Audit log: record the download.
     try:
@@ -1573,8 +1699,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         # The writer reconstructs a full structure tree (headings, lists,
-        # tables, figures, artifacts + MarkInfo/ParentTree/XMP) on every
-        # untagged PDF — verified by smoke_pdf_structure/-artifacts/-ruling.
+        # tables, figures, artifacts + MarkInfo/ParentTree/XMP) on an untagged
+        # PDF when — and only when — this fix is approved. Writer-confirmed
+        # (see _WRITER_CONFIRMED_ACTIONS) — verified by smoke_pdf_structure/
+        # -artifacts/-ruling and smoke_remediate_only_approved.
         "TAG_PDF_STRUCTURE",
         # Invisible OCR text layer on scanned pages. The executor only
         # succeeds when an OCR provider is actually available, so counting
@@ -1639,7 +1767,11 @@ def _action_persists(action_code: str, source_format: str) -> bool:
 #   - FIX_CONTRAST: only appended on a real recolour of a resolved element.
 #   - GENERATE_TABLE_CAPTION: only appended when a <caption> was actually
 #     inserted (guarded by ``find("caption") is None`` + a resolved table).
-_WRITER_CONFIRMED_ACTIONS = {"FIX_CONTRAST", "GENERATE_TABLE_CAPTION"}
+#   - TAG_PDF_STRUCTURE: the executor only records the request; the PDF writer
+#     marks its struct_tree entry with the action (keyed to the document root)
+#     only when a structure tree was really written. No taggable page, or a
+#     tagger failure, means no tree — and nothing counted or charged.
+_WRITER_CONFIRMED_ACTIONS = {"FIX_CONTRAST", "GENERATE_TABLE_CAPTION", "TAG_PDF_STRUCTURE"}
 
 
 def _count_persisted_fixes(executions, applied, source_format: str) -> int:

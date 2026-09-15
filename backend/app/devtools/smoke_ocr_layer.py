@@ -8,9 +8,11 @@ Tesseract adapter is a thin wrapper; deployments without it degrade):
 
   - OCR OFF: executor SKIPPED with an honest note; output unchanged; the
     scanned flag persists on re-parse (nothing silently claimed).
-  - OCR ON (stub): executor SUCCESS; output text extractable ("ANNUAL
-    REPORT…"); overlay stream uses 3 Tr (invisible); re-parse shows the
-    SCANNED flag GONE and pdf_tagged True (tagger ran on the new text).
+  - OCR ON (stub), only the OCR fix approved: executor SUCCESS; output text
+    extractable ("ANNUAL REPORT…"); overlay stream uses 3 Tr (invisible);
+    re-parse shows the SCANNED flag GONE and pdf_tagged True (the tagger ran
+    on the new text as part of the OCR fix — a scan has no separate
+    PDF_UNTAGGED finding to approve).
 
 Usage:
     python -m app.devtools.smoke_ocr_layer
@@ -153,7 +155,13 @@ def main() -> int:
     try:
         res2 = parse_to_tree(str(src))
         run_analyzers(res2.tree)
+        # Only the OCR fix is approved. A scan carries no PDF_UNTAGGED finding
+        # of its own, so the writer structures the recognized text as part of
+        # the OCR fix — while an approve-nothing PDF is never tagged
+        # (smoke_remediate_only_approved).
         plans2 = [p for p in plan_remediations(res2.tree, APPLY) if p.flag.code.value == FLAG]
+        check("a scan offers no separate PDF_UNTAGGED fix (OCR is the only route to tagging)",
+              not any(p.flag.code.value == "PDF_UNTAGGED" for p in plan_remediations(res2.tree, APPLY)))
         execs2 = execute_plans(res2.tree, plans2)
         ocr2 = [e for e in execs2 if e.action_code.value == "ADD_OCR_TEXT_LAYER"]
         check(

@@ -145,6 +145,9 @@ def main() -> int:
         n.alt_text = f"Approved description for page {n.metadata.page}"
         n.is_decorative = False
 
+    # Stands in for an approved TAG_PDF_STRUCTURE: the writer tags only on request.
+    res.tree.root.metadata.properties = dict(res.tree.root.metadata.properties or {})
+    res.tree.root.metadata.properties["tag_structure_requested"] = True
     rep = write_remediated_pdf(src, res.tree, out)
     alt_apps = [a for a in rep.get("applied", []) if a.get("kind") == "alt_text"]
     check("writer reports exactly one alt application per page (3)", len(alt_apps) == 3, str(alt_apps))

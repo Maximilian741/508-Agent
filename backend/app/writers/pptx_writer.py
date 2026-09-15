@@ -573,6 +573,9 @@ def _apply_document_metadata(
     """Sync ``DocumentNode`` metadata (title, language) onto core properties."""
 
     core = prs.core_properties
+    # Read before anything is written: the parser takes the deck language from
+    # core_properties.language, so equal means no language fix was applied.
+    source_language = (getattr(core, "language", None) or "").strip()
 
     title = ""
     if root.metadata.properties:
@@ -593,7 +596,10 @@ def _apply_document_metadata(
             )
 
     language = (root.metadata.language or "").strip()
-    if language:
+    # Only a CHANGED language is written. Re-asserting the source's own value
+    # stamped a:rPr@lang onto every run of decks where nobody approved a
+    # language fix (SET_DOCUMENT_LANGUAGE runs only when the deck has none).
+    if language and language != source_language:
         try:
             core.language = language
             applied.append(

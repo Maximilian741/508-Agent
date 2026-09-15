@@ -202,48 +202,66 @@ def write_remediated_pdf(
     # ------- 4. Basic PDF/UA structure tree + document metadata --------
     # Turns an untagged PDF into a tagged one (MarkInfo, StructTreeRoot,
     # DisplayDocTitle, XMP). Fidelity-preserving and never corrupts.
-    try:
-        ua_report = tag_pdf(writer, tree)
-        for kind in ua_report.get("applied", []):
-            applied.append({"kind": f"pdfua_{kind}", "target_id": "document", "summary": kind})
-        if not ua_report.get("structTree"):
-            skipped.append({"target_id": "document", "reason": "pdfua_struct_tree_skipped"})
-        # Surface WHAT the tagger actually did. These counts were previously
-        # computed and thrown away, so a user could not tell whether their
-        # tables were handled — and "tagged" silently read as "all of them".
-        # tablesDeclined is the honest counterpart: grids we deliberately did
-        # NOT tag because we weren't sure they were data.
-        pdfua_summary = {
-            k: ua_report.get(k, 0)
-            for k in (
-                "pages", "elements", "figures", "lists", "tables", "tablesDeclined",
-                "links", "formWidgets", "artifacts", "readingOrderFixedPages",
-                "perElementPages", "pagesPageLevelOnly",
-            )
-        }
-        if ua_report.get("tablesDeclined"):
-            skipped.append({
-                "target_id": "document",
-                "reason": (
-                    f"pdfua_tables_declined: {ua_report['tablesDeclined']} table-like "
-                    "grid(s) were too sparse to tag confidently — check them by hand"
-                ),
-            })
-        # Pages we could only wrap as one page-level block (unparseable or
-        # malformed content stream). They are valid and tagged, but carry no
-        # headings, lists or tables — so counting them alongside fully
-        # structured pages would overstate the result.
-        if ua_report.get("pagesPageLevelOnly"):
-            skipped.append({
-                "target_id": "document",
-                "reason": (
-                    f"pdfua_page_level_only: {ua_report['pagesPageLevelOnly']} page(s) "
-                    "could not be broken into elements — they are tagged, but their "
-                    "headings, lists and tables were not identified"
-                ),
-            })
-    except Exception as exc:
-        skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
+    #
+    # ONLY as part of an approved (and charged) fix. This used to run on every
+    # PDF whatever was approved: send approved_violations=[] and the download
+    # came back fully tagged and uncharged — byte-identical to the 5-credit run.
+    #   * TAG_PDF_STRUCTURE approved: its executor recorded the request.
+    #   * ADD_OCR_TEXT_LAYER wrote a text layer in THIS run: a scanned page
+    #     carries no PDF_UNTAGGED finding of its own (there is no text to tag
+    #     until OCR adds it), so structuring the recognized text is part of the
+    #     OCR fix. Skip it and the OCR'd scan re-analyses with a "new"
+    #     PDF_UNTAGGED after "fix everything".
+    _ocr_written = any(a.get("kind") == "ocr_text_layer" for a in applied)
+    if (tree.root.metadata.properties or {}).get("tag_structure_requested") or _ocr_written:
+        try:
+            ua_report = tag_pdf(writer, tree)
+            for kind in ua_report.get("applied", []):
+                entry = {"kind": f"pdfua_{kind}", "target_id": "document", "summary": kind}
+                if kind == "struct_tree":
+                    # The writer's confirmation that the approved fix landed.
+                    # TAG_PDF_STRUCTURE is writer-confirmed in the pipeline's
+                    # charge gate: no tree written, nothing counted or charged.
+                    entry.update({"action": "TAG_PDF_STRUCTURE", "target_id": tree.root.id})
+                applied.append(entry)
+            if not ua_report.get("structTree"):
+                skipped.append({"target_id": "document", "reason": "pdfua_struct_tree_skipped"})
+            # Surface WHAT the tagger actually did. These counts were previously
+            # computed and thrown away, so a user could not tell whether their
+            # tables were handled — and "tagged" silently read as "all of them".
+            # tablesDeclined is the honest counterpart: grids we deliberately did
+            # NOT tag because we weren't sure they were data.
+            pdfua_summary = {
+                k: ua_report.get(k, 0)
+                for k in (
+                    "pages", "elements", "figures", "lists", "tables", "tablesDeclined",
+                    "links", "formWidgets", "artifacts", "readingOrderFixedPages",
+                    "perElementPages", "pagesPageLevelOnly",
+                )
+            }
+            if ua_report.get("tablesDeclined"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        f"pdfua_tables_declined: {ua_report['tablesDeclined']} table-like "
+                        "grid(s) were too sparse to tag confidently — check them by hand"
+                    ),
+                })
+            # Pages we could only wrap as one page-level block (unparseable or
+            # malformed content stream). They are valid and tagged, but carry no
+            # headings, lists or tables — so counting them alongside fully
+            # structured pages would overstate the result.
+            if ua_report.get("pagesPageLevelOnly"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        f"pdfua_page_level_only: {ua_report['pagesPageLevelOnly']} page(s) "
+                        "could not be broken into elements — they are tagged, but their "
+                        "headings, lists and tables were not identified"
+                    ),
+                })
+        except Exception as exc:
+            skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
 
     try:
         with open(output_path, "wb") as fh:

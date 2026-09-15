@@ -63,6 +63,7 @@ from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
     _derive_sdt_label,
+    _docx_default_lang,
     _docx_theme_colors,
     _heading_level_from_style,
     _iter_note_parts,
@@ -487,7 +488,17 @@ def _apply_document_metadata(
     core = doc.core_properties
 
     language = (root.metadata.language or "").strip()
-    if language:
+    # Write the language only when it CHANGED from what the source already
+    # declares — dc:language, else the styles.xml w:lang default, the parser's
+    # own order. Re-asserting it copied a w:lang-derived "en-US" into
+    # dc:language on documents where nobody approved a language fix, so an
+    # approve-nothing download came back altered. SET_DOCUMENT_LANGUAGE only
+    # runs when the source declares none, so a real fix always differs.
+    try:
+        source_language = (getattr(core, "language", None) or "").strip() or (_docx_default_lang(doc) or "")
+    except Exception:  # pragma: no cover - defensive
+        source_language = ""
+    if language and language != source_language.strip():
         try:
             core.language = language
             applied.append(

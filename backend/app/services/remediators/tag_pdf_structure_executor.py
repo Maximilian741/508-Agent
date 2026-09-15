@@ -1,12 +1,14 @@
 """Executor for TAG_PDF_STRUCTURE (untagged PDFs).
 
 The actual work — reconstructing the structure tree from the content stream —
-happens in the PDF writer (`app.pdf.ua_tagger.tag_pdf`), which runs on every
-PDF during `write_remediated`. This executor's job is to make that repair an
-explicit, APPROVABLE action in the review queue and to mark the in-memory
-intent so the score honestly credits a fix that genuinely persists: the
-written file carries /StructTreeRoot + /MarkInfo, and re-analysing the output
-no longer raises PDF_UNTAGGED (the parser records `pdf_tagged=True`).
+happens in the PDF writer (`app.pdf.ua_tagger.tag_pdf`) during
+`write_remediated`, and ONLY when this executor recorded
+`tag_structure_requested`. That flag is the approval: without it the writer
+does not tag (it used to tag every PDF, so approving nothing got the 5-credit
+product free). The writer confirms a tree was actually built in its `applied`
+list, and the pipeline counts and charges the fix only on that confirmation:
+the written file carries /StructTreeRoot + /MarkInfo, and re-analysing the
+output no longer raises PDF_UNTAGGED (the parser records `pdf_tagged=True`).
 """
 
 from __future__ import annotations
