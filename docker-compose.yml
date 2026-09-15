@@ -80,8 +80,10 @@ services:
 
   frontend:
     build:
-      context: .
-      dockerfile: frontend/frontend/Dockerfile
+      # Must be the frontend directory: its Dockerfile copies package.json and
+      # the app source from the context root (the repo root has neither).
+      context: ./frontend/frontend
+      dockerfile: Dockerfile
       args:
         EXPO_PUBLIC_API_URL: ${EXPO_PUBLIC_API_URL:?EXPO_PUBLIC_API_URL is required - the public backend URL the web app calls, e.g. https://api.example.com}
         # Public site origin for sitemap.xml (SEO). Optional: without it the

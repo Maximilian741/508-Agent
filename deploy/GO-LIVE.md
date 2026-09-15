@@ -44,8 +44,10 @@ bash deploy/bootstrap.sh
 ```
 The values to fill in `.env` (the script generates secrets + starts everything):
 - `EXPO_PUBLIC_API_URL=https://api.yourdomain.com`
-- `PUBLIC_BASE_URL=https://yourdomain.com`
-- `CORS_ALLOW_ORIGINS=https://yourdomain.com`
+- `PUBLIC_BASE_URL=https://app.yourdomain.com`  *(the app's address from step 1 — Stripe
+  receipts, password resets, invites and certificate links all point here)*
+- `CORS_ALLOW_ORIGINS=https://app.yourdomain.com`  *(must match exactly, or every page
+  loads but can't talk to the API)*
 - `ADMIN_EMAILS=you@yourdomain.com`  *(so you can reach `/admin`)*
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, the 7 `STRIPE_PRICE_*`
 - `SMTP_*` (from your email sender)
@@ -60,8 +62,12 @@ images, runs DB migrations on boot, and waits until the backend is healthy.
 docker compose exec -T backend python -m app.devtools.verify_live_site \
   --api-url https://api.yourdomain.com
 ```
-Expect `ALL CHECKS PASSED`. Then open `https://yourdomain.com`, sign up, and run
+Expect `ALL CHECKS PASSED`. Then open `https://app.yourdomain.com`, sign up, and run
 the in-app **System check** (Dashboard → System check) — it should be all green.
+
+People will also type the bare `yourdomain.com`. In Cloudflare → Rules →
+Redirect Rules, add one: *hostname equals `yourdomain.com`* → dynamic redirect to
+`concat("https://app.yourdomain.com", http.request.uri.path)`, status 301.
 
 **5. Money test:** work through **[`PAYMENTS-CHECKLIST.md`](./PAYMENTS-CHECKLIST.md)**
 top to bottom — it is the literal click-by-click bring-up: test-mode products,
@@ -79,7 +85,7 @@ You're live.
   title, description, structured data, robots.txt and sitemap. What only you
   can do: go to https://search.google.com/search-console, add your domain as
   a property (verify via the DNS record Cloudflare makes this one click),
-  then Sitemaps → submit `https://yourdomain.com/sitemap.xml`. Indexing
+  then Sitemaps → submit `https://app.yourdomain.com/sitemap.xml`. Indexing
   starts in days; ranking for competitive queries ("pdf accessibility
   checker", "508 converter") builds over weeks and is helped most by other
   sites linking to you — the free scanner pages are the thing people link to.

@@ -16,6 +16,7 @@ import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 import { Seo } from "../src/ui/components/Seo";
+import { linkProps } from "../src/ui/components/linkProps";
 
 export default function AboutScreen() {
   const theme = useTheme();
@@ -84,7 +85,7 @@ export default function AboutScreen() {
         <View style={styles.trustGrid}>
           <TrustClaim label="TLS 1.3 everywhere" body="All managed-mode traffic is TLS 1.3, terminated at Cloudflare's edge in front of the backend." />
           <TrustClaim label="HMAC-signed download URLs" body="Remediated-file URLs are signed with a 1-hour TTL. Tampering or expiry returns 403/410." />
-          <TrustClaim label="Strict CSP / HSTS / X-Frame-Options DENY" body="Set on every response by SecurityHeadersMiddleware. No inline scripts; no third-party origins." />
+          <TrustClaim label="Strict CSP / HSTS / X-Frame-Options DENY" body="Set on every API response by SecurityHeadersMiddleware and on every page by the web server. The only inline script is a one-line bootstrap pinned by hash; no third-party origins." />
           <TrustClaim label="No third-party analytics" body="Zero pixel trackers. Zero ad networks. Zero feature-flag SDKs phoning home." />
           <TrustClaim label="Source-available" body="Read the code that handles your documents in the GitHub repository." />
         </View>
@@ -150,19 +151,19 @@ export default function AboutScreen() {
         <View style={[styles.standardsRow, { marginTop: 8 }]}>
           {/* No accessibilityLabel — the chip text below is already the label.
               "Go to admin" replaced the words the user can see and say. */}
-          <Pressable accessibilityRole="button" onPress={() => router.push("/admin" as any)}>
+          <Pressable {...linkProps("/admin")}>
             <Chip label="Admins: open Admin screen" tone="info" />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Email privacy@508-agent.app" onPress={() => Linking.openURL("mailto:privacy@508-agent.app")}>
             <Chip label="Email privacy@508-agent.app" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" onPress={() => router.push("/security" as any)}>
+          <Pressable {...linkProps("/security")}>
             <Chip label="Read the Security page" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Read the privacy policy" onPress={() => router.push("/privacy" as any)}>
+          <Pressable accessibilityLabel="Read the privacy policy" {...linkProps("/privacy")}>
             <Chip label="Privacy policy" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Read the terms of service" onPress={() => router.push("/terms" as any)}>
+          <Pressable accessibilityLabel="Read the terms of service" {...linkProps("/terms")}>
             <Chip label="Terms of service" tone="default" />
           </Pressable>
         </View>
