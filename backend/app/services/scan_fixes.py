@@ -84,23 +84,14 @@ _CONTENT_GUESS_ACTIONS = {
 def _offline_dispatcher():
     """Executors wired to a forced OFFLINE (heuristic) inference client.
 
-    Second AI gate — see the module docstring. Any executor that takes a
-    ``client`` gets a heuristic-only one, so a free scan cannot reach a paid
-    provider even if an action's ``requires_ai`` flag says it doesn't need AI.
+    Second AI gate — see the module docstring. ``get_offline_executors`` hands
+    every executor one heuristic-only client, so a free scan cannot reach a
+    paid provider even if an action's ``requires_ai`` flag says it doesn't
+    need AI, and no paid client is ever constructed.
     """
-    from app.ai.semantic_inference import HeuristicProvider, SemanticInferenceClient
-    from app.services.remediators.registry import RemediationDispatcher, get_default_executors
+    from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
 
-    offline = SemanticInferenceClient(provider=HeuristicProvider())
-    executors = []
-    for ex in get_default_executors():
-        if hasattr(ex, "_client"):
-            try:
-                ex._client = offline  # noqa: SLF001 - deliberate offline pin
-            except Exception:
-                pass
-        executors.append(ex)
-    return RemediationDispatcher(executors)
+    return RemediationDispatcher(get_offline_executors())
 
 
 def _snippet(el: Any) -> Optional[str]:

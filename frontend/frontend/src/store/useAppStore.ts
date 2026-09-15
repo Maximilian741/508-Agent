@@ -2,8 +2,6 @@ import { create } from "zustand";
 
 import {
     ApiClient,
-    ApplyFixesResponse,
-    FinalizeResponse,
     DocumentDiffResponse,
     DocumentSummary,
     DocumentIssue,
@@ -17,7 +15,6 @@ import {
     ManualReviewItem,
     PolicyDetail,
     PolicySummary,
-    RemediateRequest,
     ScanRequest,
     ScanResponse,
     TagTreeResponse,
@@ -66,11 +63,8 @@ interface AppState {
     selectedPolicyId: string | null;
     jobScoresByJobId: Record<string, JobScorePass[]>;
     evidenceBundlesByDocId: Record<string, EvidenceBundleSummary[]>;
-    finalizedPathByDocId: Record<string, string>;
-    readyToFinalizeByDocId: Record<string, boolean>;
     isExportingBundle: boolean;
     exportError?: string;
-    isFinalizing: boolean;
     isScanning: boolean;
     isUploading: boolean;
     /**
@@ -115,12 +109,9 @@ interface AppState {
         docId?: string,
     ) => Promise<RunResult<ManualReviewItem>>;
     runScan: (request: ScanRequest) => Promise<RunResult<ScanResponse>>;
-    runRemediate: (request: RemediateRequest) => Promise<RunResult<ExecutionResult[]>>;
     uploadDocument: (file: File) => Promise<RunResult<UploadResponse>>;
     runDocumentScan: (docId: string) => Promise<RunResult<{ jobId: string }>>;
-    applyDocumentFixes: (docId: string) => Promise<RunResult<ApplyFixesResponse>>;
     fetchDocumentIssues: (docId: string) => Promise<RunResult<DocumentIssue[]>>;
-    finalizeDocument: (docId: string) => Promise<RunResult<FinalizeResponse>>;
     fetchDocumentDiff: (docId: string) => Promise<RunResult<DocumentDiffResponse>>;
     fetchDocumentSummary: (docId: string) => Promise<RunResult<DocumentSummary>>;
     fetchTagTree: (docId: string) => Promise<RunResult<TagTreeResponse>>;
@@ -337,11 +328,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     selectedPolicyId: readStoredSelectedPolicyId(),
     jobScoresByJobId: {},
     evidenceBundlesByDocId: {},
-    finalizedPathByDocId: {},
-    readyToFinalizeByDocId: {},
     isExportingBundle: false,
     exportError: undefined,
-    isFinalizing: false,
     isScanning: false,
     isUploading: false,
     freeScansUsed: readStoredFreeScansUsed(),
@@ -462,17 +450,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         try {
             const item = await client.updateManualReview(itemId, payload);
             const refreshed = await client.manualReview(docId);
-            const resolvedDocId = (item.docId || docId || "").toString();
-            set((state) => ({
+            set({
                 manualReviewQueue: refreshed,
                 manualReviewLastFetched: new Date().toISOString(),
-                readyToFinalizeByDocId: resolvedDocId
-                    ? {
-                          ...state.readyToFinalizeByDocId,
-                          [resolvedDocId]: Boolean(item.readyToFinalize),
-                      }
-                    : state.readyToFinalizeByDocId,
-            }));
+            });
             return { ok: true, data: item };
         } catch (error) {
             return { ok: false, error: (error as Error).message };
@@ -490,15 +471,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: false, error: (error as Error).message };
         }
     },
-    runRemediate: async (request) => {
-        const client = getClient(get());
-        try {
-            const response = await client.remediate(request);
-            return { ok: true, results: response.results };
-        } catch (error) {
-            return { ok: false, error: (error as Error).message };
-        }
-    },
     uploadDocument: async (file) => {
         const client = getClient(get());
         set({ isUploading: true });
@@ -513,8 +485,6 @@ export const useAppStore = create<AppState>((set, get) => ({
                 tagTree: null,
                 jobScoresByJobId: {},
                 evidenceBundlesByDocId: {},
-                finalizedPathByDocId: {},
-                readyToFinalizeByDocId: {},
                 isUploading: false,
             });
             return { ok: true, data: response };
@@ -617,34 +587,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: false, error: (error as Error).message };
         }
     },
-    applyDocumentFixes: async (docId) => {
-        const client = getClient(get());
-        try {
-            const response = await client.applyFixes(docId);
-            const resolvedFixedDocId = response.fixedDocId ?? response.report?.fixedDocId ?? response.docId;
-            set({ fixedDocId: resolvedFixedDocId, fixReport: response.report ?? null });
-            if (response.report?.after?.issueCount !== undefined) {
-                set({ documentIssues: response.report.delta?.remaining ?? [] });
-            }
-            const currentJobId = get().scanJob?.jobId;
-            if (currentJobId) {
-                try {
-                    const scorePayload = await client.getJobScore(currentJobId);
-                    set((state) => ({
-                        jobScoresByJobId: {
-                            ...state.jobScoresByJobId,
-                            [currentJobId]: scorePayload.scores ?? [],
-                        },
-                    }));
-                } catch (error) {
-                    // score can be unavailable until backend updates
-                }
-            }
-            return { ok: true, data: response };
-        } catch (error) {
-            return { ok: false, error: (error as Error).message };
-        }
-    },
     fetchDocumentIssues: async (docId) => {
         const client = getClient(get());
         try {
@@ -652,63 +594,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             set({ documentIssues: issues });
             return { ok: true, data: issues };
         } catch (error) {
-            return { ok: false, error: (error as Error).message };
-        }
-    },
-    finalizeDocument: async (docId) => {
-        const client = getClient(get());
-        set({ isFinalizing: true });
-        try {
-            const response = await client.finalizeDocument(docId);
-            const finalizedPath = response.finalizedPath;
-            if (finalizedPath) {
-                set((state) => ({
-                    finalizedPathByDocId: {
-                        ...state.finalizedPathByDocId,
-                        [docId]: finalizedPath,
-                    },
-                }));
-            }
-            const [fixRes, issuesRes, manualRes, bundlesRes] = await Promise.all([
-                client.getFixReport(docId).catch(() => null),
-                client.getIssues(docId).catch(() => [] as DocumentIssue[]),
-                client.manualReview(docId).catch(() => []),
-                client.listEvidenceBundlesForDoc(docId).catch(() => []),
-            ]);
-            if (fixRes) {
-                set({ fixReport: fixRes });
-            }
-            set((state) => ({
-                documentIssues: issuesRes,
-                manualReviewQueue: manualRes,
-                manualReviewLastFetched: new Date().toISOString(),
-                evidenceBundlesByDocId: {
-                    ...state.evidenceBundlesByDocId,
-                    [docId]: bundlesRes,
-                },
-                readyToFinalizeByDocId: {
-                    ...state.readyToFinalizeByDocId,
-                    [docId]: false,
-                },
-            }));
-            const scoreJobId = response.jobId || get().scanJob?.jobId;
-            if (scoreJobId) {
-                try {
-                    const scorePayload = await client.getJobScore(scoreJobId);
-                    set((state) => ({
-                        jobScoresByJobId: {
-                            ...state.jobScoresByJobId,
-                            [scoreJobId]: scorePayload.scores ?? [],
-                        },
-                    }));
-                } catch {
-                    // non-blocking
-                }
-            }
-            set({ isFinalizing: false });
-            return { ok: true, data: response };
-        } catch (error) {
-            set({ isFinalizing: false });
             return { ok: false, error: (error as Error).message };
         }
     },

@@ -35,21 +35,11 @@ export interface ScanResponse {
     issues: Issue[];
 }
 
-export interface RemediateRequest {
-    issueId?: string;
-    targetNodeId: string;
-    actionCode: string;
-}
-
 export interface ExecutionResult {
     actionCode: string;
     targetNodeId: string;
     status: "success" | "skipped" | "not_implemented" | "ready";
     notes: string;
-}
-
-export interface RemediateResponse {
-    results: ExecutionResult[];
 }
 
 export interface ManualReviewItem {
@@ -152,32 +142,6 @@ export interface DocumentIssue {
     locationHint: string;
     recommendation: string;
     evidence?: Record<string, unknown>;
-}
-
-export interface ApplyFixesResponse {
-    docId: string;
-    fixedDocId?: string;
-    fixedPath?: string;
-    rebuiltDocId?: string;
-    rebuiltPath?: string;
-    fixed: boolean;
-    report?: FixReport;
-    jobId?: string;
-}
-
-export interface FinalizeResponse {
-    docId: string;
-    jobId?: string | null;
-    finalized: boolean;
-    finalizedPath?: string;
-    report?: FixReport;
-    counts?: {
-        remaining?: number;
-        introduced?: number;
-        pendingManual?: number;
-        approvedManual?: number;
-        rejectedManual?: number;
-    };
 }
 
 export interface FixReportItem {
@@ -433,7 +397,6 @@ export interface PipelineRemediateResult {
 
 export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
-    remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     runPipeline: (file: File, execute?: boolean) => Promise<PipelineResponse>;
     runPipelineUrl: (url: string) => Promise<PipelineResponse>;
     runSiteScan: (url: string, maxPages?: number) => Promise<SiteScanResponse>;
@@ -460,14 +423,10 @@ export interface ApiClient {
     startDocumentScan: (docId: string) => Promise<{ jobId: string }>;
     getJob: (jobId: string) => Promise<ScanJobResponse>;
     getIssues: (docId: string) => Promise<DocumentIssue[]>;
-    applyFixes: (docId: string) => Promise<ApplyFixesResponse>;
-    finalizeDocument: (docId: string) => Promise<FinalizeResponse>;
-    getDownloadUrl: (docId: string, variant: "original" | "fixed") => string;
     getDocumentDiff: (docId: string) => Promise<DocumentDiffResponse>;
     getDocumentSummary: (docId: string) => Promise<DocumentSummary>;
     getTagTree: (docId: string) => Promise<TagTreeResponse>;
     getFixReport: (docId: string) => Promise<FixReport>;
-    getRebuiltUrl: (docId: string) => string;
     listPolicies: () => Promise<PolicySummary[]>;
     getPolicy: (policyId: string) => Promise<PolicyDetail>;
     setJobPolicy: (jobId: string, policyPackId: string) => Promise<{ jobId: string; policy: Record<string, unknown> }>;
@@ -814,25 +773,6 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return await response.blob();
     };
 
-    const remediate = async (payload: RemediateRequest): Promise<RemediateResponse> => {
-        if (mockMode) {
-            return {
-                results: [
-                    {
-                        actionCode: payload.actionCode,
-                        targetNodeId: payload.targetNodeId,
-                        status: payload.actionCode === "SET_DOCUMENT_TITLE" ? "success" : "not_implemented",
-                        notes: payload.actionCode === "SET_DOCUMENT_TITLE"
-                            ? "Set document title from None to 'Untitled Document'."
-                            : "Manual review required; queued for human review.",
-                    },
-                ],
-            };
-        }
-        if (__DEV__) console.log("[api] POST /remediate");
-        return request<RemediateResponse>("/remediate", payload);
-    };
-
     const manualReview = async (docId?: string): Promise<ManualReviewItem[]> => {
         if (mockMode) {
             return [];
@@ -932,29 +872,6 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         }
         return (await response.json()) as DocumentIssue[];
     };
-
-    const applyFixes = async (docId: string): Promise<ApplyFixesResponse> => {
-        if (mockMode) {
-            return { docId, fixed: true };
-        }
-        return request<ApplyFixesResponse>(`/documents/${docId}/apply-fixes`, {});
-    };
-
-    const finalizeDocument = async (docId: string): Promise<FinalizeResponse> => {
-        if (mockMode) {
-            return { docId, finalized: true };
-        }
-        return request<FinalizeResponse>(`/documents/${docId}/finalize`, {});
-    };
-
-    const getDownloadUrl = (docId: string, variant: "original" | "fixed") => {
-        if (variant === "fixed") {
-            return `${baseUrl}/documents/${docId}/pdf-fixed`;
-        }
-        return `${baseUrl}/documents/${docId}/pdf`;
-    };
-
-    const getRebuiltUrl = (docId: string) => `${baseUrl}/documents/${docId}/pdf-rebuilt`;
 
     const getDocumentDiff = async (docId: string): Promise<DocumentDiffResponse> => {
         if (mockMode) {
@@ -1118,7 +1035,6 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
 
     return {
         scan,
-        remediate,
         runPipeline,
         runPipelineUrl,
         runSiteScan,
@@ -1137,14 +1053,10 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         startDocumentScan,
         getJob,
         getIssues,
-        applyFixes,
-        finalizeDocument,
-        getDownloadUrl,
         getDocumentDiff,
         getDocumentSummary,
         getTagTree,
         getFixReport,
-        getRebuiltUrl,
         listPolicies,
         getPolicy,
         setJobPolicy,

@@ -40,15 +40,16 @@ Policy packs may remap severity for scoring/reporting; raw analyzer output shoul
 
 ## Adding a Safe Fix
 
-1. Implement deterministic fix in apply-fixes path by doc type (`_apply_pdf_fixes`, `_apply_docx_fixes`, `_apply_pptx_fixes`).
+1. Implement the fix as a remediation executor (`app/services/remediators/`) plus the format writer that persists it (`app/writers/`). The legacy `/documents` apply-fixes path is retired (410); do not add fixes there.
 2. Never modify original source file in place.
-3. Record applied fix details in fix report (`appliedFixes`).
+3. Credit only a fix the writer confirms it persisted (`pipeline._PERSISTED_ACTIONS` / `_count_persisted_fixes`).
 4. If confidence is insufficient, generate manual-review item instead of forcing fix.
+5. An executor that calls AI must use the client `get_default_executors(client=...)` hands it, so one job shares one cost cap. Free paths build executors with `get_offline_executors()`.
 
 ## Idempotence Expectations
 
 - Re-running scan without content changes should produce stable issue keys.
-- Re-running apply-fixes should not endlessly duplicate structural edits.
+- Re-running remediation should not endlessly duplicate structural edits.
 - Delta computation should remain stable for equivalent inputs.
 
 ## Auditability Expectations

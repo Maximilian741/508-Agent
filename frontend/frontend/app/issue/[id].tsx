@@ -1,8 +1,7 @@
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useLocalSearchParams } from "expo-router";
+import { useMemo } from "react";
+import { StyleSheet, Text, View } from "react-native";
 
-import { RemediationAction } from "../../src/api/client";
 import { useAppStore } from "../../src/store/useAppStore";
 import { Button } from "../../src/ui/components/Button";
 import { Card } from "../../src/ui/components/Card";
@@ -12,89 +11,31 @@ import { InlineNotice } from "../../src/ui/components/InlineNotice";
 import { Screen } from "../../src/ui/components/Screen";
 import { useTheme } from "../../src/ui/useTheme";
 
-type Notice = { tone: "success" | "warning" | "danger" | "info"; title: string; message: string };
-
+/**
+ * Issue detail for a finding from the legacy JSON /scan.
+ *
+ * It used to offer "Run Fix", which called the legacy POST /remediate: a free,
+ * unthrottled route to the paid AI provider, now retired (410). Fixes are
+ * applied only on Audit, so this page describes the issue and sends the user
+ * there instead of showing a button that can only fail.
+ */
 export default function IssueDetailScreen() {
-  const router = useRouter();
   const theme = useTheme();
   const params = useLocalSearchParams<{ id?: string }>();
   const issueId = typeof params.id === "string" ? params.id : "";
 
   const scanResults = useAppStore((state) => state.scanResults);
-  const runRemediate = useAppStore((state) => state.runRemediate);
-  const addManualReviewItem = useAppStore((state) => state.addManualReviewItem);
-  const fetchManualReview = useAppStore((state) => state.fetchManualReview);
-  const mockMode = useAppStore((state) => state.mockMode);
 
   const issue = useMemo(() => {
     return scanResults?.issues.find((item) => item.id === issueId) ?? null;
   }, [scanResults, issueId]);
-
-  const [selectedAction, setSelectedAction] = useState<RemediationAction | null>(
-    issue?.recommendedActions?.[0] ?? null,
-  );
-  const [notice, setNotice] = useState<Notice | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
-
-  useEffect(() => {
-    setSelectedAction(issue?.recommendedActions?.[0] ?? null);
-  }, [issue]);
-
-  const handleRunFix = async () => {
-    if (!issue || !selectedAction) {
-      setNotice({ tone: "warning", title: "Select an action", message: "Choose a recommended fix to run." });
-      return;
-    }
-    setIsRunning(true);
-    setNotice(null);
-    const response = await runRemediate({
-      issueId: issue.id,
-      targetNodeId: issue.nodeId,
-      actionCode: selectedAction.actionCode,
-    });
-    setIsRunning(false);
-    if (!response.ok || !response.results) {
-      setNotice({
-        tone: "danger",
-        title: "Remediation failed",
-        message: response.error ?? "Unable to execute remediation.",
-      });
-      return;
-    }
-    const result = response.results[0];
-    if (result.status !== "success") {
-      if (mockMode) {
-        addManualReviewItem({
-          id: `${issue.id}-${selectedAction.actionCode}-${Date.now()}`,
-          issueId: issue.id,
-          targetNodeId: issue.nodeId,
-          reason: "Execution blocked by policy.",
-          notes: result.notes,
-        });
-      } else {
-        await fetchManualReview();
-      }
-      setNotice({
-        tone: "warning",
-        title: "Manual review required",
-        message: "The action was blocked and queued for review.",
-      });
-      router.push("/manual-review");
-      return;
-    }
-    setNotice({
-      tone: "success",
-      title: "Remediation complete",
-      message: result.notes,
-    });
-  };
 
   if (!issue) {
     return (
       <Screen>
         <EmptyState
           title="Issue not found"
-          message="Run a scan and select an issue to view details."
+          message="This issue is no longer loaded. Upload the document on the Audit screen to see its issues."
           materialIcon="search"
         />
       </Screen>
@@ -111,7 +52,11 @@ export default function IssueDetailScreen() {
         <Chip label={issue.ruleId} />
       </View>
 
-      {notice && <InlineNotice title={notice.title} message={notice.message} tone={notice.tone} />}
+      <InlineNotice
+        title="Fixes are applied in Audit"
+        message="Upload the document on the Audit screen, approve the fixes you want, and confirm the credit cost before anything changes."
+        tone="info"
+      />
 
       <Card style={styles.summaryCard}>
         <View style={styles.summaryRow}>
@@ -142,35 +87,18 @@ export default function IssueDetailScreen() {
         <EmptyState title="No actions available" message="This issue requires manual review." materialIcon="info" />
       )}
       {issue.recommendedActions.map((action) => (
-        <Pressable accessibilityRole="button" accessibilityLabel="Select remediation action"
-          key={action.actionCode}
-          onPress={() => setSelectedAction(action)}
-          style={({ pressed }) => [styles.actionPress, pressed && styles.actionPressed]}
-        >
-          <Card
-            style={[
-              styles.actionCard,
-              selectedAction?.actionCode === action.actionCode ? styles.actionSelected : undefined,
-            ]}
-          >
-            <Text style={[styles.actionTitle, { color: theme.colors.text }]}>{action.actionCode}</Text>
-            <Text style={{ color: theme.colors.textMuted }}>{action.description}</Text>
-            <View style={styles.actionTags}>
-              {action.requiresAi && <Chip label="AI" tone="info" />}
-              {action.requiresHumanReview && <Chip label="Human Review" tone="warning" />}
-              {action.isAutoApplicable && <Chip label="Auto" tone="success" />}
-            </View>
-          </Card>
-        </Pressable>
+        <Card key={action.actionCode} style={styles.actionCard}>
+          <Text style={[styles.actionTitle, { color: theme.colors.text }]}>{action.actionCode}</Text>
+          <Text style={{ color: theme.colors.textMuted }}>{action.description}</Text>
+          <View style={styles.actionTags}>
+            {action.requiresAi && <Chip label="AI" tone="info" />}
+            {action.requiresHumanReview && <Chip label="Human Review" tone="warning" />}
+            {action.isAutoApplicable && <Chip label="Auto" tone="success" />}
+          </View>
+        </Card>
       ))}
 
-      <Button
-        title={isRunning ? "Running..." : "Run Fix"}
-        onPress={handleRunFix}
-        variant="primary"
-        disabled={!selectedAction || isRunning}
-        loading={isRunning}
-      />
+      <Button title="Fix this in Audit" href="/audit" variant="primary" />
     </Screen>
   );
 }
@@ -181,10 +109,7 @@ const styles = StyleSheet.create({
   summaryRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   contextGrid: { gap: 4 },
   meta: { marginTop: 2 },
-  actionPress: { marginBottom: 8 },
-  actionPressed: { opacity: 0.9 },
-  actionCard: { gap: 8 },
-  actionSelected: { borderColor: "#5B8CFF", borderWidth: 2 },
+  actionCard: { gap: 8, marginBottom: 8 },
   actionTitle: { fontWeight: "700" },
   actionTags: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginTop: 8 },
 });

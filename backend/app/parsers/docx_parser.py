@@ -3,8 +3,7 @@
 Two complementary entry points are exposed:
 
 * :meth:`DOCXParser.parse` returns the dict-shaped detection payload used by
-  the legacy ``/documents`` API (this format is consumed by the existing
-  ``_apply_docx_fixes`` machinery).
+  the legacy read-only ``/documents`` routes.
 * :meth:`DOCXParser.parse_to_tree` builds an :class:`AccessibilityTree` so the
   document can flow through the same analyzer + executor pipeline as PDFs.
 """

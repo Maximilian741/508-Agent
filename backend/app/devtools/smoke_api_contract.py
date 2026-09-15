@@ -97,6 +97,9 @@ def main() -> int:
     if issue is None:
         raise AssertionError("Missing alt text issue not found")
 
+    # The legacy single-action /remediate is RETIRED: it was a free, unthrottled
+    # AI proxy that applied fixes without charging. Its contract is now a 410
+    # that names the paid replacement, never a 200 with results.
     action_code = issue["recommendedActions"][0]["actionCode"]
     remediate_payload = {
         "issueId": issue["id"],
@@ -104,21 +107,17 @@ def main() -> int:
         "actionCode": action_code,
     }
     remediate_response = client.post("/remediate", json=remediate_payload, headers=auth)
-    if remediate_response.status_code != 200:
-        raise AssertionError(f"Remediate failed: {remediate_response.status_code}")
-    remediate_data = remediate_response.json()
-    if "results" not in remediate_data or not isinstance(remediate_data["results"], list):
-        raise AssertionError("Remediate response missing results")
-    for result in remediate_data["results"]:
-        for key in ("actionCode", "targetNodeId", "status", "notes"):
-            if key not in result:
-                raise AssertionError(f"Remediate result missing key: {key}")
-        _assert_single_line(result["notes"])
+    if remediate_response.status_code != 410:
+        raise AssertionError(f"Retired /remediate should answer 410, got {remediate_response.status_code}")
+    detail = str(remediate_response.json().get("detail") or "")
+    if "/pipeline/remediate" not in detail:
+        raise AssertionError(f"Retired /remediate should point at /pipeline/remediate: {detail!r}")
+    _assert_single_line(detail)
+    if client.post("/remediate", json=remediate_payload).status_code != 401:
+        raise AssertionError("Retired /remediate must still require a session")
 
-    # The single-action remediate now auto-applies heuristic alt text and
-    # returns status="success", so this path does not always enqueue a manual
-    # review item. Assert the manual-review CONTRACT (auth + shapes), not a
-    # specific queue size.
+    # Assert the manual-review CONTRACT (auth + shapes), not a specific queue
+    # size.
     manual_review_response = client.get("/manual-review", headers=auth)
     if manual_review_response.status_code != 200:
         raise AssertionError(f"Manual review failed: {manual_review_response.status_code}")

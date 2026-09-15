@@ -54,12 +54,18 @@ class FinalizeManualReviewTests(unittest.TestCase):
         writer.write(out)
         return out.getvalue()
 
-    def test_finalize_returns_200_and_persists_post_manual_score(self) -> None:
+    def test_finalize_is_retired_and_writes_nothing(self) -> None:
+        """POST /documents/{id}/finalize wrote approved edits into the file and
+        served it back with no credit check. It is retired: 410, and no final
+        artifact, "finalized" fix report or post_manual score is produced.
+        Manual review decisions are still recorded, because the Audit flow
+        queues rejected findings there."""
+        from app.api import documents as documents_api
         from app.persistence.db import get_repo
 
         repo = get_repo()
-        doc_id = "doc-finalize-test"
-        job_id = "job-finalize-test"
+        doc_id = "doc-finalize-retired"
+        job_id = "job-finalize-retired"
         pdf_path = Path(self.tmp_dir.name) / "finalize.pdf"
         pdf_path.write_bytes(self._build_min_pdf_bytes())
         repo.save_document(
@@ -121,23 +127,18 @@ class FinalizeManualReviewTests(unittest.TestCase):
         self.assertTrue(patch_resp.json().get("readyToFinalize"))
 
         finalize = self.client.post(f"/documents/{doc_id}/finalize")
-        self.assertEqual(finalize.status_code, 200)
-        payload = finalize.json()
-        self.assertTrue(payload.get("finalized"))
-        self.assertEqual(payload.get("docId"), doc_id)
+        self.assertEqual(finalize.status_code, 410)
+        self.assertIn("/pipeline/remediate", finalize.json().get("detail", ""))
+        self.assertFalse((documents_api.FIXED_DIR / doc_id).exists())
 
         score_resp = self.client.get(f"/jobs/{job_id}/score")
         self.assertEqual(score_resp.status_code, 200)
-        score_payload = score_resp.json()
-        pass_types = {entry.get("passType") for entry in score_payload.get("scores", [])}
-        self.assertIn("post_manual", pass_types)
+        pass_types = {entry.get("passType") for entry in score_resp.json().get("scores", [])}
+        self.assertNotIn("post_manual", pass_types)
 
         fix_report = repo.get_fix_report(doc_id)
-        self.assertIsNotNone(fix_report)
-        assert fix_report is not None
-        self.assertTrue(bool(fix_report.get("finalized")))
+        self.assertFalse(bool((fix_report or {}).get("finalized")))
 
 
 if __name__ == "__main__":
     unittest.main()
-

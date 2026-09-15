@@ -12,9 +12,9 @@ substantial project on its own.  This writer takes a pragmatic v1 approach:
   caller so the UI can flag them as "needs source-app remediation".
 
 If the source PDF lacks a Catalog or pypdf can't open it, the writer copies
-the file unchanged and returns ``failed_to_open_pdf`` so the caller can fall
-back to the legacy /documents/apply-fixes pipeline (which has its own,
-heavier-weight PDF mutation code in :mod:`app.api.documents`).
+the file unchanged and returns ``failed_to_open_pdf`` so the caller knows
+nothing was applied. (The legacy /documents/apply-fixes pipeline this once
+deferred to has been retired.)
 """
 
 from __future__ import annotations
@@ -55,8 +55,7 @@ def write_remediated_pdf(
 
     The PDF writer is intentionally conservative: only metadata and image
     /Alt entries are updated.  Everything else is recorded in ``skipped`` so
-    the caller can route the document through the heavier
-    :func:`app.api.documents._apply_pdf_fixes` instead.
+    the caller can report it as not applied.
     """
 
     applied: List[Dict[str, Any]] = []

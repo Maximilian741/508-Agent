@@ -237,7 +237,14 @@ async def analyze(
             pass
 
     tree = result.tree
-    engine = RemediationEngine()
+    # /analyze is FREE (no credits, and it accepts developer API keys), yet
+    # ?execute=true runs the real executors. Pin them to the offline heuristic
+    # provider, exactly like the URL scan: requires_ai=False is not a gate
+    # (IMPROVE_LINK_TEXT still calls the inference client), so an unpinned
+    # execute=true billed the paid provider per link and per language guess.
+    from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
+
+    engine = RemediationEngine(dispatcher=RemediationDispatcher(get_offline_executors()))
     violations = await run_in_threadpool(engine.detect_violations, tree)
     actions = engine.plan_actions(violations)
     executions = (await run_in_threadpool(engine.execute, tree)) if execute else []

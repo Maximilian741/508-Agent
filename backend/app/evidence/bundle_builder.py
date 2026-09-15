@@ -258,7 +258,7 @@ def _collect_inputs(job_id: str, options: Dict[str, bool]) -> Dict[str, object]:
 
     fix_report = repo.get_fix_report(doc_id)
     if not fix_report:
-        notes.append("Fix report missing (expected until apply-fixes completes).")
+        notes.append("No fix report for this document (the legacy apply-fixes step is retired; remediation runs through /pipeline/remediate).")
 
     manual_review = repo.list_manual_review_items_for_doc(doc_id, include_resolved=True)
     if not manual_review:

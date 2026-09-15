@@ -106,13 +106,16 @@ def run(base_url: str, file_path: Path) -> None:
     _wait_job(base_url, job_id)
     print(f"[e2e] scan complete job_id={job_id}")
 
-    apply = _request_json("POST", f"{base_url}/documents/{doc_id}/apply-fixes")
-    if not bool(apply.get("fixed", False)):
-        raise RuntimeError(f"Apply fixes failed: {apply}")
-    print("[e2e] apply fixes complete")
-
-    fix_report = _request_json("GET", f"{base_url}/documents/{doc_id}/fix-report")
-    print(f"[e2e] fix report delta keys={list((fix_report.get('delta') or {}).keys())}")
+    # The legacy apply-fixes route is retired: it handed out remediated files
+    # without charging. Remediation goes through the paid /pipeline flow.
+    try:
+        _request_json("POST", f"{base_url}/documents/{doc_id}/apply-fixes")
+    except urllib.request.HTTPError as exc:
+        if exc.code != 410:
+            raise RuntimeError(f"Retired apply-fixes should answer 410, got {exc.code}")
+    else:
+        raise RuntimeError("Retired apply-fixes returned a success response")
+    print("[e2e] legacy apply-fixes is retired (410)")
 
     bundle = _request_json("POST", f"{base_url}/jobs/{job_id}/evidence-bundle", body=b"{}", headers={"Content-Type": "application/json"})
     bundle_id = str(bundle.get("bundleId") or "")
