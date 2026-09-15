@@ -150,13 +150,20 @@ class UserRow(Base):
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "admin" is set only by app.devtools.bootstrap_admin and reset on email
+    # change; it is one of three conditions (see app.api.deps.is_admin_user).
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
     credits_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Optional password hash in "salt:hash" hex format (scrypt). NULL means
     # legacy/passwordless user; sign-in still works for them by email alone.
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Set when the user has clicked the verify-email link.
+    # Set when the user has clicked the verify-email link. Cleared whenever the
+    # email changes: it always refers to the CURRENT address.
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Session revocation counter, minted into every session JWT as "ver".
+    # Bumped on sign-out, password set/reset and email change; a token minted
+    # at an older version is rejected (see app.security.sessions).
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
 
 class CreditLedgerRow(Base):
@@ -183,6 +190,25 @@ class EmailVerifyTokenRow(Base):
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class StarterGrantRow(Base):
+    """One starter-credit grant per real mailbox (see ``auth.grant_starter``).
+
+    Keyed by the SHA-256 of the canonical mailbox — ``alice+1@gmail.com`` and
+    ``a.lice@gmail.com`` are one inbox — so a mailbox can't be re-granted by
+    subaddressing, by changing the account email, or by deleting the account
+    and registering again. Hashed so the record keeps no address.
+    """
+
+    __tablename__ = "starter_grants"
+    __table_args__ = (
+        Index("idx_starter_grants_user", "user_id"),
+    )
+
+    mailbox_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class SubscriptionRow(Base):

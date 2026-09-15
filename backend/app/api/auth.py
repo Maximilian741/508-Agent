@@ -23,9 +23,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import require_user_id
-from app.db.models import CreditLedgerRow, EmailVerifyTokenRow, UserRow
+from app.api.deps import optional_user, require_user_id
+from app.config import get_settings
+from app.db.models import CreditLedgerRow, EmailVerifyTokenRow, StarterGrantRow, UserRow
 from app.db.session_sqlalchemy import session_scope
 from app.persistence import audit_log as _audit
 from app.security.sessions import mint_session
@@ -80,6 +82,13 @@ class UpdateProfileRequest(BaseModel):
     displayName: Optional[str] = Field(default=None, max_length=120)
     email: Optional[str] = Field(default=None, min_length=3, max_length=320)
 
+
+class UpdateProfileResponse(UserDTO):
+    # Set only when the email changed. That revokes every session, the
+    # caller's included, so the caller must switch to this fresh token.
+    token: Optional[str] = None
+
+
 class GrantStarterResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -107,6 +116,45 @@ def _row_to_dto(row: UserRow) -> UserDTO:
             row.email_verified_at.isoformat() if row.email_verified_at else None
         ),
     )
+
+
+def _bump_token_version(row: UserRow) -> int:
+    """Revoke every outstanding session for ``row``; returns the new version.
+
+    Each token carries the version it was minted at (app.security.sessions),
+    so incrementing it kills all of them at once: every device is signed out.
+    """
+    row.token_version = int(row.token_version or 0) + 1
+    return row.token_version
+
+
+_GMAIL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
+
+
+def canonical_mailbox(email: str) -> str:
+    """The inbox an address really delivers to, for once-per-mailbox limits.
+
+    Lowercase; drop a ``+tag`` from the local part (``alice+1@x.com`` lands in
+    ``alice@x.com``); for Gmail also drop dots and fold googlemail.com into
+    gmail.com, since Gmail ignores both. Used only for starter-grant
+    eligibility; the login email itself stays exactly as typed.
+    """
+    addr = (email or "").strip().lower()
+    local, sep, domain = addr.rpartition("@")
+    if not sep or not local or not domain:
+        return addr
+    local = local.split("+", 1)[0] or local
+    if domain in _GMAIL_DOMAINS:
+        local = local.replace(".", "") or local
+        domain = "gmail.com"
+    return f"{local}@{domain}"
+
+
+def mailbox_hash(email: str) -> str:
+    """SHA-256 of :func:`canonical_mailbox`, stored instead of the address so
+    the one-grant-per-mailbox record can outlive account deletion without
+    keeping the email. (Frozen copy in alembic 0015 for the backfill.)"""
+    return hashlib.sha256(canonical_mailbox(email).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +293,17 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
                 if len(password) < _MIN_PASSWORD_LEN:
                     raise HTTPException(status_code=400, detail="password_required")
                 row.password_hash = _hash_password(password)
+                _bump_token_version(row)
             row.last_seen_at = now
             if payload.displayName and payload.displayName.strip():
                 row.display_name = payload.displayName.strip()[:120]
         dto = _row_to_dto(row)
+        version = int(row.token_version or 0)
 
     # Mint an HS256-signed session JWT.  The token survives backend
-    # restarts (assuming APP_SECRET is set) and resists tampering.
-    token = mint_session(dto.id)
+    # restarts (assuming APP_SECRET is set), resists tampering, and dies when
+    # the user's token_version is bumped.
+    token = mint_session(dto.id, version=version)
     return SignInResponse(user=dto, token=token)
 
 
@@ -270,12 +321,19 @@ async def me(
 
 
 @router.post("/sign-out")
-async def sign_out() -> Response:
-    """Stateless sessions — nothing to clear server-side; just 204.
+async def sign_out(user: Optional[UserRow] = Depends(optional_user)) -> Response:
+    """Revoke the caller's sessions server-side, then 204.
 
-    The client discards its token. No auth required: signing out with an
-    already-expired token should still succeed.
+    A valid token bumps the user's ``token_version``, which ends EVERY session
+    on the account (all devices), not just this one — so a copied token dies
+    too. No auth required: signing out with a missing, expired or already
+    revoked token still succeeds and changes nothing.
     """
+    if user is not None:
+        with session_scope() as session:
+            row = session.get(UserRow, user.id)
+            if row is not None:
+                _bump_token_version(row)
     return Response(status_code=204)
 
 
@@ -284,12 +342,18 @@ async def grant_starter(
     request: Request,
     user_id: str = Depends(require_user_id),
 ) -> GrantStarterResponse:
-    """Grant 25 credits exactly once per user (idempotent).
+    """Grant 25 credits exactly once per user AND once per mailbox (idempotent).
 
-    Abuse guard: when an email pipeline is configured (SMTP_HOST set), the
-    grant requires a VERIFIED email — otherwise throwaway addresses can farm
-    25 free credits per signup. In dev (no SMTP) the gate is off so local
-    flows and tests keep working unchanged.
+    Abuse guards:
+    - when an email pipeline is configured (SMTP_HOST set), the grant requires
+      a VERIFIED email — otherwise throwaway addresses can farm 25 free
+      credits per signup. In dev (no SMTP) this gate is off.
+    - one grant per real inbox: ``alice+1@gmail.com``, ``a.lice@gmail.com``
+      and ``alice@googlemail.com`` all deliver to ``alice@gmail.com``, so
+      verifying each proves nothing new. The grant is recorded in
+      ``starter_grants`` under :func:`mailbox_hash` (primary key), which
+      survives email changes and account deletion. A mailbox that already
+      got its grant answers ``granted=False`` exactly like a repeat call.
     """
     GRANT_AMOUNT = 25
     GRANT_KIND = "grant"
@@ -312,17 +376,20 @@ async def grant_starter(
                 CreditLedgerRow.description == GRANT_DESC,
             )
         ).scalar_one_or_none()
+        not_granted = GrantStarterResponse(user=_row_to_dto(row), granted=False, amount=0)
         if existing is not None:
-            return GrantStarterResponse(
-                user=_row_to_dto(row),
-                granted=False,
-                amount=0,
-            )
+            return not_granted
 
+        mailbox = mailbox_hash(row.email)
+        if session.get(StarterGrantRow, mailbox) is not None:
+            return not_granted
+
+        now = datetime.utcnow()
+        session.add(StarterGrantRow(mailbox_hash=mailbox, user_id=row.id, granted_at=now))
         session.add(
             CreditLedgerRow(
                 user_id=row.id,
-                at=datetime.utcnow(),
+                at=now,
                 kind=GRANT_KIND,
                 amount=GRANT_AMOUNT,
                 description=GRANT_DESC,
@@ -330,7 +397,12 @@ async def grant_starter(
             )
         )
         row.credits_balance = int(row.credits_balance or 0) + GRANT_AMOUNT
-        session.flush()
+        try:
+            session.flush()
+        except IntegrityError:
+            # A concurrent request claimed this mailbox first (primary key).
+            session.rollback()
+            return not_granted
 
         try:
             ctx = _audit.context_from_request(request)
@@ -358,16 +430,25 @@ async def grant_starter(
 # ---------------------------------------------------------------------------
 
 
-@router.patch("/me", response_model=UserDTO)
+@router.patch("/me", response_model=UpdateProfileResponse)
 async def update_me(
     payload: UpdateProfileRequest,
     request: Request,
     user_id: str = Depends(require_user_id),
-) -> UserDTO:
+) -> UpdateProfileResponse:
     """Update the current user's display name and/or email.
 
-    Requires a valid session token. Email collisions return 409.
+    Requires a valid session token. An address that belongs to another
+    account, or that is listed in ADMIN_EMAILS, returns 409 ``email_in_use`` —
+    one answer for both, so this is no oracle for which addresses are admin.
+
+    Changing the email changes identity, so it:
+    - clears ``emailVerifiedAt`` (the new address must prove itself; the
+      starter grant keys off verification) and drops admin (``role``);
+    - discards outstanding verify/reset links, which went to the OLD inbox;
+    - revokes every session and returns a fresh ``token`` for this caller.
     """
+    token: Optional[str] = None
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
 
@@ -385,12 +466,20 @@ async def update_me(
                         UserRow.id != row.id,
                     )
                 ).scalar_one_or_none()
-                if clash is not None:
+                if clash is not None or get_settings().is_admin(new_email):
                     raise HTTPException(status_code=409, detail="email_in_use")
                 row.email = new_email
+                row.email_verified_at = None
+                # Admin is bound to the address the operator promoted.
+                if row.role == "admin":
+                    row.role = "user"
+                session.execute(
+                    delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.user_id == row.id)
+                )
+                token = mint_session(row.id, version=_bump_token_version(row))
 
         row.last_seen_at = datetime.utcnow()
-        return _row_to_dto(row)
+        return UpdateProfileResponse(**_row_to_dto(row).model_dump(), token=token)
 
 
 @router.get("/export")
@@ -491,6 +580,9 @@ class SetPasswordResponse(BaseModel):
 
     user: UserDTO
     updated: bool
+    # Changing the password revokes every session, the caller's included;
+    # the caller switches to this fresh token.
+    token: Optional[str] = None
 
 
 class VerifyQueuedResponse(BaseModel):
@@ -511,12 +603,17 @@ async def set_password(
     request: Request,
     user_id: str = Depends(require_user_id),
 ) -> SetPasswordResponse:
-    """Set or change the caller's password (scrypt salt:hash, stdlib only)."""
+    """Set or change the caller's password (scrypt salt:hash, stdlib only).
+
+    Revokes every session on the account — a new password must lock out
+    whoever else was signed in — and returns a fresh ``token`` for the caller.
+    """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
         row.password_hash = _hash_password(payload.password)
         row.last_seen_at = datetime.utcnow()
-        return SetPasswordResponse(user=_row_to_dto(row), updated=True)
+        token = mint_session(row.id, version=_bump_token_version(row))
+        return SetPasswordResponse(user=_row_to_dto(row), updated=True, token=token)
 
 
 @router.post("/request-verify-email", response_model=VerifyQueuedResponse)
@@ -718,6 +815,8 @@ async def reset_password(payload: PasswordResetConfirm) -> PasswordResetResultRe
             raise HTTPException(status_code=410, detail="token_expired")
         user.password_hash = _hash_password(payload.password)
         user.last_seen_at = datetime.utcnow()
+        # Account recovery must end every session, a stolen one included.
+        _bump_token_version(user)
         # Single-use: clear every outstanding reset token for this user.
         session.execute(
             delete(EmailVerifyTokenRow).where(

@@ -50,7 +50,11 @@ def main() -> int:
     client = TestClient(app)
 
     # All scan/remediate/manual-review routes require an authenticated session;
-    # the global manual-review view requires admin.
+    # the global manual-review view requires admin, which needs the listed
+    # address VERIFIED — bootstrap it the way the operator does.
+    from app.devtools.bootstrap_admin import bootstrap_admin
+
+    bootstrap_admin("contract-admin@example.com", "contractpass1")
     signin = client.post(
         "/auth/sign-in",
         json={

@@ -88,6 +88,12 @@ class Settings:
         return max(1, int(self.max_upload_mb)) * 1024 * 1024
 
     def is_admin(self, email: Optional[str]) -> bool:
+        """Is ``email`` listed in ``ADMIN_EMAILS``? List membership ONLY.
+
+        Never sufficient on its own — a user can type any unclaimed address.
+        Authorize with ``app.api.deps.is_admin_user``, which also requires
+        server-side promotion and a verified address.
+        """
         if not email:
             return False
         normalized = email.strip().lower()

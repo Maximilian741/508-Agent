@@ -48,7 +48,8 @@ The values to fill in `.env` (the script generates secrets + starts everything):
   receipts, password resets, invites and certificate links all point here)*
 - `CORS_ALLOW_ORIGINS=https://app.yourdomain.com`  *(must match exactly, or every page
   loads but can't talk to the API)*
-- `ADMIN_EMAILS=you@yourdomain.com`  *(so you can reach `/admin`)*
+- `ADMIN_EMAILS=you@yourdomain.com`  *(the only address allowed into `/admin`. Listing it grants
+  nothing by itself, and neither does signing up with it: step 4 unlocks it.)*
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, the 7 `STRIPE_PRICE_*`
 - `SMTP_*` (from your email sender)
 - `CF_TUNNEL_TOKEN` (from step 1) — then uncomment the `cloudflared`
@@ -62,8 +63,24 @@ images, runs DB migrations on boot, and waits until the backend is healthy.
 docker compose exec -T backend python -m app.devtools.verify_live_site \
   --api-url https://api.yourdomain.com
 ```
-Expect `ALL CHECKS PASSED`. Then open `https://app.yourdomain.com`, sign up, and run
-the in-app **System check** (Dashboard → System check) — it should be all green.
+Expect `ALL CHECKS PASSED`. Then make yourself admin, on the server (no `-T`: it
+prompts for a password twice):
+```bash
+docker compose exec backend python -m app.devtools.bootstrap_admin you@yourdomain.com
+```
+Use the exact address from `ADMIN_EMAILS`. It creates that account with the password you
+type, or takes it over if it already exists: the password is replaced, the email is marked
+verified, the account is made admin, and every other session on it is signed out. So if anyone
+registered your address before you, they are locked out. It works with or without SMTP. Then open
+`https://app.yourdomain.com`, sign in with that address and password, open
+`https://app.yourdomain.com/admin`, and run the in-app **System check** (Dashboard → System
+check). It should be all green.
+
+That command is the **only** way to become admin, and it only accepts an address listed in
+`ADMIN_EMAILS`. Nothing reachable from the web grants admin: not signing up with a listed
+address, not changing an account's email to one, not clicking a verify link. Changing your own
+email later removes admin; run the command again for a listed address to get it back. To revoke
+admin, take the address out of `ADMIN_EMAILS` and restart the backend.
 
 People will also type the bare `yourdomain.com`. In Cloudflare → Rules →
 Redirect Rules, add one: *hostname equals `yourdomain.com`* → dynamic redirect to

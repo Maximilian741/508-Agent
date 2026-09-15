@@ -100,6 +100,24 @@ function _writeToken(token: string | null, remember: boolean = true): void {
   }
 }
 
+/**
+ * Changing the password or email revokes every session server-side, the
+ * current one included, and the response carries a replacement token. Adopt
+ * it (keeping the "keep me signed in" choice) or the next call would 401.
+ */
+function _adoptRotatedToken(token: unknown): void {
+  if (typeof token !== "string" || !token) return;
+  let remember = true;
+  if (_isWeb()) {
+    try {
+      remember = window.sessionStorage.getItem(TOKEN_KEY) === null;
+    } catch {
+      // keep the default
+    }
+  }
+  _writeToken(token, remember);
+}
+
 function _readCache(): Account | null {
   if (!_isWeb()) return memoryAccount;
   try {
@@ -640,6 +658,7 @@ export async function updateProfile(patch: {
     throw new Error(typeof detail === "string" ? detail : "Update failed");
   }
   const j = await _readJson(res);
+  _adoptRotatedToken(j && j.token);
   const next = _coerceAccount(j && (j.user || j));
   if (!next) throw new Error("Update succeeded but response was malformed.");
   // Preserve cached history (PATCH /me only returns user fields)
@@ -750,6 +769,7 @@ export async function setPassword(password: string): Promise<Account> {
     throw new Error(typeof detail === "string" ? detail : "Set password failed");
   }
   const j = await _readJson(res);
+  _adoptRotatedToken(j && j.token);
   const next = _coerceAccount(j && (j.user || j));
   if (!next) throw new Error("Set password succeeded but response was malformed.");
   // Preserve cached history (set-password only returns user fields).

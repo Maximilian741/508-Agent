@@ -6,13 +6,24 @@ account uuid).  Tokens are signed with ``settings.app_secret`` so they:
 - survive a backend restart (provided ``APP_SECRET`` is set in the env)
 - resist tampering (changing any claim invalidates the signature)
 - expire after a fixed TTL
+- can be REVOKED: each token carries the user's ``token_version`` at mint time
 
 Claims are intentionally minimal:
 
-    {"sub": "<user-id>", "iat": <unix>, "exp": <unix>}
+    {"sub": "<user-id>", "ver": <int>, "iat": <unix>, "exp": <unix>}
 
-When we move off the hackathon scaffold, swap the signing key + add an
-audience claim ("aud") for the production CF Access flow.
+Revocation: ``users.token_version`` is bumped on sign-out, password set/reset
+and email change. A token whose ``ver`` no longer equals the user's current
+version is dead, so a stolen token does not survive account recovery. Bumping
+signs out EVERY device for that user — deliberate, it is the simplest correct
+answer to "I think someone has my session". Tokens minted before ``ver``
+existed carry no claim and count as version 0, so the deploy that introduced
+it logged nobody out; the first bump retires them.
+
+``verify_session`` checks only what the token itself can prove (signature,
+expiry, issuer, audience). Comparing ``ver`` needs the user row, so it happens
+where identity is resolved: :mod:`app.api.deps` via :func:`session_is_current`.
+Nothing else should call ``verify_session`` to authenticate a request.
 """
 
 from __future__ import annotations
@@ -32,6 +43,7 @@ _ALGO = "HS256"
 # different service (sharing the secret by mistake) cannot be replayed here.
 _ISS = "508-agent"
 _AUD = "508-agent-session"
+_VERSION_CLAIM = "ver"
 
 
 def _default_ttl_seconds() -> int:
@@ -41,11 +53,12 @@ def _default_ttl_seconds() -> int:
         return 7 * 24 * 3600  # 7 days
 
 
-def mint_session(user_id: str, ttl_seconds: Optional[int] = None) -> str:
+def mint_session(user_id: str, ttl_seconds: Optional[int] = None, *, version: int = 0) -> str:
     """Mint an HS256-signed session JWT for ``user_id``.
 
     ``ttl_seconds`` defaults to ``settings.session_ttl_seconds`` (7 days),
     matching the lifetime of the token the frontend stores in localStorage.
+    ``version`` must be the user's current ``token_version``.
     """
 
     if not user_id or not isinstance(user_id, str):
@@ -54,6 +67,7 @@ def mint_session(user_id: str, ttl_seconds: Optional[int] = None) -> str:
     now = datetime.now(tz=timezone.utc)
     claims = {
         "sub": user_id,
+        _VERSION_CLAIM: int(version or 0),
         "iss": _ISS,
         "aud": _AUD,
         "iat": int(now.timestamp()),
@@ -72,6 +86,8 @@ def verify_session(token: str) -> Optional[dict]:
 
     Returns ``None`` for any failure mode (bad signature, expired, malformed,
     wrong issuer/audience, missing ``sub``).  Never raises.
+
+    This does NOT check revocation — see :func:`session_is_current`.
     """
 
     if not token or not isinstance(token, str):
@@ -101,4 +117,22 @@ def verify_session(token: str) -> Optional[dict]:
     return claims
 
 
-__all__ = ["mint_session", "verify_session"]
+def session_version(claims: dict) -> Optional[int]:
+    """The ``ver`` a token was minted with; a legacy token without one is 0.
+
+    ``None`` for a present-but-malformed claim, which never matches.
+    """
+    raw = claims.get(_VERSION_CLAIM, 0)
+    # bool is an int subclass; a signed token never carries one, reject anyway.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw
+
+
+def session_is_current(claims: dict, current_version: Optional[int]) -> bool:
+    """True when the token was minted at the user's current ``token_version``."""
+    ver = session_version(claims)
+    return ver is not None and ver == int(current_version or 0)
+
+
+__all__ = ["mint_session", "verify_session", "session_version", "session_is_current"]
