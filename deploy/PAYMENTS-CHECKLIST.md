@@ -108,18 +108,32 @@ after payment — Checkout succeeding is NOT enough on its own.
 
 1. Dashboard (test mode) → Developers → Webhooks → **Add endpoint**.
 2. Endpoint URL: `https://api.yourdomain.com/billing/webhook`
-3. Events to send — select exactly these four:
+3. Events to send — select exactly these seven:
    - `checkout.session.completed`
+   - `checkout.session.async_payment_succeeded`
+   - `checkout.session.async_payment_failed`
    - `invoice.payment_succeeded`
+   - `invoice.payment_failed`
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
+
+   Why the three `async_payment` / `payment_failed` ones matter: a bank-debit
+   payment (ACH, SEPA, Bacs) finishes Checkout as **unpaid**. We grant nothing
+   until `checkout.session.async_payment_succeeded` arrives. Without that
+   event, those customers pay and never get their credits.
+
+   **Already created this endpoint with the old four?** Developers → Webhooks
+   → click the endpoint → edit its events → add the three missing ones
+   (`checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed`, `invoice.payment_failed`) → save.
+   The signing secret does not change. Do this in test mode AND live mode.
 4. After creating it, click **Reveal** on the signing secret (`whsec_...`) and
    put it in `.env` as `STRIPE_WEBHOOK_SECRET=whsec_...`, then
    `docker compose up -d --force-recreate backend` again.
 
 **VERIFY** — in the webhook's page click **Send test event** →
 `checkout.session.completed`. The dashboard should show the delivery got a
-**2xx** response. A `400 invalid_signature` means the `whsec_` in `.env`
+**2xx** response. The endpoint's event list should show all seven events. A `400 invalid_signature` means the `whsec_` in `.env`
 doesn't match THIS endpoint (each endpoint has its own secret); a
 `503 webhook_not_configured` means the env var didn't load (recreate the
 container, check for quotes/whitespace).
@@ -181,5 +195,8 @@ you the exact response our server gave.
 | Paid but no credits | webhook failing | endpoint delivery log → our response body |
 | Webhook 400 `invalid_signature` | wrong `whsec_` for that endpoint | copy the secret from THAT endpoint |
 | Webhook 503 `webhook_not_configured` | env not loaded | recreate container; check `.env` syntax |
-| Webhook 200 but `ignored` | event type not in our four | fix the event selection on the endpoint |
+| Webhook 200 but `ignored` | event type not in our seven | fix the event selection on the endpoint |
+| Bank-debit (ACH/SEPA) customer paid but no credits | `checkout.session.async_payment_succeeded` not selected on the endpoint | add it (Step 4), then **Resend** that event from the delivery log |
+| Webhook 200 with `payment_pending` | Checkout finished unpaid (delayed bank debit) | nothing — credits land on `async_payment_succeeded` |
+| Subscriber with overage on gets 402 after a few top-ups in a day | overage is capped at `OVERAGE_MAX_PACKS_PER_DAY` packs ($10 each) per rolling 24h, default 3 | intended; raise the number in `.env` and recreate the backend if a customer needs more |
 | `/credits/purchase` → 409 `use_stripe_checkout` | correct behavior with Stripe on | nothing — the UI uses Checkout |

@@ -279,7 +279,7 @@ async def spend(
     try:
         from app.api.stripe_billing import ensure_balance_for
 
-        ensure_balance_for(target_id, payload.amount)
+        ensure_balance_for(target_id, payload.amount, actor_id=user_id)
     except Exception:
         pass
     try:

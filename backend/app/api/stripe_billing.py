@@ -32,7 +32,14 @@ from sqlalchemy import select
 
 from app.api.auth import get_current_user_row
 from app.api.deps import require_user_id
-from app.db.models import CertificateRow, CreditLedgerRow, SubscriptionRow, UserRow
+from app.db.models import (
+    CertificateRow,
+    CreditLedgerRow,
+    SubscriptionRow,
+    TeamMemberRow,
+    TeamRow,
+    UserRow,
+)
 from app.db.session_sqlalchemy import session_scope
 
 logger = logging.getLogger(__name__)
@@ -121,6 +128,24 @@ _CERTIFICATE_CREDIT_COST = 2
 _OVERAGE_CREDITS = 200
 _OVERAGE_PRICE_CENTS = 1000  # $10
 
+# At most this many overage packs are charged to one wallet in any rolling 24
+# hours. Past it the spend gets a plain 402 and the customer buys a pack (or
+# raises the cap) deliberately. Override with OVERAGE_MAX_PACKS_PER_DAY; 0
+# turns auto-overage off for everyone.
+_OVERAGE_WINDOW = timedelta(hours=24)
+_DEFAULT_OVERAGE_MAX_PACKS_PER_DAY = 3
+
+# Stripe never reactivates a subscription in these states, so no later (or
+# redelivered) event may move our row out of them.
+_TERMINAL_SUB_STATUSES = frozenset({"canceled", "incomplete_expired"})
+# Our row's status while the first payment of a Checkout subscription has not
+# cleared yet (a delayed method such as ACH). Unlocks nothing.
+_PENDING_SUB_STATUS = "incomplete"
+# Checkout payment_status values that mean the money is in (or none was owed,
+# e.g. an operator's 100%-off coupon). "unpaid" means a delayed payment is
+# still settling: grant on checkout.session.async_payment_succeeded instead.
+_PAID_CHECKOUT_STATUSES = frozenset({"paid", "no_payment_required"})
+
 
 def _stripe_secret() -> Optional[str]:
     val = os.environ.get("STRIPE_SECRET_KEY", "").strip()
@@ -146,6 +171,80 @@ def _sub_price_id_for(plan: str) -> Optional[str]:
         return None
     val = os.environ.get(str(meta["price_env"]), "").strip()
     return val or None
+
+
+def _plan_for_price(price_id: Optional[str]) -> Optional[str]:
+    """Map a Stripe price id back to a plan via the STRIPE_PRICE_* config.
+
+    The price is the only trustworthy record of what a customer is billed for:
+    a plan switch in the customer portal changes it and nothing else. An id we
+    don't recognise maps to None, which must never grant anything.
+    """
+    if not price_id:
+        return None
+    for plan in _SUB_PLANS:
+        if _sub_price_id_for(plan) == price_id:
+            return plan
+    return None
+
+
+def _stripe_id(value: Any) -> Optional[str]:
+    """A Stripe reference is either an id string or an expanded object."""
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        inner = value.get("id")
+        return str(inner) if inner else None
+    return None
+
+
+def _single_plan(price_ids: List[Optional[str]]) -> Optional[str]:
+    """The one known plan among ``price_ids``; None if none or ambiguous."""
+    plans = {p for p in (_plan_for_price(pid) for pid in price_ids) if p}
+    return next(iter(plans)) if len(plans) == 1 else None
+
+
+def _subscription_price_ids(obj: Dict[str, Any]) -> List[Optional[str]]:
+    items = (obj.get("items") or {}).get("data") or []
+    return [_stripe_id(item.get("price")) for item in items if isinstance(item, dict)]
+
+
+def _subscription_period_end(obj: Dict[str, Any]) -> Optional[datetime]:
+    # Newer Stripe API versions moved current_period_end onto the items.
+    raw = obj.get("current_period_end")
+    if raw is None:
+        items = (obj.get("items") or {}).get("data") or []
+        if items and isinstance(items[0], dict):
+            raw = items[0].get("current_period_end")
+    if not isinstance(raw, (int, float)):
+        return None
+    try:
+        return datetime.utcfromtimestamp(int(raw))
+    except Exception:
+        return None
+
+
+def _invoice_subscription_id(obj: Dict[str, Any]) -> Optional[str]:
+    # Newer Stripe API versions moved invoice.subscription under parent.
+    sub = _stripe_id(obj.get("subscription"))
+    if sub:
+        return sub
+    details = (obj.get("parent") or {}).get("subscription_details") or {}
+    return _stripe_id(details.get("subscription"))
+
+
+def _invoice_billed_plan(obj: Dict[str, Any]) -> Optional[str]:
+    """The plan this invoice actually bills for, from its non-proration lines."""
+    price_ids: List[Optional[str]] = []
+    for line in (obj.get("lines") or {}).get("data") or []:
+        if not isinstance(line, dict):
+            continue
+        item_details = (line.get("parent") or {}).get("subscription_item_details") or {}
+        if line.get("proration") or item_details.get("proration"):
+            continue
+        pricing = (line.get("pricing") or {}).get("price_details") or {}
+        price_ids.append(_stripe_id(line.get("price")) or _stripe_id(pricing.get("price")))
+    return _single_plan(price_ids)
 
 
 def _grant_credits_idempotent(user_id: str, amount: int, kind: str, description: str) -> bool:
@@ -410,8 +509,39 @@ def _summary_claim(score: int, fixed: int, remaining: int) -> str:
     return " ".join(parts)
 
 
-def _overage_eligible(user_id: str) -> Optional[str]:
-    """Return the Stripe customer id if the user can auto-charge overage."""
+def _overage_max_packs_per_day() -> int:
+    raw = os.environ.get("OVERAGE_MAX_PACKS_PER_DAY", "").strip()
+    return int(raw) if raw.isdigit() else _DEFAULT_OVERAGE_MAX_PACKS_PER_DAY
+
+
+def _can_trigger_overage(wallet_id: str, actor_id: Optional[str]) -> bool:
+    """Only the wallet owner or an admin of the owner's team may cause an
+    off-session charge on the owner's card. A plain member gets a 402 instead.
+
+    ``actor_id=None`` means the caller did not say who is acting and is
+    treated as the wallet owner (the legacy call shape).
+    """
+    if actor_id is None or actor_id == wallet_id:
+        return True
+    with session_scope() as session:
+        member = session.execute(
+            select(TeamMemberRow).where(TeamMemberRow.user_id == actor_id)
+        ).scalar_one_or_none()
+        if member is None or member.role != "admin":
+            return False
+        team = session.execute(
+            select(TeamRow).where(TeamRow.id == member.team_id)
+        ).scalar_one_or_none()
+        return team is not None and team.owner_id == wallet_id
+
+
+def _overage_eligible(user_id: str, actor_id: Optional[str] = None) -> Optional[str]:
+    """Return the Stripe customer id if an overage pack may be charged now:
+    an active subscription with overage on, an actor allowed to charge the
+    owner's card, and the rolling 24-hour pack cap not yet reached."""
+    cap = _overage_max_packs_per_day()
+    if cap <= 0 or not _can_trigger_overage(user_id, actor_id):
+        return None
     with session_scope() as session:
         row = session.execute(
             select(SubscriptionRow)
@@ -419,6 +549,16 @@ def _overage_eligible(user_id: str) -> Optional[str]:
             .order_by(SubscriptionRow.created_at.desc())
         ).scalars().first()
         if row is None or not row.overage_enabled or not row.stripe_customer_id:
+            return None
+        recent = session.execute(
+            select(CreditLedgerRow.id).where(
+                CreditLedgerRow.user_id == user_id,
+                CreditLedgerRow.kind == "overage",
+                CreditLedgerRow.at >= datetime.utcnow() - _OVERAGE_WINDOW,
+            )
+        ).all()
+        if len(recent) >= cap:
+            logger.info("overage cap reached for %s (%d packs in 24h)", user_id, len(recent))
             return None
         return row.stripe_customer_id
 
@@ -464,18 +604,21 @@ def _charge_overage(customer_id: str, user_id: str) -> Optional[str]:
     return None
 
 
-def ensure_balance_for(user_id: str, needed: int) -> None:
+def ensure_balance_for(user_id: str, needed: int, actor_id: Optional[str] = None) -> None:
     """Best-effort overage top-up before a credit spend.
 
-    If the user is short on credits but is an overage-eligible subscriber,
-    auto-charge an overage pack and grant the credits. Never raises; if it
-    can't top up, the subsequent spend fails as usual (402).
+    If the wallet ``user_id`` is short on credits but is an overage-eligible
+    subscriber, auto-charge an overage pack and grant the credits. Never
+    raises; if it can't top up, the subsequent spend fails as usual (402).
 
-    Charges at most one pack per call. Real per-document spends are <= 5
-    credits and a pack is 200, so one pack always covers a single spend.
-    Grants are idempotent on the charge id. On a single worker the blocking
-    Stripe call serializes concurrent spends; a multi-instance deploy should
-    add a per-user lock here to close the concurrent-charge window.
+    Charges at most one pack per call, and only when that pack actually covers
+    the shortfall: a charge that still ends in a 402 takes the customer's money
+    for a spend that never happens. ``actor_id`` is the real caller when it
+    differs from the wallet (a team member spending the owner's wallet); only
+    the owner or a team admin may trigger the charge. Packs are capped per
+    rolling 24 hours (see _overage_eligible). Grants are idempotent on the
+    charge id and happen inside the per-user lock, so a concurrent spend sees
+    the topped-up balance instead of charging again.
     """
     if needed <= 0:
         return
@@ -497,7 +640,9 @@ def ensure_balance_for(user_id: str, needed: int) -> None:
         balance = int(user.credits_balance or 0) if user else 0
         if balance >= needed:
             return
-        customer_id = _overage_eligible(user_id)
+        if balance + _OVERAGE_CREDITS < needed:
+            return
+        customer_id = _overage_eligible(user_id, actor_id=actor_id)
         if not customer_id:
             return
         try:
@@ -505,8 +650,8 @@ def ensure_balance_for(user_id: str, needed: int) -> None:
         except Exception as exc:  # never block the request on overage failure
             logger.warning("overage charge failed for %s: %s", user_id, exc)
             return
-    if charge_id:
-        _grant_credits_idempotent(user_id, _OVERAGE_CREDITS, "overage", f"overage_{charge_id}")
+        if charge_id:
+            _grant_credits_idempotent(user_id, _OVERAGE_CREDITS, "overage", f"overage_{charge_id}")
 
 
 @router.get("/config", response_model=BillingConfigResponse)
@@ -945,20 +1090,29 @@ async def set_overage(
 # ---------------------------------------------------------------------------
 
 
-def _upsert_subscription(
+def _record_subscription_checkout(
     sub_id: str,
     user_id: str,
     plan: str,
-    status: str,
     customer_id: Optional[str],
-    period_end: Optional[datetime],
-) -> None:
+    paid: bool,
+) -> str:
+    """Record a Checkout-created subscription; return the row's status.
+
+    Checkout only creates the row. After that, status and plan belong to the
+    customer.subscription.* events, which carry Stripe's own values, so a
+    redelivered or late checkout event cannot overwrite them. Two cases are
+    handled here: our pending placeholder turns active once the session is
+    paid, and a row that is already terminal (canceled before this event
+    landed) stays terminal.
+    """
     with session_scope() as session:
         row = session.execute(
             select(SubscriptionRow).where(SubscriptionRow.id == sub_id)
         ).scalar_one_or_none()
         now = datetime.utcnow()
         if row is None:
+            status = "active" if paid else _PENDING_SUB_STATUS
             session.add(
                 SubscriptionRow(
                     id=sub_id,
@@ -966,31 +1120,41 @@ def _upsert_subscription(
                     plan=plan,
                     status=status,
                     stripe_customer_id=customer_id,
-                    current_period_end=period_end,
+                    current_period_end=None,
                     created_at=now,
                     updated_at=now,
                 )
             )
-        else:
+            session.flush()
+            return status
+        if not row.user_id:
             row.user_id = user_id
-            row.plan = plan
-            row.status = status
-            if customer_id:
-                row.stripe_customer_id = customer_id
-            if period_end is not None:
-                row.current_period_end = period_end
-            row.updated_at = now
+        if customer_id and not row.stripe_customer_id:
+            row.stripe_customer_id = customer_id
+        if paid and row.status == _PENDING_SUB_STATUS:
+            row.status = "active"
+        row.updated_at = now
         session.flush()
+        return str(row.status)
+
+
+def _checkout_paid(obj: Dict[str, Any]) -> bool:
+    return str(obj.get("payment_status") or "") in _PAID_CHECKOUT_STATUSES
 
 
 def _handle_credit_checkout(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """One-time credit-pack purchase via Checkout."""
+    """One-time credit-pack purchase via Checkout: checkout.session.completed,
+    or checkout.session.async_payment_succeeded when a delayed payment clears.
+    Both carry the same session id, so they share one grant key and the pair
+    can never grant twice."""
     user_id = obj.get("client_reference_id")
     metadata = obj.get("metadata") or {}
     tier = metadata.get("tier")
     if not user_id or tier not in _TIER_AMOUNTS:
         logger.warning("stripe webhook: missing/invalid user_id=%r tier=%r", user_id, tier)
         return {"received": True, "credited": False}
+    if not _checkout_paid(obj):
+        return {"received": True, "credited": False, "reason": "payment_pending"}
     session_id = obj.get("id") or ""
     desc = f"stripe_{tier}_{session_id}" if session_id else f"stripe_{tier}"
     granted = _grant_credits_idempotent(str(user_id), _TIER_AMOUNTS[tier], "purchase", desc)
@@ -1000,8 +1164,9 @@ def _handle_credit_checkout(obj: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _handle_subscription_checkout(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """Subscription Checkout completed: record the subscription and grant the
-    first billing period's credit allowance."""
+    """Subscription Checkout completed (or its delayed first payment cleared):
+    record the subscription, and grant the first billing period's allowance
+    only once the payment is in and the subscription has not already ended."""
     user_id = obj.get("client_reference_id")
     metadata = obj.get("metadata") or {}
     plan = metadata.get("plan")
@@ -1010,61 +1175,145 @@ def _handle_subscription_checkout(obj: Dict[str, Any]) -> Dict[str, Any]:
     if not user_id or plan not in _SUB_PLANS or not sub_id:
         logger.warning("stripe sub checkout: missing user_id=%r plan=%r sub=%r", user_id, plan, sub_id)
         return {"received": True, "credited": False}
-    _upsert_subscription(str(sub_id), str(user_id), str(plan), "active", str(customer_id) if customer_id else None, None)
+    paid = _checkout_paid(obj)
+    status = _record_subscription_checkout(
+        str(sub_id), str(user_id), str(plan), str(customer_id) if customer_id else None, paid
+    )
+    if status in _TERMINAL_SUB_STATUSES:
+        return {"received": True, "subscription": sub_id, "credited": False, "reason": "subscription_ended"}
+    if not paid:
+        return {"received": True, "subscription": sub_id, "credited": False, "reason": "payment_pending", "plan": plan}
     granted = _grant_credits_idempotent(str(user_id), _plan_grant(plan), "subscription", f"sub_init_{sub_id}")
     return {"received": True, "subscription": sub_id, "credited": granted, "plan": plan}
 
 
+def _handle_payment_failed(event_type: str, obj: Dict[str, Any]) -> Dict[str, Any]:
+    """checkout.session.async_payment_failed / invoice.payment_failed: the
+    money never arrived, so nothing is granted. The subscription's status
+    follows from the customer.subscription.* events Stripe sends next."""
+    logger.info("stripe %s for %s: nothing granted", event_type, obj.get("id"))
+    return {"received": True, "credited": False, "reason": "payment_failed"}
+
+
+# Invoices that pay for a subscription period. Proration (subscription_update),
+# manual and threshold invoices are not a new period and grant nothing.
+_PERIOD_BILLING_REASONS = frozenset({"subscription_create", "subscription_cycle"})
+
+
 def _handle_invoice_paid(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """Recurring subscription invoice paid: grant the monthly allowance on
-    renewals (the first invoice is granted by the checkout event)."""
-    sub_id = obj.get("subscription")
+    """Subscription invoice paid: grant the allowance of the plan this invoice
+    actually bills (its line price), never the plan the row last stored.
+
+    subscription_cycle grants a renewal keyed on the invoice id.
+    subscription_create shares the checkout's sub_init key: it only lands
+    credits when a delayed first payment left the checkout event ungranted,
+    and it can never grant the first period twice.
+    """
+    sub_id = _invoice_subscription_id(obj)
     invoice_id = obj.get("id") or ""
     reason = obj.get("billing_reason")
     if not sub_id:
         return {"received": True, "ignored": "no_subscription"}
-    if reason == "subscription_create":
-        return {"received": True, "skipped": "initial_handled_by_checkout"}
+    if reason not in _PERIOD_BILLING_REASONS:
+        return {"received": True, "credited": False, "reason": "not_a_period_invoice"}
+    if obj.get("status") != "paid" or not invoice_id:
+        return {"received": True, "credited": False, "reason": "invoice_not_paid"}
+    plan = _invoice_billed_plan(obj)
+    if plan is None:
+        logger.warning("invoice %s for %s bills no known plan price", invoice_id, sub_id)
+        return {"received": True, "credited": False, "reason": "unknown_price"}
     with session_scope() as session:
         row = session.execute(
             select(SubscriptionRow).where(SubscriptionRow.id == str(sub_id))
         ).scalar_one_or_none()
-        if row is None:
+        if row is None or not row.user_id:
             logger.warning("invoice paid for unknown subscription %s", sub_id)
             return {"received": True, "credited": False, "reason": "unknown_subscription"}
-        user_id, plan = row.user_id, row.plan
+        user_id = row.user_id
+        if reason == "subscription_create":
+            if row.status in _TERMINAL_SUB_STATUSES:
+                return {"received": True, "credited": False, "reason": "subscription_ended"}
+            if row.status == _PENDING_SUB_STATUS:
+                row.status = "active"
+                row.updated_at = datetime.utcnow()
+                session.flush()
+    key = f"sub_init_{sub_id}" if reason == "subscription_create" else f"sub_invoice_{invoice_id}"
     amount = _plan_grant(plan)
-    if not amount:
-        return {"received": True, "credited": False, "reason": "unknown_plan"}
-    granted = _grant_credits_idempotent(user_id, amount, "subscription", f"sub_invoice_{invoice_id}")
+    granted = _grant_credits_idempotent(user_id, amount, "subscription", key)
     return {"received": True, "credited": granted, "plan": plan, "amount": amount}
 
 
+def _resize_owner_team(session: Any, owner_id: str, plan: str) -> None:
+    """Keep the owner's team seat limit in step with a plan change. Existing
+    members stay; a team over its new limit just can't invite until it fits."""
+    if not owner_id:
+        return
+    team = session.execute(
+        select(TeamRow).where(TeamRow.owner_id == owner_id)
+    ).scalars().first()
+    if team is not None:
+        team.seat_limit = plan_seats(plan)
+        team.updated_at = datetime.utcnow()
+
+
 def _handle_subscription_change(event_type: str, obj: Dict[str, Any]) -> Dict[str, Any]:
-    """customer.subscription.updated/deleted: track status + period end."""
-    sub_id = obj.get("id")
+    """customer.subscription.updated/deleted: track Stripe's status, the plan
+    (from the subscription's current price) and the period end.
+
+    A terminal status is final: an event that lands after the row went
+    terminal (redelivered, or delivered out of order) changes nothing. A
+    deletion for a subscription we have not recorded yet leaves a canceled
+    tombstone, so a late checkout.session.completed cannot create it active.
+    """
+    sub_id = _stripe_id(obj.get("id"))
     if not sub_id:
         return {"received": True, "ignored": "no_id"}
-    status = "canceled" if event_type == "customer.subscription.deleted" else str(obj.get("status") or "active")
-    period_end = obj.get("current_period_end")
-    period_dt: Optional[datetime] = None
-    if isinstance(period_end, (int, float)):
-        try:
-            period_dt = datetime.utcfromtimestamp(int(period_end))
-        except Exception:
-            period_dt = None
+    if event_type == "customer.subscription.deleted":
+        status: Optional[str] = "canceled"
+    else:
+        status = str(obj.get("status") or "") or None
+    price_ids = _subscription_price_ids(obj)
+    plan = _single_plan(price_ids)
+    period_dt = _subscription_period_end(obj)
     with session_scope() as session:
         row = session.execute(
-            select(SubscriptionRow).where(SubscriptionRow.id == str(sub_id))
+            select(SubscriptionRow).where(SubscriptionRow.id == sub_id)
         ).scalar_one_or_none()
+        now = datetime.utcnow()
         if row is None:
-            return {"received": True, "updated": False, "reason": "unknown_subscription"}
-        row.status = status
+            if status not in _TERMINAL_SUB_STATUSES:
+                return {"received": True, "updated": False, "reason": "unknown_subscription"}
+            metadata = obj.get("metadata") or {}
+            meta_plan = metadata.get("plan")
+            session.add(
+                SubscriptionRow(
+                    id=sub_id,
+                    user_id=str(metadata.get("user_id") or ""),
+                    plan=plan or (str(meta_plan) if meta_plan in _SUB_PLANS else "unknown"),
+                    status=str(status),
+                    stripe_customer_id=_stripe_id(obj.get("customer")),
+                    current_period_end=period_dt,
+                    overage_enabled=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.flush()
+            return {"received": True, "updated": True, "status": status}
+        if row.status in _TERMINAL_SUB_STATUSES:
+            return {"received": True, "updated": False, "reason": "subscription_ended", "status": row.status}
+        if status:
+            row.status = status
+        if plan and plan != row.plan:
+            row.plan = plan
+            _resize_owner_team(session, row.user_id, plan)
+        elif price_ids and plan is None:
+            logger.warning("subscription %s has no known plan price %s; plan stays %s", sub_id, price_ids, row.plan)
         if period_dt is not None:
             row.current_period_end = period_dt
-        row.updated_at = datetime.utcnow()
+        row.updated_at = now
         session.flush()
-    return {"received": True, "updated": True, "status": status}
+        return {"received": True, "updated": True, "status": row.status, "plan": row.plan}
 
 
 @router.post("/webhook")
@@ -1089,10 +1338,14 @@ async def stripe_webhook(request: Request) -> Dict[str, Any]:
     event_type = event.get("type")
     obj = (event.get("data") or {}).get("object") or {}
 
-    if event_type == "checkout.session.completed":
+    # A delayed payment method (ACH, SEPA, ...) completes Checkout "unpaid"
+    # and reports the outcome later; both success events share a grant key.
+    if event_type in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
         if (obj.get("mode") == "subscription") or obj.get("subscription"):
             return _handle_subscription_checkout(obj)
         return _handle_credit_checkout(obj)
+    if event_type in ("checkout.session.async_payment_failed", "invoice.payment_failed"):
+        return _handle_payment_failed(event_type, obj)
     if event_type == "invoice.payment_succeeded":
         return _handle_invoice_paid(obj)
     if event_type in ("customer.subscription.deleted", "customer.subscription.updated"):
