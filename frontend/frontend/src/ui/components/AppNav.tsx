@@ -17,6 +17,7 @@ import { Chip } from "./Chip";
 import { PixelIcon } from "./PixelIcon";
 import { PixelLogo } from "./PixelLogo";
 import { SignInModal } from "./SignInModal";
+import { linkProps } from "./linkProps";
 
 const ITEMS: { label: string; href: string; key: string }[] = [
   { label: "Home", href: "/", key: "home" },
@@ -50,8 +51,8 @@ export function AppNav() {
         },
       ]}
     >
-      <Pressable accessibilityRole="button"
-        onPress={() => router.push("/" as any)}
+      <Pressable
+        {...linkProps("/")}
         // Must contain the visible wordmark (WCAG 2.5.3): a speech-input user
         // says what they see — "508 Agent" — not "Home".
         accessibilityLabel="508 Agent — home"
@@ -74,11 +75,13 @@ export function AppNav() {
         {ITEMS.map((item) => {
           const active = pathname === item.href || (item.href === "/" && pathname === "/index");
           return (
-            <Pressable accessibilityRole="button"
+            <Pressable
               key={item.key}
-              onPress={() => router.push(item.href as any)}
+              {...linkProps(item.href)}
               accessibilityLabel={"Go to " + item.label}
-              accessibilityState={{ selected: active }}
+              // A link to the current page is aria-current, not aria-selected
+              // (selected is only valid on tabs/options/grid cells).
+              {...({ "aria-current": active ? "page" : undefined } as any)}
               style={({ focused }: any) => [
                 styles.link,
                 {

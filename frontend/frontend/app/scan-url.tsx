@@ -268,7 +268,7 @@ export default function ScanUrlScreen() {
             title="Want these fixed automatically?"
             message="A live site can't be auto-fixed here. Upload a document (PDF, Word, PowerPoint, HTML) and we'll remediate it for you."
           />
-          <Button title="Upload a document to auto-fix" variant="secondary" onPress={() => router.push("/audit")} />
+          <Button title="Upload a document to auto-fix" variant="secondary" href="/audit" />
         </Card>
       ) : null}
 
@@ -420,7 +420,7 @@ export default function ScanUrlScreen() {
             title="Want these fixed automatically?"
             message="A live web page can't be auto-fixed here. To auto-remediate a document (PDF, Word, PowerPoint, HTML), upload the file."
           />
-          <Button title="Upload a document to auto-fix" variant="secondary" onPress={() => router.push("/audit")} />
+          <Button title="Upload a document to auto-fix" variant="secondary" href="/audit" />
         </Card>
       ) : null}
     </Screen>

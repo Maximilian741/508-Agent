@@ -18,6 +18,8 @@ import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 import { Seo } from "../src/ui/components/Seo";
+import { GUIDE_EXCLUDED, ruleSlug } from "../src/domain/fixGuides";
+import { linkProps } from "../src/ui/components/linkProps";
 
 const SEVERITY_ORDER: IssueCatalogEntry["severity"][] = ["error", "warning", "info"];
 
@@ -432,6 +434,14 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
             choose between (WCAG 2.4.4) — and none of them contained the
             visible "Read W3C" (WCAG 2.5.3). Both are defects this product
             detects in other people's documents. */}
+        {!GUIDE_EXCLUDED.has(entry.ruleId) ? (
+          <Pressable
+            {...linkProps(`/fix/${ruleSlug(entry.ruleId)}`)}
+            accessibilityLabel={`How to fix: ${entry.title}`}
+          >
+            <Chip label="How to fix" tone="success" />
+          </Pressable>
+        ) : null}
         {entry.learnMoreUrl ? (
           <Pressable
             accessibilityRole="button"

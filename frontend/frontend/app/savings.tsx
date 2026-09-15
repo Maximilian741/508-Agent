@@ -131,9 +131,9 @@ export default function SavingsScreen() {
               </View>
 
               <View style={{ marginTop: 18 }}>
-                <Button title="Start free with 25 credits" onPress={() => router.push("/audit" as any)} />
+                <Button title="Start free with 25 credits" href="/audit" />
                 <View style={{ height: 10 }} />
-                <Button title="See pricing" variant="ghost" onPress={() => router.push("/billing" as any)} />
+                <Button title="See pricing" variant="ghost" href="/billing" />
               </View>
             </>
           ) : (

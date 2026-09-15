@@ -243,8 +243,8 @@ export default function FaqScreen() {
               and a human will get back to you, or read the in-depth Help &amp; glossary.
             </Text>
             <View style={styles.ctaRow}>
-              <Button title="Start free: 25 credits" onPress={() => router.push("/audit" as any)} />
-              <Button title="Read the glossary" variant="ghost" onPress={() => router.push("/help" as any)} />
+              <Button title="Start free: 25 credits" href="/audit" />
+              <Button title="Read the glossary" variant="ghost" href="/help" />
             </View>
           </Card>
         </View>

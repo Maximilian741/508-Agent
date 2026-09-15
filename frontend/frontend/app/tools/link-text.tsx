@@ -154,7 +154,7 @@ export default function LinkTextChecker() {
           automatically — along with alt text, headings, tables, language and contrast. Your first audits are free.
         </Text>
         <View style={{ marginTop: 14 }}>
-          <Button title="Audit a document free" onPress={() => router.push("/audit" as any)} />
+          <Button title="Audit a document free" href="/audit" />
         </View>
       </Card>
     </Screen>

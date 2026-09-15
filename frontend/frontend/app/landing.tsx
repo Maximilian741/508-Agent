@@ -16,6 +16,7 @@ import { Hero } from "../src/ui/components/Hero";
 import { ScreenReaderPreview } from "../src/ui/components/ScreenReaderPreview";
 import { useTheme } from "../src/ui/useTheme";
 import { Seo } from "../src/ui/components/Seo";
+import { linkProps } from "../src/ui/components/linkProps";
 
 /** Real number of checks, derived from the catalog so it can never drift. */
 const ISSUE_COUNT = CATALOG_ENTRIES.length;
@@ -87,11 +88,11 @@ export default function LandingScreen() {
         subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, PowerPoint, and HTML files, fixes them automatically (including writing the alt text for your images), and hands you a conformance report. Your first audits are free."
       >
         <View style={styles.ctaRow}>
-          <Button title="Start free (25 credits)" onPress={() => router.push("/audit" as any)} />
+          <Button title="Start free (25 credits)" href="/audit" />
           <Button
             title="See pricing"
             variant="ghost"
-            onPress={() => router.push("/pricing" as any)}
+            href="/pricing"
           />
         </View>
       </Hero>
@@ -117,8 +118,8 @@ export default function LandingScreen() {
             label, and an aria-label that merely paraphrases it REPLACES the
             name a speech-input user can say (WCAG 2.5.3 Label in Name). */}
         <Pressable
-          accessibilityRole="button"
-          onPress={() => router.push("/savings" as any)}
+          
+          {...linkProps("/savings")}
           style={({ hovered }: any) => [{ marginTop: 12, alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
@@ -141,7 +142,7 @@ export default function LandingScreen() {
         </Text>
         <ScreenReaderPreview />
         <View style={{ marginTop: 20 }}>
-          <Button title="Scan my document free" onPress={() => router.push("/audit" as any)} />
+          <Button title="Scan my document free" href="/audit" />
         </View>
       </Card>
 
@@ -238,30 +239,31 @@ export default function LandingScreen() {
             you're ready to scale. Fix one document or ten thousand.
           </Text>
           <View style={[styles.ctaRow, { justifyContent: "center" }]}>
-            <Button title="Start free" onPress={() => router.push("/audit" as any)} />
-            <Button title="See pricing" variant="ghost" onPress={() => router.push("/pricing" as any)} />
+            <Button title="Start free" href="/audit" />
+            <Button title="See pricing" variant="ghost" href="/pricing" />
           </View>
         </View>
       </Card>
 
       <View style={styles.footer}>
-        <FooterLink label="Pricing" onPress={() => router.push("/pricing" as any)} />
-        <FooterLink label="Savings calculator" onPress={() => router.push("/savings" as any)} />
-        <FooterLink label="FAQ" onPress={() => router.push("/faq" as any)} />
-        <FooterLink label="About" onPress={() => router.push("/about" as any)} />
-        <FooterLink label="Help" onPress={() => router.push("/help" as any)} />
-        <FooterLink label="Terms" onPress={() => router.push("/terms" as any)} />
-        <FooterLink label="Privacy" onPress={() => router.push("/privacy" as any)} />
+        <FooterLink label="Pricing" path="/pricing" />
+        <FooterLink label="Savings calculator" path="/savings" />
+        <FooterLink label="FAQ" path="/faq" />
+        <FooterLink label="Fix guides" path="/fix" />
+        <FooterLink label="About" path="/about" />
+        <FooterLink label="Help" path="/help" />
+        <FooterLink label="Terms" path="/terms" />
+        <FooterLink label="Privacy" path="/privacy" />
       </View>
     </Screen>
   );
 }
 
-function FooterLink({ label, onPress }: { label: string; onPress: () => void }) {
+function FooterLink({ label, path }: { label: string; path: string }) {
   const theme = useTheme();
   return (
-    <Pressable accessibilityRole="button"
-      onPress={onPress}
+    <Pressable
+      {...linkProps(path)}
       style={({ hovered, focused }: any) => [
         hovered ? { opacity: 0.7 } : null,
         focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,

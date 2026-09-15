@@ -52,11 +52,24 @@ if (!existsSync(dist)) {
   process.exit(1);
 }
 
+// Per-issue fix guides are generated from the catalog (generateStaticParams),
+// so discover them from the export instead of hand-listing — the sitemap can
+// never lag the pages that actually shipped. Skips the "[slug].html" shell.
+const { readdirSync } = await import("node:fs");
+const fixDir = join(dist, "fix");
+const FIX_ROUTES = existsSync(fixDir)
+  ? readdirSync(fixDir)
+      .filter((f) => f.endsWith(".html") && !f.startsWith("[") && f !== "index.html")
+      .map((f) => `/fix/${f.slice(0, -".html".length)}`)
+      .sort()
+  : [];
+const ALL_ROUTES = [...PUBLIC_ROUTES, "/fix", ...FIX_ROUTES];
+
 const today = new Date().toISOString().slice(0, 10);
 const xml =
   `<?xml version="1.0" encoding="UTF-8"?>\n` +
   `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-  PUBLIC_ROUTES.map(
+  ALL_ROUTES.map(
     (r) => `  <url><loc>${base}${r === "/" ? "" : r}</loc><lastmod>${today}</lastmod></url>`,
   ).join("\n") +
   `\n</urlset>\n`;
@@ -67,4 +80,6 @@ const robots = join(dist, "robots.txt");
 if (existsSync(robots)) {
   appendFileSync(robots, `\nSitemap: ${base}/sitemap.xml\n`);
 }
-console.log(`[sitemap] wrote ${PUBLIC_ROUTES.length} URLs for ${base}`);
+console.log(
+  `[sitemap] wrote ${ALL_ROUTES.length} URLs (${FIX_ROUTES.length} fix guides) for ${base}`,
+);

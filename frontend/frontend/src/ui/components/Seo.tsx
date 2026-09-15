@@ -22,7 +22,7 @@
  * settings, billing…) is disallowed in robots.txt and needs none of this.
  */
 import Head from "expo-router/head";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, usePathname } from "expo-router";
 import { useCallback } from "react";
 import { Platform } from "react-native";
 
@@ -34,11 +34,27 @@ export interface SeoProps {
   description: string;
 }
 
+/** Public site origin, inlined at build time (Dockerfile maps PUBLIC_BASE_URL
+ *  onto it). Empty in dev and in builds without it — then no canonical is
+ *  emitted, because a canonical pointing at a placeholder domain tells Google
+ *  the real page is a duplicate of a site that doesn't exist. */
+const SITE_URL = String(process.env.EXPO_PUBLIC_SITE_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
+const HAS_SITE_URL = /^https?:\/\//.test(SITE_URL);
+
 export function Seo({ title, description }: SeoProps) {
+  // The nginx config serves /pricing and /pricing.html from the same file;
+  // the canonical tells search engines which URL is the page. Same shape as
+  // the sitemap (no trailing slash, bare origin for home).
+  const pathname = usePathname() || "/";
+  const canonical = HAS_SITE_URL ? `${SITE_URL}${pathname === "/" ? "" : pathname}` : "";
   return (
     <Head>
       <title>{title}</title>
       <meta name="description" content={description} />
+      {canonical ? <link rel="canonical" href={canonical} /> : null}
+      {canonical ? <meta property="og:url" content={canonical} /> : null}
       <meta property="og:title" content={title} />
       <meta property="og:description" content={description} />
       <meta name="twitter:title" content={title} />
