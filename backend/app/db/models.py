@@ -259,7 +259,9 @@ class ApiKeyRow(Base):
     Only a SHA-256 hash of the key is stored — the plaintext is shown once at
     creation and is unrecoverable thereafter. ``key_prefix`` is a short,
     non-secret slice ("ak_live_ab12…") kept only so the owner can recognise a
-    key in the list. A revoked key has ``revoked_at`` set and is rejected.
+    key in the list. A revoked key has ``revoked_at`` set and is rejected;
+    ``revoked_reason`` says why when we revoked it for the owner (account
+    recovery), and is NULL when the owner revoked it themselves.
     """
 
     __tablename__ = "api_keys"
@@ -276,6 +278,9 @@ class ApiKeyRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "password_reset" / "password_changed" / "admin_bootstrap"; NULL when the
+    # owner revoked it themselves.
+    revoked_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class TeamRow(Base):

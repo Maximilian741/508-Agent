@@ -22,12 +22,18 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import optional_user, require_user_id
 from app.config import get_settings
-from app.db.models import CreditLedgerRow, EmailVerifyTokenRow, StarterGrantRow, UserRow
+from app.db.models import (
+    ApiKeyRow,
+    CreditLedgerRow,
+    EmailVerifyTokenRow,
+    StarterGrantRow,
+    UserRow,
+)
 from app.db.session_sqlalchemy import session_scope
 from app.persistence import audit_log as _audit
 from app.security.sessions import mint_session
@@ -126,6 +132,22 @@ def _bump_token_version(row: UserRow) -> int:
     """
     row.token_version = int(row.token_version or 0) + 1
     return row.token_version
+
+
+def _revoke_api_keys(session, user_id: str, reason: str) -> int:
+    """Revoke the user's active API keys; returns how many.
+
+    Bumping token_version kills session JWTs but not API keys, and a stolen
+    session can mint one (POST /api-keys). Account recovery has to end every
+    credential, so reset/set-password revoke them too. The owner sees them in
+    Settings marked with ``reason`` and can create replacements.
+    """
+    result = session.execute(
+        update(ApiKeyRow)
+        .where(ApiKeyRow.user_id == user_id, ApiKeyRow.revoked_at.is_(None))
+        .values(revoked_at=datetime.utcnow(), revoked_reason=reason)
+    )
+    return int(result.rowcount or 0)
 
 
 _GMAIL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
@@ -583,6 +605,8 @@ class SetPasswordResponse(BaseModel):
     # Changing the password revokes every session, the caller's included;
     # the caller switches to this fresh token.
     token: Optional[str] = None
+    # How many active API keys were revoked with it, so the UI can say so.
+    apiKeysRevoked: int = 0
 
 
 class VerifyQueuedResponse(BaseModel):
@@ -605,15 +629,22 @@ async def set_password(
 ) -> SetPasswordResponse:
     """Set or change the caller's password (scrypt salt:hash, stdlib only).
 
-    Revokes every session on the account — a new password must lock out
-    whoever else was signed in — and returns a fresh ``token`` for the caller.
+    Revokes every session on the account AND its API keys — a new password
+    must lock out whoever else was signed in, and a key they minted would
+    outlive the sessions — then returns a fresh ``token`` for the caller.
     """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
         row.password_hash = _hash_password(payload.password)
         row.last_seen_at = datetime.utcnow()
         token = mint_session(row.id, version=_bump_token_version(row))
-        return SetPasswordResponse(user=_row_to_dto(row), updated=True, token=token)
+        revoked = _revoke_api_keys(session, row.id, "password_changed")
+        return SetPasswordResponse(
+            user=_row_to_dto(row),
+            updated=True,
+            token=token,
+            apiKeysRevoked=revoked,
+        )
 
 
 @router.post("/request-verify-email", response_model=VerifyQueuedResponse)
@@ -621,10 +652,10 @@ async def request_verify_email(
     request: Request,
     user_id: str = Depends(require_user_id),
 ) -> VerifyQueuedResponse:
-    """Generate a verification token and log a debug "email" line.
+    """Email a single-use verification link (24h TTL).
 
-    No real SMTP yet; the magic link is printed to the server logs so devs
-    can copy/paste it. Old tokens for this user are cleared first.
+    Without SMTP the mailer logs the message instead, so a dev can copy the
+    link out of the server log. Old tokens for this user are cleared first.
     """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
@@ -644,8 +675,13 @@ async def request_verify_email(
         )
         to_email = row.email
 
+    # PUBLIC_BASE_URL is the APP (frontend) origin, so the link must be a page
+    # route there — /auth/verify-email was an API path the web app never served,
+    # so every emailed link 404'd. /verify-email mirrors /reset-password?token=…
+    # and stays clear of /verify?cert=… (certificate verification). The page
+    # calls GET {API}/auth/verify-email?token=… below.
     base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
-    link = f"{base}/auth/verify-email?token={token}" if base else f"/auth/verify-email?token={token}"
+    link = f"{base}/verify-email?token={token}" if base else f"/verify-email?token={token}"
     send_email(
         to=to_email,
         subject="Verify your 508 Agent email",
@@ -734,6 +770,8 @@ class PasswordResetResultResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reset: bool
+    # API keys revoked along with the sessions, so the page can say so.
+    apiKeysRevoked: int = 0
 
 
 @router.post("/request-password-reset", response_model=PasswordResetQueuedResponse)
@@ -790,7 +828,11 @@ async def request_password_reset(payload: PasswordResetRequest) -> PasswordReset
 
 @router.post("/reset-password", response_model=PasswordResetResultResponse)
 async def reset_password(payload: PasswordResetConfirm) -> PasswordResetResultResponse:
-    """Consume a reset token and set the new password (single-use, 1h TTL)."""
+    """Consume a reset token and set the new password (single-use, 1h TTL).
+
+    Recovery ends every credential an attacker could hold: sessions (via
+    token_version) and API keys alike.
+    """
     token = payload.token.strip()
     if not token.startswith(_RESET_PREFIX):
         raise HTTPException(status_code=410, detail="token_expired")
@@ -817,6 +859,7 @@ async def reset_password(payload: PasswordResetConfirm) -> PasswordResetResultRe
         user.last_seen_at = datetime.utcnow()
         # Account recovery must end every session, a stolen one included.
         _bump_token_version(user)
+        revoked = _revoke_api_keys(session, user.id, "password_reset")
         # Single-use: clear every outstanding reset token for this user.
         session.execute(
             delete(EmailVerifyTokenRow).where(
@@ -824,4 +867,4 @@ async def reset_password(payload: PasswordResetConfirm) -> PasswordResetResultRe
                 EmailVerifyTokenRow.token.like(f"{_RESET_PREFIX}%"),
             )
         )
-    return PasswordResetResultResponse(reset=True)
+    return PasswordResetResultResponse(reset=True, apiKeysRevoked=revoked)

@@ -17,6 +17,9 @@ and its purge. Pins:
 4. A verify link is no way in: a squatted listed account that the real inbox
    owner verifies by clicking is still not admin (only the bootstrap promotes).
 5. Moving an admin account off the listed address drops admin (role reset).
+6. The emailed verify link points at a PAGE route on PUBLIC_BASE_URL
+   (/verify-email?token=…), not the API path (which the web app never served,
+   so every link 404'd) and not /verify?cert=… (certificate verification).
 
 Usage:
     python -m app.devtools.smoke_admin_bootstrap
@@ -37,6 +40,7 @@ os.environ.pop("SMTP_HOST", None)
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
+import app.api.auth as auth_mod  # noqa: E402
 from app.main import app  # noqa: E402
 from app.db.models import EmailVerifyTokenRow  # noqa: E402
 from app.db.session_sqlalchemy import session_scope  # noqa: E402
@@ -173,6 +177,38 @@ def main() -> int:
     check("...and its role is reset to user", r.json().get("role") == "user", r.text)
     r = c.patch("/auth/me", headers=h(away_tok), json={"email": "owner@508agent.test"})
     check("...and can't PATCH back onto the listed address (409)", r.status_code == 409, r.text)
+
+    # --- 6. the emailed verify link is a page route ----------------------------
+    os.environ["PUBLIC_BASE_URL"] = "https://app.508agent.test"
+    sent: dict = {}
+    real_send = auth_mod.send_email
+    auth_mod.send_email = lambda **kw: bool(sent.update(kw)) or True
+    try:
+        r = signin("linkcheck@example.com", "linkcheck-pass-1")
+        link_tok, link_uid = r.json()["token"], r.json()["user"]["id"]
+        c.post("/auth/request-verify-email", headers=h(link_tok))
+    finally:
+        auth_mod.send_email = real_send
+        os.environ.pop("PUBLIC_BASE_URL", None)
+    with session_scope() as s:
+        issued = s.execute(
+            select(EmailVerifyTokenRow.token).where(EmailVerifyTokenRow.user_id == link_uid)
+        ).scalars().first()
+    body = sent.get("body", "")
+    check(
+        "email links to https://app.508agent.test/verify-email?token=<token>",
+        f"https://app.508agent.test/verify-email?token={issued}" in body,
+        body,
+    )
+    check(
+        "...not the API path, and not the certificate page",
+        "/auth/verify-email?" not in body and "/verify?cert=" not in body,
+        body,
+    )
+    check(
+        "the emailed token still verifies through GET /auth/verify-email",
+        c.get("/auth/verify-email", params={"token": issued}).status_code == 200,
+    )
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

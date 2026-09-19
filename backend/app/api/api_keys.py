@@ -11,6 +11,9 @@ Security model:
   * Keys are 256-bit random, so a hash lookup is not guessable.
   * Listing/revoking is strictly owner-scoped (a user only sees their own keys);
     revoking a key you don't own returns 404 (no existence disclosure).
+  * Account recovery kills keys too: reset-password and set-password revoke
+    every active key (``revoked_reason`` says which), so a key minted from a
+    stolen session cannot outlive the sessions.
 """
 
 from __future__ import annotations
@@ -44,6 +47,10 @@ class ApiKeyDTO(BaseModel):
     createdAt: str
     lastUsedAt: Optional[str] = None
     revoked: bool
+    revokedAt: Optional[str] = None
+    # Why WE revoked it ("password_reset" / "password_changed" /
+    # "admin_bootstrap"); None when the owner revoked it themselves.
+    revokedReason: Optional[str] = None
 
 
 class CreatedApiKeyDTO(ApiKeyDTO):
@@ -59,6 +66,8 @@ def _to_dto(row: ApiKeyRow) -> ApiKeyDTO:
         createdAt=row.created_at.isoformat(),
         lastUsedAt=row.last_used_at.isoformat() if row.last_used_at else None,
         revoked=row.revoked_at is not None,
+        revokedAt=row.revoked_at.isoformat() if row.revoked_at else None,
+        revokedReason=row.revoked_reason,
     )
 
 

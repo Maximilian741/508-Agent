@@ -141,6 +141,7 @@ def main() -> int:
     # --- 6. migration 0015 backfill on a pre-fix database -----------------------
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     backend_dir = Path(__file__).resolve().parents[2]
     mig_db = Path(_TMP) / "migrate.db"
@@ -177,7 +178,10 @@ def main() -> int:
         con.close()
     finally:
         os.environ["DATABASE_URL"] = app_db_url
-    check("migration reaches 0015", head == [("0015_token_version_grant_claims",)], head)
+    # Resolve the head from the migration scripts rather than naming a
+    # revision, so a later migration doesn't fail this smoke.
+    expected_head = ScriptDirectory.from_config(cfg).get_current_head()
+    check("0014 -> head upgrade lands on the repo head", head == [(expected_head,)], (head, expected_head))
     check(
         "backfill: one claim for the farmed mailbox, held by the earliest grant",
         claims == [(auth_mod.mailbox_hash("zed@gmail.com"), "u1")],

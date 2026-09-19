@@ -239,15 +239,20 @@ def init_db() -> None:
         for col_name, col_type in add_cols:
             if col_name not in existing_cols:
                 conn.execute(f"ALTER TABLE manual_review ADD COLUMN {col_name} {col_type}")
-        # users is ORM-owned (create_all in main.py), and create_all never adds
-        # a column to an existing table: backfill token_version on a
-        # pre-existing sqlite DB or every sign-in fails on the missing column.
-        user_cols = {
-            str(row[1])
-            for row in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
-        if user_cols and "token_version" not in user_cols:
-            conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+        # users and api_keys are ORM-owned (create_all in main.py), and
+        # create_all never adds a column to an existing table. Backfill on a
+        # pre-existing sqlite DB, or every sign-in fails on a missing column.
+        orm_add_cols = [
+            ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("api_keys", "revoked_reason", "TEXT"),
+        ]
+        for table_name, col_name, col_ddl in orm_add_cols:
+            table_cols = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if table_cols and col_name not in table_cols:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS policy_packs (

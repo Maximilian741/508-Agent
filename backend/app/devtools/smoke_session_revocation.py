@@ -9,12 +9,16 @@ carries the user's ``token_version`` as ``ver``. Pins:
 3. Password RESET revokes every outstanding token, and a revoked token is
    refused on every identity path (require_user_id, require_admin, optional_user,
    require_user_id_or_api_key).
-4. set-password revokes the caller's and other devices' tokens and returns a
+4. Recovery kills API KEYS too. A stolen session can mint one (POST /api-keys),
+   and bumping token_version would not touch it, so reset-password and
+   set-password revoke every active key. The owner sees the reason in
+   GET /api-keys and can create a replacement that works.
+5. set-password revokes the caller's and other devices' tokens and returns a
    fresh one.
-5. Sign-out revokes all devices; missing / stale tokens still get 204 and a
+6. Sign-out revokes all devices; missing / stale tokens still get 204 and a
    stale token can't sign out the current session.
-6. An email change revokes and returns a fresh token; a name-only PATCH doesn't.
-7. A deleted account's token is refused.
+7. An email change revokes and returns a fresh token; a name-only PATCH doesn't.
+8. A deleted account's token is refused.
 
 Usage:
     python -m app.devtools.smoke_session_revocation
@@ -22,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 import tempfile
@@ -53,6 +58,18 @@ def _legacy_token(user_id: str) -> str:
         algorithm="HS256",
     )
     return tok.decode("utf-8") if isinstance(tok, bytes) else tok
+
+
+def _docx_bytes() -> bytes:
+    """A small valid .docx, so a live API key gets 200 from /pipeline/analyze."""
+    from docx import Document
+
+    d = Document()
+    d.add_heading("Report", level=1)
+    d.add_paragraph("Body text.")
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
 
 
 def main() -> int:
@@ -98,6 +115,14 @@ def main() -> int:
     check("fresh token works", me(stolen) == 200)
     check("legacy token (no ver claim) still works before the first bump", me(legacy) == 200)
 
+    # The attacker mints an API key from the stolen session: a second
+    # credential, which bumping token_version would not touch.
+    r = c.post("/api-keys", headers=h(stolen), json={"name": "attacker persistence"})
+    stolen_key = r.json().get("key", "")
+    check("API key minted from the stolen session", r.status_code == 200 and stolen_key.startswith("ak_"), r.text)
+    scan = c.post("/pipeline/analyze", headers={"X-API-Key": stolen_key}, files={"file": ("r.docx", _docx_bytes(), DOCX_MIME)})
+    check("that key scans before the reset", scan.status_code == 200, scan.status_code)
+
     # --- 3. password reset -------------------------------------------------------
     c.post("/auth/request-password-reset", json={"email": EMAIL})
     with session_scope() as s:
@@ -108,6 +133,7 @@ def main() -> int:
         ).scalars().first()
     r = c.post("/auth/reset-password", json={"token": reset_token, "password": "victim-pass-2"})
     check("reset-password 200", r.status_code == 200, r.text)
+    check("reset reports the API keys it revoked", r.json().get("apiKeysRevoked") == 1, r.text)
     check("stolen token rejected after password reset", me(stolen) == 401)
     check("legacy token rejected after the first bump", me(legacy) == 401)
     check("revoked token: /credits/balance 401", c.get("/credits/balance", headers=h(stolen)).status_code == 401)
@@ -118,9 +144,27 @@ def main() -> int:
     )
     r = c.post("/pipeline/analyze", headers=h(stolen), files={"file": ("x.docx", b"PK", DOCX_MIME)})
     check("revoked token: /pipeline/analyze (session-or-API-key route) 401", r.status_code == 401, r.status_code)
+    scan = c.post("/pipeline/analyze", headers={"X-API-Key": stolen_key}, files={"file": ("r.docx", _docx_bytes(), DOCX_MIME)})
+    check("the attacker's API key is dead after recovery", scan.status_code == 401, scan.status_code)
 
-    # --- 4. set-password --------------------------------------------------------
+    # --- 4. the owner can see it happened, and start over -----------------------
     laptop = signin("victim-pass-2")
+    keys = c.get("/api-keys", headers=h(laptop)).json()
+    check(
+        "owner sees the key revoked, when, and why",
+        len(keys) == 1
+        and keys[0]["revoked"] is True
+        and keys[0]["revokedReason"] == "password_reset"
+        and bool(keys[0]["revokedAt"]),
+        keys,
+    )
+    r = c.post("/api-keys", headers=h(laptop), json={"name": "replacement"})
+    new_key = r.json().get("key", "")
+    check("owner can create a replacement key", r.status_code == 200 and bool(new_key), r.text)
+    scan = c.post("/pipeline/analyze", headers={"X-API-Key": new_key}, files={"file": ("r.docx", _docx_bytes(), DOCX_MIME)})
+    check("the replacement key scans", scan.status_code == 200, scan.status_code)
+
+    # --- 5. set-password --------------------------------------------------------
     phone = signin("victim-pass-2")
     r = c.post("/auth/set-password", headers=h(laptop), json={"password": "victim-pass-3"})
     fresh = r.json().get("token")
@@ -128,8 +172,11 @@ def main() -> int:
     check("set-password revokes the caller's old token", me(laptop) == 401)
     check("set-password revokes other devices", me(phone) == 401)
     check("the returned token works", me(fresh) == 200)
+    check("set-password revokes API keys as well", r.json().get("apiKeysRevoked") == 1, r.text)
+    scan = c.post("/pipeline/analyze", headers={"X-API-Key": new_key}, files={"file": ("r.docx", _docx_bytes(), DOCX_MIME)})
+    check("the replacement key dies with the password change", scan.status_code == 401, scan.status_code)
 
-    # --- 5. sign-out ------------------------------------------------------------
+    # --- 6. sign-out ------------------------------------------------------------
     other = signin("victim-pass-3")
     check("sign-out with a valid token -> 204", c.post("/auth/sign-out", headers=h(fresh)).status_code == 204)
     check("signed-out token rejected", me(fresh) == 401)
@@ -141,7 +188,7 @@ def main() -> int:
     c.post("/auth/sign-out", headers=h(other))
     check("a stale token can't sign out the current session", me(current) == 200)
 
-    # --- 6. email change ----------------------------------------------------------
+    # --- 7. email change ----------------------------------------------------------
     r = c.patch("/auth/me", headers=h(current), json={"email": "victim-moved@example.com"})
     moved = r.json().get("token")
     check("email change -> 200 with a fresh token", r.status_code == 200 and bool(moved), r.text)
@@ -154,7 +201,7 @@ def main() -> int:
         r.text,
     )
 
-    # --- 7. deletion ---------------------------------------------------------------
+    # --- 8. deletion ---------------------------------------------------------------
     check("delete account 204", c.delete("/auth/me", headers=h(moved)).status_code == 204)
     check("deleted account's token rejected", me(moved) == 401)
 

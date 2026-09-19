@@ -323,7 +323,10 @@ export default function SettingsScreen() {
                       </Text>
                     </View>
                     {k.revoked ? (
-                      <Chip label="Revoked" tone="default" />
+                      <Chip
+                        label={k.revokedReason ? `Revoked · ${k.revokedReason.replace(/_/g, " ")}` : "Revoked"}
+                        tone="default"
+                      />
                     ) : (
                       <Pressable accessibilityRole="button" accessibilityLabel={`Revoke ${k.name}`} onPress={() => onRevokeKey(k.id)}>
                         <Text style={[theme.typography.body, { color: theme.colors.danger, fontWeight: "700", fontSize: 13 }]}>Revoke</Text>

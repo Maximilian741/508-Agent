@@ -10,8 +10,8 @@ the proof of ownership. It needs no SMTP.
 For an address in ``ADMIN_EMAILS`` it:
 - creates the account if nobody has signed up with it yet, or
 - takes over the existing account: sets the password you type and revokes
-  every session on it, so if someone registered your address before you,
-  their password and tokens stop working;
+  every session and API key on it, so if someone registered your address
+  before you, their password, tokens and keys stop working;
 - marks the email verified and the account admin.
 
 Revoke by removing the address from ``ADMIN_EMAILS`` (and restarting); an
@@ -37,7 +37,12 @@ from typing import List, Optional
 
 from sqlalchemy import delete, select
 
-from app.api.auth import _MIN_PASSWORD_LEN, _bump_token_version, _hash_password
+from app.api.auth import (
+    _MIN_PASSWORD_LEN,
+    _bump_token_version,
+    _hash_password,
+    _revoke_api_keys,
+)
 from app.config import get_settings
 from app.db.base import Base
 from app.db.models import EmailVerifyTokenRow, UserRow
@@ -97,6 +102,7 @@ def bootstrap_admin(email: str, password: str) -> dict:
             row.email_verified_at = row.email_verified_at or now
             row.role = "admin"
             _bump_token_version(row)
+            _revoke_api_keys(session, row.id, "admin_bootstrap")
             # Verify/reset links someone else may have requested for it.
             session.execute(
                 delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.user_id == row.id)

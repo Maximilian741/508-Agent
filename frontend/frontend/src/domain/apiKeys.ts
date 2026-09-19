@@ -15,6 +15,9 @@ export interface ApiKeyDTO {
   createdAt: string;
   lastUsedAt?: string | null;
   revoked: boolean;
+  revokedAt?: string | null;
+  /** Why we revoked it ("password_reset", …); absent when the owner did. */
+  revokedReason?: string | null;
 }
 
 export interface CreatedApiKeyDTO extends ApiKeyDTO {
