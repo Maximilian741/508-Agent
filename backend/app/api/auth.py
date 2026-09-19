@@ -15,6 +15,7 @@ import hmac
 import logging
 import os
 import secrets
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -217,20 +218,79 @@ def _revoke_api_keys(session, user_id: str, reason: str) -> int:
 
 _GMAIL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
 
+# The canonical form is only ever hashed, so its length never matters to the
+# store — but an unbounded local part is free work for a farmer, so cap both
+# halves at their RFC 5321 maxima (64 / 255). Anything longer is truncated,
+# which can only ever MERGE two mailboxes into one claim, never split one.
+_MAX_LOCAL_LEN = 64
+_MAX_DOMAIN_LEN = 255
+
+
+def _canonical_domain(domain: str) -> str:
+    """Fold a domain to the name it actually resolves to.
+
+    Strips the RFC 1035 absolute-form trailing dot(s) and empty labels, and
+    IDNA-encodes so a unicode/IDN spelling maps onto the same punycode label
+    its DNS lookup would use. NFKC (applied to the whole address by the caller)
+    has already folded fullwidth and other compatibility forms.
+
+    Homoglyphs across *different* scripts (Cyrillic 'а' in "gmail") are NOT
+    folded: they are genuinely different registrable domains that deliver to
+    different mailboxes, so collapsing them would wrongly deny real users. The
+    email-verification gate is what covers those.
+    """
+    # 'gmail.com.' and 'gmail.com..' are the same fully-qualified name as
+    # 'gmail.com' and resolve to the same MX.
+    labels = [label for label in domain.split(".") if label]
+    if not labels:
+        return ""
+    domain = ".".join(labels)
+    try:
+        # encode('idna') rejects empty/over-long labels, which is why the
+        # empty ones are dropped first. Falls back to the ASCII-lowered form
+        # for anything it refuses (we must never raise on hostile input).
+        domain = domain.encode("idna").decode("ascii")
+    except Exception:
+        pass
+    return domain[:_MAX_DOMAIN_LEN]
+
+
+def _canonical_local(local: str) -> str:
+    """Fold the local part: unquote a plain dot-atom, then drop any ``+tag``."""
+    # '"alice"@gmail.com' is the quoted-string spelling of 'alice@gmail.com'.
+    # Only unquote when the content is a plain dot-atom — a quoted string is
+    # allowed to contain '@' or spaces, and those really are distinct.
+    if len(local) >= 2 and local[0] == '"' and local[-1] == '"':
+        inner = local[1:-1]
+        if inner and all(ch.isalnum() or ch in "._+-" for ch in inner):
+            local = inner
+    local = local.split("+", 1)[0] or local
+    return local[:_MAX_LOCAL_LEN]
+
 
 def canonical_mailbox(email: str) -> str:
     """The inbox an address really delivers to, for once-per-mailbox limits.
 
-    Lowercase; drop a ``+tag`` from the local part (``alice+1@x.com`` lands in
-    ``alice@x.com``); for Gmail also drop dots and fold googlemail.com into
-    gmail.com, since Gmail ignores both. Used only for starter-grant
-    eligibility; the login email itself stays exactly as typed.
+    Normalises ONCE, here, so hostile spellings can't mint a second claim:
+    NFKC + lowercase + whitespace strip; unquote a plain quoted local part;
+    drop a ``+tag`` (``alice+1@x.com`` lands in ``alice@x.com``); strip the
+    trailing-dot absolute form and IDNA-fold the domain (``gmail.com.`` and
+    ``gmail.com`` are one host); and for Gmail also drop dots and fold
+    googlemail.com into gmail.com, since Gmail ignores both.
+
+    Used only for starter-grant eligibility; the login email itself stays
+    exactly as typed. Never raises — every caller feeds it untrusted input.
     """
-    addr = (email or "").strip().lower()
+    # NFKC first: it folds fullwidth/compatibility characters (ｇｍａｉｌ.ｃｏｍ)
+    # onto their ASCII equivalents so they can't spell a second "gmail.com".
+    addr = unicodedata.normalize("NFKC", email or "").strip().lower()
     local, sep, domain = addr.rpartition("@")
     if not sep or not local or not domain:
         return addr
-    local = local.split("+", 1)[0] or local
+    local = _canonical_local(local)
+    domain = _canonical_domain(domain)
+    if not local or not domain:
+        return addr
     if domain in _GMAIL_DOMAINS:
         local = local.replace(".", "") or local
         domain = "gmail.com"
@@ -443,9 +503,11 @@ async def grant_starter(
     """Grant 25 credits exactly once per user AND once per mailbox (idempotent).
 
     Abuse guards:
-    - when an email pipeline is configured (SMTP_HOST set), the grant requires
-      a VERIFIED email — otherwise throwaway addresses can farm 25 free
-      credits per signup. In dev (no SMTP) this gate is off.
+    - the grant requires a VERIFIED email — otherwise throwaway addresses can
+      farm 25 free credits per signup. The ONLY case where the gate is off is
+      a development box with no SMTP configured; every other environment
+      demands verification whether or not a sender is wired up, so shipping
+      ``SMTP_HOST=`` can never silently switch the gate off in production.
     - one grant per real inbox: ``alice+1@gmail.com``, ``a.lice@gmail.com``
       and ``alice@googlemail.com`` all deliver to ``alice@gmail.com``, so
       verifying each proves nothing new. The grant is recorded in
@@ -460,11 +522,16 @@ async def grant_starter(
     import os as _os
 
     smtp_configured = bool((_os.environ.get("SMTP_HOST") or "").strip())
+    # Fail CLOSED on the env label: only an explicit development box may skip
+    # verification, and only while it has no mail sender at all. A production
+    # (or staging, or prod-eu, ...) deploy that ships SMTP_HOST empty now
+    # refuses the grant instead of handing 25 credits to any typed address.
+    require_verified = smtp_configured or not get_settings().is_dev
 
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
 
-        if smtp_configured and not row.email_verified_at:
+        if require_verified and not row.email_verified_at:
             raise HTTPException(status_code=403, detail="verify_email_first")
 
         existing = session.execute(

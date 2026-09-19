@@ -51,7 +51,12 @@ The values to fill in `.env` (the script generates secrets + starts everything):
 - `ADMIN_EMAILS=you@yourdomain.com`  *(the only address allowed into `/admin`. Listing it grants
   nothing by itself, and neither does signing up with it: step 4 unlocks it.)*
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, the 7 `STRIPE_PRICE_*`
-- `SMTP_*` (from your email sender)
+- `SMTP_*` (from your email sender) — **required, not optional.** Verification
+  email is the only thing standing between the 25 free starter credits and an
+  unbounded farm of invented addresses, so outside `APP_ENV=development` the
+  grant refuses anyone with an unverified address. Leave `SMTP_HOST` empty and
+  nobody can verify, so nobody gets their starter credits (and monitoring
+  alerts go nowhere). The backend logs an error at boot if it's missing.
 - `CF_TUNNEL_TOKEN` (from step 1) — then uncomment the `cloudflared`
   service block in `docker-compose.yml` and run `docker compose up -d cloudflared`
 - `TRUST_PROXY_HEADERS=true` — **only** because this deployment reaches the API

@@ -89,6 +89,19 @@ class Settings:
     def max_upload_bytes(self) -> int:
         return max(1, int(self.max_upload_mb)) * 1024 * 1024
 
+    @property
+    def is_dev(self) -> bool:
+        """Is this an explicit development box?
+
+        THE env check to gate money on. ``environment`` is a free-text label,
+        so ``== "production"`` fails OPEN for 'staging', 'prod', 'prod-eu' —
+        a real secret-bearing deploy would then enable the mock credit
+        purchase and no-charge overage packs. Ask ``is_dev`` and put the
+        permissive branch behind it, so anything unrecognised behaves like
+        production where money is concerned.
+        """
+        return self.environment == "development"
+
     def is_admin(self, email: Optional[str]) -> bool:
         """Is ``email`` listed in ``ADMIN_EMAILS``? List membership ONLY.
 
@@ -183,5 +196,17 @@ def get_settings() -> Settings:
     if settings.environment == "production" and settings.require_strict_cors:
         if "*" in settings.cors_allow_origins:
             raise RuntimeError("CORS_ALLOW_ORIGINS cannot include '*' in production.")
+    if not settings.is_dev and not (os.getenv("SMTP_HOST") or "").strip():
+        # Not fatal — the app still serves — but say it loudly at boot. Email
+        # verification is what stands between /auth/grant-starter and an
+        # unbounded free-credit farm, and with no sender nobody can complete
+        # it, so the endpoint now refuses every grant (fails closed). Wire
+        # SMTP_HOST before launch or starter credits are unclaimable.
+        _log.error(
+            "[config] SMTP_HOST is empty with ENVIRONMENT=%r — verification emails cannot be "
+            "delivered, so /auth/grant-starter will refuse every starter grant (verify_email_first). "
+            "Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/SMTP_FROM before launch.",
+            settings.environment,
+        )
     return settings
   

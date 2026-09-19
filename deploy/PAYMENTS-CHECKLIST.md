@@ -16,9 +16,16 @@ You do not need to re-test any of this — it is pinned by the smoke suite
 - **Signatures + replay.** Wrong signature → 400. Events older than 5 minutes
   → rejected. A duplicate delivery of the same event grants **nothing** (the
   ledger description is the idempotency key).
-- **No free credits in production.** The dev mock `/credits/purchase` returns
-  503 in `ENVIRONMENT=production` and 409 the moment `STRIPE_SECRET_KEY` is
-  set. Verified against a real migrated production-mode database.
+- **No free credits outside development.** The dev mock `/credits/purchase`
+  returns 503 for ANY `ENVIRONMENT` that is not literally `development`
+  (`production`, `staging`, `prod-eu`, a typo — all refused) and 409 the
+  moment `STRIPE_SECRET_KEY` is set. `OVERAGE_TEST_MODE` is likewise ignored
+  outside development. Verified against a real migrated production-mode
+  database.
+- **Refunds and chargebacks take the credits back.** A refunded or
+  charged-back payment reverses the credits it bought, once, keyed on the
+  refund/dispute id; a dispute we win restores them. Requires the six
+  refund/dispute webhook events in Step 4 to be selected.
 - **Charges are honest.** A corrupt upload doesn't charge; a broke user gets
   402 and an untouched balance; a remediation only charges when fixes
   actually persist into the file; if your browser disconnects mid-remediate,
@@ -108,7 +115,9 @@ after payment — Checkout succeeding is NOT enough on its own.
 
 1. Dashboard (test mode) → Developers → Webhooks → **Add endpoint**.
 2. Endpoint URL: `https://api.yourdomain.com/billing/webhook`
-3. Events to send — select exactly these seven:
+3. Events to send — select exactly these **thirteen**:
+
+   Money coming IN (credits are granted):
    - `checkout.session.completed`
    - `checkout.session.async_payment_succeeded`
    - `checkout.session.async_payment_failed`
@@ -117,23 +126,39 @@ after payment — Checkout succeeding is NOT enough on its own.
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
 
+   Money going back OUT (credits are clawed back):
+   - `charge.refunded`
+   - `charge.refund.updated`
+   - `charge.dispute.created`
+   - `charge.dispute.closed`
+   - `invoice.voided`
+   - `invoice.marked_uncollectible`
+
    Why the three `async_payment` / `payment_failed` ones matter: a bank-debit
    payment (ACH, SEPA, Bacs) finishes Checkout as **unpaid**. We grant nothing
    until `checkout.session.async_payment_succeeded` arrives. Without that
    event, those customers pay and never get their credits.
 
-   **Already created this endpoint with the old four?** Developers → Webhooks
-   → click the endpoint → edit its events → add the three missing ones
-   (`checkout.session.async_payment_succeeded`,
-   `checkout.session.async_payment_failed`, `invoice.payment_failed`) → save.
-   The signing secret does not change. Do this in test mode AND live mode.
+   Why the six refund/dispute ones matter: without them a buyer keeps every
+   credit a refunded or charged-back payment bought — net credits from
+   nothing. With them, the credits the money bought come back out, keyed
+   idempotently on the refund/dispute id. A dispute we **win** puts the
+   credits back automatically (we kept the money). A wallet never goes
+   negative: if the buyer already spent the credits, the unrecovered part is
+   a real loss and is recorded as `shortfall=N` on the `reversal` ledger row
+   — grep the backend log for `already spent (loss)` to find them.
+
+   **Already created this endpoint with the old seven?** Developers →
+   Webhooks → click the endpoint → edit its events → add the six
+   refund/dispute ones above → save. The signing secret does not change. Do
+   this in test mode AND live mode.
 4. After creating it, click **Reveal** on the signing secret (`whsec_...`) and
    put it in `.env` as `STRIPE_WEBHOOK_SECRET=whsec_...`, then
    `docker compose up -d --force-recreate backend` again.
 
 **VERIFY** — in the webhook's page click **Send test event** →
 `checkout.session.completed`. The dashboard should show the delivery got a
-**2xx** response. The endpoint's event list should show all seven events. A `400 invalid_signature` means the `whsec_` in `.env`
+**2xx** response. The endpoint's event list should show all thirteen events. A `400 invalid_signature` means the `whsec_` in `.env`
 doesn't match THIS endpoint (each endpoint has its own secret); a
 `503 webhook_not_configured` means the env var didn't load (recreate the
 container, check for quotes/whitespace).
@@ -195,7 +220,8 @@ you the exact response our server gave.
 | Paid but no credits | webhook failing | endpoint delivery log → our response body |
 | Webhook 400 `invalid_signature` | wrong `whsec_` for that endpoint | copy the secret from THAT endpoint |
 | Webhook 503 `webhook_not_configured` | env not loaded | recreate container; check `.env` syntax |
-| Webhook 200 but `ignored` | event type not in our seven | fix the event selection on the endpoint |
+| Webhook 200 but `ignored` | event type not in our thirteen | fix the event selection on the endpoint |
+| Refund left the credits behind | the six refund/dispute events are not selected | add them in Step 4, test AND live |
 | Bank-debit (ACH/SEPA) customer paid but no credits | `checkout.session.async_payment_succeeded` not selected on the endpoint | add it (Step 4), then **Resend** that event from the delivery log |
 | Webhook 200 with `payment_pending` | Checkout finished unpaid (delayed bank debit) | nothing — credits land on `async_payment_succeeded` |
 | Subscriber with overage on gets 402 after a few top-ups in a day | overage is capped at `OVERAGE_MAX_PACKS_PER_DAY` packs ($10 each) per rolling 24h, default 3 | intended; raise the number in `.env` and recreate the backend if a customer needs more |

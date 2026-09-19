@@ -328,9 +328,12 @@ async def purchase(
     if os.environ.get("STRIPE_SECRET_KEY", "").strip():
         raise HTTPException(status_code=409, detail="use_stripe_checkout")
 
-    # Never hand out free credits via the mock path in production. The mock
-    # path exists only for local/dev where Stripe is not wired up.
-    if get_settings().environment == "production":
+    # Never hand out free credits via the mock path outside development. The
+    # mock path exists only for local/dev where Stripe is not wired up.
+    # Fail CLOSED on the env label: `== "production"` left APP_ENV=staging
+    # (a real secret-bearing deploy) minting 1300 credits per request,
+    # uncapped and non-idempotent.
+    if not get_settings().is_dev:
         raise HTTPException(status_code=503, detail="billing_not_configured")
 
     with session_scope() as session:

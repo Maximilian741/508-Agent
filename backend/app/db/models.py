@@ -177,6 +177,7 @@ class CreditLedgerRow(Base):
     __tablename__ = "credit_ledger"
     __table_args__ = (
         Index("idx_ledger_user_at", "user_id", "at"),
+        Index("idx_ledger_stripe_ref", "stripe_ref"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -186,6 +187,12 @@ class CreditLedgerRow(Base):
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     related_doc_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The Stripe object whose money paid for this grant — a PaymentIntent id
+    # for a credit pack, an Invoice id for a subscription period. Refund and
+    # dispute events name the PaymentIntent/Invoice, not our session id, so
+    # this is what lets a reversal find the rows it has to claw back. NULL for
+    # anything not bought with money (starter grants, dev mock purchases).
+    stripe_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class EmailVerifyTokenRow(Base):

@@ -69,7 +69,7 @@ from app.services.scan_history import (
     save_scan,
 )
 from app.services.remediation_planner import plan_remediations, RemediationPolicy
-from app.services.remediators.base import ExecutionStatus
+from app.services.remediators.base import ExecutionResult, ExecutionStatus
 from app.services.remediators.registry import execute_plans
 from app.writers import write_remediated
 from app.api.credits import (
@@ -1038,11 +1038,49 @@ async def remediate(
                 selected_plans.append(plan)
                 break
 
+    # AI SPEND GATE. A plan whose every action is absent from
+    # _PERSISTED_ACTIONS[fmt] can never reach the output bytes, so
+    # _count_persisted_fixes will decline to charge for it — but the executor
+    # would still run, and some of them call the paid inference provider
+    # regardless of ``requires_ai`` (IMPROVE_LINK_TEXT is declared
+    # requires_ai=False and calls suggest_link_text anyway). Approving only
+    # those actions therefore bought unlimited provider calls for zero
+    # revenue, with the per-job USD cap reset on every request.
+    #
+    # Don't start charging for nothing — the honesty rule stands. Stop the
+    # SPEND: skip the executor and report the same manual-remediation outcome
+    # the user would have got, so the counts in _build_score are unchanged.
+    runnable_plans = []
+    unpersistable = []
+    for plan in selected_plans:
+        if any(_action_persists(a.action_code.value, result.format) for a in plan.actions):
+            runnable_plans.append(plan)
+            continue
+        unpersistable.extend(
+            ExecutionResult(
+                action_code=a.action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    f"Not auto-applied to the {result.format.upper()} file — this fix "
+                    "requires manual remediation in the source document."
+                ),
+            )
+            for a in plan.actions
+        )
+    if unpersistable:
+        logger.info(
+            "remediate: skipped %d approved action(s) with no %s persistence (no AI spend, no charge)",
+            len(unpersistable),
+            result.format,
+        )
+
     executions = (
-        await run_in_threadpool(execute_plans, tree, selected_plans)
-        if selected_plans
+        await run_in_threadpool(execute_plans, tree, runnable_plans)
+        if runnable_plans
         else []
     )
+    executions = list(executions) + unpersistable
 
     # Persist rejected violations into the manual_review queue so teammates
     # can pick them up via GET /manual-review.  This is best-effort: if the
