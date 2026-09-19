@@ -87,12 +87,17 @@ class UpdateProfileRequest(BaseModel):
 
     displayName: Optional[str] = Field(default=None, max_length=120)
     email: Optional[str] = Field(default=None, min_length=3, max_length=320)
+    # Required to change the EMAIL when the account has a password (see
+    # _require_current_password). A name-only change never needs it.
+    currentPassword: Optional[str] = Field(default=None, max_length=256)
 
 
 class UpdateProfileResponse(UserDTO):
     # Set only when the email changed. That revokes every session, the
     # caller's included, so the caller must switch to this fresh token.
     token: Optional[str] = None
+    # API keys revoked by an email change (they outlive session tokens).
+    apiKeysRevoked: int = 0
 
 
 class GrantStarterResponse(BaseModel):
@@ -132,6 +137,28 @@ def _bump_token_version(row: UserRow) -> int:
     """
     row.token_version = int(row.token_version or 0) + 1
     return row.token_version
+
+
+def _require_current_password(row: UserRow, provided: Optional[str]) -> None:
+    """Re-authenticate before an identity change. No-op without a password.
+
+    A session token alone must not be enough to TAKE OVER an account.
+    Changing the email moves where every future reset link goes; changing
+    the password locks the owner out. Both were reachable with a stolen or
+    borrowed session, which turned "someone used my laptop" into a
+    permanent loss of the account.
+
+    An account with no password yet (legacy, or created before passwords)
+    has nothing to prove, so it can set one without this — that path adds
+    a credential rather than replacing one.
+    """
+    stored = row.password_hash
+    if not stored:
+        return
+    if not provided:
+        raise HTTPException(status_code=403, detail="current_password_required")
+    if not _verify_password(provided, stored):
+        raise HTTPException(status_code=403, detail="invalid_current_password")
 
 
 def _revoke_api_keys(session, user_id: str, reason: str) -> int:
@@ -471,6 +498,7 @@ async def update_me(
     - revokes every session and returns a fresh ``token`` for this caller.
     """
     token: Optional[str] = None
+    revoked = 0
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
 
@@ -490,6 +518,8 @@ async def update_me(
                 ).scalar_one_or_none()
                 if clash is not None or get_settings().is_admin(new_email):
                     raise HTTPException(status_code=409, detail="email_in_use")
+                # Prove it is the owner, not a borrowed session.
+                _require_current_password(row, payload.currentPassword)
                 row.email = new_email
                 row.email_verified_at = None
                 # Admin is bound to the address the operator promoted.
@@ -499,9 +529,14 @@ async def update_me(
                     delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.user_id == row.id)
                 )
                 token = mint_session(row.id, version=_bump_token_version(row))
+                # Keys outlive session tokens, and the new address now owns
+                # account recovery: end every credential minted before it.
+                revoked = _revoke_api_keys(session, row.id, "email_changed")
 
         row.last_seen_at = datetime.utcnow()
-        return UpdateProfileResponse(**_row_to_dto(row).model_dump(), token=token)
+        return UpdateProfileResponse(
+            **_row_to_dto(row).model_dump(), token=token, apiKeysRevoked=revoked
+        )
 
 
 @router.get("/export")
@@ -595,6 +630,9 @@ class SetPasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     password: str = Field(min_length=8, max_length=256)
+    # Required when the account already HAS a password: proving you know it
+    # is what stops a stolen session from locking the owner out.
+    currentPassword: Optional[str] = Field(default=None, max_length=256)
 
 
 class SetPasswordResponse(BaseModel):
@@ -629,12 +667,19 @@ async def set_password(
 ) -> SetPasswordResponse:
     """Set or change the caller's password (scrypt salt:hash, stdlib only).
 
+    Changing an existing password requires ``currentPassword``: a stolen
+    session must not be able to lock the owner out. Setting a first password
+    does not — there is no credential to prove yet.
+
     Revokes every session on the account AND its API keys — a new password
     must lock out whoever else was signed in, and a key they minted would
     outlive the sessions — then returns a fresh ``token`` for the caller.
     """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
+        # Changing an EXISTING password requires knowing it; setting a first
+        # one does not (there is nothing to prove, and no owner to lock out).
+        _require_current_password(row, payload.currentPassword)
         row.password_hash = _hash_password(payload.password)
         row.last_seen_at = datetime.utcnow()
         token = mint_session(row.id, version=_bump_token_version(row))

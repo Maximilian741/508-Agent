@@ -106,7 +106,11 @@ def main() -> int:
     link = mint_verify_link(m_tok, m_id)
     check("mallory verifies her own inbox", c.get("/auth/verify-email", params={"token": link}).status_code == 200)
     for target in ("ops@508agent.test", "  OPS@508agent.test "):
-        r = c.patch("/auth/me", headers=h(m_tok), json={"email": target})
+        r = c.patch(
+            "/auth/me",
+            headers=h(m_tok),
+            json={"email": target, "currentPassword": "mallory-pass-1"},
+        )
         check(
             f"PATCH email onto listed {target.strip()!r} -> 409 email_in_use",
             r.status_code == 409 and r.json().get("detail") == "email_in_use",
@@ -117,7 +121,11 @@ def main() -> int:
     check("mallory is not admin", not is_admin(m_tok))
 
     old_inbox_link = mint_verify_link(m_tok, m_id)
-    r = c.patch("/auth/me", headers=h(m_tok), json={"email": "mallory2@example.com"})
+    r = c.patch(
+        "/auth/me",
+        headers=h(m_tok),
+        json={"email": "mallory2@example.com", "currentPassword": "mallory-pass-1"},
+    )
     body = r.json()
     moved_tok = body.get("token")
     check("PATCH onto a free address -> 200 with a fresh token", r.status_code == 200 and bool(moved_tok), r.text)
@@ -171,11 +179,19 @@ def main() -> int:
     check("...and /audit-log still 403", c.get("/audit-log", headers=h(s_tok)).status_code == 403)
 
     # --- 5. moving off the listed address drops admin -------------------------
-    r = c.patch("/auth/me", headers=h(op_tok), json={"email": "owner-personal@example.com"})
+    r = c.patch(
+        "/auth/me",
+        headers=h(op_tok),
+        json={"email": "owner-personal@example.com", "currentPassword": "operator-pass-1"},
+    )
     away_tok = r.json().get("token") or ""
     check("admin moving to an unlisted address loses admin", r.status_code == 200 and not is_admin(away_tok), r.text)
     check("...and its role is reset to user", r.json().get("role") == "user", r.text)
-    r = c.patch("/auth/me", headers=h(away_tok), json={"email": "owner@508agent.test"})
+    r = c.patch(
+        "/auth/me",
+        headers=h(away_tok),
+        json={"email": "owner@508agent.test", "currentPassword": "operator-pass-1"},
+    )
     check("...and can't PATCH back onto the listed address (409)", r.status_code == 409, r.text)
 
     # --- 6. the emailed verify link is a page route ----------------------------

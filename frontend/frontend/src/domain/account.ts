@@ -643,11 +643,16 @@ export async function grantStarterCredits(): Promise<void> {
 export async function updateProfile(patch: {
   displayName?: string;
   email?: string;
+  /** Required by the backend to change the EMAIL when the account has a
+   *  password: a stolen session must not be able to move where future
+   *  password-reset links are sent. */
+  currentPassword?: string;
 }): Promise<Account> {
   if (!_readToken()) throw new Error("Not signed in.");
   const body: Record<string, string> = {};
   if (patch.displayName !== undefined) body.displayName = patch.displayName.trim();
   if (patch.email !== undefined) body.email = patch.email.trim().toLowerCase();
+  if (patch.currentPassword) body.currentPassword = patch.currentPassword;
   const res = await apiFetch("/auth/me", {
     method: "PATCH",
     body: JSON.stringify(body),
@@ -753,7 +758,12 @@ export async function confirmPasswordReset(token: string, password: string): Pro
   return Boolean(j && j.reset);
 }
 
-export async function setPassword(password: string): Promise<Account> {
+export async function setPassword(
+  password: string,
+  /** Required when the account already has a password. Omitted only when
+   *  setting a FIRST password, where there is no credential to prove. */
+  currentPassword?: string,
+): Promise<Account> {
   if (!_readToken()) throw new Error("Not signed in.");
   // Mirror the backend's minimum (8) so users aren't bounced server-side.
   if (!password || password.length < 8) {
@@ -761,7 +771,7 @@ export async function setPassword(password: string): Promise<Account> {
   }
   const res = await apiFetch("/auth/set-password", {
     method: "POST",
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(currentPassword ? { password, currentPassword } : { password }),
   });
   if (!res.ok) {
     const j = await _readJson(res);

@@ -166,7 +166,11 @@ def main() -> int:
 
     # --- 5. set-password --------------------------------------------------------
     phone = signin("victim-pass-2")
-    r = c.post("/auth/set-password", headers=h(laptop), json={"password": "victim-pass-3"})
+    r = c.post(
+        "/auth/set-password",
+        headers=h(laptop),
+        json={"password": "victim-pass-3", "currentPassword": "victim-pass-2"},
+    )
     fresh = r.json().get("token")
     check("set-password 200 returns a fresh token", r.status_code == 200 and bool(fresh) and fresh != laptop, r.text)
     check("set-password revokes the caller's old token", me(laptop) == 401)
@@ -189,7 +193,11 @@ def main() -> int:
     check("a stale token can't sign out the current session", me(current) == 200)
 
     # --- 7. email change ----------------------------------------------------------
-    r = c.patch("/auth/me", headers=h(current), json={"email": "victim-moved@example.com"})
+    r = c.patch(
+        "/auth/me",
+        headers=h(current),
+        json={"email": "victim-moved@example.com", "currentPassword": "victim-pass-3"},
+    )
     moved = r.json().get("token")
     check("email change -> 200 with a fresh token", r.status_code == 200 and bool(moved), r.text)
     check("email change revokes the previous token", me(current) == 401)

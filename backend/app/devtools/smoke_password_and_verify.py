@@ -87,7 +87,10 @@ def main() -> int:
 
     print("[2] set-password")
     r = client.post(
-        "/auth/set-password", headers=headers, json={"password": "hunter2!"}
+        "/auth/set-password",
+        headers=headers,
+        # The account signed up WITH a password, so changing it needs it.
+        json={"password": "hunter2!", "currentPassword": "initpass12"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["updated"] is True

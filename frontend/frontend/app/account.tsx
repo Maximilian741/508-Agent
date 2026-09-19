@@ -34,6 +34,18 @@ import { SignInModal } from "../src/ui/components/SignInModal";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
+/** The backend's re-auth codes, in words a person can act on. */
+function authErrorText(message?: string): string {
+  const msg = message || "";
+  if (msg.includes("current_password_required")) {
+    return "Enter your current password to make this change.";
+  }
+  if (msg.includes("invalid_current_password")) {
+    return "That current password is not right.";
+  }
+  return msg;
+}
+
 export default function AccountScreen() {
   const theme = useTheme();
   const router = useRouter();
@@ -44,6 +56,7 @@ export default function AccountScreen() {
   const [editOpen, setEditOpen] = useState(false);
   const [editName, setEditName] = useState("");
   const [editEmail, setEditEmail] = useState("");
+  const [editCurrentPw, setEditCurrentPw] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
 
   const [exporting, setExporting] = useState(false);
@@ -54,6 +67,7 @@ export default function AccountScreen() {
 
   const [pwOpen, setPwOpen] = useState(false);
   const [pwValue, setPwValue] = useState("");
+  const [pwCurrent, setPwCurrent] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
   const [pwSaving, setPwSaving] = useState(false);
 
@@ -289,6 +303,37 @@ export default function AccountScreen() {
                 },
               ]}
             />
+            {account.hasPassword ? (
+              <>
+                <Text
+                  style={{
+                    color: theme.colors.textMuted,
+                    fontSize: 12,
+                    marginTop: 12,
+                    marginBottom: 4,
+                  }}
+                >
+                  Current password — needed to change your email
+                </Text>
+                <TextInput
+                  value={editCurrentPw}
+                  onChangeText={setEditCurrentPw}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  placeholder="Your current password"
+                  placeholderTextColor={theme.colors.textMuted}
+                  accessibilityLabel="Current password"
+                  style={[
+                    styles.input,
+                    {
+                      borderColor: theme.colors.border,
+                      color: theme.colors.text,
+                      backgroundColor: theme.colors.surface,
+                    },
+                  ]}
+                />
+              </>
+            ) : null}
             <View style={styles.editButtonsRow}>
               <Button
                 title={savingProfile ? "Saving..." : "Save"}
@@ -304,7 +349,11 @@ export default function AccountScreen() {
                   }
                   setSavingProfile(true);
                   try {
-                    const patch: { displayName?: string; email?: string } = {};
+                    const patch: {
+                      displayName?: string;
+                      email?: string;
+                      currentPassword?: string;
+                    } = {};
                     if (nameTrim && nameTrim !== account.displayName) patch.displayName = nameTrim;
                     if (emailTrim && emailTrim !== account.email) patch.email = emailTrim;
                     if (!patch.displayName && !patch.email) {
@@ -313,14 +362,20 @@ export default function AccountScreen() {
                       setSavingProfile(false);
                       return;
                     }
+                    // Only an email change needs it; a rename does not.
+                    if (patch.email && editCurrentPw.trim()) {
+                      patch.currentPassword = editCurrentPw.trim();
+                    }
                     await updateProfile(patch);
+                    setEditCurrentPw("");
                     const fresh = await refreshAccount();
                     if (fresh) setAccount(fresh);
                     toast.success("Profile updated");
                     setEditOpen(false);
                   } catch (err: any) {
                     toast.error("Update failed", {
-                      description: err?.message || "Could not save your changes.",
+                      description:
+                        authErrorText(err?.message) || "Could not save your changes.",
                     });
                   } finally {
                     setSavingProfile(false);
@@ -477,7 +532,38 @@ export default function AccountScreen() {
           </View>
         ) : (
           <View style={styles.editForm}>
-            <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginBottom: 4 }}>
+            {account.hasPassword ? (
+              <>
+                <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginBottom: 4 }}>
+                  Current password
+                </Text>
+                <TextInput
+                  value={pwCurrent}
+                  onChangeText={setPwCurrent}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  placeholder="Your current password"
+                  placeholderTextColor={theme.colors.textMuted}
+                  accessibilityLabel="Current password"
+                  style={[
+                    styles.input,
+                    {
+                      borderColor: theme.colors.border,
+                      color: theme.colors.text,
+                      backgroundColor: theme.colors.surface,
+                    },
+                  ]}
+                />
+              </>
+            ) : null}
+            <Text
+              style={{
+                color: theme.colors.textMuted,
+                fontSize: 12,
+                marginTop: account.hasPassword ? 12 : 0,
+                marginBottom: 4,
+              }}
+            >
               New password
             </Text>
             <TextInput
@@ -529,9 +615,9 @@ export default function AccountScreen() {
                 disabled={pwSaving}
                 onPress={async () => {
                   if (pwSaving) return;
-                  if (!pwValue || pwValue.length < 4) {
+                  if (!pwValue || pwValue.length < 8) {
                     toast.warning("Password too short", {
-                      description: "Use at least 4 characters.",
+                      description: "Use at least 8 characters.",
                     });
                     return;
                   }
@@ -541,15 +627,19 @@ export default function AccountScreen() {
                   }
                   setPwSaving(true);
                   try {
-                    const next = await setAccountPassword(pwValue);
+                    const next = await setAccountPassword(
+                      pwValue,
+                      account.hasPassword ? pwCurrent : undefined,
+                    );
                     setAccount(next);
                     toast.success("Password updated");
                     setPwOpen(false);
                     setPwValue("");
+                    setPwCurrent("");
                     setPwConfirm("");
                   } catch (err: any) {
                     toast.error("Could not save password", {
-                      description: err?.message || "Try again.",
+                      description: authErrorText(err?.message) || "Try again.",
                     });
                   } finally {
                     setPwSaving(false);
@@ -563,6 +653,7 @@ export default function AccountScreen() {
                 onPress={() => {
                   setPwOpen(false);
                   setPwValue("");
+                  setPwCurrent("");
                   setPwConfirm("");
                 }}
               />

@@ -120,7 +120,11 @@ def main() -> int:
     carol_h = {"Authorization": f"Bearer {carol_tok}"}
     r = c.post("/auth/grant-starter", headers=carol_h)
     check("repeat grant for the same user -> granted False", r.status_code == 200 and r.json()["granted"] is False and r.json()["amount"] == 0, r.text)
-    r = c.patch("/auth/me", headers=carol_h, json={"email": "carol-renamed@example.com"})
+    r = c.patch(
+        "/auth/me",
+        headers=carol_h,
+        json={"email": "carol-renamed@example.com", "currentPassword": "mailboxpass1"},
+    )
     check("carol moves her account to another address", r.status_code == 200, r.text)
     g = onboard(c, "carol@example.com")[1]
     check("a new account on carol's old mailbox gets 0", g["amount"] == 0, g)
