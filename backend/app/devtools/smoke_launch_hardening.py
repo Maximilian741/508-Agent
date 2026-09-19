@@ -64,11 +64,15 @@ def main() -> int:
     _real = _config.get_settings
     os.environ["OVERAGE_TEST_MODE"] = "succeed"
     try:
-        _config.get_settings = lambda: types.SimpleNamespace(environment="development")
+        _config.get_settings = lambda: types.SimpleNamespace(
+            environment="development", is_dev=True
+        )
         dev = _charge_overage("cus_x", "user_x")
         check("dev: OVERAGE_TEST_MODE=succeed yields a synthetic charge", isinstance(dev, str) and dev.startswith("pi_test_"))
 
-        _config.get_settings = lambda: types.SimpleNamespace(environment="production")
+        _config.get_settings = lambda: types.SimpleNamespace(
+            environment="production", is_dev=False
+        )
         prod = _charge_overage("cus_x", "user_x")
         check("prod: OVERAGE_TEST_MODE ignored (no free credits)", prod is None)
     finally:

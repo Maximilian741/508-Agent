@@ -24,8 +24,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0017_ledger_stripe_ref_mailbox_recanon"
-down_revision = "0016_api_key_revoked_reason"
+revision = "0018_ledger_stripe_ref_mailbox_recanon"
+down_revision = "0017_manual_review_owner"
 branch_labels = None
 depends_on = None
 

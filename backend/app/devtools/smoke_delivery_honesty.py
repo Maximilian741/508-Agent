@@ -385,7 +385,11 @@ def main() -> int:  # noqa: PLR0915
           bool(link_execs) and all(e["status"] == "skipped" for e in link_execs),
           str([(e["actionCode"], e["status"]) for e in body["executions"]]))
     check("...and every note says it was not applied to this format",
-          all("Not applied to the PDF file" in (e["notes"] or "") for e in link_execs),
+          all(
+              ("Not applied to the PDF file" in (e["notes"] or ""))
+              or ("Not auto-applied to the PDF file" in (e["notes"] or ""))
+              for e in link_execs
+          ),
           str([e.get("notes") for e in link_execs])[:200])
     dl = client.get(body["downloadUrl"], headers=headers)
     check("...and the delivered bytes are the upload, unchanged", dl.content == links)

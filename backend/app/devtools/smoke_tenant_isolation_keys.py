@@ -55,6 +55,8 @@ if _alembic.returncode != 0:
 from docx import Document  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.db.models import UserRow  # noqa: E402
+from app.db.session_sqlalchemy import session_scope  # noqa: E402
 from app.main import app  # noqa: E402
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -88,6 +90,13 @@ def main() -> int:  # noqa: PLR0915
         assert r.status_code == 200, r.text
         h = {"Authorization": f"Bearer {r.json()['token']}"}
         client.post("/auth/grant-starter", headers=h)
+        # The starter grant now fails closed until the address is verified.
+        # This smoke tests who OWNS a job, not how a wallet gets filled, so
+        # credit it directly instead of teaching it the onboarding dance.
+        with session_scope() as s:
+            row = s.get(UserRow, r.json()["user"]["id"])
+            if row is not None:
+                row.credits_balance = 100
         return h
 
     # A is the victim; B is the attacker whose email is ALSO a substring of A's.
