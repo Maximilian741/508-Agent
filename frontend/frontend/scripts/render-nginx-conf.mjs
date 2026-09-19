@@ -101,15 +101,32 @@ const dynamicShells = htmlFiles
 
 const hasNotFound = existsSync(join(dist, "+not-found.html"));
 
+// A localhost API and its 127.0.0.1 spelling are the same backend, and the app
+// falls back between them (localhost resolves to ::1 first on Windows, where
+// uvicorn binds IPv4). Allow both or a local production-like run is blocked by
+// its own CSP. Never widens anything in a real deployment: a public API host
+// is neither spelling.
+const apiOrigins = [apiOrigin];
+try {
+  const u = new URL(apiOrigin);
+  if (u.hostname === "localhost" || u.hostname === "127.0.0.1") {
+    u.hostname = u.hostname === "localhost" ? "127.0.0.1" : "localhost";
+    apiOrigins.push(u.origin);
+  }
+} catch {
+  /* apiOrigin was validated above */
+}
+const apiSrc = apiOrigins.join(" ");
+
 // ---- Policy -----------------------------------------------------------------
 const csp = [
   "default-src 'self'",
   `script-src 'self' ${[...hashes].sort().join(" ")}`.trim(),
   // react-native-web writes styles into <style> tags and style="" attributes.
   "style-src 'self' 'unsafe-inline'",
-  `img-src 'self' data: blob: ${apiOrigin}`,
+  `img-src 'self' data: blob: ${apiSrc}`,
   "font-src 'self' data:",
-  `connect-src 'self' ${apiOrigin}`,
+  `connect-src 'self' ${apiSrc}`,
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'self'",

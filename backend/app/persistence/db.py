@@ -251,6 +251,11 @@ def init_db() -> None:
         orm_add_cols = [
             ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
             ("api_keys", "revoked_reason", "TEXT"),
+            # Refund/chargeback clawback (0018). Missing it 500s the FIRST thing
+            # a new account does — POST /auth/grant-starter reads the ledger —
+            # and the UI swallows that, so the user lands with 0 credits and no
+            # idea why. Caught by running the real signup flow in a browser.
+            ("credit_ledger", "stripe_ref", "TEXT"),
         ]
         for table_name, col_name, col_ddl in orm_add_cols:
             table_cols = {
