@@ -30,6 +30,11 @@ from pathlib import Path
 _TMP = tempfile.mkdtemp(prefix="508_smoke_grant_mailbox_")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/g.db"
 os.environ.pop("SMTP_HOST", None)
+# The per-section X-Forwarded-For below only separates rate-limit buckets when
+# the app is told it sits behind a proxy. That now defaults to false (a
+# client-set header must not be trusted), so this smoke declares the proxy the
+# way a Cloudflare deployment does — see security/rate_limit.py.
+os.environ["TRUST_PROXY_HEADERS"] = "true"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402

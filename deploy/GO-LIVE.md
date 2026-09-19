@@ -54,6 +54,14 @@ The values to fill in `.env` (the script generates secrets + starts everything):
 - `SMTP_*` (from your email sender)
 - `CF_TUNNEL_TOKEN` (from step 1) — then uncomment the `cloudflared`
   service block in `docker-compose.yml` and run `docker compose up -d cloudflared`
+- `TRUST_PROXY_HEADERS=true` — **only** because this deployment reaches the API
+  exclusively through the Cloudflare Tunnel. The per-IP brute-force limit on
+  `/auth` keys on `CF-Connecting-IP` (which Cloudflare overwrites) or the last
+  `X-Forwarded-For` hop (which your own proxy appends). If you ever publish
+  port 8000, or put anything in front of the API that does **not** rewrite
+  those headers, set this to `false` — otherwise an attacker sends the header
+  themselves, gets a fresh rate-limit bucket per request, and password guessing
+  against `/auth/sign-in` becomes unlimited. The default is `false`.
 
 `bootstrap.sh` auto-generates `APP_SECRET` and `POSTGRES_PASSWORD`, builds the
 images, runs DB migrations on boot, and waits until the backend is healthy.

@@ -54,6 +54,21 @@ def _signin(client: TestClient, email: str):
     return {"Authorization": f"Bearer {r.json()['token']}"}, r.json()["user"]["id"]
 
 
+def _verify(email: str) -> None:
+    """Mark an address proven, as clicking the verification link would."""
+    from datetime import datetime
+
+    from sqlalchemy import update
+
+    from app.db.models import UserRow
+    from app.db.session_sqlalchemy import session_scope
+
+    with session_scope() as s:
+        s.execute(
+            update(UserRow).where(UserRow.email == email).values(email_verified_at=datetime.utcnow())
+        )
+
+
 def main() -> int:
     client = TestClient(app)
     failures = 0
@@ -92,6 +107,10 @@ def main() -> int:
     member_auth, _ = _signin(client, "guard-member@example.com")
     admin_auth, _ = _signin(client, "guard-admin@example.com")
     for email, auth, role in (("guard-member@example.com", member_auth, "member"), ("guard-admin@example.com", admin_auth, "admin")):
+        # A seat spends the owner's wallet, so /teams/accept requires a PROVEN
+        # address (see smoke_team_invites). Stamp it rather than round-trip the
+        # verification email — this smoke is about overage, not verification.
+        _verify(email)
         inv = client.post("/teams/invite", headers=owner_auth, json={"email": email, "role": role}).json()
         r = client.post("/teams/accept", headers=auth, json={"token": inv["acceptUrl"].split("token=")[-1]})
         check(f"{role} joined the team", r.status_code == 200)

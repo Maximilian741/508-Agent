@@ -32,15 +32,44 @@ from app.db.models import (
     CreditLedgerRow,
     EmailVerifyTokenRow,
     StarterGrantRow,
+    SubscriptionRow,
+    TeamInviteRow,
+    TeamMemberRow,
+    TeamRow,
     UserRow,
 )
 from app.db.session_sqlalchemy import session_scope
 from app.persistence import audit_log as _audit
+from app.security.rate_limit import CredentialThrottle
 from app.security.sessions import mint_session
 from app.services.mailer import send_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth")
+
+# Brute-force protection keyed on the ACCOUNT rather than the source address.
+# The per-IP middleware is the other half, but it cannot tell a botnet from a
+# crowd, and behind a proxy with TRUST_PROXY_HEADERS off every request keys on
+# the proxy's own address — so on its own it either bounds nothing or bounds
+# everyone together. This bounds guessing against one email wherever it comes
+# from, and caps the scrypt work (N=2**15, ~32 MiB a try) an unauthenticated
+# caller can spend for us. A correct password clears the counter immediately,
+# so the owner's worst case is one cool-off.
+_SIGN_IN_THROTTLE = CredentialThrottle(failures=10, window_seconds=900.0, cool_off_seconds=60.0)
+# Reset mail goes to the address's real owner, so an unbounded loop here is an
+# inbox-flood weapon aimed at someone else. Same shape, counted per address.
+_RESET_THROTTLE = CredentialThrottle(failures=5, window_seconds=3600.0, cool_off_seconds=300.0)
+
+
+def _throttled(throttle: CredentialThrottle, key: str) -> None:
+    """Refuse with 429 + Retry-After while ``key`` is in its cool-off."""
+    wait = throttle.retry_after(key)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail="too_many_attempts",
+            headers={"Retry-After": str(wait)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +188,15 @@ def _require_current_password(row: UserRow, provided: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="current_password_required")
     if not _verify_password(provided, stored):
         raise HTTPException(status_code=403, detail="invalid_current_password")
+
+
+# Verify-email and password-reset links share one table (email_verify_tokens).
+# Reset tokens are namespaced with this prefix so the two kinds stay separable:
+# neither endpoint may consume the other's token, and — just as important —
+# neither flow may DELETE the other's rows. Defined up here because both
+# request_verify_email and the reset endpoints below filter on it.
+_RESET_PREFIX = "pr_"
+_RESET_TTL = timedelta(hours=1)
 
 
 def _revoke_api_keys(session, user_id: str, reason: str) -> int:
@@ -305,6 +343,10 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
       proceeds.
 
     There is no passwordless path — identity must be provable.
+
+    Wrong passwords are counted per account (``_SIGN_IN_THROTTLE``): past the
+    threshold this answers 429 with ``Retry-After`` instead of running scrypt
+    again, and a successful sign-in clears the count.
     """
     email_norm = payload.email.strip().lower()
     display = (payload.displayName or email_norm.split("@")[0]).strip()
@@ -312,6 +354,8 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
         display = email_norm
     password = (payload.password or "").strip()
     now = datetime.utcnow()
+
+    _throttled(_SIGN_IN_THROTTLE, email_norm)
 
     with session_scope() as session:
         row = session.execute(
@@ -336,6 +380,7 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
         else:
             if row.password_hash:
                 if not password or not _verify_password(password, row.password_hash):
+                    _SIGN_IN_THROTTLE.record_attempt(email_norm)
                     raise HTTPException(status_code=401, detail="invalid_credentials")
             else:
                 # Legacy passwordless row: adopt the supplied password once.
@@ -348,6 +393,10 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
                 row.display_name = payload.displayName.strip()[:120]
         dto = _row_to_dto(row)
         version = int(row.token_version or 0)
+
+    # Proving the credential ends any cool-off: the owner is never locked out
+    # by someone else's failed guesses for longer than one window.
+    _SIGN_IN_THROTTLE.clear(email_norm)
 
     # Mint an HS256-signed session JWT.  The token survives backend
     # restarts (assuming APP_SECRET is set), resists tampering, and dies when
@@ -611,14 +660,100 @@ async def delete_me(
     request: Request,
     user_id: str = Depends(require_user_id),
 ) -> Response:
-    """Delete the current user's account and cascade-remove their ledger rows."""
+    """Delete the account and every credential and membership it carried.
+
+    Deletion used to remove two tables — ``users`` and ``credit_ledger`` — and
+    leave everything else standing, which meant an erased account kept handing
+    out authority:
+
+    - its API keys stayed unrevoked and kept authenticating, kept being stamped
+      ``last_used_at``, and kept writing rows under the erased user id. Nobody
+      could revoke them: the owner can't sign in, and re-registering the same
+      address mints a different id, so the keys were invisible in Settings;
+    - a team it owned survived with its members, who kept routing their credit
+      reads and spends through :func:`teams.resolve_credit_user_id` to a user
+      id with no row, and could never disband it (that needs ``owner_id ==
+      caller``, an identity that can never sign in again);
+    - its subscription row stayed ``active``.
+
+    What happens to a team the caller OWNS is the one thing this route will not
+    decide on their behalf. Disbanding silently would delete other people's
+    shared wallet because a third party pressed a button; handing ownership to
+    another admin would make someone the owner of a subscription they don't pay
+    for and can't manage in Stripe. So a team with other members in it returns
+    409 and names the two moves the owner can make (remove the members, or
+    DELETE /teams) — the owner chooses, then deletes. A team with nobody but
+    the owner in it has no one to surprise, so it is disbanded here and a sole
+    owner is never stuck.
+
+    Everything below happens in one transaction: the account either goes away
+    completely or not at all.
+    """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
-        # Cascade ledger first
+
+        # 1. A team this account OWNS. Other members present -> refuse.
+        owned = session.execute(
+            select(TeamRow).where(TeamRow.owner_id == user_id)
+        ).scalars().all()
+        for team in owned:
+            others = session.execute(
+                select(TeamMemberRow).where(
+                    TeamMemberRow.team_id == team.id,
+                    TeamMemberRow.user_id != user_id,
+                )
+            ).scalars().all()
+            if others:
+                raise HTTPException(status_code=409, detail="team_has_members")
+            session.execute(
+                delete(TeamMemberRow).where(TeamMemberRow.team_id == team.id)
+            )
+            session.execute(
+                update(TeamInviteRow)
+                .where(TeamInviteRow.team_id == team.id, TeamInviteRow.status == "pending")
+                .values(status="revoked")
+            )
+            session.delete(team)
+
+        # 2. Seats held in somebody ELSE's team, and invites addressed here.
+        session.execute(
+            delete(TeamMemberRow).where(TeamMemberRow.user_id == user_id)
+        )
+        session.execute(
+            update(TeamInviteRow)
+            .where(TeamInviteRow.email == row.email, TeamInviteRow.status == "pending")
+            .values(status="revoked")
+        )
+
+        # 3. The subscription stops looking active to active_subscription_for.
+        #    Cancelling in Stripe is the operator's job (this server never
+        #    calls the Stripe API on a user action); this only stops the dead
+        #    account from granting benefits.
+        session.execute(
+            update(SubscriptionRow)
+            .where(SubscriptionRow.user_id == user_id)
+            .values(status="canceled", updated_at=datetime.utcnow())
+        )
+
+        # 4. Credentials. API keys outlive session tokens, so they have to be
+        #    removed, not just revoked — a revoked row for a user id that no
+        #    longer exists is a record nobody can read or act on.
+        session.execute(delete(ApiKeyRow).where(ApiKeyRow.user_id == user_id))
+        session.execute(
+            delete(EmailVerifyTokenRow).where(EmailVerifyTokenRow.user_id == user_id)
+        )
+
+        # 5. Ledger, then the account itself. Sessions die with the row.
         session.execute(
             delete(CreditLedgerRow).where(CreditLedgerRow.user_id == user_id)
         )
         session.delete(row)
+
+        # NOTE: StarterGrantRow is deliberately NOT deleted. It is keyed by a
+        # hash of the canonical mailbox precisely so the one free grant can't
+        # be re-farmed by deleting the account and signing up again; it keeps
+        # no address, so it is not personal data to erase.
+
     # Their remediated documents are their content and must not outlive the
     # account on disk. (Reachability is already gone — an artifact URL is
     # signed against the owner's live row — but the bytes were still there.)
@@ -716,10 +851,18 @@ async def request_verify_email(
     """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
-        # Drop any stale tokens for this user (one outstanding link is plenty).
+        # Drop this user's stale VERIFICATION tokens (one outstanding link is
+        # plenty) — and nothing else. Password-reset tokens share this table
+        # under the "pr_" prefix, and an unscoped delete here deleted those
+        # too: a borrowed session could not take the account (that needs the
+        # password), but it could fire this always-200 endpoint after each of
+        # the owner's reset requests and shred the link before they clicked it,
+        # holding the account hostage forever. Reset IS the recovery path for
+        # someone who has forgotten their password, so there was no way out.
         session.execute(
             delete(EmailVerifyTokenRow).where(
-                EmailVerifyTokenRow.user_id == row.id
+                EmailVerifyTokenRow.user_id == row.id,
+                EmailVerifyTokenRow.token.notlike(f"{_RESET_PREFIX}%"),
             )
         )
         token = secrets.token_hex(16)  # 32 hex chars
@@ -755,9 +898,9 @@ async def verify_email(token: str) -> VerifyResultResponse:
     """Consume a verification token, mark the user verified, return ok."""
     if not token or len(token) > 64:
         raise HTTPException(status_code=410, detail="token_expired")
-    # Password-reset tokens live in the same table under a "pr_" prefix; they
+    # Password-reset tokens live in the same table under _RESET_PREFIX; they
     # must never be usable to verify an email address.
-    if token.startswith("pr_"):
+    if token.startswith(_RESET_PREFIX):
         raise HTTPException(status_code=410, detail="token_expired")
     with session_scope() as session:
         row = session.execute(
@@ -793,15 +936,13 @@ async def verify_email(token: str) -> VerifyResultResponse:
 # ---------------------------------------------------------------------------
 # Password reset (forgot password)
 #
-# Reuses the email-verify token table; reset tokens are namespaced with a
-# "pr_" prefix so neither token kind can be consumed by the other endpoint
-# (verify_email rejects pr_ tokens via the exact-match + the guard below;
-# reset endpoints REQUIRE the prefix). Reset links expire after 1 hour and
-# are single-use; requesting a new one invalidates older ones.
+# Reuses the email-verify token table; reset tokens are namespaced with the
+# _RESET_PREFIX defined near the top so neither token kind can be consumed —
+# or deleted — by the other flow (verify_email rejects pr_ tokens;
+# request_verify_email skips them; reset endpoints REQUIRE the prefix). Reset
+# links expire after 1 hour and are single-use; requesting a new one
+# invalidates older ones.
 # ---------------------------------------------------------------------------
-
-_RESET_PREFIX = "pr_"
-_RESET_TTL = timedelta(hours=1)
 
 
 class PasswordResetRequest(BaseModel):
@@ -838,9 +979,13 @@ async def request_password_reset(payload: PasswordResetRequest) -> PasswordReset
     Always returns ``{"queued": true}`` regardless of whether the address has
     an account — anything else is an account-enumeration oracle. Unauthenticated
     by design (the caller has forgotten their password); covered by the /auth
-    rate limit.
+    rate limit and by a per-address throttle, because the mail lands in someone
+    else's inbox. The 429 is raised before the account lookup, so it stays
+    silent about whether the address exists.
     """
     email = payload.email.strip().lower()
+    _throttled(_RESET_THROTTLE, email)
+    _RESET_THROTTLE.record_attempt(email)
     token: Optional[str] = None
     to_email: Optional[str] = None
     with session_scope() as session:

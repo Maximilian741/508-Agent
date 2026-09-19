@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,6 +45,12 @@ def resolve_credit_user_id(user_id: str) -> str:
     A non-owner team member resolves to the team owner (the shared wallet and
     payer). Solo users and team owners resolve to themselves. Never raises; on
     any error it falls back to ``user_id`` so credit ops degrade to per-user.
+
+    The owner row is checked to still EXIST before we redirect anyone's wallet
+    at it. A dangling ``owner_id`` used to send a live member's balance reads
+    and spends to a user id with no row: the member saw 0 credits and an
+    inactive subscription with no hint that their wallet had been orphaned.
+    ``delete_me`` no longer leaves one behind, and this is the second lock.
     """
     try:
         with session_scope() as session:
@@ -58,6 +64,12 @@ def resolve_credit_user_id(user_id: str) -> str:
             ).scalar_one_or_none()
             if team is None or not team.owner_id:
                 return user_id
+            if team.owner_id != user_id:
+                owner_exists = session.execute(
+                    select(UserRow.id).where(UserRow.id == team.owner_id)
+                ).scalar_one_or_none()
+                if owner_exists is None:
+                    return user_id
             return team.owner_id
     except Exception:  # pragma: no cover - defensive: never block a spend
         return user_id
@@ -153,7 +165,43 @@ def _accept_url(token: str) -> str:
     return f"{base}/join?token={token}" if base else f"/join?token={token}"
 
 
+# An invite link is a bearer credential: whoever holds the token and controls
+# the address gets a seat on the owner's wallet. Forwarded invite mail, a
+# shared inbox, a CC, browser history and chat logs all keep it readable
+# forever, so it has to stop working on its own. Seven days is the usual span.
+_INVITE_TTL = timedelta(days=7)
+
+
+def _invite_is_expired(invite: TeamInviteRow, now: Optional[datetime] = None) -> bool:
+    now = now or datetime.utcnow()
+    if invite.created_at is None:
+        return True
+    return (now - invite.created_at) > _INVITE_TTL
+
+
+def _expire_stale_invites(session, team_id: Optional[str] = None) -> int:
+    """Flip aged pending invites to 'expired'. Returns how many.
+
+    Swept on read rather than by a background job: an expired invite that
+    stayed 'pending' would go on holding a seat that the owner paid for and
+    would keep showing up in the team's invite list as if it were live.
+    """
+    q = select(TeamInviteRow).where(TeamInviteRow.status == "pending")
+    if team_id is not None:
+        q = q.where(TeamInviteRow.team_id == team_id)
+    now = datetime.utcnow()
+    swept = 0
+    for invite in session.execute(q).scalars().all():
+        if _invite_is_expired(invite, now):
+            invite.status = "expired"
+            swept += 1
+    if swept:
+        session.flush()
+    return swept
+
+
 def _seats_used(session, team_id: str) -> int:
+    _expire_stale_invites(session, team_id)
     members = session.execute(
         select(TeamMemberRow).where(TeamMemberRow.team_id == team_id)
     ).scalars().all()
@@ -192,6 +240,7 @@ def _team_dto(session, team: TeamRow, caller_id: str, include_invites: bool) -> 
 
     invites: List[TeamInviteDTO] = []
     if include_invites:
+        _expire_stale_invites(session, team.id)
         invite_rows = session.execute(
             select(TeamInviteRow).where(
                 TeamInviteRow.team_id == team.id,
@@ -367,7 +416,9 @@ async def invite_member(payload: InviteRequest, user: UserRow = Depends(require_
                 f"\"{team_name}\" team on 508 Agent.\n\n"
                 f"Accept your invite: {dto.acceptUrl}\n\n"
                 f"If you don't have an account yet, sign up with this email "
-                f"address ({email}) first, then open the link."
+                f"address ({email}) first and confirm it from the verification "
+                f"email, then open the link.\n\n"
+                f"This invite expires in {_INVITE_TTL.days} days."
             ),
         )
     except Exception:  # pragma: no cover
@@ -378,19 +429,51 @@ async def invite_member(payload: InviteRequest, user: UserRow = Depends(require_
 
 @router.post("/accept", response_model=TeamDTO)
 async def accept_invite(payload: AcceptRequest, user: UserRow = Depends(require_user)) -> TeamDTO:
+    """Consume an invite token and take a seat on the team's shared wallet.
+
+    Two things have to hold besides possessing the token, because a seat spends
+    the owner's credits and — with overage on — the owner's card:
+
+    - the invite must still be inside its TTL. It used to be a permanent
+      credential: a link back-dated 900 days still granted a seat;
+    - the accepting account must have PROVEN the invited address
+      (``email_verified_at``). The email match alone was satisfiable by
+      PATCHing your own profile onto the invited address — any address not
+      already registered can be claimed, and the PATCH leaves verification
+      null — so an unrelated account could squat the address and walk in.
+      Verification is the proof of inbox control the flow was assuming; it is
+      cleared on every email change, so a squatter cannot inherit it.
+    """
+    # Retire an aged link in its OWN transaction: the 410 below aborts the main
+    # one, so a mark written there would roll straight back and the dead invite
+    # would go on holding a seat the owner pays for.
+    with session_scope() as session:
+        aged = session.execute(
+            select(TeamInviteRow).where(TeamInviteRow.token == payload.token)
+        ).scalar_one_or_none()
+        if aged is not None and aged.status == "pending" and _invite_is_expired(aged):
+            aged.status = "expired"
+
     with session_scope() as session:
         invite = session.execute(
-            select(TeamInviteRow).where(
-                TeamInviteRow.token == payload.token,
-                TeamInviteRow.status == "pending",
-            )
+            select(TeamInviteRow).where(TeamInviteRow.token == payload.token)
         ).scalar_one_or_none()
         if invite is None:
+            raise HTTPException(status_code=404, detail="invite_not_found")
+        if invite.status == "expired":
+            # Say so rather than 404: the holder already has the token, so this
+            # reveals nothing, and "ask for a new link" is actionable.
+            raise HTTPException(status_code=410, detail="invite_expired")
+        if invite.status != "pending":
             raise HTTPException(status_code=404, detail="invite_not_found")
 
         # The invite is addressed to a specific email; enforce it matches.
         if (user.email or "").strip().lower() != invite.email.strip().lower():
             raise HTTPException(status_code=403, detail="invite_email_mismatch")
+
+        # ...and that the address was actually proven, not merely typed.
+        if user.email_verified_at is None:
+            raise HTTPException(status_code=403, detail="email_verification_required")
 
         existing = session.execute(
             select(TeamMemberRow).where(TeamMemberRow.user_id == user.id)

@@ -4,6 +4,9 @@ Exercises: create team (subscriber only), invite + accept, shared-wallet spend
 (a member's spend draws on the owner's balance), free certificates for members,
 seat-limit enforcement, invite email-match guard, remove, and owner-can't-leave.
 
+Accepting also requires a VERIFIED address — see smoke_team_invites, which pins
+that rule and the invite TTL.
+
 Usage:
     python -m app.devtools.smoke_teams
 """
@@ -28,6 +31,22 @@ def _signin(client: TestClient, email: str):
     r = client.post("/auth/sign-in", json={"email": email, "displayName": email.split("@")[0], "password": "teampass123"})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['token']}"}, r.json()["user"]["id"]
+
+
+def _verify(client: TestClient, auth: dict) -> None:
+    """Walk the real verification round-trip: request the link, then open it."""
+    from sqlalchemy import select
+
+    from app.db.models import EmailVerifyTokenRow
+    from app.db.session_sqlalchemy import session_scope
+
+    uid = client.get("/auth/me", headers=auth).json()["id"]
+    assert client.post("/auth/request-verify-email", headers=auth).status_code == 200
+    with session_scope() as s:
+        link = s.execute(
+            select(EmailVerifyTokenRow.token).where(EmailVerifyTokenRow.user_id == uid)
+        ).scalars().first()
+    assert client.get("/auth/verify-email", params={"token": link}).status_code == 200
 
 
 def main() -> int:
@@ -82,7 +101,13 @@ def main() -> int:
     r = client.post("/teams/accept", headers=other_auth, json={"token": token})
     check("invite email mismatch -> 403", r.status_code == 403)
 
-    # The invited member accepts.
+    # The right address, but not yet proven: a seat spends the owner's wallet,
+    # so accepting needs a VERIFIED address (smoke_team_invites pins why).
+    r = client.post("/teams/accept", headers=member_auth, json={"token": token})
+    check("unverified invitee -> 403", r.status_code == 403 and "email_verification_required" in r.text)
+
+    # The invited member proves the address, then accepts.
+    _verify(client, member_auth)
     r = client.post("/teams/accept", headers=member_auth, json={"token": token})
     check("accept invite -> 200", r.status_code == 200)
     check("team now has 2 members", r.json().get("seatsUsed") == 2)

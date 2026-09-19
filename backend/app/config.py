@@ -69,7 +69,9 @@ class Settings:
     require_strict_cors: bool
     # Only trust client-supplied forwarded-IP headers (CF-Connecting-IP /
     # X-Forwarded-For) when actually behind a trusted proxy, otherwise an
-    # attacker can spoof them to evade per-IP rate limiting.
+    # attacker can spoof them to evade per-IP rate limiting. Defaults to
+    # FALSE: a wrong "true" silently disables the only brute-force control,
+    # while a wrong "false" only makes the limit stricter than intended.
     trust_proxy_headers: bool
     app_secret: str
     session_ttl_seconds: int
@@ -164,7 +166,7 @@ def get_settings() -> Settings:
         max_upload_mb=_env_int("MAX_UPLOAD_MB", 25),
         ocr_enabled=_env_bool("OCR_ENABLED", False),
         require_strict_cors=_env_bool("REQUIRE_STRICT_CORS", True),
-        trust_proxy_headers=_env_bool("TRUST_PROXY_HEADERS", True),
+        trust_proxy_headers=_env_bool("TRUST_PROXY_HEADERS", False),
         app_secret=raw_secret,
         session_ttl_seconds=max(300, _env_int("SESSION_TTL_SECONDS", 7 * 24 * 3600)),
         pipeline_artifact_ttl_seconds=max(60, _env_int("PIPELINE_ARTIFACT_TTL_SECONDS", 86400)),

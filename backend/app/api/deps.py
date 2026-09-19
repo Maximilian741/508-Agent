@@ -146,6 +146,14 @@ def _api_key_user_id(presented: Optional[str]) -> Optional[str]:
 
     Looks up the key by its hash among non-revoked keys and stamps last-used.
     Never reveals whether a key exists (callers get a generic 401).
+
+    The join to ``users`` is load-bearing, not decoration: it is the only thing
+    here that checks the OWNER still exists. Every other identity path goes
+    through ``_find_user`` and dies with the account; without this join a key
+    outlived the account that minted it, kept authenticating, and kept writing
+    rows keyed to an erased identity that nobody could ever revoke (the owner
+    can't sign in, and re-registering the address mints a different user id).
+    ``delete_me`` now deletes the key rows as well; this is the second lock.
     """
     key = (presented or "").strip()
     if not key.startswith(API_KEY_PREFIX):
@@ -154,6 +162,7 @@ def _api_key_user_id(presented: Optional[str]) -> Optional[str]:
     with session_scope() as session:
         row = session.execute(
             select(ApiKeyRow)
+            .join(UserRow, UserRow.id == ApiKeyRow.user_id)
             .where(ApiKeyRow.key_hash == digest)
             .where(ApiKeyRow.revoked_at.is_(None))
         ).scalar_one_or_none()

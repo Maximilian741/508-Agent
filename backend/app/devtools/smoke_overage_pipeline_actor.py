@@ -61,6 +61,21 @@ def _signin(client: TestClient, email: str):
     return {"Authorization": f"Bearer {r.json()['token']}"}, r.json()["user"]["id"]
 
 
+def _verify(email: str) -> None:
+    """Mark an address proven, as clicking the verification link would."""
+    from datetime import datetime
+
+    from sqlalchemy import update
+
+    from app.db.models import UserRow
+    from app.db.session_sqlalchemy import session_scope
+
+    with session_scope() as s:
+        s.execute(
+            update(UserRow).where(UserRow.email == email).values(email_verified_at=datetime.utcnow())
+        )
+
+
 def _docx() -> bytes:
     d = Document()
     d.add_heading("Quarterly results", level=1)
@@ -103,6 +118,10 @@ def main() -> int:
     admin_auth, _ = _signin(client, "actor-admin@example.com")
     for email, auth, role in (("actor-member@example.com", member_auth, "member"),
                               ("actor-admin@example.com", admin_auth, "admin")):
+        # A seat spends the owner's wallet, so /teams/accept requires a PROVEN
+        # address (see smoke_team_invites). Stamp it rather than round-trip the
+        # verification email — this smoke is about the overage actor.
+        _verify(email)
         inv = client.post("/teams/invite", headers=owner_auth, json={"email": email, "role": role}).json()
         r = client.post("/teams/accept", headers=auth, json={"token": inv["acceptUrl"].split("token=")[-1]})
         check(f"{role} joined the team", r.status_code == 200)
