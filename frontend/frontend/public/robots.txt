@@ -20,5 +20,6 @@ Disallow: /manual-review
 Disallow: /join
 Disallow: /reset-password
 Disallow: /verify
+Disallow: /verify-email
 
 Allow: /

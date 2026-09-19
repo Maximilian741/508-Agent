@@ -802,6 +802,23 @@ export async function requestEmailVerification(): Promise<boolean> {
   }
 }
 
+/**
+ * Complete email verification from the emailed link (/verify-email?token=…).
+ *
+ * The token IS the credential, so this works signed out — the person clicking
+ * the link may be in a different browser from the one that signed up. Throws
+ * with the backend's detail ("token_expired" for a bad, expired, already-used
+ * or wrong-kind token) so the page can offer a new link.
+ */
+export async function confirmEmailVerification(token: string): Promise<boolean> {
+  const clean = (token || "").trim();
+  if (!clean) throw new Error("Missing verification token.");
+  const res = await apiFetch("/auth/verify-email?token=" + encodeURIComponent(clean));
+  if (!res.ok) await _throwDetail(res, "Could not verify this email address");
+  const j = await _readJson(res);
+  return Boolean(j && j.verified);
+}
+
 // ---------------------------------------------------------------------------
 // Teams (multi-seat shared subscription wallet)
 // ---------------------------------------------------------------------------
