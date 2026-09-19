@@ -1651,7 +1651,11 @@ async def get_document_status(doc_id: str) -> Dict[str, object]:
 async def start_scan(doc_id: str, request: Optional[ScanStartRequest] = None) -> dict:
     if _get_doc(doc_id) is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    job_id = f"job-{int(time.time() * 1000)}"
+    # uuid4, not a millisecond counter: ownership of a job is resolved
+    # job -> doc -> owner, so two tenants starting a scan in the same
+    # millisecond used to share one job row — one of them silently inherited
+    # the other's document (and lost their own to a 404).
+    job_id = f"job-{uuid.uuid4().hex}"
     with LOCK:
         JOBS[job_id] = {
             "jobId": job_id,
@@ -1753,10 +1757,15 @@ async def get_issues(doc_id: str) -> List[Dict[str, object]]:
 
 
 @router.get("/documents/{doc_id}/manual-review")
-async def get_document_manual_review(doc_id: str) -> List[Dict[str, object]]:
+async def get_document_manual_review(
+    doc_id: str,
+    user_id: str = Depends(require_user_id),
+) -> List[Dict[str, object]]:
     if _get_doc(doc_id) is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    return REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False)
+    # Scoped by owner as well as doc id: the queue is written from
+    # /pipeline/remediate, where the doc id is the caller's filename.
+    return REPO.list_manual_review_items_for_doc(doc_id, include_resolved=False, owner_id=user_id)
 
 
 # ---------------------------------------------------------------------------

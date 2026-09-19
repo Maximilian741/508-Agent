@@ -575,8 +575,11 @@ async def export_me(
 
     audit_entries: list = []
     try:
+        # EXACT match, never the admin substring filter: "o@bigcorp.com" is a
+        # substring of "cfo@bigcorp.com", so a LIKE here hands one tenant
+        # another tenant's audit trail.
         events = _audit.list_events(
-            filters={"actor_email": actor_email},
+            filters={"actor_email_exact": actor_email},
             limit=2000,
         )
         audit_entries = [e.to_dict() for e in events]

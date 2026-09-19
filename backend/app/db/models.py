@@ -67,10 +67,17 @@ class ManualReviewRow(Base):
     __tablename__ = "manual_review"
     __table_args__ = (
         Index("idx_manual_review_doc_id", "doc_id"),
+        Index("idx_manual_review_owner", "owner_id"),
     )
 
     id: Mapped[str] = mapped_column(String(160), primary_key=True)
     doc_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # WHO queued this item. doc_id comes from the uploaded filename, so it is
+    # caller-controlled and can never decide whose queue a row belongs to —
+    # every doc-scoped read filters on owner_id as well. NULL means "written
+    # before this column existed"; those rows stay visible to the document's
+    # owner (who is the only caller that can reach them anyway).
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     item_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

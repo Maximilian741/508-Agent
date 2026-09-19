@@ -22,6 +22,7 @@ try:
 except Exception:  # pragma: no cover - defensive
     MSO_FILL = None
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -363,7 +364,7 @@ class PPTXParser:
             "slide_count": len(prs.slides),
         }
         return ParserResult(
-            document_id=path.stem or "doc",
+            document_id=derive_document_id(path),
             format="pptx",
             tree=AccessibilityTree(root=root, metadata=raw_metadata),
             raw_metadata=raw_metadata,

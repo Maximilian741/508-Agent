@@ -53,6 +53,7 @@ from app.parsers.docx_parser import (
     strip_fake_list_prefix,
 )
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -458,7 +459,7 @@ class HTMLParser:
             "language": language or "",
         }
         return ParserResult(
-            document_id=path.stem or "doc",
+            document_id=derive_document_id(path),
             format="html",
             tree=AccessibilityTree(root=root, metadata=raw_metadata),
             raw_metadata=raw_metadata,

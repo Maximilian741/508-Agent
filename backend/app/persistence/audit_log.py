@@ -200,7 +200,11 @@ def list_events(
     """Return up to ``limit`` recent entries matching ``filters``.
 
     Supported filter keys:
-      * ``actor_email`` — case-insensitive substring match.
+      * ``actor_email`` — case-insensitive SUBSTRING match. Only ever safe
+        behind the admin gate: "o@bigcorp.com" matches "cfo@bigcorp.com", so it
+        must never be used to scope a caller to their own rows.
+      * ``actor_email_exact`` — case-insensitive EXACT match. This is the one
+        to use for per-user scoping.
       * ``event`` — exact match.
       * ``since`` — ISO-8601 UTC string; entries strictly after.
       * ``until`` — ISO-8601 UTC string; entries strictly before.
@@ -219,6 +223,11 @@ def list_events(
         # honors LOWER() for the comparison.  Both behave acceptably.
         where.append("LOWER(COALESCE(actor_email,'')) LIKE :actor_email")
         params["actor_email"] = f"%{actor_email.lower()}%"
+
+    actor_email_exact = (filters.get("actor_email_exact") or "").strip()
+    if actor_email_exact:
+        where.append("LOWER(COALESCE(actor_email,'')) = :actor_email_exact")
+        params["actor_email_exact"] = actor_email_exact.lower()
 
     event = (filters.get("event") or "").strip()
     if event:

@@ -16,9 +16,16 @@ router = APIRouter()
 async def download_storage_object(key: str) -> FileResponse:
     settings = get_settings()
     storage = get_storage()
-    clean = sanitize_storage_key(key)
+    # The kill-switch comes FIRST: a route production has switched off must not
+    # run any of its own logic, least of all logic that can raise.
     if settings.environment == "production" and not settings.enable_dev_storage_endpoint:
         raise HTTPException(status_code=404, detail="Not found")
+    try:
+        clean = sanitize_storage_key(key)
+    except ValueError:
+        # A traversal or empty key is a key that names nothing — a clean 404,
+        # not an unhandled 500 an anonymous caller can trigger at will.
+        raise HTTPException(status_code=404, detail="Stored object not found")
     if settings.storage_provider != "local" or not isinstance(storage, LocalStorage):
         raise HTTPException(status_code=404, detail="Storage endpoint is only available for local provider")
     path = storage.resolve_local_path(clean)

@@ -39,6 +39,7 @@ from pypdf.generic import (
     TextStringObject,
 )
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -622,7 +623,7 @@ class PDFParser:
 
     def parse(self, file_path: str) -> ParserResult:
         path = Path(file_path)
-        document_id = path.stem or "doc"
+        document_id = derive_document_id(path)
         reader = PdfReader(str(path))
 
         title = _document_title(reader)

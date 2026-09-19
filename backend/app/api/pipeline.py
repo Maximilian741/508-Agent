@@ -979,7 +979,11 @@ async def remediate(
             pages_list = [int(page_value)] if isinstance(page_value, int) else []
             review_items.append(
                 {
-                    "id": f"mr-{result.document_id}-{v.violation_id}",
+                    # Keyed on the server-minted job id, never on
+                    # result.document_id — that is the uploaded FILENAME, so an
+                    # id built from it is one another tenant can reconstruct
+                    # (and therefore overwrite).
+                    "id": f"mr-{job_id}-{v.violation_id}",
                     "issueId": v.violation_id,
                     "targetNodeId": v.location.node_id,
                     "reason": "User rejected during /pipeline/remediate",
@@ -995,7 +999,10 @@ async def remediate(
             )
         try:
             REPO = get_repo()
-            REPO.add_manual_review_items(result.document_id, review_items)
+            # owner_id is what decides whose queue this is. The doc id is only
+            # a label (it comes from the filename), so without an owner anyone
+            # could file items against anyone else's document.
+            REPO.add_manual_review_items(result.document_id, review_items, owner_id=user_id)
             manual_items_created = len(review_items)
         except Exception as exc:
             logger.warning(

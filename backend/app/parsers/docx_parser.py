@@ -21,6 +21,7 @@ from docx import Document
 from docx.oxml.ns import qn
 from lxml import etree
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -407,7 +408,7 @@ class DOCXParser:
             "table_count": len(list(iter_body_tables(doc))),
         }
         return ParserResult(
-            document_id=path.stem or "doc",
+            document_id=derive_document_id(path),
             format="docx",
             tree=AccessibilityTree(root=root, metadata=raw_metadata),
             raw_metadata=raw_metadata,
