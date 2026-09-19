@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 _ALLOWED_EVENTS = frozenset(
     {
         "analyze",
+        # The URL scan and the whole-site scan record these; both were being
+        # dropped as unknown, so the free-scan funnel left no audit trail at all.
+        "analyze_url",
+        "scan_site",
         "remediate",
         "share_create",
         "share_view",

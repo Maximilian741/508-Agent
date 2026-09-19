@@ -70,6 +70,18 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The browser cannot read a response header it wasn't told to expose, and
+    # the app is served from a different origin than the API. /pipeline/batch-zip
+    # reports a SHORT batch in these (it returns 200 with a partial archive when
+    # one of the files couldn't be charged), so without this the client would
+    # keep treating a partial delivery as a complete one.
+    expose_headers=[
+        "X-Batch-Requested",
+        "X-Batch-Delivered",
+        "X-Batch-Withheld",
+        "X-Batch-Withheld-Jobs",
+        "X-Batch-Withheld-Unpaid",
+    ],
 )
 
 

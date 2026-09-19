@@ -25,7 +25,11 @@ import { Platform } from "react-native";
 
 import { useAppStore } from "../store/useAppStore";
 
-export type HistoryKind = "purchase" | "spend" | "grant" | "refund";
+// "spend_once" is a debit the server took under its own idempotency key (the
+// credit owed on a remediated file whose download was deferred). It reads as a
+// spend everywhere in the UI; the separate kind exists so a caller-written
+// ledger row can never masquerade as one. See backend credits.SPEND_ONCE_KIND.
+export type HistoryKind = "purchase" | "spend" | "spend_once" | "grant" | "refund";
 
 export interface HistoryEntry {
   id: string;
@@ -146,7 +150,11 @@ function _isHistoryEntry(x: any): x is HistoryEntry {
     x &&
     typeof x.id === "string" &&
     typeof x.at === "string" &&
-    (x.kind === "purchase" || x.kind === "spend" || x.kind === "grant" || x.kind === "refund") &&
+    (x.kind === "purchase" ||
+      x.kind === "spend" ||
+      x.kind === "spend_once" ||
+      x.kind === "grant" ||
+      x.kind === "refund") &&
     typeof x.amount === "number" &&
     typeof x.description === "string"
   );

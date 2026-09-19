@@ -20,6 +20,7 @@ deferred to has been retired.)
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
@@ -195,7 +196,7 @@ def write_remediated_pdf(
     # (which itself requires an available OCR provider).
     if (tree.root.metadata.properties or {}).get("ocr_text_layer_requested"):
         try:
-            _apply_ocr_text_layer(writer, applied, skipped)
+            _apply_ocr_text_layer(writer, applied, skipped, tree.root.id)
         except Exception as exc:  # pragma: no cover - defensive
             skipped.append({"target_id": "document", "reason": f"ocr_layer_failed: {exc}"})
 
@@ -263,11 +264,29 @@ def write_remediated_pdf(
         except Exception as exc:
             skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
 
+    # Save to a sibling temp file and only then move it into place. Writing
+    # straight to output_path truncated the source copy the instant the file
+    # was opened, so a save that raised (ENOSPC, a read-only volume, an AV or
+    # indexer lock, a pypdf serialization failure on an exotic document) left a
+    # ZERO-BYTE artifact where the download route would happily serve it — and
+    # the caller reported applied entries, so the pipeline charged full price.
+    # Now a failed save leaves the untouched copy on disk and returns applied=[]
+    # with a failed_to_save reason, which the pipeline treats as a hard failure.
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
-        with open(output_path, "wb") as fh:
+        with open(tmp_path, "wb") as fh:
             writer.write(fh)
+        os.replace(str(tmp_path), str(output_path))
     except Exception as exc:
-        skipped.append({"target_id": str(output_path), "reason": f"failed_to_save_pdf: {exc}"})
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.exception("Failed to save remediated pdf: %s", exc)
+        return {
+            "applied": [],
+            "skipped": skipped + [{"target_id": str(output_path), "reason": f"failed_to_save_pdf: {exc}"}],
+        }
 
     result: Dict[str, Any] = {"applied": applied, "skipped": skipped}
     if pdfua_summary:
@@ -324,7 +343,12 @@ def _escape_pdf_text(text: str) -> str:
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _apply_ocr_text_layer(writer: PdfWriter, applied: List[Dict[str, Any]], skipped: List[Dict[str, Any]]) -> None:
+def _apply_ocr_text_layer(
+    writer: PdfWriter,
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+    root_id: str = "document",
+) -> None:
     """Append an INVISIBLE (render mode 3) position-matched text layer to each
     image-only page, using the active OCR provider.
 
@@ -426,10 +450,16 @@ def _apply_ocr_text_layer(writer: PdfWriter, applied: List[Dict[str, Any]], skip
         words_total += len(result.words)
 
     if pages_done:
+        # Tagged with the action + the document root the executor targeted, so
+        # ADD_OCR_TEXT_LAYER can be writer-confirmed in the pipeline's charge
+        # gate: the executor returns SUCCESS as soon as a provider is
+        # AVAILABLE, which says nothing about whether the engine could read
+        # this scan. Only this entry proves a text layer reached the bytes.
         applied.append(
             {
                 "kind": "ocr_text_layer",
-                "target_id": "document",
+                "action": "ADD_OCR_TEXT_LAYER",
+                "target_id": root_id,
                 "summary": f"invisible OCR text layer on {pages_done} page(s), {words_total} word(s)",
             }
         )

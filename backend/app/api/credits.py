@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import desc, select, update
 
 from app.api.auth import get_current_user_row
@@ -71,6 +71,22 @@ class SpendRequest(BaseModel):
     description: str = Field(min_length=1, max_length=500)
     relatedDocId: Optional[str] = Field(default=None, max_length=128)
 
+    @field_validator("relatedDocId")
+    @classmethod
+    def _no_reserved_namespace(cls, v: Optional[str]) -> Optional[str]:
+        """Refuse doc ids in a namespace the server uses for its own keys.
+
+        ``related_doc_id`` doubles as the idempotency key for server-side
+        one-shot debits (``spend_credits_once_for_user``). A caller who could
+        write a row in that namespace could pre-empt a debit it had not paid:
+        one ``/credits/spend`` of 1 credit at ``pipeline-job:<id>`` cancelled
+        that job's 5-credit deferred charge. The kind separation below is the
+        real guard; this keeps the field itself unspoofable.
+        """
+        if v and str(v).lower().startswith(_RESERVED_DOC_ID_PREFIXES):
+            raise ValueError("relatedDocId uses a reserved prefix")
+        return v
+
 
 class SpendResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -89,6 +105,17 @@ _TIER_AMOUNTS = {
     "pro": 250,
     "studio": 1300,
 }
+
+
+# Ledger ``kind`` for a server-side one-shot debit. Deliberately NOT "spend":
+# the idempotency check looks up (user, kind, related_doc_id), so a row the
+# caller wrote through /credits/spend — which can only ever be kind "spend" —
+# cannot satisfy it and cancel a charge the caller has not paid.
+SPEND_ONCE_KIND = "spend_once"
+
+# ``related_doc_id`` namespaces reserved for server-minted idempotency keys.
+# /credits/spend rejects them so the field can't be spoofed in the first place.
+_RESERVED_DOC_ID_PREFIXES = ("pipeline-job:",)
 
 
 # Per-format spend amounts for /pipeline/remediate.
@@ -188,10 +215,19 @@ def spend_credits_once_for_user(
 ) -> Tuple[int, bool]:
     """Spend at most once per ``idempotency_key``. Returns (balance, charged_now).
 
-    The key is recorded as the ledger row's ``related_doc_id``, in the SAME
-    transaction as the debit, so "charged" and "recorded" commit together or
-    not at all: a crash can't leave one without the other, and a failed debit
+    The key is recorded as the ledger row's ``related_doc_id`` under the
+    reserved kind :data:`SPEND_ONCE_KIND`, in the SAME transaction as the
+    debit, so "charged" and "recorded" commit together or not at all: a crash
+    can't leave one without the other, and a failed debit
     (InsufficientCreditsError) records nothing, so a later retry can still pay.
+
+    The kind is part of the lookup, not decoration. It used to match any
+    ``kind="spend"`` row with that ``related_doc_id`` — and /credits/spend lets
+    a caller choose ``relatedDocId``, so spending 1 credit at
+    ``pipeline-job:<jobId>`` made this function believe the job's 5-credit
+    deferred charge was already collected and hand the file over for 1 credit.
+    Only this function writes SPEND_ONCE_KIND rows, and /credits/spend now also
+    refuses the reserved prefixes outright.
 
     Racing callers serialize on the wallet's write lock, taken first by a
     no-op UPDATE (a row lock on Postgres, the database write lock on sqlite).
@@ -217,7 +253,7 @@ def spend_credits_once_for_user(
             select(CreditLedgerRow.id)
             .where(
                 CreditLedgerRow.user_id == user_id,
-                CreditLedgerRow.kind == "spend",
+                CreditLedgerRow.kind == SPEND_ONCE_KIND,
                 CreditLedgerRow.related_doc_id == key,
             )
             .limit(1)
@@ -232,7 +268,7 @@ def spend_credits_once_for_user(
             CreditLedgerRow(
                 user_id=user_id,
                 at=datetime.utcnow(),
-                kind="spend",
+                kind=SPEND_ONCE_KIND,
                 amount=-amount,
                 description=description,
                 related_doc_id=key,

@@ -619,6 +619,15 @@ async def delete_me(
             delete(CreditLedgerRow).where(CreditLedgerRow.user_id == user_id)
         )
         session.delete(row)
+    # Their remediated documents are their content and must not outlive the
+    # account on disk. (Reachability is already gone — an artifact URL is
+    # signed against the owner's live row — but the bytes were still there.)
+    try:
+        from app.api.pipeline import purge_user_artifacts
+
+        purge_user_artifacts(user_id)
+    except Exception:
+        logger.warning("could not purge artifacts for deleted account", exc_info=True)
     return Response(status_code=204)
 
 

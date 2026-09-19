@@ -690,10 +690,13 @@ function ActivityRow({ entry, isLast }: { entry: HistoryEntry; isLast: boolean }
       : tone === "warning"
       ? theme.colors.warning
       : theme.colors.info;
+  // A deferred remediation debit ("spend_once") is a spend like any other to
+  // the reader — only the ledger bookkeeping differs.
+  const isSpend = entry.kind === "spend" || entry.kind === "spend_once";
   const iconName: PixelGlyph =
     entry.kind === "purchase"
       ? "coin"
-      : entry.kind === "spend"
+      : isSpend
       ? "bolt"
       : entry.kind === "grant"
       ? "spark"
@@ -701,8 +704,7 @@ function ActivityRow({ entry, isLast }: { entry: HistoryEntry; isLast: boolean }
       ? "arrow_left"
       : "coin";
   const amountText = (entry.amount > 0 ? "+" : "") + entry.amount;
-  const amountColor =
-    entry.kind === "spend" ? theme.colors.warning : theme.colors.success;
+  const amountColor = isSpend ? theme.colors.warning : theme.colors.success;
 
   return (
     <View
@@ -741,7 +743,7 @@ function ActivityRow({ entry, isLast }: { entry: HistoryEntry; isLast: boolean }
 
 function toneFor(kind: HistoryEntry["kind"]): "success" | "warning" | "info" {
   if (kind === "purchase") return "success";
-  if (kind === "spend") return "warning";
+  if (kind === "spend" || kind === "spend_once") return "warning";
   return "info";
 }
 
