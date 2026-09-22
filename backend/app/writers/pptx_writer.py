@@ -33,6 +33,7 @@ Design notes
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import shutil
@@ -43,7 +44,7 @@ from lxml import etree
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
+from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.oxml.ns import qn
 
 from app.models.accessibility import (
@@ -62,11 +63,13 @@ from app.parsers.docx_parser import _fake_list_signature, strip_fake_list_prefix
 from app.parsers.pptx_parser import (
     PPTXParser,
     _IdCounter,
+    _image_kind,
     _iter_hyperlink_groups,
     _iter_shapes_recursive,
     _paragraph_has_real_bullet,
     _pptx_theme_colors,
     _run_color_hex_pptx,
+    _shape_marked_decorative,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,9 +165,9 @@ def write_remediated_pptx(
     # error for the tree to contain unsupported node types).
     for node in mutated_index.values():
         if isinstance(node, SectionNode) and (node.metadata.properties or {}).get("set_slide_title"):
-            # An untitled slide the SET_SLIDE_TITLE executor approved — insert a
-            # real title placeholder carrying the derived text.
-            _apply_slide_title(node, section_by_node_id, applied, skipped)
+            # An untitled slide the SET_SLIDE_TITLE executor approved — make
+            # the slide's own text its title (never a visible duplicate).
+            _apply_slide_title(node, section_by_node_id, text_by_node_id, prs, applied, skipped)
         elif isinstance(node, ImageNode):
             _apply_image(node, image_by_node_id, applied, skipped)
         elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
@@ -391,7 +394,7 @@ def _index_shapes_by_parser_id(
             ids(f"slide-{slide_index}-h")
 
         for shape in _iter_shapes_recursive(slide.shapes):
-            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+            if _image_kind(shape):
                 node_id = ids(f"slide-{slide_index}-img")
                 image_by_node_id[node_id] = shape
                 continue
@@ -500,81 +503,419 @@ def _layout_title_placeholder(slide):
     return None
 
 
-def _ensure_slide_title(slide, text: str) -> Optional[str]:
-    """Make ``slide`` carry a real title placeholder containing ``text``.
+# --- Slide titles -----------------------------------------------------------
+#
+# The title must come from text the slide ALREADY shows, and must never add a
+# second visible copy of it. We used to insert a title placeholder carrying the
+# derived text while the original text box stayed put: the placeholder has no
+# geometry of its own, so it inherited the layout's title position and the
+# words appeared twice on 40 of 200 slides of a real deck. Now:
+#
+#   1. PROMOTE — the source is a plain top-level text box holding exactly the
+#      title: it BECOMES the title placeholder (a <p:ph type="title"/> in its
+#      nvPr). Placeholder text inherits the master's title style (44pt, the
+#      heading font, centred, anchored to the bottom...), so every property
+#      the box was taking from the presentation defaults is first written onto
+#      the box explicitly — position, size, font, colour and alignment stay
+#      exactly as they were.
+#   2. OFF-SLIDE — anything else (the text is in a group, shares its box with
+#      body text, or is an autoshape): a title placeholder carrying the text is
+#      positioned just ABOVE the slide, PowerPoint's own documented way to
+#      give a slide a title nobody sees. It is outside the rendered area, so
+#      the slide, a slideshow and a PDF export look exactly as before.
 
-    Three tiers, so this essentially never fails (keeping the executor's
-    SUCCESS honest — a fix that's always written, never just claimed):
-      1. A title placeholder already on the slide (e.g. present but empty) —
-         just set its text.
-      2. Clone the layout's title placeholder onto the slide.
-      3. No layout title placeholder (e.g. a Blank layout) — build a title
-         placeholder (idx 0) from scratch.
-    Returns a short tag on success, or None if every tier failed.
+_P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_EMU_PER_INCH = 914400
+
+# CT_TextCharacterProperties / CT_TextParagraphProperties / CT_TextBodyProperties
+# / CT_ShapeProperties child order — a child out of order and PowerPoint
+# refuses to open the file.
+_RPR_ORDER = [qn(t) for t in (
+    "a:ln", "a:noFill", "a:solidFill", "a:gradFill", "a:blipFill", "a:pattFill", "a:grpFill",
+    "a:effectLst", "a:effectDag", "a:highlight", "a:uLnTx", "a:uLn", "a:uFillTx", "a:uFill",
+    "a:latin", "a:ea", "a:cs", "a:sym", "a:hlinkClick", "a:hlinkMouseOver", "a:rtl", "a:extLst",
+)]
+_PPR_ORDER = [qn(t) for t in (
+    "a:lnSpc", "a:spcBef", "a:spcAft", "a:buClrTx", "a:buClr", "a:buSzTx", "a:buSzPct",
+    "a:buSzPts", "a:buFontTx", "a:buFont", "a:buNone", "a:buAutoNum", "a:buChar", "a:buBlip",
+    "a:tabLst", "a:defRPr", "a:extLst",
+)]
+_BODYPR_ORDER = [qn(t) for t in (
+    "a:prstTxWarp", "a:noAutofit", "a:normAutofit", "a:spAutoFit", "a:scene3d", "a:sp3d",
+    "a:flatTx", "a:extLst",
+)]
+_SPPR_ORDER = [qn(t) for t in (
+    "a:xfrm", "a:custGeom", "a:prstGeom", "a:noFill", "a:solidFill", "a:gradFill", "a:blipFill",
+    "a:pattFill", "a:grpFill", "a:ln", "a:effectLst", "a:effectDag", "a:scene3d", "a:sp3d",
+    "a:extLst",
+)]
+_FILL_TAGS = {qn(t) for t in ("a:noFill", "a:solidFill", "a:gradFill", "a:blipFill", "a:pattFill", "a:grpFill")}
+_BULLET_TAGS = {qn(t) for t in ("a:buNone", "a:buAutoNum", "a:buChar", "a:buBlip")}
+_AUTOFIT_TAGS = {qn(t) for t in ("a:noAutofit", "a:normAutofit", "a:spAutoFit")}
+
+# Values the schema/PowerPoint use when nothing in a text box's chain sets one.
+_RUN_ATTR_DEFAULTS = {
+    "sz": "1800", "b": "0", "i": "0", "u": "none", "strike": "noStrike",
+    "cap": "none", "spc": "0", "baseline": "0",
+}
+_PARA_ATTR_DEFAULTS = {"algn": "l", "marL": "0", "indent": "0", "rtl": "0"}
+_BODY_ATTR_DEFAULTS = {
+    "lIns": "91440", "tIns": "45720", "rIns": "91440", "bIns": "45720",
+    "anchor": "t", "wrap": "square", "vert": "horz", "anchorCtr": "0", "rtlCol": "0",
+}
+
+
+def _insert_ordered(parent, child, order: List[str]) -> None:
+    """Insert ``child`` at its schema position among ``parent``'s children."""
+    try:
+        rank = order.index(child.tag)
+    except ValueError:
+        parent.append(child)
+        return
+    for i, existing in enumerate(parent):
+        try:
+            if order.index(existing.tag) > rank:
+                parent.insert(i, child)
+                return
+        except ValueError:
+            continue
+    parent.append(child)
+
+
+def _lvl_ppr(list_style, lvl: int):
+    """``a:lvl{N}pPr`` of an ``a:lstStyle``/``p:defaultTextStyle``, or None."""
+    if list_style is None:
+        return None
+    return list_style.find(qn(f"a:lvl{lvl}pPr"))
+
+
+def _freeze_text_box_look(prs, sp) -> None:
+    """Write onto ``sp`` every text/shape property it currently takes from the
+    presentation defaults, so promoting it to a placeholder changes nothing.
+
+    A text box's text resolves: run/paragraph -> the box's own ``a:lstStyle``
+    -> ``p:defaultTextStyle`` -> schema defaults. A title placeholder resolves
+    run/paragraph -> own lstStyle -> the layout's and master's title styles.
+    The box's own lstStyle keeps its priority either way, so only values that
+    came from the presentation defaults (or the schema) need writing down.
     """
+    try:
+        default_style = prs.part._element.find(qn("p:defaultTextStyle"))  # noqa: SLF001
+    except Exception:
+        default_style = None
+    tx_body = sp.find(qn("p:txBody"))
+    list_style = tx_body.find(qn("a:lstStyle")) if tx_body is not None else None
+
+    # -- shape geometry / fill / line: a placeholder inherits these too ------
+    sp_pr = sp.find(qn("p:spPr"))
+    if sp_pr is not None:
+        if sp_pr.find(qn("a:prstGeom")) is None and sp_pr.find(qn("a:custGeom")) is None:
+            geom = sp_pr.makeelement(qn("a:prstGeom"), {"prst": "rect"})
+            etree.SubElement(geom, qn("a:avLst"))
+            _insert_ordered(sp_pr, geom, _SPPR_ORDER)
+        if not any(c.tag in _FILL_TAGS for c in sp_pr):
+            nf = sp_pr.makeelement(qn("a:noFill"), {})
+            _insert_ordered(sp_pr, nf, _SPPR_ORDER)
+        if sp_pr.find(qn("a:ln")) is None:
+            ln = sp_pr.makeelement(qn("a:ln"), {})
+            etree.SubElement(ln, qn("a:noFill"))
+            _insert_ordered(sp_pr, ln, _SPPR_ORDER)
+        if sp_pr.find(qn("a:effectLst")) is None and sp_pr.find(qn("a:effectDag")) is None:
+            _insert_ordered(sp_pr, sp_pr.makeelement(qn("a:effectLst"), {}), _SPPR_ORDER)
+
+    if tx_body is None:
+        return
+
+    # -- body properties: a text box's are its own or the schema's ----------
+    body_pr = tx_body.find(qn("a:bodyPr"))
+    if body_pr is None:
+        body_pr = tx_body.makeelement(qn("a:bodyPr"), {})
+        tx_body.insert(0, body_pr)
+    for attr, value in _BODY_ATTR_DEFAULTS.items():
+        if body_pr.get(attr) is None:
+            body_pr.set(attr, value)
+    if not any(c.tag in _AUTOFIT_TAGS for c in body_pr):
+        _insert_ordered(body_pr, body_pr.makeelement(qn("a:noAutofit"), {}), _BODYPR_ORDER)
+
+    for p in tx_body.findall(qn("a:p")):
+        p_pr = p.find(qn("a:pPr"))
+        if p_pr is None:
+            p_pr = p.makeelement(qn("a:pPr"), {})
+            p.insert(0, p_pr)
+        try:
+            lvl = int(p_pr.get("lvl") or 0) + 1
+        except ValueError:
+            lvl = 1
+        own_lvl = _lvl_ppr(list_style, lvl)
+        def_lvl = _lvl_ppr(default_style, lvl)
+
+        # paragraph attributes
+        for attr, value in _PARA_ATTR_DEFAULTS.items():
+            if p_pr.get(attr) is not None or (own_lvl is not None and own_lvl.get(attr) is not None):
+                continue
+            inherited = def_lvl.get(attr) if def_lvl is not None else None
+            p_pr.set(attr, inherited if inherited is not None else value)
+        # spacing + bullets
+        for tag, inner_tag, inner_val in (
+            ("a:lnSpc", "a:spcPct", "100000"),
+            ("a:spcBef", "a:spcPts", "0"),
+            ("a:spcAft", "a:spcPts", "0"),
+        ):
+            if p_pr.find(qn(tag)) is not None or (own_lvl is not None and own_lvl.find(qn(tag)) is not None):
+                continue
+            src = def_lvl.find(qn(tag)) if def_lvl is not None else None
+            if src is not None:
+                spacing = copy.deepcopy(src)
+            else:
+                spacing = p_pr.makeelement(qn(tag), {})
+                etree.SubElement(spacing, qn(inner_tag)).set("val", inner_val)
+            _insert_ordered(p_pr, spacing, _PPR_ORDER)
+        has_bullet = any(c.tag in _BULLET_TAGS for c in p_pr) or (
+            own_lvl is not None and any(c.tag in _BULLET_TAGS for c in own_lvl)
+        )
+        if not has_bullet:
+            src = next((c for c in def_lvl if c.tag in _BULLET_TAGS), None) if def_lvl is not None else None
+            _insert_ordered(p_pr, copy.deepcopy(src) if src is not None else p_pr.makeelement(qn("a:buNone"), {}), _PPR_ORDER)
+
+        own_def = own_lvl.find(qn("a:defRPr")) if own_lvl is not None else None
+        dflt_def = def_lvl.find(qn("a:defRPr")) if def_lvl is not None else None
+        run_props = []
+        for r in p:
+            if r.tag in (qn("a:r"), qn("a:fld")):
+                r_pr = r.find(qn("a:rPr"))
+                if r_pr is None:
+                    r_pr = r.makeelement(qn("a:rPr"), {})
+                    r.insert(0, r_pr)
+                run_props.append(r_pr)
+        end_pr = p.find(qn("a:endParaRPr"))
+        if end_pr is not None:
+            run_props.append(end_pr)
+        for r_pr in run_props:
+            _freeze_run_props(r_pr, own_def, dflt_def)
+
+
+def _freeze_run_props(r_pr, own_def, dflt_def) -> None:
+    attrs = dict(_RUN_ATTR_DEFAULTS)
+    if dflt_def is not None and dflt_def.get("kern") is not None:
+        attrs["kern"] = dflt_def.get("kern")
+    for attr, value in attrs.items():
+        if r_pr.get(attr) is not None or (own_def is not None and own_def.get(attr) is not None):
+            continue
+        inherited = dflt_def.get(attr) if dflt_def is not None else None
+        r_pr.set(attr, inherited if inherited is not None else value)
+
+    def _own_has(tags) -> bool:
+        return any(c.tag in tags for c in r_pr) or (
+            own_def is not None and any(c.tag in tags for c in own_def)
+        )
+
+    if not _own_has(_FILL_TAGS):
+        src = next((c for c in dflt_def if c.tag in _FILL_TAGS), None) if dflt_def is not None else None
+        if src is not None:
+            _insert_ordered(r_pr, copy.deepcopy(src), _RPR_ORDER)
+        else:
+            fill = r_pr.makeelement(qn("a:solidFill"), {})
+            etree.SubElement(fill, qn("a:schemeClr")).set("val", "tx1")
+            _insert_ordered(r_pr, fill, _RPR_ORDER)
+    if not _own_has({qn("a:effectLst"), qn("a:effectDag")}):
+        src = None
+        if dflt_def is not None:
+            # (never `find() or find()`: an EMPTY lxml element is falsy)
+            src = next((c for c in dflt_def if c.tag in (qn("a:effectLst"), qn("a:effectDag"))), None)
+        _insert_ordered(r_pr, copy.deepcopy(src) if src is not None else r_pr.makeelement(qn("a:effectLst"), {}), _RPR_ORDER)
+    for tag, theme_font in (("a:latin", "+mn-lt"), ("a:ea", "+mn-ea"), ("a:cs", "+mn-cs")):
+        if _own_has({qn(tag)}):
+            continue
+        src = dflt_def.find(qn(tag)) if dflt_def is not None else None
+        if src is not None:
+            _insert_ordered(r_pr, copy.deepcopy(src), _RPR_ORDER)
+        else:
+            font = r_pr.makeelement(qn(tag), {})
+            font.set("typeface", theme_font)
+            _insert_ordered(r_pr, font, _RPR_ORDER)
+
+
+def _shape_is_placeholder(sp) -> bool:
+    return sp.find(f"{qn('p:nvSpPr')}/{qn('p:nvPr')}/{qn('p:ph')}") is not None
+
+
+def _shape_referenced_by_animation(slide, shape_id) -> bool:
+    try:
+        timing = slide._element.find(qn("p:timing"))  # noqa: SLF001
+    except Exception:
+        return True  # can't tell -> don't touch it
+    if timing is None:
+        return False
+    sid = str(shape_id)
+    return any(el.get("spid") == sid for el in timing.iter(qn("p:spTgt")))
+
+
+def _promotable_title_box(slide, shape, title: str) -> bool:
+    """True when ``shape`` is a plain top-level text box holding exactly ``title``."""
+    try:
+        sp = shape._element  # noqa: SLF001
+    except Exception:
+        return False
+    if sp.tag != qn("p:sp"):
+        return False
+    parent = sp.getparent()
+    if parent is None or parent.tag != qn("p:spTree"):
+        return False  # inside a group: its xfrm is group-relative
+    if _shape_is_placeholder(sp):
+        return False
+    if sp.find(qn("p:style")) is not None:
+        return False  # an autoshape's theme font/colour comes from p:style
+    xfrm = sp.find(f"{qn('p:spPr')}/{qn('a:xfrm')}")
+    if xfrm is None or xfrm.find(qn("a:off")) is None or xfrm.find(qn("a:ext")) is None:
+        return False  # would inherit the layout title's position
+    tx_body = sp.find(qn("p:txBody"))
+    if tx_body is None:
+        return False
+    paras = tx_body.findall(qn("a:p"))
+    if len(paras) != 1 or paras[0].find(qn("a:br")) is not None:
+        return False  # other lines would become part of the title
+    text = "".join(t.text or "" for t in paras[0].iter(qn("a:t"))).strip()
+    return text == title.strip()
+
+
+def _promote_to_title(prs, slide, shape) -> Optional[str]:
+    """Turn a plain text box into the slide's title placeholder, look frozen."""
+    sp = shape._element  # noqa: SLF001
     try:
         existing = slide.shapes.title
     except Exception:
         existing = None
     if existing is not None:
-        try:
-            existing.text = text
-            return "set_existing"
-        except Exception:
+        # An EMPTY title placeholder (the slide was flagged untitled, so it has
+        # no text) renders nothing in a slideshow — but two title placeholders
+        # on one slide would be ambiguous. Drop it, unless an animation
+        # targets it, in which case the caller falls back to the off-slide
+        # title (which reuses this placeholder).
+        if (existing.text or "").strip():
             return None
+        if _shape_referenced_by_animation(slide, existing.shape_id):
+            return None
+        ex_el = existing._element  # noqa: SLF001
+        ex_el.getparent().remove(ex_el)
+    _freeze_text_box_look(prs, sp)
+    nv_sp_pr = sp.find(qn("p:nvSpPr"))
+    c_nv_sp_pr = nv_sp_pr.find(qn("p:cNvSpPr"))
+    if c_nv_sp_pr is not None and "txBox" in c_nv_sp_pr.attrib:
+        del c_nv_sp_pr.attrib["txBox"]  # it is a placeholder now, not a text box
+    nv_pr = nv_sp_pr.find(qn("p:nvPr"))
+    if nv_pr is None:
+        nv_pr = etree.SubElement(nv_sp_pr, qn("p:nvPr"))
+    ph = nv_pr.makeelement(qn("p:ph"), {"type": "title"})
+    nv_pr.insert(0, ph)  # p:ph must be nvPr's first child
+    return "promoted_existing_text"
 
-    layout_title = _layout_title_placeholder(slide)
-    if layout_title is not None:
-        try:
-            slide.shapes.clone_placeholder(layout_title)
-            title = slide.shapes.title
-            if title is not None:
-                title.text = text
-                return "cloned_from_layout"
-        except Exception:
-            logger.debug("clone_placeholder failed; falling back to scratch title", exc_info=True)
 
-    # Tier 3 — construct a title placeholder directly.
+def _off_slide_title(prs, slide, text: str) -> Optional[str]:
+    """Give ``slide`` a title placeholder carrying ``text``, placed above the
+    slide so it is never rendered. Reuses an empty title placeholder; else
+    clones the layout's; else builds one."""
+    how = None
+    title = None
     try:
-        shapes = slide.shapes
-        id_ = shapes._next_shape_id  # noqa: SLF001 - mirrors clone_placeholder
-        name = f"Title {id_}"
-        # orient/sz must be valid ST strings ("horz"/"full") — new_placeholder_sp
-        # assigns them unconditionally and rejects None.
-        shapes._spTree.add_placeholder(id_, name, PP_PLACEHOLDER.TITLE, "horz", "full", 0)  # noqa: SLF001
         title = slide.shapes.title
         if title is not None:
-            title.text = text
-            return "built_from_scratch"
+            how = "existing_placeholder_moved_off_slide"
     except Exception:
-        logger.debug("scratch title placeholder build failed", exc_info=True)
-    return None
+        title = None
+    if title is None:
+        layout_title = _layout_title_placeholder(slide)
+        if layout_title is not None:
+            try:
+                slide.shapes.clone_placeholder(layout_title)
+                title = slide.shapes.title
+                how = "off_slide_title"
+            except Exception:
+                logger.debug("clone_placeholder failed; falling back to scratch title", exc_info=True)
+                title = None
+    if title is None:
+        try:
+            shapes = slide.shapes
+            id_ = shapes._next_shape_id  # noqa: SLF001 - mirrors clone_placeholder
+            # orient/sz must be valid ST strings ("horz"/"full") — new_placeholder_sp
+            # assigns them unconditionally and rejects None.
+            shapes._spTree.add_placeholder(id_, f"Title {id_}", PP_PLACEHOLDER.TITLE, "horz", "full", 0)  # noqa: SLF001
+            title = slide.shapes.title
+            how = "off_slide_title"
+        except Exception:
+            logger.debug("scratch title placeholder build failed", exc_info=True)
+            return None
+    if title is None:
+        return None
+
+    def _dim(name: str) -> int:
+        # A scratch-built placeholder has no geometry to inherit; python-pptx
+        # may answer None or raise for it.
+        try:
+            return int(getattr(title, name) or 0)
+        except Exception:
+            return 0
+
+    try:
+        slide_width = int(prs.slide_width or 0) or 12192000
+        width = _dim("width") or max(slide_width - _EMU_PER_INCH, _EMU_PER_INCH)
+        height = _dim("height") or _EMU_PER_INCH
+        left = _dim("left") or _EMU_PER_INCH // 2
+        title.text = text
+        title.left = left
+        title.width = width
+        title.height = height
+        # Entirely above the slide's top edge, with a margin.
+        title.top = -(height + _EMU_PER_INCH // 2)
+        # Screen readers read shapes in tree order: put the title first.
+        sp = title._element  # noqa: SLF001
+        tree = sp.getparent()
+        first_shape_index = 2  # after p:nvGrpSpPr and p:grpSpPr
+        if tree is not None and tree.index(sp) != first_shape_index:
+            tree.remove(sp)
+            tree.insert(first_shape_index, sp)
+    except Exception:
+        logger.debug("off-slide title placement failed", exc_info=True)
+        return None
+    return how
 
 
 def _apply_slide_title(
     section: SectionNode,
     section_by_node_id: Dict[str, Any],
+    text_by_node_id: Dict[str, Any],
+    prs,
     applied: List[Dict[str, Any]],
     skipped: List[Dict[str, Any]],
 ) -> None:
-    """Insert/set a real title placeholder on the slide for ``section``."""
+    """Make the slide's own text its title — never a visible duplicate."""
     slide = section_by_node_id.get(section.id)
     if slide is None:
         skipped.append({"target_id": section.id, "reason": "slide_not_found_for_section"})
         return
-    title = (section.metadata.properties or {}).get("set_slide_title")
+    props = section.metadata.properties or {}
+    title = str(props.get("set_slide_title") or "").strip()
     if not title:
         skipped.append({"target_id": section.id, "reason": "no_title_text"})
         return
-    result = _ensure_slide_title(slide, str(title))
+    source = text_by_node_id.get(props.get("set_slide_title_source") or "")
+    result = None
+    if source is not None and _promotable_title_box(slide, source, title):
+        try:
+            result = _promote_to_title(prs, slide, source)
+        except Exception:
+            logger.debug("title promotion failed; using an off-slide title", exc_info=True)
+            result = None
+    if result is None:
+        result = _off_slide_title(prs, slide, title)
     if result is None:
         skipped.append({"target_id": section.id, "reason": "could_not_create_title_placeholder"})
         return
     applied.append(
         {
             "kind": "slide_title",
+            "action": "SET_SLIDE_TITLE",
             "target_id": section.id,
-            "summary": f"slide title = {str(title)!r} ({result})",
+            "summary": f"slide title = {title!r} ({result})",
         }
     )
 
@@ -666,6 +1007,11 @@ def _apply_image(
         return
 
     if image.is_decorative:
+        if _shape_marked_decorative(shape):
+            # Already decorative in the source (the parser read it from this
+            # very extension): nothing was approved, so nothing is written —
+            # not even clearing a descr PowerPoint never announces.
+            return
         # Decorative: clear alt text and mark via the Office "decorative"
         # extension (the only mechanism PowerPoint actually honors).
         _clear_descr(shape)

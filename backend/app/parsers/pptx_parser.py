@@ -300,7 +300,7 @@ class PPTXParser:
                 top = float(getattr(shape, "top", 0) or 0)
                 left = float(getattr(shape, "left", 0) or 0)
                 shape_meta_props = {"order_hint": (top, left)}
-                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                if _image_kind(shape):
                     section.children.append(_picture_to_image_node(shape, slide_index, ids, shape_meta_props))
                     continue
                 if shape.has_table:
@@ -407,6 +407,68 @@ def _iter_shapes_recursive(shapes):
                 continue
         else:
             yield shape
+
+
+_P_PIC_TAG = "{http://schemas.openxmlformats.org/presentationml/2006/main}pic"
+_P_GRAPHIC_FRAME_TAG = "{http://schemas.openxmlformats.org/presentationml/2006/main}graphicFrame"
+_GRAPHIC_DATA_TAG = "{http://schemas.openxmlformats.org/drawingml/2006/main}graphicData"
+_IMAGE_LIKE_GRAPHIC_URIS = {
+    "http://schemas.openxmlformats.org/drawingml/2006/chart": "chart",
+    "http://schemas.openxmlformats.org/drawingml/2006/diagram": "smartart",
+}
+_DECORATIVE_EXT_URI = "{C183D7F6-B498-43B3-948B-1728B52AA6E4}"
+
+
+def _image_kind(shape) -> Optional[str]:
+    """What kind of image a shape is, or None when it is not one.
+
+    ``shape_type == PICTURE`` alone missed most real-deck images: a picture
+    dropped into a content/picture PLACEHOLDER (the "insert picture" icon on
+    a layout — the usual way pictures get onto slides) is a ``p:pic`` whose
+    shape_type is PLACEHOLDER, and a chart or SmartArt graphic needs alt text
+    just as much. So: every ``p:pic`` (pictures, filled picture placeholders,
+    video/audio posters) and every chart/SmartArt graphic frame.
+
+    ``parse_to_tree`` and the writer's ``_index_shapes_by_parser_id`` MUST
+    both use this so the minted image ids stay aligned.
+    """
+    try:
+        el = shape._element  # noqa: SLF001
+    except Exception:
+        return None
+    tag = getattr(el, "tag", None)
+    if tag == _P_PIC_TAG:
+        return "picture"
+    if tag == _P_GRAPHIC_FRAME_TAG:
+        gd = el.find(f".//{_GRAPHIC_DATA_TAG}")
+        if gd is not None:
+            return _IMAGE_LIKE_GRAPHIC_URIS.get(gd.get("uri") or "")
+    return None
+
+
+def _shape_marked_decorative(shape) -> bool:
+    """True when PowerPoint's "Mark as decorative" is set on the shape.
+
+    That is the Office 2017 ``adec:decorative`` extension under ``p:cNvPr`` —
+    the same mechanism the writer uses. A decorative image is skipped by
+    screen readers, so it needs no alt text; flagging it as missing/vague alt
+    (the ``descr`` PowerPoint leaves behind is often "image.png") was a false
+    positive, including on our own output after a mark-decorative fix.
+    """
+    try:
+        for nv in shape._element.iter():  # noqa: SLF001
+            tag = nv.tag
+            if isinstance(tag, str) and tag.endswith("}cNvPr"):
+                for ext in nv.iter(f"{_A_NS}ext"):
+                    if ext.get("uri") != _DECORATIVE_EXT_URI:
+                        continue
+                    for child in ext:
+                        if isinstance(child.tag, str) and child.tag.endswith("}decorative"):
+                            return (child.get("val") or "").strip().lower() in ("1", "true")
+                return False
+    except Exception:
+        return False
+    return False
 
 
 def _shape_bg_hex(shape) -> Optional[str]:
@@ -674,7 +736,14 @@ def _iter_hyperlink_groups(paragraph):
     prev_href = None
     for run in getattr(paragraph, "runs", []) or []:
         try:
-            href = run.hyperlink.address
+            # python-pptx's ``run.hyperlink`` does get_or_add_rPr(): merely
+            # LOOKING for a link stamped an empty <a:rPr/> into every run the
+            # writer indexed, so slides nobody touched came back changed.
+            r_pr = run._r.rPr  # noqa: SLF001
+            if r_pr is None or r_pr.find(f"{_A_NS}hlinkClick") is None:
+                href = None
+            else:
+                href = run.hyperlink.address
         except Exception:
             href = None
         if href:
@@ -703,9 +772,26 @@ def _shape_descr(shape) -> str:
     return ""
 
 
+def _chart_title(shape) -> Optional[str]:
+    """A chart's own title text — the author's caption for it — or None."""
+    try:
+        chart = shape.chart
+        if chart.has_title:
+            text = " ".join((chart.chart_title.text_frame.text or "").split())
+            return text[:200] or None
+    except Exception:
+        return None
+    return None
+
+
 def _picture_to_image_node(shape, slide_index: int, ids: "_IdCounter", extra_props: Dict[str, Any]) -> ImageNode:
     alt_text = _shape_descr(shape)
-    is_decorative = False
+    kind = _image_kind(shape) or "picture"
+    is_decorative = _shape_marked_decorative(shape)
+    if is_decorative:
+        # Screen readers skip a decorative image; whatever descr PowerPoint
+        # left behind is never announced, so it is neither missing nor vague.
+        alt_text = ""
     image_b64: Optional[str] = None
     image_mime: Optional[str] = None
     try:
@@ -722,6 +808,12 @@ def _picture_to_image_node(shape, slide_index: int, ids: "_IdCounter", extra_pro
         properties["image_b64"] = image_b64
         properties["image_mime"] = image_mime or "image/png"
     properties["shape_id"] = getattr(shape, "shape_id", None)
+    if kind != "picture":
+        properties["image_kind"] = kind
+    if kind == "chart" and not is_decorative:
+        title = _chart_title(shape)
+        if title:
+            properties["caption"] = title
     metadata = NodeMetadata(page=slide_index, source_format="pptx", properties=properties)
     if is_decorative and alt_text:
         return ImageNode.model_construct(

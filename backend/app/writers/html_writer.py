@@ -54,10 +54,14 @@ from app.models.accessibility import (
     iter_reading_order,
 )
 from app.parsers.html_parser import (
+    HtmlSource,
     _parse_document,
+    _svg_accessible_name,
+    encode_html_text,
     iter_autocomplete_candidates,
     iter_derivable_form_labels,
     iter_positive_tabindex,
+    parse_html_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,10 +93,15 @@ def write_remediated_html(
 
     try:
         data = Path(source_path).read_bytes()
-        doc = _parse_document(data)
+        doc, source_info = parse_html_source(data)
     except Exception as exc:
         logger.exception("html_writer parse failed: %s", exc)
         # Signal a hard failure so the pipeline cleans up and does NOT charge.
+        return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
+    if source_info.fallback:
+        # lxml could not build a document from these bytes and the parser
+        # substituted an EMPTY one. Serialising that would replace the
+        # customer's file with a blank page; leave the copy untouched.
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
 
     def resolve(xpath: Optional[str]) -> Optional[Any]:
@@ -101,8 +110,14 @@ def write_remediated_html(
         try:
             found = doc.xpath(xpath)
         except Exception:
-            return None
-        return found[0] if len(found) == 1 else None
+            found = []
+        if len(found) == 1:
+            return found[0]
+        # libxml2's XPath evaluator fails ("unknown error") on a long path
+        # that ends in a positional predicate — a table cell ~1000 wrappers
+        # deep — so the fix was silently skipped. The locator is always
+        # getpath() output, which we can walk step by step ourselves.
+        return _walk_getpath(doc, xpath)
 
     root = tree.root
     props = root.metadata.properties or {}
@@ -231,7 +246,7 @@ def write_remediated_html(
         _apply_list_conversion(node, run_ids, nodes_by_id, list_member_els, applied, skipped)
 
     try:
-        out_bytes = _serialize(doc)
+        out_bytes = _serialize(doc, source_info)
     except Exception as exc:
         logger.exception("html_writer serialize failed: %s", exc)
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: serialize"}]}
@@ -265,6 +280,51 @@ def write_remediated_html(
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: write"}]}
 
     return {"applied": applied, "skipped": skipped}
+
+
+_PATH_STEP_RE = re.compile(r"^([^\[\]/]+)(?:\[(\d+)\])?$")
+
+
+def _walk_getpath(doc: Any, xpath: str) -> Optional[Any]:
+    """Resolve an ``ElementTree.getpath()`` locator by walking children.
+
+    getpath() emits absolute paths of plain steps — ``tag`` or ``tag[n]``,
+    where ``n`` is the 1-based position among same-tag siblings (``*[n]``
+    among all elements) — so this needs no XPath engine and has no depth
+    limit. Anything else is not ours: return None.
+    """
+    if not xpath or not xpath.startswith("/"):
+        return None
+    steps = xpath[1:].split("/")
+    cur = None
+    try:
+        for i, step in enumerate(steps):
+            m = _PATH_STEP_RE.match(step)
+            if not m:
+                return None
+            tag, pos = m.group(1), int(m.group(2) or 1)
+            if i == 0:
+                root = doc.getroottree().getroot()
+                if pos != 1 or (tag != "*" and root.tag != tag):
+                    return None
+                cur = root
+                continue
+            n = 0
+            nxt = None
+            for child in cur:
+                if not isinstance(child.tag, str):
+                    continue
+                if tag == "*" or child.tag == tag:
+                    n += 1
+                    if n == pos:
+                        nxt = child
+                        break
+            if nxt is None:
+                return None
+            cur = nxt
+    except Exception:
+        return None
+    return cur
 
 
 _LIST_MARKER_TOKEN = re.compile(r"^(?:[-*•·]|\d{1,3}[.)])$")
@@ -335,8 +395,36 @@ def _apply_image(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> Non
     # never edit an image the user didn't approve a fix for).
     if node.is_decorative or not node.alt_text or el is None:
         return
+    if (node.metadata.properties or {}).get("svg_inline"):
+        _apply_svg_name(node, el, applied)
+        return
     if el.get("alt") != node.alt_text:
         el.set("alt", node.alt_text)
+        applied.append({"action": "GENERATE_ALT_TEXT", "target_id": node.id})
+
+
+def _apply_svg_name(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> None:
+    """Name an inline ``<svg>``: ``role="img"`` + ``aria-label``.
+
+    An ``<svg>`` has no ``alt``. ``role="img"`` makes assistive tech treat it
+    as ONE image (instead of a group of loose shapes and text fragments) and
+    ``aria-label`` is its name — it outranks a ``<title>`` child in the
+    accessible-name computation, so it also replaces a non-descriptive title.
+    The parser reads ``aria-label`` back, so a re-scan sees a named image.
+    """
+    tag = el.tag.rsplit("}", 1)[-1].lower() if isinstance(el.tag, str) else ""
+    if tag != "svg":
+        return
+    if _svg_accessible_name(el) == node.alt_text:
+        return  # the name the parser read — nothing was approved/changed
+    changed = False
+    if not (el.get("role") or "").strip():
+        el.set("role", "img")
+        changed = True
+    if (el.get("aria-label") or "") != node.alt_text:
+        el.set("aria-label", node.alt_text)
+        changed = True
+    if changed:
         applied.append({"action": "GENERATE_ALT_TEXT", "target_id": node.id})
 
 
@@ -505,28 +593,39 @@ def _ensure_title_element(doc: Any) -> Optional[Any]:
     return title_el
 
 
-def _serialize(doc: Any) -> bytes:
-    # We always emit UTF-8 bytes, so any existing charset declaration must say
-    # utf-8 or a browser will mis-decode a document we re-encoded. This only
-    # rewrites an EXISTING meta (never injects one) — required for correctness,
-    # not a gratuitous edit.
-    for meta in doc.iter("meta"):
-        if meta.get("charset") is not None:
-            meta.set("charset", "utf-8")
-        elif (meta.get("http-equiv") or "").lower() == "content-type":
-            meta.set("content", "text/html; charset=utf-8")
-    doctype = None
-    try:
-        doctype = doc.getroottree().docinfo.doctype or None
-    except Exception:
-        doctype = None
-    return lxml_html.tostring(
-        doc,
-        encoding="utf-8",
+_LEADING_DOCTYPE_RE = re.compile(r"^\s*<!DOCTYPE[^>]*>[ \t]*(?:\r?\n)?", re.IGNORECASE)
+
+
+def _serialize(doc: Any, source: Optional[HtmlSource] = None) -> bytes:
+    """Serialize back in the SOURCE'S OWN encoding, doctype and declaration.
+
+    We used to always emit UTF-8 (rewriting any <meta charset> to match). For
+    a legacy windows-1252 page with no declaration that shipped UTF-8 bytes
+    the browser still decoded as windows-1252 — every "é" became "Ã©" — and a
+    page served by a server that sends ``charset=ISO-8859-1`` breaks the same
+    way whatever the meta says. Re-encoding with the codec the parser decoded
+    with means every byte of text we did not change comes back as it was, the
+    existing declaration stays true, and nothing is (re)declared.
+
+    The whole document tree is serialized (so a comment before ``<html>`` —
+    e.g. IE's "saved from url" mark — survives), but lxml invents an HTML 4.0
+    Transitional doctype for a page that had none, and adding a doctype can
+    switch a page's rendering mode, so it is only kept if the source had one.
+    """
+    source = source or HtmlSource()
+    # include_meta_content_type=True means "leave the page's own
+    # <meta http-equiv="Content-Type"> alone" (with str output lxml never
+    # injects one). False DELETED it — and for a Word "Save as Web Page"
+    # export that meta is the page's only charset declaration.
+    text = lxml_html.tostring(
+        doc.getroottree(),
+        encoding="unicode",
         method="html",
-        doctype=doctype,
-        include_meta_content_type=False,
+        include_meta_content_type=True,
     )
+    if not source.has_doctype:
+        text = _LEADING_DOCTYPE_RE.sub("", text, count=1)
+    return encode_html_text(text, source)
 
 
 __all__ = ["write_remediated_html"]

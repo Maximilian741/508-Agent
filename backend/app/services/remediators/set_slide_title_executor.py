@@ -5,29 +5,44 @@ users navigate a deck by pulling up the list of slide titles, and an untitled
 slide is invisible there (WCAG 2.4.2 / 1.3.1). The parser marks each untitled
 slide's ``SectionNode`` with ``properties["missing_title"]``.
 
-This executor turns that detect-only finding into an auto-fix. It is
-deterministic (no AI): it derives a title from the slide's *topmost* text — the
-shape highest on the slide by geometry (the parser records each shape's
+This executor turns that finding into an auto-fix ONLY when the slide already
+shows its own title as ordinary text — deterministic, no AI. It picks the
+slide's *topmost* title-like text shape (the parser records each shape's
 ``order_hint`` = (top, left)), which is almost always the de-facto title the
-author typed as plain text instead of into the title placeholder. Pure dates and
-page numbers are skipped so a footer can't hijack the title, and over-long lines
-are truncated on a word boundary. It falls back to ``"Slide N"`` only when the
-slide has no usable text. The chosen title is stashed on the section as
-``set_slide_title``; ``pptx_writer`` then inserts a real *title placeholder*
-(cloned from the slide layout, or built from scratch) carrying that text, so the
-slide enters the title-navigation list. Re-parsing the output then sees a titled
-slide and the flag clears.
+author typed into a text box instead of the title placeholder. It never
+invents words:
+
+  * only text SHAPES are candidates — never a table cell (a data table's first
+    cell "North" is not a title), a link, or an image;
+  * pure dates and page numbers are skipped so a footer can't hijack the title,
+    and so is a typed list;
+  * text repeated on several slides (a running "ACME Corp" / "Confidential"
+    banner) is boilerplate, not this slide's title.
+
+When no shape qualifies the slide is left for a person: a fabricated "Slide 7"
+is what a screen reader already announces for an untitled slide, so writing it
+would be charged for and fix nothing.
+
+The chosen text goes on the section as ``set_slide_title`` and the shape's node
+id as ``set_slide_title_source``. ``pptx_writer`` then makes that text the
+slide's title WITHOUT adding a visible duplicate: it promotes the source shape
+itself to the title placeholder (its look and position frozen), or — when the
+shape can't be promoted (inside a group, several paragraphs) — adds a title
+placeholder positioned OFF the slide, which is how PowerPoint's own guidance
+hides a title. Re-parsing the output then sees a titled slide and the flag
+clears.
 """
 
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
     ActionCode,
+    ParagraphNode,
     SectionNode,
     iter_reading_order,
 )
@@ -35,10 +50,14 @@ from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 _MAX_TITLE_LEN = 120
+# A title is a line, not a paragraph of body copy.
+_MAX_TITLE_WORDS = 20
+# Text on at least this many slides is a running header/footer, not a title.
+_BOILERPLATE_MIN_SLIDES = 3
 
 # A title candidate that is *only* a page number or a bare date is almost
 # certainly a footer/header artifact, not the slide's title.
-_PAGENUM_RE = re.compile(r"^(?:page|slide)?\s*\d{1,4}$", re.IGNORECASE)
+_PAGENUM_RE = re.compile(r"^(?:page|slide)?\s*\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?$", re.IGNORECASE)
 _DATE_RE = re.compile(
     r"^(?:"
     r"\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}"  # 6/16/2026, 16-06-26
@@ -60,13 +79,31 @@ def _order_key(node) -> Tuple[float, float]:
     return (float("inf"), float("inf"))
 
 
+def _first_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
 def _is_title_like(text: str) -> bool:
     t = text.strip()
-    return bool(t) and not _PAGENUM_RE.match(t) and not _DATE_RE.match(t)
+    if not t or _PAGENUM_RE.match(t) or _DATE_RE.match(t):
+        return False
+    if not any(c.isalpha() for c in t):
+        return False
+    words = len(t.split())
+    if t.endswith(".") and words > 8:
+        return False  # a sentence of body copy, not a heading
+    return words <= _MAX_TITLE_WORDS
 
 
 def _truncate_title(text: str) -> str:
-    first_line = text.splitlines()[0].strip()
+    first_line = _first_line(text)
     if len(first_line) <= _MAX_TITLE_LEN:
         return first_line
     head = first_line[:_MAX_TITLE_LEN].rsplit(" ", 1)[0].rstrip()
@@ -75,30 +112,50 @@ def _truncate_title(text: str) -> str:
     return head + "…"
 
 
-def _derive_slide_title(section: SectionNode) -> str:
-    """Best title we can derive from the slide's content (never empty).
-
-    Picks the topmost text on the slide (by geometry, not XML order), skipping
-    pure dates/page numbers so footers can't hijack the title.
-    """
-    slide_no = (section.metadata.properties or {}).get("slide_number")
-    candidates: List[Tuple[Tuple[float, float], str]] = []
-    for node in iter_reading_order(section):
-        if node is section:
-            # The section's own content text is the placeholder "Slide N".
+def _slide_text_counts(tree: AccessibilityTree) -> Dict[str, int]:
+    """How many slides each (normalised) first line of a text shape is on."""
+    counts: Dict[str, int] = {}
+    for section in tree.root.children:
+        if not isinstance(section, SectionNode):
             continue
-        text = ((node.content.text if node.content else "") or "").strip()
-        if text:
-            candidates.append((_order_key(node), text))
+        seen = set()
+        for node in iter_reading_order(section):
+            if isinstance(node, ParagraphNode):
+                key = _norm(_first_line((node.content.text if node.content else "") or ""))
+                if key:
+                    seen.add(key)
+        for key in seen:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _pick_title_source(
+    section: SectionNode, boilerplate: Dict[str, int]
+) -> Optional[Tuple[ParagraphNode, str]]:
+    """The slide's own title text and the shape it is on, or None.
+
+    The topmost (by geometry, not XML order) text shape whose first line reads
+    as a title. Never a table cell/link/image, never a date, page number,
+    typed list, or text repeated across the deck.
+    """
+    candidates: List[Tuple[Tuple[float, float], ParagraphNode, str]] = []
+    for node in iter_reading_order(section):
+        if not isinstance(node, ParagraphNode):
+            continue
+        props = node.metadata.properties or {}
+        if props.get("fake_list_run_ids"):
+            continue  # a typed "- item" list is body content
+        line = _first_line((node.content.text if node.content else "") or "")
+        if not _is_title_like(line):
+            continue
+        if boilerplate.get(_norm(line), 0) >= _BOILERPLATE_MIN_SLIDES:
+            continue
+        candidates.append((_order_key(node), node, line))
+    if not candidates:
+        return None
     candidates.sort(key=lambda c: c[0])
-    for _key, text in candidates:
-        if _is_title_like(text):
-            return _truncate_title(text)
-    # Nothing title-like (e.g. the only text is a date) — use the topmost text
-    # rather than a generic placeholder, if any.
-    if candidates:
-        return _truncate_title(candidates[0][1])
-    return f"Slide {slide_no}" if slide_no else "Slide"
+    _key, node, line = candidates[0]
+    return node, _truncate_title(line)
 
 
 class SetSlideTitleExecutor(RemediationExecutor):
@@ -129,16 +186,31 @@ class SetSlideTitleExecutor(RemediationExecutor):
                 status=ExecutionStatus.SKIPPED,
                 notes="Slide is not flagged as missing a title; no changes applied.",
             )
-        title = _derive_slide_title(target)
         if target.metadata.properties is None:
             target.metadata.properties = {}
-        target.metadata.properties["set_slide_title"] = title
         slide_no = target.metadata.properties.get("slide_number")
+        picked = _pick_title_source(target, _slide_text_counts(tree))
+        if picked is None:
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    f"Slide {slide_no} has no text that reads as a title (only a table, "
+                    "pictures, dates/page numbers or text repeated on other slides), so "
+                    "we did not make one up. Add a title in PowerPoint (Home > Layout, or "
+                    "type into the title box). Left for manual review; you were not "
+                    "charged for it."
+                ),
+            )
+        source, title = picked
+        target.metadata.properties["set_slide_title"] = title
+        target.metadata.properties["set_slide_title_source"] = source.id
         return ExecutionResult(
             action_code=action_code,
             target_node_id=plan.target_node_id,
             status=ExecutionStatus.SUCCESS,
-            notes=f"Set title of slide {slide_no} to {title!r}.",
+            notes=f"Made the slide's own text {title!r} the title of slide {slide_no}.",
         )
 
 

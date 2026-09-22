@@ -28,16 +28,19 @@ from app.models.accessibility import (
 from app.analyzers.helpers import attach_flag
 
 
-def _walk(node: Node, inside_table: bool) -> None:
-    if isinstance(node, TableNode):
-        if inside_table:
-            attach_flag(node, AccessibilityFlagCode.TABLE_NESTED)
-        # Everything beneath this table is "inside a table" for its descendants.
-        for child in node.children:
-            _walk(child, True)
-        return
-    for child in node.children:
-        _walk(child, inside_table)
+def _walk(root: Node, inside_table: bool) -> None:
+    # Explicit stack, not recursion: an HTML page can nest lists/tables
+    # hundreds deep, and a recursive walk raised RecursionError there.
+    stack = [(root, inside_table)]
+    while stack:
+        node, inside = stack.pop()
+        if isinstance(node, TableNode):
+            if inside:
+                attach_flag(node, AccessibilityFlagCode.TABLE_NESTED)
+            # Everything beneath this table is "inside a table" for its descendants.
+            inside = True
+        for child in reversed(node.children):
+            stack.append((child, inside))
 
 
 class NestedTableAnalyzer(Analyzer):

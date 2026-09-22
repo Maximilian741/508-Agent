@@ -35,8 +35,10 @@ Design notes
 
 from __future__ import annotations
 
+import codecs
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -77,8 +79,20 @@ from app.models.accessibility import (
 
 _HEADING_TAGS: Dict[str, int] = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 _SECTION_TAGS = {"section", "article", "main", "nav", "aside", "header", "footer", "div", "body"}
-# Content we never descend into for accessibility nodes.
-_SKIP_TAGS = {"script", "style", "template", "noscript", "head", "svg", "math"}
+# Content we never descend into for accessibility nodes. (<svg> is handled
+# as a whole by _build_svg — it can be an image — and its children are never
+# walked as page content.)
+_SKIP_TAGS = {"script", "style", "template", "noscript", "head", "math"}
+# Tree depth past which a plain wrapper (<div>/<section>/...) stops getting
+# its own SectionNode and its children are spliced into the parent instead.
+# Real pages never nest 64 wrappers deep; legacy <font>/<div> soup and
+# hostile pages do, and a tree as deep as the DOM just moves the stack
+# problem downstream. Headings, links, lists, tables and images are ALWAYS
+# emitted — only the empty grouping level is dropped, so no finding is lost.
+_MAX_SECTION_DEPTH = 64
+# Tags _build_node may turn into a node (and so locate); <a> counts only with
+# an href, checked separately.
+_NODE_TAGS = frozenset(set(_HEADING_TAGS) | _SECTION_TAGS | {"img", "svg", "ul", "ol", "table", "p"})
 _FORM_CONTROL_TAGS = ("input", "select", "textarea")
 # <input> types that are not labelable text controls.
 _NONLABELABLE_INPUT_TYPES = {"hidden", "submit", "button", "reset", "image"}
@@ -267,12 +281,17 @@ def _inline_style(el: Any) -> Dict[str, Any]:
 
 
 def _merge_ctx(parent: Dict[str, Any], own: Dict[str, Any]) -> Dict[str, Any]:
-    """Layer an element's own inline style over the inherited context."""
+    """Layer an element's own inline style over the inherited context.
+
+    ``dd`` is the element's DOM depth (every parent->child step merges once),
+    which the builder uses to meter locator cost — see :class:`_PathBudget`.
+    """
     return {
         "color": own.get("color", parent.get("color")),
         "bg": own.get("bg", parent.get("bg")),
         "sz": own.get("sz", parent.get("sz")),
         "b": own.get("b", parent.get("b", False)),
+        "dd": parent.get("dd", 0) + 1,
     }
 
 
@@ -304,7 +323,7 @@ def _has_conflicting_child_color(el: Any, resolved_color: str) -> bool:
     for desc in el.iterdescendants():
         if not isinstance(desc.tag, str):
             continue
-        if _tag(desc) in _SKIP_TAGS:
+        if _tag(desc) in _SKIP_TAGS or _tag(desc) == "svg":
             continue
         if not _declares_color(desc):
             continue
@@ -321,6 +340,54 @@ def _emit_ctx(el: Any, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if _has_conflicting_child_color(el, ctx["color"]):
         return None
     return ctx
+
+
+# Every node carries an absolute getpath() locator, which costs O(DOM depth)
+# to build and store. For normal pages that is nothing; for a page that nests
+# thousands of node-producing elements thousands deep (tables in tables,
+# lists in lists — hostile or broken markup, and /scan-url fetches any public
+# page) it is quadratic: 3000 nested tables took 52s. Each element that may
+# become a node is charged its depth beyond _PATH_FREE_DEPTH when the walk
+# STARTS it (rows/tables/sections are only located after their children, so
+# charging at locate time would let the descent overshoot); once the budget
+# is spent the walk stops emitting nodes and the document is flagged
+# ANALYSIS_TRUNCATED, so the report never looks complete when it is not.
+_PATH_FREE_DEPTH = 64
+_PATH_DEPTH_BUDGET = 2_000_000
+
+
+class _PathBudget:
+    """Stands in for the ElementTree in the builder: same ``getpath``, plus a
+    depth meter the builder charges as it descends."""
+
+    def __init__(self, roottree: Any, limit: int = _PATH_DEPTH_BUDGET) -> None:
+        self._tree = roottree
+        self._limit = limit
+        self.spent = 0
+        self.exhausted = False
+
+    def getpath(self, el: Any) -> str:
+        return self._tree.getpath(el)
+
+    def charge(self, dom_depth: Any) -> None:
+        try:
+            excess = int(dom_depth) - _PATH_FREE_DEPTH
+        except (TypeError, ValueError):
+            return
+        if excess > 0:
+            self.spent += excess
+            if self.spent > self._limit:
+                self.exhausted = True
+
+
+def _charge(locator: Any, ctx: Dict[str, Any]) -> None:
+    charge = getattr(locator, "charge", None)
+    if charge is not None:
+        charge(ctx.get("dd", 0))
+
+
+def _budget_spent(locator: Any) -> bool:
+    return bool(getattr(locator, "exhausted", False))
 
 
 class _Ids:
@@ -385,15 +452,13 @@ class HTMLParser:
         if body is not None:
             root_ctx = _merge_ctx(root_ctx, _inline_style(body))
 
-        try:
-            children = _build_children(content_root, ids, roottree, root_ctx)
-        except RecursionError:
-            # Pathologically deep markup (e.g. thousands of nested <div>s) would
-            # otherwise exhaust the stack. Degrade gracefully to a minimal tree
-            # rather than 500 — the analyzers still grade the document-level
-            # signals (title/language) we already collected.
-            logger.warning("html_parser: document too deeply nested; structure truncated")
-            children = []
+        # The walk is ITERATIVE (see _drive): it used to recurse two Python
+        # frames per DOM level, so a page nested ~450 deep hit RecursionError
+        # and the whole analysis collapsed to title/language — a page full of
+        # unlabeled images reported as nearly clean. Depth is now bounded by
+        # memory, not the interpreter stack, and every node is still emitted.
+        locator = _PathBudget(roottree)
+        children = _drive(_build_children(content_root, ids, locator, root_ctx, 0))
 
         # Detect FAKE lists — runs of plain <p> typed as "- item" / "1. item"
         # that should be a real <ul>/<ol>. Mirrors the DOCX/PPTX path: mark each
@@ -412,6 +477,12 @@ class HTMLParser:
         properties: Dict[str, Any] = {"filename": path.name}
         if title:
             properties["title"] = title
+        if locator.exhausted:
+            # Read by AnalysisTruncatedAnalyzer: the findings do not cover the
+            # whole page, and the report must say so.
+            logger.warning("html_parser: nesting too deep to analyze fully; structure truncated")
+            properties["pages_truncated"] = True
+            properties["analysis_truncated_reason"] = "nesting_depth"
         # Locators the writer uses for document-level edits.
         properties["__html_xpath"] = roottree.getpath(doc)
         if title_el is not None:
@@ -466,17 +537,52 @@ class HTMLParser:
         )
 
 
+_EMPTY_HTML = "<html><head></head><body></body></html>"
+
+
+@dataclass(frozen=True)
+class HtmlSource:
+    """How a page's bytes were decoded — so the writer can put them back.
+
+    ``encoding`` is the Python codec the text was decoded with; the writer
+    re-encodes with the SAME codec (plus the same BOM and XML declaration), so
+    every byte of text we did not change comes back exactly as it was, and the
+    page drops back into whatever server/charset setup it came from.
+    """
+
+    encoding: str = "utf-8"
+    bom: bytes = b""
+    xml_decl: str = ""
+    has_doctype: bool = False
+    # True when lxml could not build a document at all and we substituted an
+    # empty one — the writer must never ship that as the customer's page.
+    fallback: bool = False
+
+
 def _parse_document(data: bytes):
-    """Parse bytes into an ``<html>`` root, tolerating malformed/partial input.
+    """Parse bytes into an ``<html>`` root, tolerating malformed/partial input."""
+    return parse_html_source(data)[0]
+
+
+def parse_html_source(data: bytes) -> Tuple[Any, HtmlSource]:
+    """Parse bytes into ``(<html> root, HtmlSource)``.
 
     Uses lxml.html's default parser, which (unlike the XML parser) does not
     expand custom/external entities, does not fetch external DTDs, and runs with
     ``no_network=True`` — so there is no XXE/SSRF surface, and parsing never
     fetches the resources an HTML document references. A fresh parser per call
     keeps this threadpool-safe.
+
+    We DECODE the bytes ourselves (see :func:`decode_html_bytes`) and hand lxml
+    a str. Leaving it to libxml2 was wrong whenever anything non-ASCII came
+    before the ``<meta charset>`` — libxml2 had already committed to latin-1
+    by then, so ``<title>Café — Menú</title><meta charset="utf-8">`` became
+    "CafÃ© â€" Menú" in the analysis AND was re-serialised double-encoded
+    across the whole delivered page (word counts matched, so the content-loss
+    gate could not see it).
     """
-    blob = data if data and data.strip() else b"<html><head></head><body></body></html>"
-    src: Any = _decode_html_bytes(blob)
+    blob = data if data and data.strip() else _EMPTY_HTML.encode("ascii")
+    text, src = decode_html_bytes(blob)
     # huge_tree lifts libxml2's default 256-level depth clamp. Below that
     # limit lxml silently DROPS everything nested deeper — no error — and the
     # writer then serialized the truncated tree as the "fixed" file, deleting
@@ -485,35 +591,244 @@ def _parse_document(data: bytes):
     # the docstring still holds: no entity expansion, no network.
     parser = lxml_html.HTMLParser(huge_tree=True, no_network=True)
     try:
-        return lxml_html.document_fromstring(src, parser=parser)
+        return lxml_html.document_fromstring(text, parser=parser), src
     except (etree.ParserError, etree.XMLSyntaxError, ValueError):
-        return lxml_html.document_fromstring(b"<html><head></head><body></body></html>")
+        doc = lxml_html.document_fromstring(_EMPTY_HTML, parser=lxml_html.HTMLParser(no_network=True))
+        return doc, HtmlSource(
+            encoding=src.encoding, bom=src.bom, xml_decl=src.xml_decl,
+            has_doctype=src.has_doctype, fallback=True,
+        )
 
 
-def _decode_html_bytes(blob: bytes) -> Any:
-    """Return a unicode string when the bytes are charset-less UTF-8, else the
-    original bytes.
+# ---------------------------------------------------------------------------
+# Encoding sniffing — what a browser would decode these bytes as.
+# ---------------------------------------------------------------------------
 
-    lxml decodes a charset-less document as latin-1/cp1252, so a UTF-8 page that
-    omits ``<meta charset>`` (common in fragments and exported HTML) comes back as
-    mojibake — which would then be written into alt text / aria-labels verbatim.
-    When the bytes carry no charset declaration but ARE valid UTF-8, we decode
-    them ourselves so the text is correct; documents that DO declare a charset
-    are left as bytes for lxml to honour, and non-UTF-8 bytes fall through
-    unchanged (legacy behaviour).
+_BOMS: Tuple[Tuple[bytes, str], ...] = (
+    (b"\xef\xbb\xbf", "utf-8"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
+
+# WHATWG Encoding Standard label mappings that DIFFER from Python's codec of
+# the same name. The big one: every latin-1/ascii label means windows-1252 on
+# the web, so 0x80-0x9F are curly quotes, dashes and the euro sign — decoding
+# them as ISO-8859-1 turns "—" into an invisible C1 control character.
+_LABEL_OVERRIDES: Dict[str, str] = {
+    **dict.fromkeys(
+        ("iso-8859-1", "iso8859-1", "iso_8859-1", "iso88591", "latin1", "latin-1", "l1",
+         "cp819", "ibm819", "iso-ir-100", "csisolatin1", "us-ascii", "ascii",
+         "ansi_x3.4-1968", "iso-ir-6", "x-cp1252", "windows-1252", "cp1252", "x-user-defined"),
+        "cp1252",
+    ),
+    **dict.fromkeys(("iso-8859-9", "iso8859-9", "iso_8859-9", "latin5", "l5", "csisolatin5"), "cp1254"),
+    **dict.fromkeys(("iso-8859-11", "iso8859-11", "tis-620", "dos-874", "windows-874"), "cp874"),
+    **dict.fromkeys(("iso-8859-8-i", "csiso88598i", "logical", "visual"), "iso8859-8"),
+    **dict.fromkeys(
+        ("gb2312", "gb_2312", "gb_2312-80", "chinese", "csgb2312", "csiso58gb231280",
+         "iso-ir-58", "x-gbk", "gbk"),
+        "gbk",
+    ),
+    **dict.fromkeys(
+        ("shift_jis", "shift-jis", "sjis", "ms_kanji", "x-sjis", "windows-31j", "csshiftjis", "ms932"),
+        "cp932",
+    ),
+    **dict.fromkeys(
+        ("euc-kr", "ks_c_5601-1987", "ks_c_5601-1989", "ksc5601", "ksc_5601", "korean",
+         "windows-949", "csksc56011987", "iso-ir-149", "cseuckr"),
+        "cp949",
+    ),
+    **dict.fromkeys(("big5", "big5-hkscs", "cn-big5", "x-x-big5", "csbig5"), "big5hkscs"),
+    **dict.fromkeys(("x-mac-roman", "macintosh", "mac", "csmacintosh"), "mac-roman"),
+    **dict.fromkeys(("x-mac-cyrillic", "x-mac-ukrainian"), "mac-cyrillic"),
+    # A <meta> is only readable if the bytes are ASCII-compatible, so WHATWG
+    # treats a meta-declared UTF-16 as UTF-8 (a real UTF-16 file has a BOM).
+    **dict.fromkeys(
+        ("utf-16", "utf-16le", "utf-16be", "unicode", "ucs-2", "csunicode",
+         "iso-10646-ucs-2", "unicodefeff", "unicodefffe"),
+        "utf-8",
+    ),
+}
+
+# Codecs a web page can legitimately be in (the WHATWG encoding list, by
+# Python codec name). Anything else — utf-7, unicode_escape, idna, rot13,
+# base64, a typo — is ignored as a declaration: decoding a page with
+# unicode_escape would rewrite every backslash sequence in it.
+_WEB_CODECS = frozenset({
+    "utf-8", "cp866", "iso8859-2", "iso8859-3", "iso8859-4", "iso8859-5", "iso8859-6",
+    "iso8859-7", "iso8859-8", "iso8859-10", "iso8859-13", "iso8859-14", "iso8859-15",
+    "iso8859-16", "koi8-r", "koi8-u", "mac-roman", "mac-cyrillic", "cp874", "cp1250",
+    "cp1251", "cp1252", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257", "cp1258",
+    "gbk", "gb18030", "big5hkscs", "euc_jp", "iso2022_jp", "cp932", "cp949",
+    "utf-16-le", "utf-16-be",
+})
+
+# The five bytes windows-1252 leaves undefined. Browsers map each to the C1
+# control of the same value (as latin-1 would); Python's strict cp1252 codec
+# raises instead, so decode/encode them with the handlers below — a stray 0x81
+# must round-trip as 0x81, not become U+FFFD or a character reference.
+_CP1252_UNDEFINED = frozenset((0x81, 0x8D, 0x8F, 0x90, 0x9D))
+
+
+def _cp1252_decode_errors(err: UnicodeError) -> Tuple[str, int]:
+    chunk = err.object[err.start:err.end]  # type: ignore[attr-defined]
+    return bytes(chunk).decode("latin-1"), err.end  # type: ignore[attr-defined]
+
+
+def _html_encode_errors(err: UnicodeError) -> Tuple[bytes, int]:
+    """Characters the page's own encoding can't hold -> ``&#N;`` references.
+
+    Only text WE inserted can hit this (everything else was decoded from this
+    very encoding): an em dash in generated alt text written into a latin-1
+    page becomes ``&#8212;``, which every browser renders as "—".
     """
-    if blob[:3] == b"\xef\xbb\xbf":  # UTF-8 BOM
-        try:
-            return blob.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            return blob
-    head = blob[:1024].lower()
-    if b"charset=" in head or b"encoding=" in head:
-        return blob  # an explicit declaration — let lxml use it
+    out = bytearray()
+    for ch in err.object[err.start:err.end]:  # type: ignore[attr-defined]
+        out += f"&#{ord(ch)};".encode("ascii")
+    return bytes(out), err.end  # type: ignore[attr-defined]
+
+
+def _cp1252_encode_errors(err: UnicodeError) -> Tuple[bytes, int]:
+    out = bytearray()
+    for ch in err.object[err.start:err.end]:  # type: ignore[attr-defined]
+        cp = ord(ch)
+        out += bytes((cp,)) if cp in _CP1252_UNDEFINED else f"&#{cp};".encode("ascii")
+    return bytes(out), err.end  # type: ignore[attr-defined]
+
+
+codecs.register_error("a508_cp1252_decode", _cp1252_decode_errors)
+codecs.register_error("a508_html_charref", _html_encode_errors)
+codecs.register_error("a508_cp1252_encode", _cp1252_encode_errors)
+
+
+def resolve_charset_label(label: Any) -> Optional[str]:
+    """A declared charset label -> the Python codec to use, or None if unusable."""
+    if isinstance(label, bytes):
+        label = label.decode("ascii", "ignore")
+    norm = str(label or "").strip().strip("\"'").strip().lower()
+    if not norm:
+        return None
+    if norm in _LABEL_OVERRIDES:
+        return _LABEL_OVERRIDES[norm]
     try:
-        return blob.decode("utf-8")
-    except UnicodeDecodeError:
-        return blob  # not UTF-8; let lxml guess from the raw bytes
+        name = codecs.lookup(norm).name
+    except (LookupError, ValueError):
+        return None
+    return name if name in _WEB_CODECS else None
+
+
+_HEAD_END_RE = re.compile(rb"</head\b|<body\b", re.IGNORECASE)
+_COMMENT_RE = re.compile(rb"<!--.*?-->", re.DOTALL)
+_META_TAG_RE = re.compile(rb"<meta\b([^>]*)>", re.IGNORECASE)
+_ATTR_RE = re.compile(rb"""([^\s=/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?""")
+_CONTENT_CHARSET_RE = re.compile(rb"""charset\s*=\s*["']?\s*([^\s"';]+)""", re.IGNORECASE)
+_XML_DECL_ENC_RE = re.compile(rb"""^\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+_XML_DECL_STR_RE = re.compile(r"""^\s*<\?xml\b[^>]*\?>[ \t]*(?:\r?\n)?""", re.IGNORECASE)
+_DOCTYPE_RE = re.compile(r"^\s*(?:<!--.*?-->\s*)*<!doctype\b", re.IGNORECASE | re.DOTALL)
+# How much of the page to prescan for <meta charset>. WHATWG's prescan reads
+# 1024 bytes, but a browser that meets a <meta charset> later in the <head>
+# re-decodes the page with it — and a long <title>/<style> ahead of the meta
+# is exactly the case that broke. So scan the whole <head>, capped.
+_PRESCAN_LIMIT = 65536
+
+
+def _meta_declared_charset(blob: bytes) -> Optional[str]:
+    head = blob[:_PRESCAN_LIMIT]
+    m = _HEAD_END_RE.search(head)
+    if m:
+        head = head[: m.start()]
+    head = _COMMENT_RE.sub(b" ", head)  # a <meta> inside a comment declares nothing
+    for tag in _META_TAG_RE.finditer(head):
+        attrs: Dict[bytes, bytes] = {}
+        for am in _ATTR_RE.finditer(tag.group(1)):
+            key = am.group(1).lower()
+            if key not in attrs:
+                attrs[key] = am.group(2) or am.group(3) or am.group(4) or b""
+        if b"charset" in attrs:
+            codec = resolve_charset_label(attrs[b"charset"])
+            if codec:
+                return codec
+            continue
+        if attrs.get(b"http-equiv", b"").strip().lower() == b"content-type":
+            cm = _CONTENT_CHARSET_RE.search(attrs.get(b"content", b""))
+            if cm:
+                codec = resolve_charset_label(cm.group(1))
+                if codec:
+                    return codec
+    return None
+
+
+def _decode_as(blob: bytes, codec: str) -> str:
+    if codec == "cp1252":
+        return blob.decode("cp1252", errors="a508_cp1252_decode")
+    # Invalid sequences in a declared encoding render as U+FFFD in a browser;
+    # decode them the same way rather than failing the whole page.
+    return blob.decode(codec, errors="replace")
+
+
+def decode_html_bytes(blob: bytes) -> Tuple[str, HtmlSource]:
+    """Decode page bytes the way a browser does, and record how.
+
+    Order (WHATWG encoding sniffing, minus the HTTP header we don't have):
+      1. a byte-order mark — it beats every declaration;
+      2. ``<meta charset>`` / ``<meta http-equiv="Content-Type">`` anywhere in
+         the ``<head>`` (not just before the first non-ASCII byte);
+      3. an XML declaration's ``encoding=`` (XHTML saved to disk);
+      4. no declaration: UTF-8 if the bytes are valid UTF-8, else
+         windows-1252 — the browser default for a legacy undeclared page.
+
+    Returns the decoded text with any leading XML declaration removed (lxml
+    refuses a str that carries one) and the :class:`HtmlSource` the writer
+    uses to re-encode identically.
+    """
+    bom = b""
+    codec: Optional[str] = None
+    body = blob
+    for mark, name in _BOMS:
+        if blob.startswith(mark):
+            bom, codec, body = mark, name, blob[len(mark):]
+            break
+    if codec is None:
+        codec = _meta_declared_charset(body)
+    if codec is None:
+        xm = _XML_DECL_ENC_RE.match(body)
+        if xm:
+            codec = resolve_charset_label(xm.group(1))
+    if codec is None:
+        try:
+            body.decode("utf-8")
+            codec = "utf-8"
+        except UnicodeDecodeError:
+            codec = "cp1252"
+    try:
+        text = _decode_as(body, codec)
+    except (LookupError, UnicodeError):  # pragma: no cover - codecs are allowlisted
+        codec = "cp1252"
+        text = _decode_as(body, codec)
+    xml_decl = ""
+    xd = _XML_DECL_STR_RE.match(text)
+    if xd:
+        xml_decl = xd.group(0)
+        text = text[xd.end():]
+    has_doctype = bool(_DOCTYPE_RE.match(text[:4096]))
+    return text, HtmlSource(encoding=codec, bom=bom, xml_decl=xml_decl, has_doctype=has_doctype)
+
+
+def encode_html_text(text: str, src: HtmlSource) -> bytes:
+    """Encode serialized page text back into the source's own encoding.
+
+    Inverse of :func:`decode_html_bytes`: same codec, same BOM, same XML
+    declaration. Characters the encoding can't represent (only ever ones we
+    inserted) become numeric character references.
+    """
+    codec = src.encoding or "utf-8"
+    handler = "a508_cp1252_encode" if codec == "cp1252" else "a508_html_charref"
+    try:
+        out = (src.xml_decl + text).encode(codec, errors=handler)
+    except LookupError:  # pragma: no cover - codecs are allowlisted
+        out = (src.xml_decl + text).encode("utf-8")
+        return out
+    return src.bom + out
 
 
 def _meta(el: Any, roottree: Any, ctx: Optional[Dict[str, Any]] = None) -> NodeMetadata:
@@ -525,14 +840,46 @@ def _meta(el: Any, roottree: Any, ctx: Optional[Dict[str, Any]] = None) -> NodeM
     return NodeMetadata(source_format="html", properties=props)
 
 
-def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> List[Any]:
+def _drive(gen: Any) -> Any:
+    """Run a builder generator to completion WITHOUT Python recursion.
+
+    Every builder below is a generator that, instead of calling a sub-builder
+    directly, ``yield``s the sub-builder's generator and receives its result
+    back via ``send``. This loop keeps those generators on an explicit list, so
+    DOM depth costs heap, not interpreter stack — the old mutually-recursive
+    builder raised RecursionError around 450 levels and the parser threw the
+    whole structure away. Evaluation order (and therefore every minted node id)
+    is exactly what the recursive version produced.
+    """
+    stack: List[Any] = [gen]
+    value: Any = None
+    while stack:
+        try:
+            request = stack[-1].send(value)
+        except StopIteration as done:
+            stack.pop()
+            value = done.value
+            continue
+        stack.append(request)
+        value = None
+    return value
+
+
+def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any], depth: int):
+    """Generator (see :func:`_drive`): the nodes for ``el``'s children.
+
+    ``depth`` is how many tree nodes enclose the result; it only decides
+    whether a plain wrapper still gets its own SectionNode.
+    """
     out: List[Any] = []
     for child in el:
+        if _budget_spent(roottree):
+            break  # see _PathBudget: the document is flagged truncated
         tag = _tag(child)
         if tag is None or tag in _SKIP_TAGS:
             continue
         child_ctx = _merge_ctx(ctx, _inline_style(child))
-        node = _build_node(child, tag, ids, roottree, child_ctx)
+        node = yield _build_node(child, tag, ids, roottree, child_ctx, depth)
         if isinstance(node, list):
             # A section-tag wrapper whose subtree was already walked and
             # produced nothing. Extend by that result; never walk it again.
@@ -543,7 +890,7 @@ def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> L
             # Transparent wrapper (span, strong, label, etc.): inline any
             # accessibility-relevant descendants so inline <img>/<a> are seen,
             # carrying the wrapper's style down to them.
-            out.extend(_build_children(child, ids, roottree, child_ctx))
+            out.extend((yield _build_children(child, ids, roottree, child_ctx, depth)))
     return out
 
 
@@ -662,7 +1009,18 @@ def _link_is_nameless(el: Any) -> bool:
     return True
 
 
-def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> Optional[Any]:
+def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any], depth: int):
+    """Generator (see :func:`_drive`): the node for ``el``, a list (an empty
+    wrapper already walked), or None (transparent — caller walks children).
+
+    Ids are minted at the same points the recursive builder minted them
+    (before the children for headings/links/paragraphs/list items/cells,
+    after them for sections/rows/lists/tables).
+    """
+    if tag in _NODE_TAGS or (tag == "a" and el.get("href") is not None):
+        # A spliced deep wrapper is never located, so it costs nothing.
+        if not (tag in _SECTION_TAGS and depth >= _MAX_SECTION_DEPTH):
+            _charge(roottree, ctx)
     if tag in _HEADING_TAGS:
         text = _text(el)
         content = (
@@ -670,17 +1028,26 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
             if text
             else NodeContent(kind=ContentKind.NONE)
         )
+        hid = ids("html-h")
+        meta = _meta(el, roottree, _emit_ctx(el, ctx) if text else None)
+        children = yield _build_children(el, ids, roottree, ctx, depth + 1)
         return HeadingNode(
-            id=ids("html-h"),
+            id=hid,
             level=_HEADING_TAGS[tag],
             content=content,
-            metadata=_meta(el, roottree, _emit_ctx(el, ctx) if text else None),
-            children=_build_children(el, ids, roottree, ctx),
+            metadata=meta,
+            children=children,
             accessibility_flags=[],
         )
 
     if tag == "img":
         return _build_image(el, ids, roottree)
+
+    if tag == "svg":
+        # Never walk an <svg>'s children as page content. It is either an
+        # image (role="img", or it draws visible text) or it is left alone.
+        svg = _build_svg(el, ids, roottree)
+        return svg if svg is not None else []
 
     if tag == "a" and el.get("href") is not None:
         text = _text(el)
@@ -698,20 +1065,22 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
         # Empty-TEXT links are handled separately by LinkTextAnalyzer.
         if content.kind != ContentKind.TEXT and _link_is_nameless(el):
             meta.properties["__link_nameless"] = True
+        lid = ids("html-link")
+        children = yield _build_children(el, ids, roottree, ctx, depth + 1)
         return LinkNode(
-            id=ids("html-link"),
+            id=lid,
             target=(el.get("href") or None),
             content=content,
             metadata=meta,
-            children=_build_children(el, ids, roottree, ctx),
+            children=children,
             accessibility_flags=[],
         )
 
     if tag in {"ul", "ol"}:
-        return _build_list(el, tag, ids, roottree, ctx)
+        return (yield _build_list(el, tag, ids, roottree, ctx, depth))
 
     if tag == "table":
-        return _build_table(el, ids, roottree, ctx)
+        return (yield _build_table(el, ids, roottree, ctx, depth))
 
     if tag == "p":
         text = _text(el)
@@ -728,16 +1097,23 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
             meta.properties["__p_has_inline_children"] = True
         if _in_code_context(el):
             meta.properties["__p_in_code_context"] = True
+        pid = ids("html-p")
+        children = yield _build_children(el, ids, roottree, ctx, depth + 1)
         return ParagraphNode(
-            id=ids("html-p"),
+            id=pid,
             content=content,
             metadata=meta,
-            children=_build_children(el, ids, roottree, ctx),
+            children=children,
             accessibility_flags=[],
         )
 
     if tag in _SECTION_TAGS:
-        children = _build_children(el, ids, roottree, ctx)
+        if depth >= _MAX_SECTION_DEPTH:
+            # Too deep to keep a grouping level per wrapper: splice this
+            # wrapper's nodes into the parent (returned as a list, which the
+            # caller extends by). Content and findings are unchanged.
+            return (yield _build_children(el, ids, roottree, ctx, depth))
+        children = yield _build_children(el, ids, roottree, ctx, depth + 1)
         if not children:
             # Return the (already-built, empty) child list — NOT None. None
             # tells the caller "transparent wrapper, walk my subtree", and the
@@ -761,6 +1137,21 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
     return None
 
 
+def _figcaption_text(el: Any) -> Optional[str]:
+    """The <figcaption> of the <figure> wrapping ``el`` (directly, or one
+    wrapper — a link/span — up), or None."""
+    parent = el.getparent()
+    for holder in (parent, parent.getparent() if parent is not None else None):
+        if holder is None or _tag(holder) != "figure":
+            continue
+        for child in holder:
+            if _tag(child) == "figcaption":
+                cap = " ".join((child.text_content() or "").split())
+                if cap:
+                    return cap[:200]
+    return None
+
+
 def _image_caption(el: Any) -> Optional[str]:
     """Nearby human text that describes an <img>, or None.
 
@@ -770,22 +1161,9 @@ def _image_caption(el: Any) -> Optional[str]:
        sibling (a lead-in like "Figure 2 shows quarterly revenue:").
     Kept short and only ever text a human wrote for the image's neighbourhood
     — never the filename, never boilerplate."""
-    parent = el.getparent()
-    if parent is not None and _tag(parent) == "figure":
-        for child in parent:
-            if _tag(child) == "figcaption":
-                cap = " ".join((child.text_content() or "").split())
-                if cap:
-                    return cap[:200]
-    # figure may wrap the img in a link/span; look one level up too.
-    if parent is not None:
-        gp = parent.getparent()
-        if gp is not None and _tag(gp) == "figure":
-            for child in gp:
-                if _tag(child) == "figcaption":
-                    cap = " ".join((child.text_content() or "").split())
-                    if cap:
-                        return cap[:200]
+    cap = _figcaption_text(el)
+    if cap:
+        return cap
     title = (el.get("title") or "").strip()
     if title:
         return title[:200]
@@ -851,24 +1229,131 @@ def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     )
 
 
-def _build_list(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> ListNode:
+_SVG_MAX_NAME_WORDS = 12
+
+
+def _svg_local(el: Any) -> str:
+    t = el.tag if isinstance(el.tag, str) else ""
+    return t.rsplit("}", 1)[-1].lower()
+
+
+def _svg_visible_text(svg: Any) -> str:
+    """The words an inline SVG DRAWS: its <text>/<tspan>/<textPath> content.
+
+    <title>/<desc> are the accessible name/description, not drawn text, and
+    <style>/<script> are source code — none of them count.
+    """
+    parts: List[str] = []
+    for d in svg.iter():
+        if not isinstance(d.tag, str):
+            continue
+        if _svg_local(d) in ("text", "tspan", "textpath"):
+            # Only the element's own text; its <tspan> children are visited
+            # themselves, and a tail belongs to the parent element.
+            if d.text and d.text.strip():
+                parts.append(d.text)
+            for c in d:
+                if isinstance(c.tag, str) and c.tail and c.tail.strip():
+                    parts.append(c.tail)
+    return " ".join(" ".join(parts).split())
+
+
+def _svg_accessible_name(svg: Any) -> str:
+    """aria-label, a resolving aria-labelledby, or a DIRECT-child <title>."""
+    label = (svg.get("aria-label") or "").strip()
+    if label:
+        return label
+    lb = (svg.get("aria-labelledby") or "").strip()
+    if lb:
+        txt = _labelledby_text(svg, lb)
+        if txt:
+            return txt
+    for child in svg:
+        if isinstance(child.tag, str) and _svg_local(child) == "title":
+            txt = " ".join((child.text_content() or "").split())
+            if txt:
+                return txt
+    return ""
+
+
+def _build_svg(el: Any, ids: _Ids, roottree: Any) -> Optional[ImageNode]:
+    """An inline ``<svg>`` as an image, or None when it is not one we judge.
+
+    Emitted ONLY when the SVG is unambiguously content:
+      * ``role="img"`` — the author declared it an image; or
+      * it draws visible words (<text>) — a badge, a labelled diagram.
+    A plain icon SVG (no role, no text) could be decorative or not, so we make
+    no claim about it. SVGs hidden from assistive tech (aria-hidden,
+    role=presentation/none, ``hidden``, inline display:none) are skipped, and
+    so are SVGs inside a link or button — the control's name rules own those.
+
+    An unnamed content SVG raises MISSING_ALT_TEXT like an ``<img>`` with no
+    alt; the writer's fix is ``role="img"`` + ``aria-label``. The drawn text
+    is offered as the grounded ``caption`` (it is literally what the image
+    says) when it is short enough to read as a name — a chart's axis labels
+    are not a description, so long text gets no caption.
+    """
+    role = (el.get("role") or "").strip().lower()
+    if role in {"presentation", "none"}:
+        return None
+    if el.get("hidden") is not None or _style_hides(el):
+        return None
+    for anc in (el, *el.iterancestors()):
+        if not isinstance(anc.tag, str):
+            continue
+        if (anc.get("aria-hidden") or "").strip().lower() == "true":
+            return None
+        if anc is not el and _tag(anc) in ("a", "button"):
+            return None
+    drawn = _svg_visible_text(el)
+    if role != "img" and not drawn:
+        return None
+    name = _svg_accessible_name(el)
+    props: Dict[str, Any] = {"__xpath": roottree.getpath(el), "svg_inline": True}
+    if drawn:
+        props["svg_text"] = drawn[:200]
+        if len(drawn.split()) <= _SVG_MAX_NAME_WORDS and any(c.isalpha() for c in drawn):
+            props["caption"] = drawn[:200]
+    if "caption" not in props:
+        cap = _figcaption_text(el)
+        if cap:
+            props["caption"] = cap
+    return ImageNode(
+        id=ids("html-img"),
+        content=NodeContent(kind=ContentKind.NONE),
+        metadata=NodeMetadata(source_format="html", properties=props),
+        children=[],
+        accessibility_flags=[],
+        is_decorative=False,
+        alt_text=name or None,
+    )
+
+
+def _build_list(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any], depth: int):
+    """Generator (see :func:`_drive`)."""
     items: List[Any] = []
     for li in el:
+        if _budget_spent(roottree):
+            break
         if _tag(li) != "li":
             continue
         li_ctx = _merge_ctx(ctx, _inline_style(li))
+        _charge(roottree, li_ctx)
         text = _text(li)
         content = (
             NodeContent(kind=ContentKind.TEXT, text=text)
             if text
             else NodeContent(kind=ContentKind.NONE)
         )
+        li_id = ids("html-li")
+        li_meta = _meta(li, roottree, _emit_ctx(li, li_ctx) if text else None)
+        li_children = yield _build_children(li, ids, roottree, li_ctx, depth + 2)
         items.append(
             ListItemNode(
-                id=ids("html-li"),
+                id=li_id,
                 content=content,
-                metadata=_meta(li, roottree, _emit_ctx(li, li_ctx) if text else None),
-                children=_build_children(li, ids, roottree, li_ctx),
+                metadata=li_meta,
+                children=li_children,
                 accessibility_flags=[],
             )
         )
@@ -897,16 +1382,23 @@ def _table_rows(table_el: Any) -> List[Any]:
     return rows
 
 
-def _build_table(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> TableNode:
+def _build_table(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any], depth: int):
+    """Generator (see :func:`_drive`)."""
     rows_nodes: List[Any] = []
     for tr in _table_rows(el):
+        if _budget_spent(roottree):
+            break
         tr_ctx = _merge_ctx(ctx, _inline_style(tr))
+        _charge(roottree, tr_ctx)
         cells: List[Any] = []
         for cell_el in tr:
+            if _budget_spent(roottree):
+                break
             ct = _tag(cell_el)
             if ct not in {"td", "th"}:
                 continue
             cell_ctx = _merge_ctx(tr_ctx, _inline_style(cell_el))
+            _charge(roottree, cell_ctx)
             is_header = ct == "th"
             text = _text(cell_el)
             if is_header:
@@ -919,14 +1411,17 @@ def _build_table(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> Tabl
                 if text
                 else NodeContent(kind=ContentKind.NONE)
             )
+            cell_id = ids("html-cell")
+            cell_meta = _meta(cell_el, roottree, _emit_ctx(cell_el, cell_ctx) if text else None)
+            cell_children = yield _build_children(cell_el, ids, roottree, cell_ctx, depth + 3)
             cells.append(
                 TableCellNode(
-                    id=ids("html-cell"),
+                    id=cell_id,
                     cell_type=TableCellType.HEADER if is_header else TableCellType.DATA,
                     header_scope=scope,
                     content=content,
-                    metadata=_meta(cell_el, roottree, _emit_ctx(cell_el, cell_ctx) if text else None),
-                    children=_build_children(cell_el, ids, roottree, cell_ctx),
+                    metadata=cell_meta,
+                    children=cell_children,
                     accessibility_flags=[],
                 )
             )
@@ -1592,12 +2087,16 @@ def _mark_html_fake_lists(nodes: List[Any]) -> None:
     :func:`_group_fake_list_runs` to record ``fake_list_run_ids`` on the first
     node of every >=2-item run.
     """
-    for node in nodes:
-        _set_fake_list_signature(node)
-    _group_fake_list_runs(nodes)
-    for node in nodes:
-        if getattr(node, "children", None):
-            _mark_html_fake_lists(node.children)
+    # Iterative (explicit stack of sibling lists) — the tree can be deep.
+    pending: List[List[Any]] = [nodes]
+    while pending:
+        siblings = pending.pop()
+        for node in siblings:
+            _set_fake_list_signature(node)
+        _group_fake_list_runs(siblings)
+        for node in siblings:
+            if getattr(node, "children", None):
+                pending.append(node.children)
 
 
 __all__ = ["HTMLParser"]
