@@ -71,6 +71,12 @@ def report_pdf() -> bytes:
         c += K.bt("F1", 13, 72, 690, K.lit("2.1 Rate Structure" if p == 0 else "3.1 Residential"))
         for i in range(8):
             c += K.bt("F1", 11, 72, 660 - 14 * i, K.lit(BODY))
+        if p == 0:
+            # A SIBLING of 2.1 at the same 13pt size (the clamp once filed it
+            # as a child of 2.1: H4 then H5).
+            c += K.bt("F1", 13, 72, 530, K.lit("2.2 Capital Projects"))
+            for i in range(3):
+                c += K.bt("F1", 11, 72, 500 - 14 * i, K.lit(BODY))
         K.add_page(w, c, {"F1": f})
     # bare TOC (no leaders): entry | page number
     c = K.bt("F1", 16, 72, 700, K.lit("Table of Contents"))
@@ -173,6 +179,12 @@ def main() -> int:
     levels = [h["level"] for h in info["headings"]]
     check("headings found", len(levels) >= 5, str(info["headings"]))
     check("no heading level skips in the output", all(b <= a + 1 for a, b in zip(levels, levels[1:])), str(levels))
+    by_text = {h["text"].strip(): h["level"] for h in info["headings"]}
+    check("equal-size sibling sections get the SAME level (2.1 and 2.2)",
+          by_text.get("2.1 Rate Structure") is not None
+          and by_text.get("2.1 Rate Structure") == by_text.get("2.2 Capital Projects"), str(by_text))
+    check("the subtitle under the title is H2, not H4", by_text.get("Fiscal Year 2026") == 2, str(by_text))
+    check("the first heading is H1", levels[:1] == [1], str(levels))
     check("the tagger reports what it normalised", int(ua.get("headingLevelsNormalized") or 0) >= 1, str(ua))
     res_out = PDFParser().parse(str(out))
     rules = [v.rule_id for v in RemediationEngine().detect_violations(res_out.tree)]

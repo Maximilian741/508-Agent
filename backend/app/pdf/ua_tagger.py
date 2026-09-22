@@ -2335,29 +2335,44 @@ _PDFUA_PART_RE = re.compile(rb"pdfuaid:part\s*(?:>\s*|=\s*[\"'])\s*(\d)")
 
 
 def _clamp_heading_specs(specs: List[Dict[str, Any]], state: Dict[str, Any]) -> int:
-    """Keep heading levels contiguous in reading order (no H1 -> H4 jumps).
+    """Turn size-ranked heading levels into a contiguous OUTLINE.
 
     Levels come from a font-size ranking, which knows nothing about order: a
     14pt subtitle under a 26pt title ranked H4 because 18pt and 16pt headings
     existed elsewhere, and re-auditing our own output raised
-    HEADING_LEVEL_JUMP — a new defect we had created. Each heading is clamped
-    to at most one level below the previous heading (Matterhorn 14-003).
-    Relative order of sizes is kept; content is never touched. Returns how
-    many headings changed level.
+    HEADING_LEVEL_JUMP — a new defect we had created (Matterhorn 14-003).
+
+    Clamping each heading to "previous + 1" fixed the jump but broke
+    siblings: under a 16pt H3, the 13pt "2.1" was clamped to H4 and the
+    equally-sized "2.2" right after it was then allowed H5 — a sibling
+    section filed as a child of the one before it. So the level is taken from
+    the outline instead: a stack of the size ranks of the open headings (a
+    larger font is a smaller rank). A heading closes every open heading of the
+    same or a smaller size, and its level is the number still open + 1. So
+
+    * levels never jump (each is at most one deeper than the open parent);
+    * equal sizes in the same context are siblings (the same level);
+    * a heading is only ever PROMOTED relative to its size rank, never
+      demoted, and the first heading of the document is H1.
+
+    ``state["stack"]`` carries the open headings across pages. Content is
+    never touched. Returns how many headings changed level.
     """
     changed = 0
+    stack: List[int] = state.setdefault("stack", [])
     for spec in specs:
         s = str(spec.get("s") or "")
         m = re.fullmatch(r"/H([1-6])", s)
         if not m:
             continue
-        lvl = int(m.group(1))
-        prev = state.get("prev")
-        if prev is not None and lvl > prev + 1:
-            lvl = prev + 1
+        rank = int(m.group(1))
+        while stack and stack[-1] >= rank:
+            stack.pop()
+        lvl = min(6, len(stack) + 1)
+        stack.append(rank)
+        if lvl != rank:
             spec["s"] = f"/H{lvl}"
             changed += 1
-        state["prev"] = lvl
     return changed
 
 
