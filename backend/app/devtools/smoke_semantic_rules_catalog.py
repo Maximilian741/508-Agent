@@ -181,6 +181,18 @@ CAPTIONS = [
     ("Click to enlarge", "title", None),
     ("Figure 3", "figcaption", None),
     ("", "figcaption", None),
+    # A label with nothing after it is still only a label.
+    ("Figure 1.", "figcaption", None),
+    ("Fig. 3", "caption_style", None),
+    ("Chart 2:", "figcaption", None),
+    ("Figure IV", "figcaption", None),
+    # Page furniture set in the Caption style is not a description.
+    ("Continued on next page", "caption_style", None),
+    ("(continued)", "caption_style", None),
+    ("See figure 3 below", "caption_style", None),
+    # A picture of a table captioned as a table: the label is stripped too.
+    ("Table 1: Revenue by region", "caption_style", "Revenue by region"),
+    ("Figura 2: Ingresos por región", "figcaption", "Ingresos por región"),
 ]
 
 TITLES_FROM_FILENAME = [

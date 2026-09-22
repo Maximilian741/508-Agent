@@ -158,6 +158,13 @@ UNAUTHORED_CAPTION_SOURCES = frozenset({"preceding_text", "own_paragraph", "near
 _FIGURE_WORDS = (
     r"figure|fig\.?|chart|graph|photo(?:graph)?|image|picture|illustration|diagram"
     r"|map|exhibit|plate|infographic|graphic|abbildung|abb\.|figura|imagen|gráfico|grafico"
+    r"|table|tabla|tableau|tabelle|tabella"
+)
+# Captions that are page furniture, not descriptions.
+_NOT_A_DESCRIPTION_RE = re.compile(
+    r"^\(?(?:continued|cont(?:'d|\.)?|continued (?:on|from) (?:next|previous) page|see (?:below|above)"
+    r"|see (?:figure|fig\.?|chart|table) \S+(?: (?:below|above))?)\)?\.?$",
+    re.IGNORECASE,
 )
 # "Figure 2: …", "Fig. 3 – …", "Chart 1) …", "Figure 2-1. …", "Figure IV: …"
 _FIGURE_LABEL_SEP_RE = re.compile(
@@ -170,12 +177,19 @@ _FIGURE_LABEL_BARE_RE = re.compile(
     rf"^\s*(?:{_FIGURE_WORDS})\s*(?:\d+(?:[.\-]\d+)*[a-z]?)\s+(?=(?-i:[A-ZÀ-Þ]))",
     re.IGNORECASE,
 )
+# Nothing but the label: "Figure 1.", "Fig. 3", "Chart 2:", "Figure IV".
+_FIGURE_LABEL_ONLY_RE = re.compile(
+    rf"^\s*(?:{_FIGURE_WORDS})\s*(?:no\.?\s*)?(?:\d+(?:[.\-]\d+)*[a-z]?|[ivxlc]+)\s*[.:)\-–—]?\s*$",
+    re.IGNORECASE,
+)
 _ALT_MAX = 200
 
 
 def split_figure_label(text: str) -> Tuple[bool, str]:
     """``(had_label, description)`` — strip a leading "Figure N:" label."""
     t = _collapse(text)
+    if _FIGURE_LABEL_ONLY_RE.match(t):
+        return True, ""
     m = _FIGURE_LABEL_SEP_RE.match(t) or _FIGURE_LABEL_BARE_RE.match(t)
     if not m:
         return False, t
@@ -216,6 +230,8 @@ def _description_problem(desc: str) -> Optional[str]:
         return "the text near it is a website menu, not a description"
     if _UI_PHRASE_RE.match(d):
         return "the text near it is an instruction ('click to enlarge'), not a description"
+    if _NOT_A_DESCRIPTION_RE.match(d):
+        return "the text near it is a page note ('continued', 'see below'), not a description"
     if len(_real_words(d)) < 2 and len(d) < 6:
         return "the caption is too short to describe anything"
     if len(_REAL_WORD_RE.findall(d)) == 0:
