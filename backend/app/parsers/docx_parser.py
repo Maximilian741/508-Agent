@@ -140,7 +140,7 @@ class DOCXParser:
             if not _rows:
                 tables_missing_headers.append(table_index)
                 continue
-            header_cells = _rows[0].cells
+            header_cells = row_cells(_rows[0])
             header_text = [(cell.text or "").strip() for cell in header_cells]
             if not any(header_text):
                 tables_missing_headers.append(table_index)
@@ -1429,6 +1429,27 @@ def iter_table_rows(table):
         yield _Row(tr, table)
 
 
+def row_cells(row) -> List[Any]:
+    """``row.cells``, or — when python-docx's grid arithmetic cannot place
+    the row — one cell per ``<w:tc>`` in the row (SDT-descended).
+
+    ``row.cells`` resolves merges against the grid and RAISES on shapes Word
+    itself opens without complaint: a vertical-merge continuation in the
+    first row ("no tr above topmost tr"), or one sitting under a cell that
+    spans a different number of grid columns ("no tc element at
+    grid_offset=1"). Converters and years of editing produce both, and one
+    such table made the whole document fail to parse — "Failed to parse
+    document" for a file Word opens. The fallback reads every cell once, in
+    order; the parser and the writer both call this, so ids agree.
+    """
+    try:
+        return list(row.cells)
+    except Exception:
+        from docx.table import _Cell
+
+        return [_Cell(tc, row) for tc in _iter_sdt_aware(row._tr, qn("w:tc"))]  # noqa: SLF001
+
+
 def paragraph_style_name(paragraph, cache: Dict[Any, str]) -> str:
     """``paragraph.style.name`` without python-docx's per-paragraph cost.
 
@@ -1911,7 +1932,7 @@ def _docx_row_is_header(row) -> bool:
         th = trPr.find(qn("w:tblHeader"))
         if th is not None and th.get(qn("w:val")) not in ("0", "false", "off"):
             return True
-    populated = [c for c in row.cells if (c.text or "").strip()]
+    populated = [c for c in row_cells(row) if (c.text or "").strip()]
     return bool(populated) and all(_cell_text_is_bold(c) for c in populated)
 
 
@@ -2083,7 +2104,8 @@ def _table_to_node(
     # fire. Small/ambiguous tables keep the legacy header assumption to avoid
     # false positives on layout tables.
     all_rows = list(iter_table_rows(table))
-    n_cols = max((len(r.cells) for r in all_rows), default=0)
+    cells_by_row = [row_cells(r) for r in all_rows]
+    n_cols = max((len(c) for c in cells_by_row), default=0)
     looks_like_data_table = len(all_rows) >= 3 and n_cols >= 2
     first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
     treat_row0_as_header = first_is_header or not looks_like_data_table
@@ -2099,7 +2121,7 @@ def _table_to_node(
     first_row_text: List[str] = []
     for row_index, row in enumerate(all_rows):
         cells: List[TableCellNode] = []
-        for cell in row.cells:
+        for cell in cells_by_row[row_index]:
             text = (cell.text or "").strip()
             if row_index == 0:
                 first_row_text.append(" ".join(text.split()))

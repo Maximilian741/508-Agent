@@ -27,6 +27,8 @@ tracked changes, nested tables, text boxes, 500 pages) showed going wrong:
     it used to abort the whole write (422, no file for the customer)
   * a synthesized header row goes on TOP of a table whose rows all live in a
     repeating-section content control (it was appended after the last row)
+  * irregular vertical merges Word opens (a continuation in the first row, or
+    under a cell with a different grid span) no longer fail the whole parse
 
 Usage:
     python -m app.devtools.smoke_docx_robustness
@@ -73,6 +75,7 @@ from app.models.accessibility import (  # noqa: E402
     iter_reading_order,
 )
 from app.parsers import parse_to_tree  # noqa: E402
+from app.parsers.docx_parser import DOCXParser  # noqa: E402
 from app.services.remediation_planner import RemediationPolicy, plan_remediations  # noqa: E402
 from app.services.remediators.registry import execute_plans  # noqa: E402
 from app.writers.docx_writer import write_remediated_docx  # noqa: E402
@@ -530,6 +533,61 @@ def main() -> int:
     check("sdt rows: re-parse reads Region | Sales as the header row, data rows intact",
           [c.content.text for c in t2.children[0].children] == ["Region", "Sales"] and len(t2.children) == 4,
           str([[c.content.text for c in r.children] for r in t2.children]))
+
+    # ===== 10. Irregular merges Word opens do not fail the whole document =====
+    # python-docx's row.cells raises on a vertical-merge continuation in the
+    # first row, and on one under a cell spanning a different number of grid
+    # columns. One such table made /analyze answer "Failed to parse document"
+    # for a file Word opens without complaint.
+    def _tc(text, extra=""):
+        return f"<w:tc><w:tcPr>{extra}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"
+
+    def _grid(n):
+        return "<w:tblGrid>" + '<w:gridCol w:w="1500"/>' * n + "</w:tblGrid>"
+
+    shapes = {
+        "vmerge_first_row": _grid(2)
+        + "<w:tr>" + _tc("Region", "<w:vMerge/>") + _tc("Sales") + "</w:tr>"
+        + "<w:tr>" + _tc("North") + _tc("120") + "</w:tr>"
+        + "<w:tr>" + _tc("South") + _tc("95") + "</w:tr>",
+        "vmerge_under_span": _grid(3)
+        + "<w:tr>" + _tc("Program", '<w:gridSpan w:val="2"/>') + _tc("Budget") + "</w:tr>"
+        + "<w:tr>" + _tc("Parks") + _tc("Trails", "<w:vMerge/>") + _tc("40") + "</w:tr>"
+        + "<w:tr>" + _tc("Pools") + _tc("Swim") + _tc("25") + "</w:tr>",
+    }
+    for name, inner in shapes.items():
+        d = Document()
+        d.core_properties.title = "Irregular table"
+        d.add_heading("Irregular table", 1)
+        d.element.body.insert(len(d.element.body) - 1,
+                              parse_xml(f'<w:tbl {nsdecls("w")}><w:tblPr/>{inner}</w:tbl>'))
+        src = tmp / f"{name}.docx"
+        d.save(str(src))
+        try:
+            res = parse_to_tree(str(src))
+            legacy = DOCXParser().parse(str(src))
+            err = None
+        except Exception as exc:  # the regression
+            res, legacy, err = None, None, repr(exc)
+        check(f"irregular merge ({name}): the document parses (tree + legacy /documents parse)",
+              err is None and legacy is not None and legacy.get("tables") == 1, str(err))
+        if res is None:
+            continue
+        run_analyzers(res.tree)
+        tbl_nodes = _nodes(res.tree, TableNode)
+        check(f"irregular merge ({name}): the table is a node with its 3 rows",
+              len(tbl_nodes) == 1 and len(tbl_nodes[0].children) == 3, str([len(t.children) for t in tbl_nodes]))
+        for c in tbl_nodes[0].children[0].children:
+            c.cell_type = TableCellType.HEADER            # ADD_TABLE_HEADERS' effect
+        out = tmp / f"{name}_fixed.docx"
+        wr = write_remediated_docx(src, res.tree, out)
+        with zipfile.ZipFile(out) as z:
+            troot = etree.fromstring(z.read("word/document.xml"))
+        rows_x = troot.findall(f".//{W}tbl/{W}tr")
+        check(f"irregular merge ({name}): tblHeader lands on the first row only; file re-opens",
+              [r.find(f"{W}trPr/{W}tblHeader") is not None for r in rows_x] == [True, False, False]
+              and any(a.get("kind") == "table_header_row" for a in wr["applied"])
+              and Document(str(out)) is not None, str(wr))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
