@@ -10,12 +10,15 @@ anything that depends on placement was either guessed or skipped:
 * a "Figure 1. ..." caption under a chart was invisible to the alt-text step;
 * no finding could say where on the page it is.
 
-This module walks a page's content stream with pypdf's own layout-mode text
-state machine (the same font widths and ToUnicode decoding ``extract_text``
-uses), and returns :class:`Word` objects in PDF user space: origin
-bottom-left, y up, points. Rotated text is skipped (its boxes would be
-wrong). Anything unexpected returns ``None`` — callers must treat "no
-geometry" as "no claim".
+This module walks a page's content stream with pypdf's layout-mode text
+state manager and fonts (the same widths and ToUnicode decoding
+``extract_text`` uses) but its own pen: every shown string and TJ adjustment
+moves it, as in a viewer. Words are built from glyph positions across show
+ops (a kerned TJ array or one Tj per glyph is still one word), and returned
+as :class:`Word` objects in PDF user space: origin bottom-left, y up,
+points. Rotated text is skipped (its boxes would be wrong). Anything
+unexpected returns ``None`` — callers must treat "no geometry" as "no
+claim".
 
 pypdf is pinned (requirements.txt); the private layout-mode helpers used here
 exist in 4.x. Every entry point is wrapped so an API change degrades to
