@@ -102,6 +102,22 @@ def main() -> int:
           _visible_word_count(nul) == _visible_word_count(out) and _visible_word_count(nul) >= 8,
           f"{_visible_word_count(nul)} vs {_visible_word_count(out)}")
 
+    # A NUL INSIDE a tag would change the tree if kept as a stand-in ("<im?g"
+    # is not an <img>): the writer then uses the tree the analysis saw.
+    in_tag = (b"<html><head><title>T</title></head><body><p>Intro words here.</p>"
+              b"<im\x00g src='x.png'><p>After the image.</p></body></html>")
+    tree, out, again, rep = _roundtrip("nul_in_tag", in_tag)
+    check("NUL inside a tag: the analysis's image is the one that gets the alt",
+          _alts(again) == [ALT] and b"<img " in out, repr(out))
+    check("NUL inside a tag: the markup is not written back escaped", b"&lt;" not in out, repr(out))
+    check("NUL inside a tag: every word survives", b"Intro words here." in out and b"After the image." in out)
+    # UTF-32 (no BOM) is NUL-riddled markup; it must never come back as
+    # escaped tag soup.
+    u32 = "<html><head><title>Wide</title></head><body><p>Thirty two bits</p><img src='w.png'></body></html>".encode("utf-32-le")
+    tree, out, again, rep = _roundtrip("utf32", u32)
+    check("UTF-32 (no BOM): read as the page it is, fixed, markup intact",
+          _texts(tree) == ["Thirty two bits"] and _alts(again) == [ALT] and b"&lt;" not in out, repr(out[:120]))
+
     # ---- 2. UTF-16 without a BOM --------------------------------------------
     wide_src = "<html><head><title>Résumé</title></head><body><p>Hello wide world</p><img src='x.png'></body></html>"
     tree, out, again, rep = _roundtrip("utf16", wide_src.encode("utf-16-le"))

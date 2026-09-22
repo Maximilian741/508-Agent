@@ -97,6 +97,17 @@ def write_remediated_html(
         # as that same byte (see parse_html_source) — never dropped, never
         # turned into U+FFFD.
         doc, source_info = parse_html_source(data, preserve_bytes=True)
+        if source_info.escaped:
+            # The stand-ins are ordinary characters to lxml. In text they are
+            # harmless, but one INSIDE markup ("<im\0g>", a UTF-32 file) changes
+            # the tree — "<" followed by a stand-in is text, not a tag — and
+            # the analysis's locators (built without them) would then point
+            # at the wrong elements, or the page's markup would be written
+            # back escaped. Keep exact bytes only when the two parses agree
+            # element for element; otherwise write the tree the analysis saw.
+            plain_doc, plain_info = parse_html_source(data)
+            if _tag_sequence(plain_doc) != _tag_sequence(doc):
+                doc, source_info = plain_doc, plain_info
     except Exception as exc:
         logger.exception("html_writer parse failed: %s", exc)
         # Signal a hard failure so the pipeline cleans up and does NOT charge.
@@ -295,6 +306,11 @@ def write_remediated_html(
 
 
 _PATH_STEP_RE = re.compile(r"^([^\[\]/]+)(?:\[(\d+)\])?$")
+
+
+def _tag_sequence(doc: Any) -> List[str]:
+    """Every element's tag in document order — the tree's shape."""
+    return [el.tag for el in list(doc.iter()) if isinstance(el.tag, str)]
 
 
 class _PathIndex:
