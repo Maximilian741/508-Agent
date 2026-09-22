@@ -151,7 +151,12 @@ _GENERIC_TITLE_RE = re.compile(
     r"^\s*(?:(?:table\s+of\s+)?contents|index|introduction|intro|abstract|overview|summary|"
     r"executive\s+summary|preface|foreword|acknowledg(?:e)?ments?|appendix(?:\s+\w{1,3})?|"
     r"(?:chapter|section|part|page)\s+[\divxlc]{1,4}|draft|confidential|sample|copy|void|"
-    r"for\s+official\s+use\s+only|internal\s+use\s+only|untitled(?:\s+document)?)\s*[.:]?\s*$",
+    r"for\s+official\s+use\s+only|internal\s+use\s+only|untitled(?:\s+document)?)\s*[.:]?\s*$"
+    # A numbered division of the document ("Chapter 1: Programme Area 1",
+    # "Section 2 - Rates", "1. Introduction", "2.1 Rate Structure") names
+    # the first section on the page, not the document.
+    r"|^\s*(?:chapter|section|part|appendix|annex|article|unit|lesson|module)\s+[\divxlc]{1,4}\b"
+    r"|^\s*(?:\d{1,2}(?:\.\d{1,2})*[.)]|\d{1,2}\.\d{1,2}(?:\.\d{1,2})*)\s+",
     re.IGNORECASE,
 )
 

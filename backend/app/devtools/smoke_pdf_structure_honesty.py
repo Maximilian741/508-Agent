@@ -188,11 +188,11 @@ def watermark_pdf() -> bytes:
     return K.to_bytes(w)
 
 
-def contents_first_pdf() -> bytes:
+def contents_first_pdf(big: str = "Contents") -> bytes:
     """Page 1 is a contents page: its largest line is "Contents"."""
     w = PdfWriter()
     f = K.helvetica(w)
-    c = K.bt("F1", 18, 72, 740, K.lit("Contents"))
+    c = K.bt("F1", 18, 72, 740, K.lit(big))
     for i, t in enumerate(["1. Introduction", "2. Salt Supply", "3. Plow Routes"]):
         c += K.bt("F1", 11, 72, 700 - 20 * i, K.lit(t))
     K.add_page(w, c, {"F1": f})
@@ -321,6 +321,11 @@ def main() -> int:
     check("a contents page's 'Contents' is never offered as the document title",
           not rc.tree.root.metadata.properties.get("title_candidate"),
           repr(rc.tree.root.metadata.properties.get("title_candidate")))
+    for big in ("Chapter 1: Programme Area 1", "2.1 Rate Structure"):
+        rb = PDFParser().parse(str(_write(contents_first_pdf(big), "first_section.pdf")))
+        check(f"the first SECTION's name ({big!r}) is not offered as the document title",
+              not rb.tree.root.metadata.properties.get("title_candidate"),
+              repr(rb.tree.root.metadata.properties.get("title_candidate")))
 
     _rg, wg, out_g = remediate(grid_pdf(), "bold_grid.pdf")
     hg = read_struct_info(PdfReader(str(out_g)))["headings"]
