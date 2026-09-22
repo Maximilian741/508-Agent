@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -69,6 +70,21 @@ class AutoReviewTests(unittest.TestCase):
         writer.write(buf)
         return buf.getvalue()
 
+    def _seed_pdf_doc(self, doc_id: str, filename: str) -> None:
+        from app.persistence.db import get_repo
+
+        pdf_path = Path(self.tmp_dir.name) / filename
+        pdf_path.write_bytes(self._min_pdf_bytes())
+        get_repo().save_document(
+            {
+                "id": doc_id,
+                "ownerId": self.user_id,
+                "filename": filename,
+                "docType": "pdf",
+                "path": str(pdf_path),
+            }
+        )
+
     def test_validator_rejects_generic_and_too_long(self) -> None:
         ok, status = validate_alt_text("image of a chart")
         self.assertFalse(ok)
@@ -82,22 +98,15 @@ class AutoReviewTests(unittest.TestCase):
         self.assertTrue(ok3)
         self.assertEqual(status3, "pass")
 
-    def test_ai_review_propose_then_apply(self) -> None:
+    def test_ai_review_is_retired_and_never_calls_the_model(self) -> None:
+        """POST /documents/{id}/ai-review sent document context straight to
+        OpenAI, outside SemanticInferenceClient's per-job cost cap, with no
+        credit check or rate limit. It is retired: both modes answer 410, the
+        model is never called, and the queued item is left untouched."""
         from app.persistence.db import get_connection, get_repo, _utc_now
 
-        repo = get_repo()
         doc_id = "doc-ai-review"
-        pdf_path = Path(self.tmp_dir.name) / "sample.pdf"
-        pdf_path.write_bytes(self._min_pdf_bytes())
-        repo.save_document(
-            {
-                "id": doc_id,
-                "ownerId": self.user_id,
-                "filename": "sample.pdf",
-                "docType": "pdf",
-                "path": str(pdf_path),
-            }
-        )
+        self._seed_pdf_doc(doc_id, "sample.pdf")
         seed_item = {
             "id": "mr-ai-1",
             "issueId": "missing_alt_text",
@@ -112,64 +121,34 @@ class AutoReviewTests(unittest.TestCase):
             INSERT INTO manual_review(id, doc_id, item_json, created_at, resolved)
             VALUES(?,?,?,?,0)
             """,
-            (seed_item["id"], doc_id, __import__("json").dumps(seed_item), _utc_now()),
+            (seed_item["id"], doc_id, json.dumps(seed_item), _utc_now()),
         )
         conn.commit()
 
         with patch(
-            "app.api.documents.propose_alt_text",
-            return_value={
-                "aiDecision": {
-                    "action": "approve",
-                    "approvedText": "Chart of annual sales by quarter.",
-                    "confidence": 0.95,
-                    "rationale": "Caption and nearby text indicate chart content.",
-                    "model": "test-model",
-                },
-                "aiConfidence": 0.95,
-                "aiStatus": "proposed",
-                "validatorStatus": "pass",
-                "aiModel": "test-model",
-                "aiUpdatedAt": "2026-02-26T00:00:00Z",
-            },
-        ):
-            propose_resp = self.client.post(f"/documents/{doc_id}/ai-review", json={"mode": "propose", "maxItems": 5})
-        self.assertEqual(propose_resp.status_code, 200)
-        propose_body = propose_resp.json()
-        self.assertEqual(propose_body["processed"], 1)
+            "app.ai.auto_review._openai_propose",
+            side_effect=AssertionError("the model must not be called"),
+        ) as propose:
+            for mode in ("propose", "apply"):
+                resp = self.client.post(f"/documents/{doc_id}/ai-review", json={"mode": mode, "maxItems": 5})
+                self.assertEqual(resp.status_code, 410, resp.text)
+                self.assertIn("/pipeline/remediate", resp.json().get("detail", ""))
+        propose.assert_not_called()
 
-        apply_resp = self.client.post(
-            f"/documents/{doc_id}/ai-review",
-            json={"mode": "apply", "maxItems": 5, "minConfidence": 0.8},
-        )
-        self.assertEqual(apply_resp.status_code, 200)
-        apply_body = apply_resp.json()
-        self.assertEqual(apply_body["approved"], 1)
-
-        item = repo.get_manual_review_item("mr-ai-1")
+        item = get_repo().get_manual_review_item("mr-ai-1")
         assert item is not None
-        self.assertEqual(item.get("status"), "approved")
-        self.assertEqual(item.get("approvedText"), "Chart of annual sales by quarter.")
-        self.assertEqual(item.get("aiStatus"), "applied")
+        self.assertEqual(item.get("status"), "pending")
+        self.assertFalse(item.get("approvedText"))
 
-    def test_ai_review_apply_escalates_invalid_candidate(self) -> None:
+    def test_ai_review_apply_never_approves_a_stored_proposal(self) -> None:
+        """Even a stored high-confidence proposal is not auto-approved: the
+        route that applied it is gone, so the item stays pending for a human."""
         from app.persistence.db import get_connection, get_repo, _utc_now
 
-        repo = get_repo()
-        doc_id = "doc-ai-review-invalid"
-        pdf_path = Path(self.tmp_dir.name) / "sample-invalid.pdf"
-        pdf_path.write_bytes(self._min_pdf_bytes())
-        repo.save_document(
-            {
-                "id": doc_id,
-                "ownerId": self.user_id,
-                "filename": "sample-invalid.pdf",
-                "docType": "pdf",
-                "path": str(pdf_path),
-            }
-        )
+        doc_id = "doc-ai-review-stored"
+        self._seed_pdf_doc(doc_id, "sample-stored.pdf")
         seed_item = {
-            "id": "mr-ai-invalid-1",
+            "id": "mr-ai-stored-1",
             "issueId": "missing_alt_text",
             "targetNodeId": "fig-1",
             "reason": "Missing alt text",
@@ -177,7 +156,7 @@ class AutoReviewTests(unittest.TestCase):
             "anchors": [{"page": 1, "mcid": 0}],
             "aiDecision": {
                 "action": "approve",
-                "approvedText": "image of logo",
+                "approvedText": "Chart of annual sales by quarter.",
                 "confidence": 0.99,
                 "rationale": "test",
                 "model": "test-model",
@@ -197,9 +176,9 @@ class AutoReviewTests(unittest.TestCase):
             (
                 seed_item["id"],
                 doc_id,
-                __import__("json").dumps(seed_item),
+                json.dumps(seed_item),
                 _utc_now(),
-                __import__("json").dumps(seed_item["aiDecision"]),
+                json.dumps(seed_item["aiDecision"]),
                 seed_item["aiConfidence"],
                 seed_item["aiStatus"],
                 seed_item["validatorStatus"],
@@ -213,15 +192,12 @@ class AutoReviewTests(unittest.TestCase):
             f"/documents/{doc_id}/ai-review",
             json={"mode": "apply", "maxItems": 5, "minConfidence": 0.8},
         )
-        self.assertEqual(apply_resp.status_code, 200)
-        body = apply_resp.json()
-        self.assertEqual(body["approved"], 0)
-        self.assertEqual(body["escalated"], 1)
+        self.assertEqual(apply_resp.status_code, 410)
 
-        item = repo.get_manual_review_item("mr-ai-invalid-1")
+        item = get_repo().get_manual_review_item("mr-ai-stored-1")
         assert item is not None
         self.assertEqual(item.get("status"), "pending")
-        self.assertEqual(item.get("aiStatus"), "escalated")
+        self.assertEqual(item.get("aiStatus"), "proposed")
 
 
 if __name__ == "__main__":

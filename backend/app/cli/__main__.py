@@ -166,10 +166,27 @@ def _build_score_dict(violations: Sequence[Any], executions: Sequence[Any]) -> D
             "grade": "A+",
         }
 
+    errors = sum(1 for v in violations if v.severity == Severity.ERROR.value)
+    warnings = sum(1 for v in violations if v.severity == Severity.WARNING.value)
+
+    if not executions:
+        # ANALYZE-ONLY (the CLI's default): nothing was remediated, so the
+        # remediation-PROGRESS formula below would score every document 0.0/'F'
+        # — a live misrepresentation of a perfectly good file. Report page
+        # QUALITY as-found instead, matching pipeline._build_scan_score.
+        quality = max(0.0, 100.0 - (6.0 * errors + 2.5 * warnings))
+        return {
+            "initialIssues": initial,
+            "fixedAutomatically": 0,
+            "pendingManual": initial,
+            "score": round(quality, 2),
+            "grade": _grade_letter(quality),
+        }
+
     fixed = sum(1 for e in executions if getattr(e.status, "value", e.status) == "success")
     pending = sum(1 for e in executions if getattr(e.status, "value", e.status) == "skipped")
-    error_weight = sum(2 for v in violations if v.severity == Severity.ERROR.value)
-    warning_weight = sum(1 for v in violations if v.severity == Severity.WARNING.value)
+    error_weight = 2 * errors
+    warning_weight = warnings
     total_weight = max(error_weight + warning_weight, 1)
     fixed_weight = sum(
         2 for e in executions if getattr(e.status, "value", e.status) == "success"

@@ -120,7 +120,7 @@ export default function AltTextToolScreen() {
           </Text>
           <View style={{ flexDirection: "row", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
             <Button title="Sign in" onPress={() => setSignInOpen(true)} />
-            <Button title="See pricing" variant="ghost" onPress={() => router.push("/billing" as any)} />
+            <Button title="See pricing" variant="ghost" href="/billing" />
           </View>
         </Card>
       ) : (

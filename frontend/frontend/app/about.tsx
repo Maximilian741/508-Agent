@@ -15,6 +15,8 @@ import { Chip } from "../src/ui/components/Chip";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
+import { linkProps } from "../src/ui/components/linkProps";
 
 export default function AboutScreen() {
   const theme = useTheme();
@@ -22,6 +24,10 @@ export default function AboutScreen() {
 
   return (
     <Screen scroll title="About">
+      <Seo
+        title="About 508 Agent — Honest, Automated Document Accessibility"
+        description="Why we built an accessibility remediation tool that never claims a fix it didn't make, which standards we evaluate, and how your documents are handled."
+      />
       <Hero
         eyebrow="ABOUT"
         title="Built for remediators, not bureaucrats"
@@ -79,7 +85,7 @@ export default function AboutScreen() {
         <View style={styles.trustGrid}>
           <TrustClaim label="TLS 1.3 everywhere" body="All managed-mode traffic is TLS 1.3, terminated at Cloudflare's edge in front of the backend." />
           <TrustClaim label="HMAC-signed download URLs" body="Remediated-file URLs are signed with a 1-hour TTL. Tampering or expiry returns 403/410." />
-          <TrustClaim label="Strict CSP / HSTS / X-Frame-Options DENY" body="Set on every response by SecurityHeadersMiddleware. No inline scripts; no third-party origins." />
+          <TrustClaim label="Strict CSP / HSTS / X-Frame-Options DENY" body="Set on every API response by SecurityHeadersMiddleware and on every page by the web server. The only inline script is a one-line bootstrap pinned by hash; no third-party origins." />
           <TrustClaim label="No third-party analytics" body="Zero pixel trackers. Zero ad networks. Zero feature-flag SDKs phoning home." />
           <TrustClaim label="Source-available" body="Read the code that handles your documents in the GitHub repository." />
         </View>
@@ -121,13 +127,13 @@ export default function AboutScreen() {
       <Card>
         <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Standards we evaluate</Text>
         <View style={styles.standardsRow}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the WCAG 2.1 specification (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21/")}>
             <Chip label="WCAG 2.1" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.access-board.gov" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the Section 508 standards (external link)" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link www.w3.org" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF/UA accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>
@@ -143,19 +149,21 @@ export default function AboutScreen() {
           {"You can request a copy of your audit log, request deletion of your account's data, or ask a question about how your documents are handled."}
         </Text>
         <View style={[styles.standardsRow, { marginTop: 8 }]}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Go to admin" onPress={() => router.push("/admin" as any)}>
+          {/* No accessibilityLabel — the chip text below is already the label.
+              "Go to admin" replaced the words the user can see and say. */}
+          <Pressable {...linkProps("/admin")}>
             <Chip label="Admins: open Admin screen" tone="info" />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Email privacy@508-agent.app" onPress={() => Linking.openURL("mailto:privacy@508-agent.app")}>
             <Chip label="Email privacy@508-agent.app" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Go to security" onPress={() => router.push("/security" as any)}>
+          <Pressable {...linkProps("/security")}>
             <Chip label="Read the Security page" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Read the privacy policy" onPress={() => router.push("/privacy" as any)}>
+          <Pressable accessibilityLabel="Read the privacy policy" {...linkProps("/privacy")}>
             <Chip label="Privacy policy" tone="default" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Read the terms of service" onPress={() => router.push("/terms" as any)}>
+          <Pressable accessibilityLabel="Read the terms of service" {...linkProps("/terms")}>
             <Chip label="Terms of service" tone="default" />
           </Pressable>
         </View>

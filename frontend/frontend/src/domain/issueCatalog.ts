@@ -185,6 +185,82 @@ const C: Record<string, IssueCatalogEntry> = {
     learnMoreUrl: "https://www.w3.org/WAI/tips/writing/#make-link-text-meaningful",
   },
 
+  IFRAME_TITLE_MISSING: {
+    ruleId: "IFRAME_TITLE_MISSING",
+    title: "Embedded frame has no title",
+    summary: "An <iframe> (map, video, widget) is announced only as \"frame\".",
+    why:
+      "Screen reader users navigate a page by its landmarks and frames. An embedded map, video player or booking widget with no title is announced as just \"frame\" — there's no way to know what's inside or whether it's worth entering. WCAG 4.1.2 requires every frame to have an accessible name.",
+    autoFix:
+      "We can't name it for you: the content lives on another site, so we'd be guessing what's inside. We flag every untitled frame so you can add a short title.",
+    manualJudgment:
+      "Add title=\"…\" describing what the frame contains — \"Map of our office\", \"Product demo video\". Describe the content, not the technology.",
+    severity: "error",
+    standards: {
+      wcag: ["4.1.2 Name, Role, Value", "2.4.1 Bypass Blocks"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Techniques/html/H64",
+  },
+
+  INPUT_AUTOCOMPLETE_MISSING: {
+    ruleId: "INPUT_AUTOCOMPLETE_MISSING",
+    title: "Form field doesn't declare its purpose",
+    summary: "Fields collecting personal data are missing the autocomplete attribute.",
+    why:
+      "WCAG 2.1 added 1.3.5 (Identify Input Purpose) so browsers and assistive tech can autofill a user's own details. Without it, someone with a motor or cognitive disability has to retype their name, address and phone on every form — a genuine barrier, not a convenience.",
+    autoFix:
+      "For HTML we add the standard autocomplete token to fields whose purpose is unambiguous (email → autocomplete=\"email\", phone → \"tel\", zip → \"postal-code\"). Password, payment and unclear fields are deliberately left alone — a wrong token makes the browser autofill the wrong value, which is worse than none.",
+    manualJudgment:
+      "Check the fields we skipped: if one clearly collects the user's own data, add the matching token from the WCAG input-purpose list.",
+    severity: "warning",
+    standards: {
+      wcag: ["1.3.5 Identify Input Purpose"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/identify-input-purpose.html",
+  },
+
+  LABEL_IN_NAME_MISMATCH: {
+    ruleId: "LABEL_IN_NAME_MISMATCH",
+    title: "Button's name doesn't match its visible text",
+    summary: "An aria-label replaces the words on the button instead of extending them.",
+    why:
+      "People who use speech input say what they see — \"click Send order\". If the button's aria-label says something else (\"Submit form\"), the spoken command never matches its accessible name and the control simply can't be operated by voice. WCAG 2.5.3 is Level A, and this failure is almost always *caused* by a well-meaning aria-label.",
+    autoFix:
+      "We flag it rather than fix it: choosing which wording wins — the visible text or your aria-label — is a content decision only you can make.",
+    manualJudgment:
+      "Make the accessible name start with the visible text. \"Read more\" → aria-label=\"Read more about pensions\" is correct; \"Learn about pensions\" is not, because the words \"read more\" are gone.",
+    severity: "error",
+    standards: {
+      wcag: ["2.5.3 Label in Name"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/label-in-name.html",
+  },
+
+  POSITIVE_TABINDEX: {
+    ruleId: "POSITIVE_TABINDEX",
+    title: "Positive tabindex breaks keyboard order",
+    summary: "tabindex=\"3\" pulls an element to the front of the tab sequence.",
+    why:
+      "Any positive tabindex jumps ahead of every normal element on the page, so keyboard focus leaps around instead of following the visual order. It's one of the most disorienting things for a keyboard or screen reader user, and it only gets worse as the page grows.",
+    autoFix:
+      "We reset positive values to tabindex=\"0\" — the element stays focusable, but focus follows natural document order again. tabindex=\"-1\" (used for programmatic focus) is left untouched.",
+    manualJudgment:
+      "If an element genuinely needs to come earlier in the tab order, move it earlier in the markup rather than using a positive tabindex.",
+    severity: "warning",
+    standards: {
+      wcag: ["2.4.3 Focus Order"],
+      section508: ["E205.4"],
+      pdfUa: [],
+    },
+    learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/focus-order.html",
+  },
+
   LINK_NAME_MISSING: {
     ruleId: "LINK_NAME_MISSING",
     title: "Link has no accessible name",
@@ -506,6 +582,21 @@ const C: Record<string, IssueCatalogEntry> = {
       pdfUa: [],
     },
     learnMoreUrl: "https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html",
+  },
+
+  ANALYSIS_TRUNCATED: {
+    ruleId: "ANALYSIS_TRUNCATED",
+    title: "Only part of this document was analyzed",
+    summary: "The file is longer than the per-upload page limit, so the score and findings do not cover the whole document.",
+    why:
+      "To keep the service responsive, each upload is analyzed up to a fixed number of pages (400 by default). Everything past that point was not read at all — so a clean score here says nothing about the pages we did not see. This finding exists so that gap is never silent.",
+    autoFix:
+      "There is no automatic fix for pages we did not read. Split the document at the page limit and audit each part on its own; each part gets its own complete score.",
+    manualJudgment:
+      "If your documents are routinely this long, the operator can raise the limit (MAX_PDF_PAGES) on the deployment.",
+    severity: "error",
+    standards: { wcag: [], section508: [], pdfUa: [] },
+    learnMoreUrl: "",
   },
 };
 

@@ -1,174 +1,36 @@
-"""Remediation API routes."""
+"""Legacy single-action remediation route: retired (410 Gone).
+
+``POST /remediate`` ran one action against the caller's last ``POST /scan``
+tree with no credit check and no rate limit, and every request built fresh AI
+clients with a fresh per-job cost cap. That made it a free, unthrottled proxy
+to the paid inference provider, handing out fixes nobody paid for.
+
+Documents are remediated only through ``POST /pipeline/remediate`` (the Audit
+screen), which prices the job before any work and charges only for fixes that
+persist into the output file. The route answers 410 instead of disappearing,
+so an old client fails with a message that says where the feature went.
+``POST /scan`` stays: it only runs the analyzers and never calls a model.
+"""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-UTC = timezone.utc
-from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, HTTPException
 
-from app.analyzers.registry import get_default_analyzers, run_analyzers
-from app.api import state
 from app.api.deps import require_user_id
-from app.models.accessibility import AccessibilityTree, ActionCode
-from app.services.remediation_planner import RemediationPlan
-from app.services.remediators.base import ExecutionResult, ExecutionStatus
-from app.services.remediators.registry import execute_plans
-from app.persistence.db import get_repo
 
 router = APIRouter()
-REPO = get_repo()
 logger = logging.getLogger(__name__)
 
-
-class RemediateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    issueId: Optional[str] = None
-    targetNodeId: str
-    actionCode: str
+RETIRED_DETAIL = (
+    "POST /remediate has been retired. Fix documents on the Audit screen "
+    "(POST /pipeline/remediate), where each fix is priced before you pay."
+)
 
 
-class RemediateResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    actionCode: str
-    targetNodeId: str
-    status: str
-    notes: str
-
-
-class RemediateResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    results: List[RemediateResult]
-
-
-def _find_node(tree: AccessibilityTree, node_id: str) -> Optional[Any]:
-    stack = [tree.root]
-    while stack:
-        node = stack.pop(0)
-        if node.id == node_id:
-            return node
-        for child in getattr(node, "children", []) or []:
-            stack.append(child)
-    return None
-
-
-def _to_result(result: ExecutionResult) -> RemediateResult:
-    return RemediateResult(
-        actionCode=result.action_code.value,
-        targetNodeId=result.target_node_id,
-        status=result.status.value,
-        notes=result.notes,
-    )
-
-
-def _manual_review_item(
-    issue_id: Optional[str],
-    target_node_id: str,
-    reason: str,
-    notes: str,
-) -> Dict[str, Any]:
-    return {
-        "id": f"mr-{target_node_id}-{int(datetime.now(UTC).timestamp())}",
-        "issueId": issue_id or "unknown",
-        "targetNodeId": target_node_id,
-        "reason": reason,
-        "notes": notes,
-        "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-    }
-
-
-@router.post("/remediate", response_model=RemediateResponse)
-async def remediate(
-    request: RemediateRequest,
-    user_id: str = Depends(require_user_id),
-) -> RemediateResponse:
-    logger.info("POST /remediate targetNodeId=%s actionCode=%s", request.targetNodeId, request.actionCode)
-    st = state.for_user(user_id)
-    if st.last_tree is None:
-        return RemediateResponse(
-            results=[
-                RemediateResult(
-                    actionCode=request.actionCode,
-                    targetNodeId=request.targetNodeId,
-                    status=ExecutionStatus.NOT_IMPLEMENTED.value,
-                    notes="No scan data available for remediation.",
-                )
-            ]
-        )
-
-    tree = st.last_tree
-    run_analyzers(tree, get_default_analyzers())
-
-    try:
-        action_code = ActionCode(request.actionCode)
-    except ValueError:
-        return RemediateResponse(
-            results=[
-                RemediateResult(
-                    actionCode=request.actionCode,
-                    targetNodeId=request.targetNodeId,
-                    status=ExecutionStatus.NOT_IMPLEMENTED.value,
-                    notes="Requested action code is not supported.",
-                )
-            ]
-        )
-
-    target_node = _find_node(tree, request.targetNodeId)
-    if target_node is None:
-        return RemediateResponse(
-            results=[
-                RemediateResult(
-                    actionCode=action_code.value,
-                    targetNodeId=request.targetNodeId,
-                    status=ExecutionStatus.NOT_IMPLEMENTED.value,
-                    notes="Target node not found in last scan.",
-                )
-            ]
-        )
-
-    plan: Optional[RemediationPlan] = None
-    for flag in target_node.accessibility_flags:
-        for action in flag.recommended_actions():
-            if action.action_code == action_code:
-                plan = RemediationPlan(
-                    flag=flag,
-                    target_node_id=target_node.id,
-                    actions=[action],
-                    execution_allowed=True,
-                )
-                break
-        if plan is not None:
-            break
-
-    if plan is None:
-        return RemediateResponse(
-            results=[
-                RemediateResult(
-                    actionCode=action_code.value,
-                    targetNodeId=request.targetNodeId,
-                    status=ExecutionStatus.NOT_IMPLEMENTED.value,
-                    notes="Requested action not available for target node.",
-                )
-            ]
-        )
-
-    results = execute_plans(tree, [plan])
-    api_results = [_to_result(result) for result in results]
-
-    for result in api_results:
-        if result.status != ExecutionStatus.SUCCESS.value:
-            item = _manual_review_item(
-                request.issueId,
-                result.targetNodeId,
-                "Execution did not complete automatically.",
-                result.notes,
-            )
-            REPO.add_manual_review_items(st.last_document_id or "doc-1", [item])
-
-    return RemediateResponse(results=api_results)
+@router.post("/remediate")
+async def remediate(user_id: str = Depends(require_user_id)) -> None:
+    # Auth still runs first, so an anonymous caller gets 401, not a hint.
+    logger.info("POST /remediate called; route is retired (410)")
+    raise HTTPException(status_code=410, detail=RETIRED_DETAIL)

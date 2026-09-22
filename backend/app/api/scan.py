@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import json
 import logging
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
@@ -189,9 +191,9 @@ def _build_tree(request: ScanRequest) -> AccessibilityTree:
 
 
 def _find_path(root: DocumentNode, target_id: str) -> Optional[List[str]]:
-    stack: List[tuple[Any, List[str]]] = [(root, [root.id])]
+    stack: Deque[tuple[Any, List[str]]] = deque([(root, [root.id])])  # pop(0) was O(n)
     while stack:
-        node, path = stack.pop(0)
+        node, path = stack.popleft()
         if node.id == target_id:
             return path
         for child in getattr(node, "children", []) or []:

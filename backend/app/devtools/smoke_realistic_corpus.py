@@ -164,8 +164,18 @@ def main() -> int:  # noqa: PLR0915
     check("pptx deck: violations strictly decrease", len(post) < len(pre), f"pre={len(pre)} post={len(post)}")
     new_codes = set(post) - set(pre)
     check("pptx deck: NO new violation codes after fixing", not new_codes, str(new_codes))
-    for fixed_code in ("MISSING_ALT_TEXT", "LIST_STRUCTURE_INVALID", "TABLE_MISSING_HEADERS"):
+    for fixed_code in ("LIST_STRUCTURE_INVALID", "TABLE_MISSING_HEADERS"):
         check(f"pptx deck: {fixed_code} GONE from output", fixed_code not in post)
+    # MISSING_ALT_TEXT is deliberately NOT in that list. This picture sits
+    # alone on an untitled slide — no caption, no nearby text — and this
+    # smoke runs without an AI key, so there is genuinely nothing to describe
+    # it from. The old behaviour "fixed" it by writing "Image slide-2-img1
+    # shown in slide 2." — a location, not a description — and this smoke
+    # asserted that overclaim. Now the executor refuses to write a placeholder
+    # and the image honestly stays flagged. (The DOCX picture above DOES get
+    # fixed: it has nearby text, so the heuristic derives a real alt from it.)
+    check("pptx deck: caption-less image is left HONESTLY unfixed (no placeholder written)",
+          "MISSING_ALT_TEXT" in post)
 
     # ===== 3. Untagged PDF with structure-worthy content =====================
     w = PdfWriter()

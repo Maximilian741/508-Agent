@@ -200,6 +200,25 @@ Edit `.env` and fill in (use `nano .env` or `vi .env`):
 - `CF_TUNNEL_TOKEN` = the tunnel token from Step 2
 - `ANTHROPIC_API_KEY` = `sk-ant-...`
 
+Two more that are easy to forget, and whose absence is SILENT — nothing
+errors, a headline feature just quietly does less:
+
+- `SMTP_HOST` (plus `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`).
+  Scheduled monitoring alerts are only *logged* without it. A customer who
+  sets up "monitor my site" on day one and never receives an email will
+  assume the feature is broken.
+- `OCR_ENABLED=true`. Scanned PDFs are always *detected* and flagged as
+  unreadable, but they are only *fixed* (an invisible text layer is added)
+  when OCR is on. Government forms are very often scanned. The backend image
+  ships Tesseract with the English pack; for other languages add the matching
+  `tesseract-ocr-<lang>` package to `backend/Dockerfile`. If the flag is on
+  but the binary is missing, the backend logs one line and OCR is simply off
+  — check `/diagnostics` (`ocrAvailable`) after bringing the stack up.
+
+Optional but worth knowing: `MAX_UPLOAD_MB` (default 25). The UI reads the
+live value from `/healthz` and shows it on the dropzone, so raising it here
+is all you need to do.
+
 ### What could go wrong
 
 - **`scp: Permission denied`.** SSH agent does not have your key loaded. Run

@@ -17,6 +17,9 @@ import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
+import { GUIDE_EXCLUDED, ruleSlug } from "../src/domain/fixGuides";
+import { linkProps } from "../src/ui/components/linkProps";
 
 const SEVERITY_ORDER: IssueCatalogEntry["severity"][] = ["error", "warning", "info"];
 
@@ -85,6 +88,10 @@ export default function HelpScreen() {
 
   return (
     <Screen scroll title="Help & Glossary">
+      <Seo
+        title="Accessibility Rules, in Plain English — WCAG 2.1, Section 508 & PDF/UA Glossary"
+        description="Every check 508 Agent runs, explained for humans: what breaks for screen-reader users, the exact WCAG/508/PDF-UA citation, and how the automated fix works."
+      />
       <Hero
         eyebrow="HELP"
         title="Help & glossary"
@@ -421,8 +428,26 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
         {entry.standards.pdfUa.map((id) => (
           <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
         ))}
+        {/* The link below names the rule it belongs to. Every one of these
+            used to be "Open external link", so a screen-reader user pulling up
+            this page's link list saw the same words 29 times with nothing to
+            choose between (WCAG 2.4.4) — and none of them contained the
+            visible "Read W3C" (WCAG 2.5.3). Both are defects this product
+            detects in other people's documents. */}
+        {!GUIDE_EXCLUDED.has(entry.ruleId) ? (
+          <Pressable
+            {...linkProps(`/fix/${ruleSlug(entry.ruleId)}`)}
+            accessibilityLabel={`How to fix: ${entry.title}`}
+          >
+            <Chip label="How to fix" tone="success" />
+          </Pressable>
+        ) : null}
         {entry.learnMoreUrl ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(entry.learnMoreUrl)}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Read W3C reference for: ${entry.title} (external link)`}
+            onPress={() => Linking.openURL(entry.learnMoreUrl)}
+          >
             <Chip label="Read W3C" tone="info" />
           </Pressable>
         ) : null}

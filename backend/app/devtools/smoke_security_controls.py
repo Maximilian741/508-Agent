@@ -56,6 +56,13 @@ def main() -> int:
 
     # Admin gating (fail closed)
     check("non-admin GET /audit-log -> 403", c.get("/audit-log", headers=user_h).status_code == 403)
+    # A listed address is not admin until it is VERIFIED: typing it at sign-up
+    # grants nothing. The operator verifies it with the ops-only command.
+    squat_h = {"Authorization": f"Bearer {signin('boss@example.com').json()['token']}"}
+    check("listed but unverified email -> /audit-log 403", c.get("/audit-log", headers=squat_h).status_code == 403)
+    from app.devtools.bootstrap_admin import bootstrap_admin
+
+    bootstrap_admin("boss@example.com", "goodpassword1")
     admin_h = {"Authorization": f"Bearer {signin('boss@example.com').json()['token']}"}
     check("admin GET /audit-log -> 200", c.get("/audit-log", headers=admin_h).status_code == 200)
     check("admin whoami isAdmin=true", c.get("/api/admin/whoami", headers=admin_h).json().get("isAdmin") is True)

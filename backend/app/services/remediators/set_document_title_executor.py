@@ -42,6 +42,12 @@ def _derive_title(tree: AccessibilityTree, target: DocumentNode) -> str:
     if first_any:
         return first_any[:200]
 
+    # PDF: the parser's page-1 largest-font line (see pdf_parser's
+    # _title_candidate_from_page). Only present when it clearly stood out.
+    cand = (target.metadata.properties or {}).get("title_candidate")
+    if isinstance(cand, str) and cand.strip():
+        return cand.strip()[:200]
+
     filename = (target.metadata.properties or {}).get("filename")
     if isinstance(filename, str) and filename.strip():
         stem = Path(filename).stem
@@ -93,6 +99,23 @@ class SetDocumentTitleExecutor(RemediationExecutor):
         filename = filename if isinstance(filename, str) else None
         before_set = isinstance(before_title, str) and bool(before_title.strip())
         before_placeholder = before_set and is_placeholder_title(before_title, filename)
+        # No title AND nothing better than the placeholder could be derived:
+        # SKIP. "Untitled Document" is a string our own DocumentTitleAnalyzer
+        # flags; writing it as the /Title (with DisplayDocTitle on, so viewers
+        # show it in the title bar) and crediting it as a fix was the exact
+        # overclaim the honesty invariant forbids. The document keeps its
+        # DOCUMENT_TITLE_MISSING finding and a human names it.
+        if not before_set and is_placeholder_title(after_title, filename):
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    "No confident title could be derived (no heading, no distinct "
+                    "title line, no usable filename); refusing to write a placeholder. "
+                    "Set the title manually."
+                ),
+            )
         # A real, non-placeholder title is left alone.
         if before_set and not before_placeholder:
             return ExecutionResult(

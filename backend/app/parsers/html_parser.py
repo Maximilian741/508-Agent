@@ -53,6 +53,7 @@ from app.parsers.docx_parser import (
     strip_fake_list_prefix,
 )
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -424,6 +425,22 @@ class HTMLParser:
             # (the honesty invariant) — see iter_derivable_form_labels.
             properties["form_fields_derivable"] = ff_derivable
 
+        # Counted with the SAME iterators the writer applies, so what we claim is
+        # exactly what gets written (see iter_autocomplete_candidates /
+        # iter_positive_tabindex).
+        ac_count = sum(1 for _ in iter_autocomplete_candidates(doc))
+        if ac_count:
+            properties["inputs_missing_autocomplete"] = ac_count
+        tabindex_count = sum(1 for _ in iter_positive_tabindex(doc))
+        if tabindex_count:
+            properties["positive_tabindex_count"] = tabindex_count
+        untitled_frames = count_untitled_iframes(doc)
+        if untitled_frames:
+            properties["iframes_missing_title"] = untitled_frames
+        label_mismatches = count_label_in_name_mismatches(doc)
+        if label_mismatches:
+            properties["label_in_name_mismatches"] = label_mismatches
+
         root = DocumentNode(
             id="doc-1",
             content=NodeContent(kind=ContentKind.NONE),
@@ -442,7 +459,7 @@ class HTMLParser:
             "language": language or "",
         }
         return ParserResult(
-            document_id=path.stem or "doc",
+            document_id=derive_document_id(path),
             format="html",
             tree=AccessibilityTree(root=root, metadata=raw_metadata),
             raw_metadata=raw_metadata,
@@ -460,8 +477,15 @@ def _parse_document(data: bytes):
     """
     blob = data if data and data.strip() else b"<html><head></head><body></body></html>"
     src: Any = _decode_html_bytes(blob)
+    # huge_tree lifts libxml2's default 256-level depth clamp. Below that
+    # limit lxml silently DROPS everything nested deeper — no error — and the
+    # writer then serialized the truncated tree as the "fixed" file, deleting
+    # content from a customer's page while reporting success. Legacy pages
+    # with unclosed <font>/<div> chains reach 256 easily. Everything else in
+    # the docstring still holds: no entity expansion, no network.
+    parser = lxml_html.HTMLParser(huge_tree=True, no_network=True)
     try:
-        return lxml_html.document_fromstring(src)
+        return lxml_html.document_fromstring(src, parser=parser)
     except (etree.ParserError, etree.XMLSyntaxError, ValueError):
         return lxml_html.document_fromstring(b"<html><head></head><body></body></html>")
 
@@ -509,7 +533,11 @@ def _build_children(el: Any, ids: _Ids, roottree: Any, ctx: Dict[str, Any]) -> L
             continue
         child_ctx = _merge_ctx(ctx, _inline_style(child))
         node = _build_node(child, tag, ids, roottree, child_ctx)
-        if node is not None:
+        if isinstance(node, list):
+            # A section-tag wrapper whose subtree was already walked and
+            # produced nothing. Extend by that result; never walk it again.
+            out.extend(node)
+        elif node is not None:
             out.append(node)
         else:
             # Transparent wrapper (span, strong, label, etc.): inline any
@@ -711,7 +739,15 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
     if tag in _SECTION_TAGS:
         children = _build_children(el, ids, roottree, ctx)
         if not children:
-            return None
+            # Return the (already-built, empty) child list — NOT None. None
+            # tells the caller "transparent wrapper, walk my subtree", and the
+            # caller then rebuilt this exact subtree a second time. For a
+            # chain of wrappers whose leaves yield no node (spans, icons,
+            # text) that made work(k) = 2 * work(k-1): a 684-byte page with
+            # 23 nested <div> took 17s, doubling per level; ~26 deep pinned a
+            # request-thread forever. And /scan-url takes arbitrary public
+            # URLs. Returning the list lets the caller extend by it in O(1).
+            return children
         return SectionNode(
             id=ids("html-section"),
             content=NodeContent(kind=ContentKind.NONE),
@@ -725,6 +761,51 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
     return None
 
 
+def _image_caption(el: Any) -> Optional[str]:
+    """Nearby human text that describes an <img>, or None.
+
+    1. <figure><img><figcaption>…</figcaption></figure> — the HTML caption.
+    2. The <img>'s title attribute (a tooltip, but authored for humans).
+    3. The nearest PRECEDING text-bearing sibling or ancestor's preceding
+       sibling (a lead-in like "Figure 2 shows quarterly revenue:").
+    Kept short and only ever text a human wrote for the image's neighbourhood
+    — never the filename, never boilerplate."""
+    parent = el.getparent()
+    if parent is not None and _tag(parent) == "figure":
+        for child in parent:
+            if _tag(child) == "figcaption":
+                cap = " ".join((child.text_content() or "").split())
+                if cap:
+                    return cap[:200]
+    # figure may wrap the img in a link/span; look one level up too.
+    if parent is not None:
+        gp = parent.getparent()
+        if gp is not None and _tag(gp) == "figure":
+            for child in gp:
+                if _tag(child) == "figcaption":
+                    cap = " ".join((child.text_content() or "").split())
+                    if cap:
+                        return cap[:200]
+    title = (el.get("title") or "").strip()
+    if title:
+        return title[:200]
+    # Nearest preceding text: walk previous siblings of the img, then of its
+    # ancestors, up to a few hops, and take the first with real words.
+    node = el
+    for _hop in range(4):
+        prev = node.getprevious()
+        while prev is not None:
+            if isinstance(prev.tag, str) and prev.tag.lower() not in ("script", "style", "template", "noscript"):
+                txt = " ".join((prev.text_content() or "").split())
+                if len(txt.split()) >= 3:
+                    return txt[:200]
+            prev = prev.getprevious()
+        node = node.getparent()
+        if node is None or _tag(node) in ("body", "html"):
+            break
+    return None
+
+
 def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     alt = el.get("alt")  # None = attribute absent; "" = explicitly decorative
     role = (el.get("role") or "").strip().lower()
@@ -735,6 +816,16 @@ def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     is_decorative = (alt == "") or role in {"presentation", "none"} or aria_hidden
     node_id = ids("html-img")
     meta = _meta(el, roottree)
+    # Context for alt generation, so the heuristic provider (no AI key) can
+    # derive a REAL description instead of a location placeholder — which the
+    # executor now refuses to write. Prefer a <figcaption> sibling, then the
+    # <img>'s own title attribute, then the nearest preceding block of text.
+    if not is_decorative:
+        cap = _image_caption(el)
+        if cap:
+            if meta.properties is None:
+                meta.properties = {}
+            meta.properties["caption"] = cap
 
     if is_decorative:
         return ImageNode(
@@ -915,6 +1006,272 @@ def _count_form_fields(doc: Any) -> Tuple[int, int, int]:
         if _derive_html_label(ctrl, labels_for):
             derivable += 1
     return total, unlabeled, derivable
+
+
+# ---------------------------------------------------------------------------
+# WCAG 1.3.5 — Identify Input Purpose (autocomplete)
+# ---------------------------------------------------------------------------
+
+# EXACT identifier -> the WCAG-listed autocomplete token.
+#
+# These are matched EXACTLY against a normalized field identifier — never as
+# substrings. An adversarial review proved substring matching is actively
+# dangerous here: "mobile" lives inside "automobile", "lname" inside
+# "hotel_name"/"model_name", "company" inside "accompanying", "zip" inside
+# "zip_file", "email" inside "email_subject". Each of those wrote a
+# personal-data token onto an unrelated field, so the browser would silently
+# prefill the user's real name/phone/address into the wrong box — strictly worse
+# than the missing attribute we set out to fix.
+_AUTOCOMPLETE_EXACT: Dict[str, str] = {
+    # email
+    "email": "email", "emailaddress": "email", "emailaddr": "email",
+    "mail": "email", "mailaddress": "email", "useremail": "email",
+    # names
+    "firstname": "given-name", "givenname": "given-name", "fname": "given-name",
+    "forename": "given-name",
+    "lastname": "family-name", "familyname": "family-name", "surname": "family-name",
+    "lname": "family-name",
+    "fullname": "name", "yourname": "name", "name": "name",
+    # phone
+    "phone": "tel", "phonenumber": "tel", "telephone": "tel", "telephonenumber": "tel",
+    "tel": "tel", "mobile": "tel", "mobilenumber": "tel", "mobilephone": "tel",
+    "cellphone": "tel", "cell": "tel",
+    # address
+    "streetaddress": "street-address", "street": "street-address",
+    "address": "street-address",
+    "address1": "address-line1", "addressline1": "address-line1",
+    "address2": "address-line2", "addressline2": "address-line2",
+    "postalcode": "postal-code", "zipcode": "postal-code", "postcode": "postal-code",
+    "zip": "postal-code",
+    "country": "country-name", "countryname": "country-name",
+    # org / misc
+    "organization": "organization", "organisation": "organization",
+    "organizationname": "organization", "company": "organization",
+    "companyname": "organization", "employer": "organization",
+    "birthday": "bday", "dateofbirth": "bday", "dob": "bday", "bday": "bday",
+    "username": "username", "userid": "username",
+}
+
+# Noise wrappers commonly put AROUND a real purpose token ("user_email",
+# "billing_zip"). Stripped only at the ends, so the anchor is preserved.
+_AUTOCOMPLETE_AFFIXES = (
+    "user", "contact", "billing", "shipping", "home", "work", "your", "my",
+    "customer", "input", "field", "txt", "text", "the",
+)
+
+# <input type> that maps directly, regardless of the field's name.
+_AUTOCOMPLETE_BY_TYPE = {"email": "email", "tel": "tel"}
+# Fields we must NEVER guess for: a wrong token here is a security/UX hazard.
+_AUTOCOMPLETE_SKIP_TYPES = {
+    "password", "hidden", "submit", "button", "reset", "image", "file",
+    "checkbox", "radio", "search", "range", "color",
+}
+# Only these types can carry a personal-data purpose. url/number are excluded:
+# a URL field is never a person's name or postal code, and a number field is
+# never a name — including them could ONLY produce wrong tokens.
+_AUTOCOMPLETE_OK_TYPES = {"text", "tel", "email", ""}
+
+# A field holding SOMEONE ELSE'S data is out of scope for WCAG 1.3.5, which is
+# explicitly about "collecting information about the USER". Autofilling the
+# user's own details there is wrong.
+_THIRD_PARTY_MARKERS = (
+    "recipient", "friend", "colleague", "referral", "refer", "guest", "invitee",
+    "emergency", "nextofkin", "beneficiary", "dependent", "spouse", "parent",
+    "child", "employee", "candidate", "patient", "client", "student", "member",
+    "sender", "to", "cc", "bcc",
+)
+
+
+def _normalize_ident(raw: str) -> str:
+    """camelCase/snake_case/kebab -> a bare lowercase identifier."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw or "")
+    return re.sub(r"[^a-z0-9]+", "", spaced.lower())
+
+
+def _strip_affixes(ident: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        for aff in _AUTOCOMPLETE_AFFIXES:
+            if ident.startswith(aff) and len(ident) > len(aff):
+                ident, changed = ident[len(aff):], True
+            elif ident.endswith(aff) and len(ident) > len(aff):
+                ident, changed = ident[: -len(aff)], True
+    return ident
+
+
+def _autocomplete_token_for(ctrl: Any) -> Optional[str]:
+    """The unambiguous autocomplete token for a control, or None.
+
+    EXACT-matches a normalized ``name``/``id`` (each independently — never
+    concatenated, since joining two attributes manufactures adjacencies present
+    in neither). Anything not an exact, known purpose is left alone: a missing
+    autocomplete is a WCAG 1.3.5 warning, a wrong one autofills the user's real
+    personal data into the wrong field.
+    """
+    if not isinstance(ctrl.tag, str) or ctrl.tag.lower() != "input":
+        return None  # <select>/<textarea> purposes are far less predictable
+    itype = (ctrl.get("type") or "text").strip().lower()
+    if itype in _AUTOCOMPLETE_SKIP_TYPES:
+        return None
+    if (ctrl.get("autocomplete") or "").strip():
+        return None  # already declared (including autocomplete="off")
+
+    # WCAG 1.3.5 covers the USER'S OWN data. A "recipient email" or "emergency
+    # contact phone" collects someone else's, so we must not autofill it.
+    scope_hay = _normalize_ident(" ".join((ctrl.get(a) or "") for a in ("name", "id")))
+    if any(marker in scope_hay for marker in _THIRD_PARTY_MARKERS if len(marker) > 2):
+        return None
+
+    by_type = _AUTOCOMPLETE_BY_TYPE.get(itype)
+    if by_type:
+        return by_type
+    if itype not in _AUTOCOMPLETE_OK_TYPES:
+        return None
+    # ``placeholder`` is deliberately NOT consulted: it is prose ("we'll never
+    # share your email"), not an identifier, and matching it turns search boxes
+    # and free-text notes into personal-data fields.
+    for attr in ("name", "id"):
+        token = _AUTOCOMPLETE_EXACT.get(_strip_affixes(_normalize_ident(ctrl.get(attr) or "")))
+        if token:
+            return token
+    return None
+
+
+def iter_autocomplete_candidates(doc: Any):
+    """Yield ``(input_element, token)`` for inputs whose purpose is unambiguous.
+
+    Shared by the parser (which COUNTS them) and the writer (which APPLIES
+    them) so the number we claim is exactly the number we write — the same
+    honesty contract as :func:`iter_derivable_form_labels`.
+    """
+    for ctrl in doc.iter("input"):
+        token = _autocomplete_token_for(ctrl)
+        if token:
+            yield ctrl, token
+
+
+# ---------------------------------------------------------------------------
+# WCAG 2.4.3 — Focus Order (positive tabindex)
+# ---------------------------------------------------------------------------
+
+
+def iter_positive_tabindex(doc: Any):
+    """Yield elements with a POSITIVE tabindex.
+
+    ``tabindex="3"`` yanks an element out of DOM order and to the front of the
+    whole page's tab sequence, so keyboard focus jumps unpredictably. The fix is
+    always the same and is safe: ``tabindex="0"`` keeps the element focusable
+    but restores natural order. ``tabindex="-1"`` (programmatic focus) and
+    ``tabindex="0"`` are both fine and never yielded.
+    """
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        raw = (el.get("tabindex") or "").strip()
+        if not raw:
+            continue
+        try:
+            if int(raw) > 0:
+                yield el
+        except ValueError:
+            continue
+
+
+# ---------------------------------------------------------------------------
+# WCAG 4.1.2 / 2.4.1 — frames need an accessible name
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# WCAG 2.5.3 — Label in Name
+# ---------------------------------------------------------------------------
+
+_LABEL_IN_NAME_TAGS = ("a", "button")
+_PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+
+
+def _speech_normalize(text: str) -> str:
+    """Lowercase, strip punctuation/whitespace — how a voice command is matched."""
+    return re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", (text or "").lower())).strip()
+
+
+def count_label_in_name_mismatches(doc: Any) -> int:
+    """Controls whose accessible name omits their own VISIBLE text (WCAG 2.5.3).
+
+    Speech-input users activate a control by saying the words they can see
+    ("click Submit order"). If the ``aria-label`` says something different, the
+    spoken command doesn't match the accessible name and the control simply
+    cannot be operated by voice — a Level A failure, and one that a
+    well-meaning ``aria-label`` usually CAUSES.
+
+    Deliberately narrow, so this is a fact rather than a judgement: we only look
+    at controls that have BOTH visible text and an explicit ``aria-label``, and
+    flag only when the visible text is not contained in the label at all. An
+    ``aria-label`` that merely ADDS context ("Read more about pensions" over
+    "Read more") is correct and is never flagged.
+    """
+    n = 0
+    for tag in _LABEL_IN_NAME_TAGS:
+        for el in doc.iter(tag):
+            label = (el.get("aria-label") or "").strip()
+            if not label:
+                continue  # no override -> the visible text IS the name
+            visible = _speech_normalize(_visible_subtree_text(el))
+            if not visible:
+                continue  # icon-only control: LINK_NAME_MISSING's territory
+            if len(visible) < 2:
+                continue  # single character ("x", ">") — not a spoken command
+            if _speech_normalize(label).find(visible) == -1:
+                n += 1
+    return n
+
+
+def count_untitled_iframes(doc: Any) -> int:
+    """How many <iframe>/<frame> elements have no accessible name.
+
+    An embedded map, video or widget with no ``title`` is announced only as
+    "frame", so a screen reader user cannot tell what is inside or whether to
+    enter it. Frames hidden from the a11y tree don't count.
+    """
+    n = 0
+    for tag in ("iframe", "frame"):
+        for el in doc.iter(tag):
+            if (el.get("title") or "").strip():
+                continue
+            if (el.get("aria-label") or "").strip():
+                continue
+            if (el.get("aria-labelledby") or "").strip():
+                continue
+            # Explicitly removed from the a11y tree — nothing to name.
+            if (el.get("role") or "").strip().lower() in {"presentation", "none"}:
+                continue
+            if el.get("hidden") is not None:
+                continue
+            if _style_hides(el):
+                continue
+            # aria-hidden or display:none on ANY ancestor also removes it.
+            if any(
+                isinstance(a.tag, str)
+                and (
+                    (a.get("aria-hidden") or "").strip().lower() == "true"
+                    or a.get("hidden") is not None
+                    or _style_hides(a)
+                )
+                for a in el.iterancestors()
+            ):
+                continue
+            # A 0x0 / 1x1 frame is a tracking pixel or a hidden RPC channel, not
+            # content a user could enter — naming it would be noise.
+            try:
+                w = int(float((el.get("width") or "").strip() or -1))
+                h = int(float((el.get("height") or "").strip() or -1))
+                if 0 <= w <= 1 and 0 <= h <= 1:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            n += 1
+    return n
 
 
 def iter_derivable_form_labels(doc: Any):

@@ -41,6 +41,11 @@ def main() -> int:
         if not cond:
             failures += 1
 
+    # ADMIN_EMAILS only counts once the address is verified; bootstrap it the
+    # way the operator does (python -m app.devtools.bootstrap_admin).
+    from app.devtools.bootstrap_admin import bootstrap_admin
+
+    bootstrap_admin("admin@example.com", "adminpass123")
     admin_auth, _ = _signin(client, "admin@example.com")
     user_auth, user_id = _signin(client, "u1@example.com")
 

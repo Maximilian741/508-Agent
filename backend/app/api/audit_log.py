@@ -6,8 +6,8 @@
 * ``GET /api/admin/whoami`` — tells the frontend whether to show the Admin tab
   for the current session user (never throws).
 
-Admin = the authenticated session user whose ``role == 'admin'`` or whose email
-is in ``ADMIN_EMAILS``. Authorization fails closed when neither holds.
+Admin = ``app.api.deps.is_admin_user``: promoted server-side (``role ==
+'admin'``) AND a verified email AND listed in ``ADMIN_EMAILS``. Fails closed.
 """
 
 from __future__ import annotations
@@ -18,8 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.deps import optional_user, require_admin
-from app.config import get_settings
+from app.api.deps import is_admin_user, optional_user, require_admin
 from app.db.models import UserRow
 from app.persistence import audit_log as _audit
 
@@ -80,9 +79,7 @@ async def whoami(user: Optional[UserRow] = Depends(optional_user)) -> WhoAmIResp
     """
     if user is None:
         return WhoAmIResponse(email=None, isAdmin=False)
-    settings = get_settings()
-    is_admin = (user.role == "admin") or settings.is_admin(user.email)
-    return WhoAmIResponse(email=user.email, isAdmin=is_admin)
+    return WhoAmIResponse(email=user.email, isAdmin=is_admin_user(user))
 
 
 @router.get("/audit-log", response_model=List[AuditLogEntryModel])

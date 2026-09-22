@@ -85,11 +85,14 @@ async def stream_to_tempfile(
             if written > max_bytes:
                 fd_obj.close()
                 tmp_path.unlink(missing_ok=True)
+                # A user-facing sentence, not a config key. The UI shows
+                # `detail` verbatim, so this is the text a customer reads.
+                limit_mb = max(1, max_bytes // (1024 * 1024))
                 raise HTTPException(
                     status_code=413,
                     detail=(
-                        f"upload_too_large: limit={max_bytes} bytes; "
-                        "lower the file size or contact the operator to raise MAX_UPLOAD_MB."
+                        f"That file is larger than the {limit_mb} MB limit. "
+                        "Try compressing it, or split it into parts and audit each one."
                     ),
                 )
             if len(head) < 16:

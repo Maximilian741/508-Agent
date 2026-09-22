@@ -94,6 +94,8 @@ def _remediate(src: Path, out: Path, title=None, lang=None) -> dict:
     res = parse_to_tree(str(src))
     if isinstance(res.tree.root, DocumentNode):
         res.tree.root.metadata.properties = dict(res.tree.root.metadata.properties or {})
+        # Stands in for an approved TAG_PDF_STRUCTURE: the writer tags only on request.
+        res.tree.root.metadata.properties["tag_structure_requested"] = True
         if title:
             res.tree.root.metadata.properties["title"] = title
         if lang:
@@ -240,6 +242,7 @@ def main() -> int:
     if isinstance(res.tree.root, DocumentNode):
         res.tree.root.metadata.properties = dict(res.tree.root.metadata.properties or {})
         res.tree.root.metadata.properties["title"] = "Per Element"; res.tree.root.metadata.language = "en"
+        res.tree.root.metadata.properties["tag_structure_requested"] = True  # approved TAG_PDF_STRUCTURE
     pe_out = tmp / "perel_out.pdf"
     write_remediated(pe, res.tree, pe_out, source_format=res.format)
 

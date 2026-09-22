@@ -11,6 +11,10 @@ from app.services.remediators.add_table_headers_executor import AddTableHeadersE
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 from app.services.remediators.flag_for_manual_review_executor import FlagForManualReviewExecutor
 from app.services.remediators.fill_form_field_labels_executor import FillFormFieldLabelsExecutor
+from app.services.remediators.html_semantics_executors import (
+    FixPositiveTabindexExecutor,
+    SetInputAutocompleteExecutor,
+)
 from app.services.remediators.fix_contrast_executor import FixContrastExecutor
 from app.services.remediators.fix_list_structure_executor import FixListStructureExecutor
 from app.services.remediators.generate_alt_text_executor import GenerateAltTextExecutor
@@ -26,22 +30,37 @@ from app.services.remediators.set_slide_title_executor import SetSlideTitleExecu
 from app.services.remediators.set_table_header_scope_executor import SetTableHeaderScopeExecutor
 from app.services.remediators.add_ocr_text_layer_executor import AddOcrTextLayerExecutor
 from app.services.remediators.tag_pdf_structure_executor import TagPdfStructureExecutor
+from app.ai.semantic_inference import HeuristicProvider, SemanticInferenceClient
 
 
-def get_default_executors() -> List[RemediationExecutor]:
+def get_default_executors(client: Optional[SemanticInferenceClient] = None) -> List[RemediationExecutor]:
+    """Build the executor set for ONE job.
+
+    Every AI-backed executor shares a single inference client, so the per-job
+    cost cap (``MAX_AI_COST_PER_JOB_USD``) bounds the whole job. Each executor
+    used to build its own client, and with it its own cap: one remediation of
+    a page with images, links, tables and no language spent several caps.
+
+    Build a fresh set per job (``execute_plans`` does): the client's running
+    cost tally IS the job's budget, so reusing a set would carry one job's
+    spend into the next.
+    """
+    shared = client if client is not None else SemanticInferenceClient()
     return [
-        GenerateAltTextExecutor(),
+        GenerateAltTextExecutor(client=shared),
         RemoveDecorativeAltTextExecutor(),
         NormalizeHeadingLevelExecutor(),
         PromoteHeadingExecutor(),
         AddTableHeadersExecutor(),
         SetTableHeaderScopeExecutor(),
-        GenerateTableCaptionExecutor(),
+        GenerateTableCaptionExecutor(client=shared),
         FixListStructureExecutor(),
         FillFormFieldLabelsExecutor(),
+        SetInputAutocompleteExecutor(),
+        FixPositiveTabindexExecutor(),
         FixContrastExecutor(),
-        ImproveLinkTextExecutor(),
-        SetDocumentLanguageExecutor(),
+        ImproveLinkTextExecutor(client=shared),
+        SetDocumentLanguageExecutor(client=shared),
         SetDocumentTitleExecutor(),
         SetSlideTitleExecutor(),
         ResolveReadingOrderExecutor(),
@@ -49,6 +68,18 @@ def get_default_executors() -> List[RemediationExecutor]:
         AddOcrTextLayerExecutor(),
         FlagForManualReviewExecutor(),
     ]
+
+
+def get_offline_executors() -> List[RemediationExecutor]:
+    """Executors that can never reach a paid AI provider, for FREE paths.
+
+    Gate AI spend here, not with ``requires_ai``: IMPROVE_LINK_TEXT is declared
+    ``requires_ai=False`` yet its executor still calls the inference client, so
+    a free path that merely filters AI actions still bills per link. Pinning
+    the shared client to the heuristic provider makes the spend structurally
+    impossible, and no paid client is ever constructed.
+    """
+    return get_default_executors(client=SemanticInferenceClient(provider=HeuristicProvider()))
 
 
 def execute_plan(

@@ -10,11 +10,11 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, select
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import desc, select, update
 
 from app.api.auth import get_current_user_row
 from app.api.deps import require_user_id
@@ -71,6 +71,22 @@ class SpendRequest(BaseModel):
     description: str = Field(min_length=1, max_length=500)
     relatedDocId: Optional[str] = Field(default=None, max_length=128)
 
+    @field_validator("relatedDocId")
+    @classmethod
+    def _no_reserved_namespace(cls, v: Optional[str]) -> Optional[str]:
+        """Refuse doc ids in a namespace the server uses for its own keys.
+
+        ``related_doc_id`` doubles as the idempotency key for server-side
+        one-shot debits (``spend_credits_once_for_user``). A caller who could
+        write a row in that namespace could pre-empt a debit it had not paid:
+        one ``/credits/spend`` of 1 credit at ``pipeline-job:<id>`` cancelled
+        that job's 5-credit deferred charge. The kind separation below is the
+        real guard; this keeps the field itself unspoofable.
+        """
+        if v and str(v).lower().startswith(_RESERVED_DOC_ID_PREFIXES):
+            raise ValueError("relatedDocId uses a reserved prefix")
+        return v
+
 
 class SpendResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -89,6 +105,17 @@ _TIER_AMOUNTS = {
     "pro": 250,
     "studio": 1300,
 }
+
+
+# Ledger ``kind`` for a server-side one-shot debit. Deliberately NOT "spend":
+# the idempotency check looks up (user, kind, related_doc_id), so a row the
+# caller wrote through /credits/spend — which can only ever be kind "spend" —
+# cannot satisfy it and cancel a charge the caller has not paid.
+SPEND_ONCE_KIND = "spend_once"
+
+# ``related_doc_id`` namespaces reserved for server-minted idempotency keys.
+# /credits/spend rejects them so the field can't be spoofed in the first place.
+_RESERVED_DOC_ID_PREFIXES = ("pipeline-job:",)
 
 
 # Per-format spend amounts for /pipeline/remediate.
@@ -124,6 +151,27 @@ class InsufficientCreditsError(Exception):
     pass
 
 
+def _debit_wallet(session, user_id: str, amount: int) -> int:
+    """Debit ``amount`` in ONE conditional UPDATE; return the new balance.
+
+    The guard and the write are a single statement, so the database evaluates
+    ``balance >= amount`` against the row it is about to write — on sqlite and
+    Postgres alike. rowcount 0 means the user is unknown or can't afford it.
+    """
+    result = session.execute(
+        update(UserRow)
+        .where(UserRow.id == user_id, UserRow.credits_balance >= amount)
+        .values(credits_balance=UserRow.credits_balance - amount)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        exists = session.execute(select(UserRow.id).where(UserRow.id == user_id)).scalar_one_or_none()
+        raise InsufficientCreditsError("unknown_user" if exists is None else "insufficient_credits")
+    return int(
+        session.execute(select(UserRow.credits_balance).where(UserRow.id == user_id)).scalar_one() or 0
+    )
+
+
 def spend_credits_for_user(
     user_id: str,
     amount: int,
@@ -133,24 +181,18 @@ def spend_credits_for_user(
     """Atomic spend.  Returns the new balance.
 
     Raises InsufficientCreditsError if the user doesn't have enough.
+
+    The debit is a conditional UPDATE plus the ledger row in one transaction.
+    It used to be read-check-write, row-locked only when the dialect was not
+    sqlite — and sqlite is the default DATABASE_URL, run under 2 uvicorn
+    workers. Eight concurrent spends of 5 against a balance of 5 all read 5,
+    all passed the check, and all delivered: balance 0, ledger -40.
     """
     if amount <= 0:
         raise ValueError("amount must be positive")
 
     with session_scope() as session:
-        row = session.execute(
-            select(UserRow).where(UserRow.id == user_id).with_for_update()
-            if session.bind.dialect.name != "sqlite"
-            else select(UserRow).where(UserRow.id == user_id)
-        ).scalar_one_or_none()
-        if row is None:
-            raise InsufficientCreditsError("unknown_user")
-
-        current = int(row.credits_balance or 0)
-        if current < amount:
-            raise InsufficientCreditsError("insufficient_credits")
-
-        row.credits_balance = current - amount
+        new_balance = _debit_wallet(session, user_id, amount)
         session.add(
             CreditLedgerRow(
                 user_id=user_id,
@@ -162,7 +204,78 @@ def spend_credits_for_user(
             )
         )
         session.flush()
-        return int(row.credits_balance or 0)
+        return new_balance
+
+
+def spend_credits_once_for_user(
+    user_id: str,
+    amount: int,
+    description: str,
+    idempotency_key: str,
+) -> Tuple[int, bool]:
+    """Spend at most once per ``idempotency_key``. Returns (balance, charged_now).
+
+    The key is recorded as the ledger row's ``related_doc_id`` under the
+    reserved kind :data:`SPEND_ONCE_KIND`, in the SAME transaction as the
+    debit, so "charged" and "recorded" commit together or not at all: a crash
+    can't leave one without the other, and a failed debit
+    (InsufficientCreditsError) records nothing, so a later retry can still pay.
+
+    The kind is part of the lookup, not decoration. It used to match any
+    ``kind="spend"`` row with that ``related_doc_id`` — and /credits/spend lets
+    a caller choose ``relatedDocId``, so spending 1 credit at
+    ``pipeline-job:<jobId>`` made this function believe the job's 5-credit
+    deferred charge was already collected and hand the file over for 1 credit.
+    Only this function writes SPEND_ONCE_KIND rows, and /credits/spend now also
+    refuses the reserved prefixes outright.
+
+    Racing callers serialize on the wallet's write lock, taken first by a
+    no-op UPDATE (a row lock on Postgres, the database write lock on sqlite).
+    The loser then sees the winner's committed ledger row and returns
+    ``charged_now=False`` without debiting. Works across worker processes.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    key = str(idempotency_key or "").strip()
+    if not key:
+        raise ValueError("idempotency_key is required")
+
+    with session_scope() as session:
+        locked = session.execute(
+            update(UserRow)
+            .where(UserRow.id == user_id)
+            .values(credits_balance=UserRow.credits_balance)
+            .execution_options(synchronize_session=False)
+        )
+        if locked.rowcount != 1:
+            raise InsufficientCreditsError("unknown_user")
+        already = session.execute(
+            select(CreditLedgerRow.id)
+            .where(
+                CreditLedgerRow.user_id == user_id,
+                CreditLedgerRow.kind == SPEND_ONCE_KIND,
+                CreditLedgerRow.related_doc_id == key,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if already is not None:
+            balance = session.execute(
+                select(UserRow.credits_balance).where(UserRow.id == user_id)
+            ).scalar_one()
+            return int(balance or 0), False
+        new_balance = _debit_wallet(session, user_id, amount)
+        session.add(
+            CreditLedgerRow(
+                user_id=user_id,
+                at=datetime.utcnow(),
+                kind=SPEND_ONCE_KIND,
+                amount=-amount,
+                description=description,
+                related_doc_id=key,
+            )
+        )
+        session.flush()
+        return new_balance, True
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +328,12 @@ async def purchase(
     if os.environ.get("STRIPE_SECRET_KEY", "").strip():
         raise HTTPException(status_code=409, detail="use_stripe_checkout")
 
-    # Never hand out free credits via the mock path in production. The mock
-    # path exists only for local/dev where Stripe is not wired up.
-    if get_settings().environment == "production":
+    # Never hand out free credits via the mock path outside development. The
+    # mock path exists only for local/dev where Stripe is not wired up.
+    # Fail CLOSED on the env label: `== "production"` left APP_ENV=staging
+    # (a real secret-bearing deploy) minting 1300 credits per request,
+    # uncapped and non-idempotent.
+    if not get_settings().is_dev:
         raise HTTPException(status_code=503, detail="billing_not_configured")
 
     with session_scope() as session:
@@ -279,7 +395,7 @@ async def spend(
     try:
         from app.api.stripe_billing import ensure_balance_for
 
-        ensure_balance_for(target_id, payload.amount)
+        ensure_balance_for(target_id, payload.amount, actor_id=user_id)
     except Exception:
         pass
     try:

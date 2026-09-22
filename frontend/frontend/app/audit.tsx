@@ -86,6 +86,7 @@ import { LetterFromCurb } from "../src/ui/components/LetterFromCurb";
 import { UncertaintyChip } from "../src/ui/components/UncertaintyChip";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 const ACCEPTED_FILE_TYPES = [
   ".pdf",
@@ -143,6 +144,7 @@ export default function AuditScreen() {
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
   const backendHealth = useAppStore((state) => state.backendHealth);
+  const maxUploadMb = useAppStore((state) => state.maxUploadMb);
   const backendUrlSource = useAppStore((state) => state.backendUrlSource);
   const refreshBackendUrl = useAppStore((state) => state.refreshBackendUrl);
   const setMockMode = useAppStore((state) => state.setMockMode);
@@ -465,6 +467,16 @@ export default function AuditScreen() {
       ) {
         return;
       }
+      // Fail an oversized pick immediately, with the number, instead of
+      // making the user sit through the whole upload to learn the cap. The
+      // server still enforces it; this is the courteous copy of the check.
+      if (maxUploadMb && file.size > maxUploadMb * 1024 * 1024) {
+        const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+        const msg = `That file is ${sizeMb} MB — the limit is ${maxUploadMb} MB. Try compressing it, or split it into parts and audit each one.`;
+        setError(msg);
+        toast.error("File too large", { description: msg });
+        return;
+      }
       const seq = ++analyzeSeqRef.current;
       const isStale = () => seq !== analyzeSeqRef.current;
       setBusy(true);
@@ -518,10 +530,17 @@ export default function AuditScreen() {
         const past = loadHistory();
         if (past.length >= 10) unlockAchievement("ten_audits");
         checkStreakFromHistory(past.map((h) => h.ranAt));
+        // Never let "across N pages" imply the whole file was read when the
+        // page cap truncated the analysis — say "400 of 512" out loud.
+        const analyzed = response.summary.pagesAnalyzed;
+        const pagesPhrase =
+          analyzed && analyzed < response.summary.pageCount
+            ? `the first ${analyzed} of ${response.summary.pageCount} pages`
+            : `${response.summary.pageCount} page(s)`;
         toast.success(`Audit complete: ${response.score.grade}`, {
           description: `${response.violations.length} finding${
             response.violations.length === 1 ? "" : "s"
-          } across ${response.summary.pageCount} page(s).`,
+          } across ${pagesPhrase}.`,
         });
         notify(`Audit complete: ${response.score.grade}`, file.name);
         playChime();
@@ -548,7 +567,7 @@ export default function AuditScreen() {
         if (!isStale()) setBusy(false);
       }
     },
-    [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy],
+    [client, report, toast, gateFreeScan, freeScansUsed, setFreeScansUsed, autoFixPolicy, maxUploadMb],
   );
 
   /* ---- Decisions / undo --------------------------------------------------- */
@@ -1163,6 +1182,10 @@ export default function AuditScreen() {
       ) : null}
 
       {/* === Header ============================================================ */}
+      <Seo
+        title="Free Accessibility Checker — Scan a PDF, Word or PowerPoint for 508/WCAG Issues"
+        description="Drop in a document and get every Section 508, WCAG 2.1 and PDF/UA issue in seconds, with plain-English explanations and one-click automated fixes. First scan free, no card."
+      />
       <Hero
         eyebrow="AUDIT"
         title="508 Agent Audit"
@@ -1283,7 +1306,10 @@ export default function AuditScreen() {
         {Platform.OS === "web" && !filename && !busy ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Upload a document - click to choose, or drag a file onto this area"
+            // Contains the zone's visible headline and its "Choose file" call
+            // to action verbatim, so a speech-input user can activate it by
+            // saying what they see (WCAG 2.5.3 Label in Name).
+            accessibilityLabel="Drop a PDF, Word, PowerPoint, or HTML file here — or click to choose file from your computer"
             onPress={handlePick}
             style={({ hovered, pressed }: any) => [
               styles.dropZone,
@@ -1309,7 +1335,7 @@ export default function AuditScreen() {
               <Text style={styles.dropZoneCtaText}>Choose file</Text>
             </View>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 10 }]}>
-              .pdf · .docx · .pptx · .html
+              .pdf · .docx · .pptx · .html{maxUploadMb ? ` · up to ${maxUploadMb} MB` : ""}
             </Text>
           </Pressable>
         ) : (
@@ -1434,7 +1460,9 @@ export default function AuditScreen() {
                 <Pressable accessibilityRole="button"
                   key={sample.id}
                   onPress={() => loadSample(sample)}
-                  accessibilityLabel={`Load sample document: ${sample.title}`}
+                  // Leads with the card's visible title (WCAG 2.5.3) — the
+                  // name has to contain what the user can see and say.
+                  accessibilityLabel={`${sample.title} — load this sample document`}
                   style={[
                     styles.sampleCard,
                     { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
@@ -2362,7 +2390,11 @@ function IssueCard(props: {
               <Chip key={`pdfua-${id}`} label={`PDF/UA ${id}`} tone="default" />
             ))}
             {catalog.learnMoreUrl ? (
-              <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(catalog.learnMoreUrl)}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Learn more about: ${catalog.title} (external link)`}
+                onPress={() => Linking.openURL(catalog.learnMoreUrl)}
+              >
                 <Chip label="Learn more" tone="info" />
               </Pressable>
             ) : null}

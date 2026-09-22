@@ -25,7 +25,11 @@ import { Platform } from "react-native";
 
 import { useAppStore } from "../store/useAppStore";
 
-export type HistoryKind = "purchase" | "spend" | "grant" | "refund";
+// "spend_once" is a debit the server took under its own idempotency key (the
+// credit owed on a remediated file whose download was deferred). It reads as a
+// spend everywhere in the UI; the separate kind exists so a caller-written
+// ledger row can never masquerade as one. See backend credits.SPEND_ONCE_KIND.
+export type HistoryKind = "purchase" | "spend" | "spend_once" | "grant" | "refund";
 
 export interface HistoryEntry {
   id: string;
@@ -100,6 +104,24 @@ function _writeToken(token: string | null, remember: boolean = true): void {
   }
 }
 
+/**
+ * Changing the password or email revokes every session server-side, the
+ * current one included, and the response carries a replacement token. Adopt
+ * it (keeping the "keep me signed in" choice) or the next call would 401.
+ */
+function _adoptRotatedToken(token: unknown): void {
+  if (typeof token !== "string" || !token) return;
+  let remember = true;
+  if (_isWeb()) {
+    try {
+      remember = window.sessionStorage.getItem(TOKEN_KEY) === null;
+    } catch {
+      // keep the default
+    }
+  }
+  _writeToken(token, remember);
+}
+
 function _readCache(): Account | null {
   if (!_isWeb()) return memoryAccount;
   try {
@@ -128,7 +150,11 @@ function _isHistoryEntry(x: any): x is HistoryEntry {
     x &&
     typeof x.id === "string" &&
     typeof x.at === "string" &&
-    (x.kind === "purchase" || x.kind === "spend" || x.kind === "grant" || x.kind === "refund") &&
+    (x.kind === "purchase" ||
+      x.kind === "spend" ||
+      x.kind === "spend_once" ||
+      x.kind === "grant" ||
+      x.kind === "refund") &&
     typeof x.amount === "number" &&
     typeof x.description === "string"
   );
@@ -625,11 +651,16 @@ export async function grantStarterCredits(): Promise<void> {
 export async function updateProfile(patch: {
   displayName?: string;
   email?: string;
+  /** Required by the backend to change the EMAIL when the account has a
+   *  password: a stolen session must not be able to move where future
+   *  password-reset links are sent. */
+  currentPassword?: string;
 }): Promise<Account> {
   if (!_readToken()) throw new Error("Not signed in.");
   const body: Record<string, string> = {};
   if (patch.displayName !== undefined) body.displayName = patch.displayName.trim();
   if (patch.email !== undefined) body.email = patch.email.trim().toLowerCase();
+  if (patch.currentPassword) body.currentPassword = patch.currentPassword;
   const res = await apiFetch("/auth/me", {
     method: "PATCH",
     body: JSON.stringify(body),
@@ -640,6 +671,7 @@ export async function updateProfile(patch: {
     throw new Error(typeof detail === "string" ? detail : "Update failed");
   }
   const j = await _readJson(res);
+  _adoptRotatedToken(j && j.token);
   const next = _coerceAccount(j && (j.user || j));
   if (!next) throw new Error("Update succeeded but response was malformed.");
   // Preserve cached history (PATCH /me only returns user fields)
@@ -734,7 +766,12 @@ export async function confirmPasswordReset(token: string, password: string): Pro
   return Boolean(j && j.reset);
 }
 
-export async function setPassword(password: string): Promise<Account> {
+export async function setPassword(
+  password: string,
+  /** Required when the account already has a password. Omitted only when
+   *  setting a FIRST password, where there is no credential to prove. */
+  currentPassword?: string,
+): Promise<Account> {
   if (!_readToken()) throw new Error("Not signed in.");
   // Mirror the backend's minimum (8) so users aren't bounced server-side.
   if (!password || password.length < 8) {
@@ -742,7 +779,7 @@ export async function setPassword(password: string): Promise<Account> {
   }
   const res = await apiFetch("/auth/set-password", {
     method: "POST",
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(currentPassword ? { password, currentPassword } : { password }),
   });
   if (!res.ok) {
     const j = await _readJson(res);
@@ -750,6 +787,7 @@ export async function setPassword(password: string): Promise<Account> {
     throw new Error(typeof detail === "string" ? detail : "Set password failed");
   }
   const j = await _readJson(res);
+  _adoptRotatedToken(j && j.token);
   const next = _coerceAccount(j && (j.user || j));
   if (!next) throw new Error("Set password succeeded but response was malformed.");
   // Preserve cached history (set-password only returns user fields).
@@ -780,6 +818,23 @@ export async function requestEmailVerification(): Promise<boolean> {
     console.warn("[account] requestEmailVerification failed", e);
     return false;
   }
+}
+
+/**
+ * Complete email verification from the emailed link (/verify-email?token=…).
+ *
+ * The token IS the credential, so this works signed out — the person clicking
+ * the link may be in a different browser from the one that signed up. Throws
+ * with the backend's detail ("token_expired" for a bad, expired, already-used
+ * or wrong-kind token) so the page can offer a new link.
+ */
+export async function confirmEmailVerification(token: string): Promise<boolean> {
+  const clean = (token || "").trim();
+  if (!clean) throw new Error("Missing verification token.");
+  const res = await apiFetch("/auth/verify-email?token=" + encodeURIComponent(clean));
+  if (!res.ok) await _throwDetail(res, "Could not verify this email address");
+  const j = await _readJson(res);
+  return Boolean(j && j.verified);
 }
 
 // ---------------------------------------------------------------------------

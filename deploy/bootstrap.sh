@@ -94,8 +94,8 @@ if [ "${#missing[@]}" -gt 0 ]; then
 
   Edit .env and set them to your real domains, e.g.:
       EXPO_PUBLIC_API_URL=https://api.yourdomain.com
-      PUBLIC_BASE_URL=https://yourdomain.com
-      CORS_ALLOW_ORIGINS=https://yourdomain.com
+      PUBLIC_BASE_URL=https://app.yourdomain.com
+      CORS_ALLOW_ORIGINS=https://app.yourdomain.com
 
   Stripe live keys (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_*)
   are needed for payments — fill them now or add them later and re-run.
@@ -106,6 +106,16 @@ EOF
   die "Fill the values above, then re-run."
 fi
 ok "Required public URLs are set"
+
+# CORS must allow the app's own origin. If it doesn't, every page loads but
+# every API call fails in the browser — the most confusing way a deploy breaks.
+app_origin="$(grep -E "^PUBLIC_BASE_URL=" "$ENV_FILE" | head -1 | cut -d= -f2- | sed -E 's#^(https?://[^/]+).*#\1#' || true)"
+cors="$(grep -E "^CORS_ALLOW_ORIGINS=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+case ",${cors// /}," in
+  *",${app_origin},"*) ok "CORS_ALLOW_ORIGINS includes ${app_origin}" ;;
+  *,\*,*) warn "CORS_ALLOW_ORIGINS is * — works, but any website can call your API from a visitor's browser" ;;
+  *) die "CORS_ALLOW_ORIGINS (${cors:-empty}) does not include ${app_origin} (from PUBLIC_BASE_URL). The site would load but no API call would work. Set CORS_ALLOW_ORIGINS=${app_origin} in .env, then re-run." ;;
+esac
 
 # --- 5. Build + up -----------------------------------------------------------
 say "Building images and starting the stack (this can take a few minutes)"

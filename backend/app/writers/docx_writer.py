@@ -63,6 +63,7 @@ from app.parsers.docx_parser import (
     DOCXParser,
     _IdCounter,
     _derive_sdt_label,
+    _docx_default_lang,
     _docx_theme_colors,
     _heading_level_from_style,
     _iter_note_parts,
@@ -71,6 +72,10 @@ from app.parsers.docx_parser import (
     _note_paragraphs,
     _paragraph_caption_text,
     _run_color_hex,
+    iter_body_paragraphs,
+    iter_body_tables,
+    iter_table_rows,
+    paragraph_style_name,
     strip_fake_list_prefix,
 )
 
@@ -150,6 +155,7 @@ def write_remediated_docx(
     # pair tree-node-ids to lxml elements in the source XML.
     paragraph_by_id = _index_paragraphs_by_parser_id(doc)
     image_by_rid = _index_image_doc_pr_by_rid(doc)
+    image_by_id = _index_image_doc_pr_by_parser_id(doc)
     table_rows_by_id = _index_table_rows_by_parser_id(doc)
     table_cells_by_id = _index_table_cells_by_parser_id(doc)
     tables_by_id = _index_tables_by_parser_id(doc)
@@ -164,7 +170,8 @@ def write_remediated_docx(
 
     for node in mutated_index.values():
         if isinstance(node, ImageNode):
-            _apply_image(node, image_by_rid, applied, skipped)
+            _apply_image(node, image_by_id, image_by_rid, applied, skipped,
+                         reference=reference_index.get(node.id))
         elif isinstance(node, LinkNode):
             _apply_link(node, hyperlink_by_id, applied, skipped)
         elif isinstance(node, HeadingNode):
@@ -281,8 +288,9 @@ def _index_paragraphs_by_parser_id(doc) -> Dict[str, Any]:
 
     ids = _IdCounter()
     out: Dict[str, Any] = {}
-    for paragraph in doc.paragraphs:
-        style_name = (paragraph.style.name or "") if paragraph.style else ""
+    style_cache: Dict[Any, str] = {}
+    for paragraph in iter_body_paragraphs(doc):
+        style_name = paragraph_style_name(paragraph, style_cache)
         text = (paragraph.text or "").strip()
 
         # The parser groups numbered/bulleted runs into list nodes; those do
@@ -325,6 +333,42 @@ def _index_image_doc_pr_by_rid(doc) -> Dict[str, Any]:
     return out
 
 
+def _index_image_doc_pr_by_parser_id(doc) -> Dict[str, Any]:
+    """Map ``docx-img-N`` ids to the ONE ``<wp:docPr>`` of that visual instance.
+
+    Mirrors :func:`app.parsers.docx_parser._inline_images_in_paragraph`
+    exactly — same paragraph walk (body paragraphs, in order), same
+    per-drawing iteration, same "has a blip with an rId" filter, same counter
+    — so the Nth image the parser saw is the Nth docPr here.
+
+    This exists because keying by rId is wrong: Word dedupes identical image
+    bytes to ONE rId, so a logo pasted four times is four <w:drawing>
+    instances sharing rId10, each with its OWN docPr and its own alt text.
+    The parser mints four nodes; writing one node's alt to every docPr that
+    shares its rId clobbered the other three — including alt a human author
+    had already written — and reported all four as fixed.
+    """
+    ids = _IdCounter()
+    out: Dict[str, Any] = {}
+    for paragraph in iter_body_paragraphs(doc):
+        for drawing in paragraph._p.iterfind(f".//{_DRAWING_NS}*"):  # noqa: SLF001
+            blip = drawing.find(f".//{_DRAWINGML_NS}blip")
+            if blip is None:
+                blip = drawing.find(f".//{_PIC_NS}blip")
+            if blip is None:
+                continue
+            rid = blip.get(f"{_REL_NS}embed") or blip.get(f"{_REL_NS}link")
+            if not rid:
+                continue
+            doc_pr = drawing.find(f".//{_DRAWING_NS}docPr")
+            if doc_pr is None:
+                doc_pr = drawing.find(f".//{_DRAWINGML_NS}docPr")
+            node_id = ids("docx-img")
+            if doc_pr is not None:
+                out[node_id] = doc_pr
+    return out
+
+
 def _record_doc_pr(drawing, out: Dict[str, Any]) -> None:
     blip = drawing.find(f".//{_DRAWINGML_NS}blip")
     if blip is None:
@@ -353,8 +397,8 @@ def _index_table_rows_by_parser_id(doc) -> Dict[str, Any]:
     # tables) then iterates ``doc.tables`` to assign row/cell ids.  Mirror
     # that order: we visit tables top-level, allocating cells then rows
     # exactly like ``_table_to_node`` does.
-    for table in doc.tables:
-        for row in table.rows:
+    for table in iter_body_tables(doc):
+        for row in iter_table_rows(table):
             for _ in row.cells:
                 ids("docx-cell")
             out[ids("docx-row")] = row
@@ -367,8 +411,8 @@ def _index_table_cells_by_parser_id(doc) -> Dict[str, Tuple[Any, Any]]:
 
     ids = _IdCounter()
     out: Dict[str, Tuple[Any, Any]] = {}
-    for table in doc.tables:
-        for row in table.rows:
+    for table in iter_body_tables(doc):
+        for row in iter_table_rows(table):
             for cell in row.cells:
                 out[ids("docx-cell")] = (row, cell)
             ids("docx-row")
@@ -385,8 +429,8 @@ def _index_tables_by_parser_id(doc) -> Dict[str, Any]:
 
     ids = _IdCounter()
     out: Dict[str, Any] = {}
-    for table in doc.tables:
-        for row in table.rows:
+    for table in iter_body_tables(doc):
+        for row in iter_table_rows(table):
             for _ in row.cells:
                 ids("docx-cell")
             ids("docx-row")
@@ -424,6 +468,12 @@ def _set_docx_default_lang(doc, language: str) -> None:
     if lang is None:
         lang = OxmlElement("w:lang")
         rpr.append(lang)
+    existing = (lang.get(qn("w:val")) or "").strip()
+    # Never DOWNGRADE: if the document already says "en-US" and we detected
+    # "en", the existing tag is the same language and more specific — keep it.
+    # Only overwrite when the existing value is empty or a different language.
+    if existing and existing.lower().split("-")[0] == (language or "").lower().split("-")[0] and len(existing) >= len(language or ""):
+        return
     lang.set(qn("w:val"), language)
 
 
@@ -438,7 +488,17 @@ def _apply_document_metadata(
     core = doc.core_properties
 
     language = (root.metadata.language or "").strip()
-    if language:
+    # Write the language only when it CHANGED from what the source already
+    # declares — dc:language, else the styles.xml w:lang default, the parser's
+    # own order. Re-asserting it copied a w:lang-derived "en-US" into
+    # dc:language on documents where nobody approved a language fix, so an
+    # approve-nothing download came back altered. SET_DOCUMENT_LANGUAGE only
+    # runs when the source declares none, so a real fix always differs.
+    try:
+        source_language = (getattr(core, "language", None) or "").strip() or (_docx_default_lang(doc) or "")
+    except Exception:  # pragma: no cover - defensive
+        source_language = ""
+    if language and language != source_language.strip():
         try:
             core.language = language
             applied.append(
@@ -554,42 +614,62 @@ def _apply_form_field_labels(
 
 def _apply_image(
     image: ImageNode,
+    image_by_id: Dict[str, Any],
     image_by_rid: Dict[str, Any],
     applied: List[Dict[str, Any]],
     skipped: List[Dict[str, Any]],
+    reference: Optional[ImageNode] = None,
 ) -> None:
-    """Apply alt text / decorative-flag mutations to an image's docPr.
+    """Apply alt text / decorative-flag mutations to ONE image instance's docPr.
 
-    Edge case: an image referenced from a different rId (e.g. the parser
-    assigned one but the source has been edited since) cannot be paired and
-    will be skipped.  Headers/footers also live on a different part and are
-    out of scope for this writer.
+    Targets the node's own visual instance (``image_by_id``), never every
+    docPr sharing its rId — Word dedupes identical bytes to one rId, so a
+    pasted logo is many instances with one rId and each has its own alt.
+
+    Also a no-op for nodes the pipeline did not change: the writer is handed
+    every ImageNode in the tree, and re-writing an unchanged node's alt onto
+    its docPr is harmless for its OWN docPr but was how sibling instances got
+    clobbered under the old rId keying. With ``reference`` (the pre-mutation
+    node) available we skip untouched nodes outright, so a human author's
+    existing description is never so much as rewritten.
     """
+    if reference is not None:
+        ref_alt = (reference.alt_text or "").strip()
+        ref_dec = bool(reference.is_decorative)
+        cur_alt = (image.alt_text or "").strip()
+        cur_dec = bool(image.is_decorative)
+        if ref_alt == cur_alt and ref_dec == cur_dec:
+            return  # untouched — leave the author's docPr exactly as it was
 
-    rid = (image.metadata.properties or {}).get("image_rid")
-    if not rid:
-        skipped.append({"target_id": image.id, "reason": "image_rid_missing_on_node"})
-        return
-    doc_prs = image_by_rid.get(rid)
-    if not doc_prs:
-        skipped.append({"target_id": image.id, "reason": f"image_rid_not_found_in_source:{rid}"})
-        return
-    if not isinstance(doc_prs, list):  # back-compat if ever a single element
-        doc_prs = [doc_prs]
+    doc_pr = image_by_id.get(image.id)
+    if doc_pr is None:
+        # Fall back to the rId index ONLY when there is exactly one instance —
+        # then the two keyings agree and there is nothing to clobber.
+        rid = (image.metadata.properties or {}).get("image_rid")
+        candidates = image_by_rid.get(rid) if rid else None
+        if isinstance(candidates, list) and len(candidates) == 1:
+            doc_pr = candidates[0]
+        else:
+            skipped.append({
+                "target_id": image.id,
+                "reason": "image_instance_not_found_in_source" if not candidates
+                          else f"image_rid_shared_by_{len(candidates)}_instances_and_node_unmatched",
+            })
+            return
+    rid = (image.metadata.properties or {}).get("image_rid") or "?"
 
     if image.is_decorative:
-        # Decorative: descr must be empty AND hidden=1 on every instance.
-        for doc_pr in doc_prs:
-            doc_pr.set("descr", "")
-            if doc_pr.get("title"):
-                doc_pr.set("title", "")
-            if doc_pr.get("hidden") not in {"1", "true"}:
-                doc_pr.set("hidden", "1")
+        # Decorative: descr must be empty AND hidden=1 on THIS instance.
+        doc_pr.set("descr", "")
+        if doc_pr.get("title"):
+            doc_pr.set("title", "")
+        if doc_pr.get("hidden") not in {"1", "true"}:
+            doc_pr.set("hidden", "1")
         applied.append(
             {
                 "kind": "image_decorative",
                 "target_id": image.id,
-                "summary": f"docPr[@rid={rid}] x{len(doc_prs)} descr='' hidden=1",
+                "summary": f"docPr[{image.id} rid={rid}] descr='' hidden=1",
             }
         )
         return
@@ -601,16 +681,14 @@ def _apply_image(
         skipped.append({"target_id": image.id, "reason": "alt_text_empty_and_not_decorative"})
         return
 
-    # Write the alt text to EVERY visual instance of this image.
-    for doc_pr in doc_prs:
-        doc_pr.set("descr", alt_text)
-        if doc_pr.get("hidden") in {"1", "true"}:
-            doc_pr.set("hidden", "0")
+    doc_pr.set("descr", alt_text)
+    if doc_pr.get("hidden") in {"1", "true"}:
+        doc_pr.set("hidden", "0")
     applied.append(
         {
             "kind": "image_alt_text",
             "target_id": image.id,
-            "summary": f"docPr[@rid={rid}] x{len(doc_prs)} descr={alt_text!r}",
+            "summary": f"docPr[{image.id} rid={rid}] descr={alt_text!r}",
         }
     )
 
@@ -633,8 +711,9 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
             n += 1
             out[f"docx-link-{n}"] = el
 
-    for para in doc.paragraphs:
-        style_name = (para.style.name or "") if para.style else ""
+    style_cache: Dict[Any, str] = {}
+    for para in iter_body_paragraphs(doc):
+        style_name = paragraph_style_name(para, style_cache)
         if _heading_level_from_style(style_name):
             continue  # parser's heading branch short-circuits before links
         pPr = para._p.find(qn("w:pPr"))
@@ -642,9 +721,9 @@ def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
             continue  # list paragraphs likewise never reach link emission
         take(para._p)
 
-    for table in doc.tables:
+    for table in iter_body_tables(doc):
         seen_tc: set = set()
-        for row in table.rows:
+        for row in iter_table_rows(table):
             for cell in row.cells:
                 tc_key = id(cell._tc)
                 if tc_key in seen_tc:

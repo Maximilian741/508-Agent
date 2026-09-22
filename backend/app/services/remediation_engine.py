@@ -26,6 +26,8 @@ engine.
 
 from __future__ import annotations
 
+from collections import deque
+
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional, Sequence
 
@@ -271,9 +273,10 @@ def _iter_with_path(tree: AccessibilityTree):
     The path is the ordered list of ancestor ids leading to the node.
     """
 
-    stack = [(tree.root, [tree.root.id])]
+    # deque: list.pop(0) is O(n), which made this walk O(n^2) on flat bodies.
+    stack = deque([(tree.root, [tree.root.id])])
     while stack:
-        node, path = stack.pop(0)
+        node, path = stack.popleft()
         yield node, path
         for child in node.children:
             stack.append((child, path + [child.id]))

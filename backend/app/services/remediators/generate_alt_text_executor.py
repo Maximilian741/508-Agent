@@ -19,6 +19,7 @@ from app.models.accessibility import (
     ImageNode,
     iter_reading_order,
 )
+from app.analyzers.image_analyzer import is_nondescriptive_alt
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
@@ -113,6 +114,30 @@ class GenerateAltTextExecutor(RemediationExecutor):
                 target_node_id=plan.target_node_id,
                 status=ExecutionStatus.SKIPPED,
                 notes="Semantic provider returned empty alt text; no changes applied.",
+            )
+        # Never write alt text that our OWN analyzer would flag as
+        # non-descriptive. The heuristic provider — the fallback when no AI key
+        # is configured, or when the per-job AI cost cap trips partway through
+        # a large document — emits "Image page-3-img2 shown in page 3." when it
+        # has no caption to work from. That names where the image is, not what
+        # it shows; shipping it as a fix and crediting it is the overclaim the
+        # honesty invariant forbids. Skip with a reason the UI can show, so the
+        # image stays in the manual-review queue instead of looking done.
+        if is_nondescriptive_alt(suggestion):
+            capped = bool(getattr(self._client, "cost_capped", False))
+            why = (
+                "the per-job AI budget was exhausted before this image"
+                if capped
+                else "no AI provider is configured and there is no nearby caption to derive it from"
+            )
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    f"Could not generate a real description ({why}); refusing to write the "
+                    f"placeholder {suggestion!r}. Left for manual review."
+                ),
             )
 
         replaced = existing_alt

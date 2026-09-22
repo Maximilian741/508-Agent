@@ -20,12 +20,17 @@ import {
 } from "react-native";
 
 import { useTheme } from "../useTheme";
+import { linkProps } from "./linkProps";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
 
 interface ButtonProps {
   title: string;
-  onPress: () => void;
+  /** Optional when `href` is given (then it runs just before navigating). */
+  onPress?: () => void;
+  /** Navigate here. Renders a real <a href> on web so crawlers follow it and
+   *  "open in new tab" works — see linkProps. */
+  href?: string;
   variant?: Variant;
   loading?: boolean;
   disabled?: boolean;
@@ -38,6 +43,7 @@ interface ButtonProps {
 export function Button({
   title,
   onPress,
+  href,
   variant = "primary",
   loading = false,
   disabled = false,
@@ -52,6 +58,7 @@ export function Button({
   const [hovered, setHovered] = useState(false);
   const isDark = theme.colors.bg === "#150E08";
   const filled = variant === "primary" || variant === "danger";
+  const nav = href ? linkProps(href, onPress) : null;
 
   const hoverShadow =
     Platform.OS === "web" && hovered && !isDisabled && filled
@@ -60,11 +67,12 @@ export function Button({
 
   return (
     <Pressable
-      accessibilityRole="button"
+      {...(nav?.href ? ({ href: nav.href } as any) : null)}
+      accessibilityRole={nav ? "link" : "button"}
       accessibilityLabel={accessibilityLabel ?? title}
       accessibilityHint={accessibilityHint}
       accessibilityState={{ disabled: isDisabled, busy: loading }}
-      onPress={onPress}
+      onPress={nav ? nav.onPress : onPress}
       disabled={isDisabled}
       // @ts-ignore - RN-Web hover events
       onHoverIn={() => setHovered(true)}
@@ -126,10 +134,10 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       ...theme.typography.body,
       color: theme.colors.text,
     },
-    text_primary: { color: "#FFFFFF", fontWeight: "700" },
+    text_primary: { color: theme.colors.onAccent, fontWeight: "700" },
     text_secondary: { color: theme.colors.text, fontWeight: "700" },
     text_ghost: { color: theme.colors.text, fontWeight: "700" },
-    text_danger: { color: "#FFFFFF", fontWeight: "700" },
+    text_danger: { color: theme.colors.onDanger, fontWeight: "700" },
     hovered_primary: { transform: [{ translateY: -1 }] },
     hovered_secondary: { borderColor: theme.colors.accent, transform: [{ translateY: -1 }] },
     hovered_ghost: { borderColor: theme.colors.accent, backgroundColor: theme.colors.accent + "0F" },

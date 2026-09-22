@@ -67,10 +67,17 @@ class ManualReviewRow(Base):
     __tablename__ = "manual_review"
     __table_args__ = (
         Index("idx_manual_review_doc_id", "doc_id"),
+        Index("idx_manual_review_owner", "owner_id"),
     )
 
     id: Mapped[str] = mapped_column(String(160), primary_key=True)
     doc_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # WHO queued this item. doc_id comes from the uploaded filename, so it is
+    # caller-controlled and can never decide whose queue a row belongs to —
+    # every doc-scoped read filters on owner_id as well. NULL means "written
+    # before this column existed"; those rows stay visible to the document's
+    # owner (who is the only caller that can reach them anyway).
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     item_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -150,19 +157,27 @@ class UserRow(Base):
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "admin" is set only by app.devtools.bootstrap_admin and reset on email
+    # change; it is one of three conditions (see app.api.deps.is_admin_user).
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
     credits_balance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Optional password hash in "salt:hash" hex format (scrypt). NULL means
     # legacy/passwordless user; sign-in still works for them by email alone.
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Set when the user has clicked the verify-email link.
+    # Set when the user has clicked the verify-email link. Cleared whenever the
+    # email changes: it always refers to the CURRENT address.
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Session revocation counter, minted into every session JWT as "ver".
+    # Bumped on sign-out, password set/reset and email change; a token minted
+    # at an older version is rejected (see app.security.sessions).
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
 
 class CreditLedgerRow(Base):
     __tablename__ = "credit_ledger"
     __table_args__ = (
         Index("idx_ledger_user_at", "user_id", "at"),
+        Index("idx_ledger_stripe_ref", "stripe_ref"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -172,6 +187,12 @@ class CreditLedgerRow(Base):
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     related_doc_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The Stripe object whose money paid for this grant — a PaymentIntent id
+    # for a credit pack, an Invoice id for a subscription period. Refund and
+    # dispute events name the PaymentIntent/Invoice, not our session id, so
+    # this is what lets a reversal find the rows it has to claw back. NULL for
+    # anything not bought with money (starter grants, dev mock purchases).
+    stripe_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class EmailVerifyTokenRow(Base):
@@ -183,6 +204,25 @@ class EmailVerifyTokenRow(Base):
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class StarterGrantRow(Base):
+    """One starter-credit grant per real mailbox (see ``auth.grant_starter``).
+
+    Keyed by the SHA-256 of the canonical mailbox — ``alice+1@gmail.com`` and
+    ``a.lice@gmail.com`` are one inbox — so a mailbox can't be re-granted by
+    subaddressing, by changing the account email, or by deleting the account
+    and registering again. Hashed so the record keeps no address.
+    """
+
+    __tablename__ = "starter_grants"
+    __table_args__ = (
+        Index("idx_starter_grants_user", "user_id"),
+    )
+
+    mailbox_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class SubscriptionRow(Base):
@@ -233,7 +273,9 @@ class ApiKeyRow(Base):
     Only a SHA-256 hash of the key is stored — the plaintext is shown once at
     creation and is unrecoverable thereafter. ``key_prefix`` is a short,
     non-secret slice ("ak_live_ab12…") kept only so the owner can recognise a
-    key in the list. A revoked key has ``revoked_at`` set and is rejected.
+    key in the list. A revoked key has ``revoked_at`` set and is rejected;
+    ``revoked_reason`` says why when we revoked it for the owner (account
+    recovery), and is NULL when the owner revoked it themselves.
     """
 
     __tablename__ = "api_keys"
@@ -250,6 +292,9 @@ class ApiKeyRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "password_reset" / "password_changed" / "admin_bootstrap"; NULL when the
+    # owner revoked it themselves.
+    revoked_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class TeamRow(Base):
@@ -338,3 +383,67 @@ class AnalysisResultRow(Base):
     grade: Mapped[str] = mapped_column(String(8), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MonitoredSiteRow(Base):
+    """A URL the user asked us to re-check on a schedule.
+
+    MULTI-WORKER SAFETY: the backend runs ``uvicorn --workers 2``, so every
+    worker has its own event loop and would fire the same due monitor
+    simultaneously — duplicate crawls of a customer's site and duplicate alert
+    emails. ``claimed_by``/``claimed_at`` implement a lease: a worker takes a
+    monitor with a single atomic conditional UPDATE and only proceeds if it won
+    the row. A lease older than the stale cutoff is reclaimable, so a crashed
+    worker can't strand a monitor forever.
+    """
+
+    __tablename__ = "monitored_sites"
+    __table_args__ = (
+        Index("idx_monitor_user", "user_id"),
+        Index("idx_monitor_due", "enabled", "next_run_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # "daily" | "weekly"
+    frequency: Mapped[str] = mapped_column(String(16), nullable=False, default="weekly")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notify_email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_issue_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_status: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Lease fields — see the class docstring.
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ScanHistoryRow(Base):
+    """One URL scan, kept so the NEXT scan can report what changed.
+
+    Stores the set of issue FINGERPRINTS (content-derived, not node ids — node
+    ids are ordinal counters that shift whenever the page changes) so a re-scan
+    can honestly say "3 new, 5 fixed" instead of a wall of phantom regressions.
+    Only the fingerprints and counts are kept — never the page's content.
+    """
+
+    __tablename__ = "scan_history"
+    __table_args__ = (
+        Index("idx_scan_history_user_url", "user_id", "url_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Normalized URL (scheme+host+path, no query/fragment) — the identity a
+    # re-scan is matched on.
+    url_key: Mapped[str] = mapped_column(String(600), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    issue_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    grade: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    # JSON array of fingerprint strings.
+    fingerprints: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

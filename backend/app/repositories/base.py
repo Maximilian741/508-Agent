@@ -54,7 +54,12 @@ class Repository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_manual_review_items(self, doc_id: str, items: List[Dict[str, object]]) -> None:
+    def add_manual_review_items(
+        self,
+        doc_id: str,
+        items: List[Dict[str, object]],
+        owner_id: Optional[str] = None,
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod

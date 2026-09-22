@@ -14,7 +14,6 @@
 import { ScrollViewStyleReset } from "expo-router/html";
 import { type PropsWithChildren } from "react";
 
-const TITLE = "508 Agent — Automated document accessibility & remediation";
 const DESCRIPTION =
   "Automatically find and fix WCAG 2.1, Section 508 & PDF/UA accessibility issues in PDF, Word, PowerPoint, and HTML files — including AI-written alt text — and get a conformance report. First audits free.";
 // Brand primary (light theme `accent`, burnt-orange ember).
@@ -28,20 +27,42 @@ export default function Root({ children }: PropsWithChildren) {
         <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
         <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
 
-        <title>{TITLE}</title>
-        <meta name="description" content={DESCRIPTION} />
+        {/* title / description / og:title / og:description are NOT set here.
+            They come from the <Seo> component: each public route sets its own
+            (app/landing.tsx etc.) and app/_layout.tsx provides the site-wide
+            default for everything else. Setting them here TOO shipped every
+            page with two <meta name="description"> tags — the route one and
+            this one — and whichever a crawler picked was luck. Helmet-managed
+            tags dedupe against each other; a raw tag here does not. */}
         <meta name="theme-color" content={THEME_COLOR} />
 
-        {/* Open Graph — Slack / LinkedIn / Facebook share cards */}
+        {/* Open Graph / Twitter statics that are genuinely site-wide */}
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="508 Agent" />
-        <meta property="og:title" content={TITLE} />
-        <meta property="og:description" content={DESCRIPTION} />
-
-        {/* Twitter / X */}
         <meta name="twitter:card" content="summary" />
-        <meta name="twitter:title" content={TITLE} />
-        <meta name="twitter:description" content={DESCRIPTION} />
+
+        {/* schema.org SoftwareApplication — static so crawlers that don't run
+            JS still get it. Site-wide by design (it describes the product,
+            not the page); the FAQ page adds its FAQPage data at runtime. */}
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "SoftwareApplication",
+              name: "508 Agent",
+              applicationCategory: "BusinessApplication",
+              operatingSystem: "Web",
+              description: DESCRIPTION,
+              offers: {
+                "@type": "Offer",
+                price: "0",
+                priceCurrency: "USD",
+                description: "Free accessibility scan; pay only to download fixed files.",
+              },
+            }),
+          }}
+        />
 
         {/*
           Disable body scrolling on web so ScrollView components work as

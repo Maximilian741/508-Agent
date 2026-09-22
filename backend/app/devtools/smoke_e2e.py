@@ -112,7 +112,8 @@ def main() -> int:
     r = client.post(
         "/auth/set-password",
         headers=bearer,
-        json={"password": "hunter2!"},
+        # Replacing an existing password proves you know it.
+        json={"password": "hunter2!", "currentPassword": "starterpass1"},
     )
     assert r.status_code == 200, r.text
     sp = r.json()

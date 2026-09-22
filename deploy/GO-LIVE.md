@@ -44,13 +44,29 @@ bash deploy/bootstrap.sh
 ```
 The values to fill in `.env` (the script generates secrets + starts everything):
 - `EXPO_PUBLIC_API_URL=https://api.yourdomain.com`
-- `PUBLIC_BASE_URL=https://yourdomain.com`
-- `CORS_ALLOW_ORIGINS=https://yourdomain.com`
-- `ADMIN_EMAILS=you@yourdomain.com`  *(so you can reach `/admin`)*
+- `PUBLIC_BASE_URL=https://app.yourdomain.com`  *(the app's address from step 1 — Stripe
+  receipts, password resets, invites and certificate links all point here)*
+- `CORS_ALLOW_ORIGINS=https://app.yourdomain.com`  *(must match exactly, or every page
+  loads but can't talk to the API)*
+- `ADMIN_EMAILS=you@yourdomain.com`  *(the only address allowed into `/admin`. Listing it grants
+  nothing by itself, and neither does signing up with it: step 4 unlocks it.)*
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, the 7 `STRIPE_PRICE_*`
-- `SMTP_*` (from your email sender)
+- `SMTP_*` (from your email sender) — **required, not optional.** Verification
+  email is the only thing standing between the 25 free starter credits and an
+  unbounded farm of invented addresses, so outside `APP_ENV=development` the
+  grant refuses anyone with an unverified address. Leave `SMTP_HOST` empty and
+  nobody can verify, so nobody gets their starter credits (and monitoring
+  alerts go nowhere). The backend logs an error at boot if it's missing.
 - `CF_TUNNEL_TOKEN` (from step 1) — then uncomment the `cloudflared`
   service block in `docker-compose.yml` and run `docker compose up -d cloudflared`
+- `TRUST_PROXY_HEADERS=true` — **only** because this deployment reaches the API
+  exclusively through the Cloudflare Tunnel. The per-IP brute-force limit on
+  `/auth` keys on `CF-Connecting-IP` (which Cloudflare overwrites) or the last
+  `X-Forwarded-For` hop (which your own proxy appends). If you ever publish
+  port 8000, or put anything in front of the API that does **not** rewrite
+  those headers, set this to `false` — otherwise an attacker sends the header
+  themselves, gets a fresh rate-limit bucket per request, and password guessing
+  against `/auth/sign-in` becomes unlimited. The default is `false`.
 
 `bootstrap.sh` auto-generates `APP_SECRET` and `POSTGRES_PASSWORD`, builds the
 images, runs DB migrations on boot, and waits until the backend is healthy.
@@ -60,18 +76,49 @@ images, runs DB migrations on boot, and waits until the backend is healthy.
 docker compose exec -T backend python -m app.devtools.verify_live_site \
   --api-url https://api.yourdomain.com
 ```
-Expect `ALL CHECKS PASSED`. Then open `https://yourdomain.com`, sign up, and run
-the in-app **System check** (Dashboard → System check) — it should be all green.
+Expect `ALL CHECKS PASSED`. Then make yourself admin, on the server (no `-T`: it
+prompts for a password twice):
+```bash
+docker compose exec backend python -m app.devtools.bootstrap_admin you@yourdomain.com
+```
+Use the exact address from `ADMIN_EMAILS`. It creates that account with the password you
+type, or takes it over if it already exists: the password is replaced, the email is marked
+verified, the account is made admin, and every other session on it is signed out. So if anyone
+registered your address before you, they are locked out. It works with or without SMTP. Then open
+`https://app.yourdomain.com`, sign in with that address and password, open
+`https://app.yourdomain.com/admin`, and run the in-app **System check** (Dashboard → System
+check). It should be all green.
 
-**5. Money test:** buy a Starter pack with Stripe **test** card
-`4242 4242 4242 4242` (in Stripe test mode), confirm your credit balance
-updates, then flip Stripe to live mode.
+That command is the **only** way to become admin, and it only accepts an address listed in
+`ADMIN_EMAILS`. Nothing reachable from the web grants admin: not signing up with a listed
+address, not changing an account's email to one, not clicking a verify link. Changing your own
+email later removes admin; run the command again for a listed address to get it back. To revoke
+admin, take the address out of `ADMIN_EMAILS` and restart the backend.
+
+People will also type the bare `yourdomain.com`. In Cloudflare → Rules →
+Redirect Rules, add one: *hostname equals `yourdomain.com`* → dynamic redirect to
+`concat("https://app.yourdomain.com", http.request.uri.path)`, status 301.
+
+**5. Money test:** work through **[`PAYMENTS-CHECKLIST.md`](./PAYMENTS-CHECKLIST.md)**
+top to bottom — it is the literal click-by-click bring-up: test-mode products,
+the webhook (the step everyone gets wrong), the `4242 4242 4242 4242` purchase,
+replay-safety check, subscription + cancel, portal, then the flip to live and
+one real refunded purchase. It also lists what is already machine-verified so
+you don't re-test it, and a symptom→fix table for when something is red.
 
 You're live.
 
 ---
 
 ## Optional, after launch
+- **Get into Google (do this launch week):** every page already ships its own
+  title, description, structured data, robots.txt and sitemap. What only you
+  can do: go to https://search.google.com/search-console, add your domain as
+  a property (verify via the DNS record Cloudflare makes this one click),
+  then Sitemaps → submit `https://app.yourdomain.com/sitemap.xml`. Indexing
+  starts in days; ranking for competitive queries ("pdf accessibility
+  checker", "508 converter") builds over weeks and is helped most by other
+  sites linking to you — the free scanner pages are the thing people link to.
 - **OCR for scanned PDFs:** on the server, `apt-get install -y tesseract-ocr`
   and set `OCR_ENABLED=true` (the admin dashboard will show "OCR: Active").
 - **Offsite storage:** set the `S3_*` / `AWS_*` vars to a Cloudflare R2 bucket.

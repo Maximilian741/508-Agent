@@ -2,8 +2,6 @@ import { create } from "zustand";
 
 import {
     ApiClient,
-    ApplyFixesResponse,
-    FinalizeResponse,
     DocumentDiffResponse,
     DocumentSummary,
     DocumentIssue,
@@ -17,7 +15,6 @@ import {
     ManualReviewItem,
     PolicyDetail,
     PolicySummary,
-    RemediateRequest,
     ScanRequest,
     ScanResponse,
     TagTreeResponse,
@@ -46,6 +43,8 @@ interface AppState {
     backendUrlWarning: string | null;
     backendHealth: "unknown" | "ok" | "error";
     backendHealthMessage: string | null;
+    /** Upload cap the backend advertises on /healthz, in MB. null until probed. */
+    maxUploadMb: number | null;
     themeMode: "system" | "light" | "dark";
     mockMode: boolean;
     selectedDocument: DocumentPayload | null;
@@ -64,11 +63,8 @@ interface AppState {
     selectedPolicyId: string | null;
     jobScoresByJobId: Record<string, JobScorePass[]>;
     evidenceBundlesByDocId: Record<string, EvidenceBundleSummary[]>;
-    finalizedPathByDocId: Record<string, string>;
-    readyToFinalizeByDocId: Record<string, boolean>;
     isExportingBundle: boolean;
     exportError?: string;
-    isFinalizing: boolean;
     isScanning: boolean;
     isUploading: boolean;
     /**
@@ -113,12 +109,9 @@ interface AppState {
         docId?: string,
     ) => Promise<RunResult<ManualReviewItem>>;
     runScan: (request: ScanRequest) => Promise<RunResult<ScanResponse>>;
-    runRemediate: (request: RemediateRequest) => Promise<RunResult<ExecutionResult[]>>;
     uploadDocument: (file: File) => Promise<RunResult<UploadResponse>>;
     runDocumentScan: (docId: string) => Promise<RunResult<{ jobId: string }>>;
-    applyDocumentFixes: (docId: string) => Promise<RunResult<ApplyFixesResponse>>;
     fetchDocumentIssues: (docId: string) => Promise<RunResult<DocumentIssue[]>>;
-    finalizeDocument: (docId: string) => Promise<RunResult<FinalizeResponse>>;
     fetchDocumentDiff: (docId: string) => Promise<RunResult<DocumentDiffResponse>>;
     fetchDocumentSummary: (docId: string) => Promise<RunResult<DocumentSummary>>;
     fetchTagTree: (docId: string) => Promise<RunResult<TagTreeResponse>>;
@@ -259,14 +252,25 @@ function storeAutoFixPolicy(value: "conservative" | "balanced" | "aggressive") {
     }
 }
 
-async function probeBackend(baseUrl: string): Promise<{ ok: boolean; message?: string; resolvedUrl?: string }> {
+async function probeBackend(
+    baseUrl: string,
+): Promise<{ ok: boolean; message?: string; resolvedUrl?: string; maxUploadMb?: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
     try {
         const response = await fetch(`${baseUrl}/healthz`, { signal: controller.signal });
         clearTimeout(timeout);
         if (response.ok) {
-            return { ok: true, resolvedUrl: baseUrl };
+            // The backend advertises its upload cap here so the UI can state
+            // it up front rather than letting the user find out via a 413.
+            let maxUploadMb: number | undefined;
+            try {
+                const body = await response.json();
+                if (typeof body?.maxUploadMb === "number") maxUploadMb = body.maxUploadMb;
+            } catch {
+                /* older backends return no body worth reading */
+            }
+            return { ok: true, resolvedUrl: baseUrl, maxUploadMb };
         }
         return { ok: false, message: "Backend responded but health check failed." };
     } catch (error) {
@@ -305,6 +309,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     backendUrlWarning: resolved.warning ?? null,
     backendHealth: "unknown",
     backendHealthMessage: null,
+    maxUploadMb: null,
     themeMode: "system",
     mockMode: false,
     selectedDocument: null,
@@ -323,11 +328,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     selectedPolicyId: readStoredSelectedPolicyId(),
     jobScoresByJobId: {},
     evidenceBundlesByDocId: {},
-    finalizedPathByDocId: {},
-    readyToFinalizeByDocId: {},
     isExportingBundle: false,
     exportError: undefined,
-    isFinalizing: false,
     isScanning: false,
     isUploading: false,
     freeScansUsed: readStoredFreeScansUsed(),
@@ -365,6 +367,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         backendHealth: "ok",
                         backendHealthMessage: null,
                         backendUrlWarning: null,
+                        maxUploadMb: fallback.maxUploadMb ?? null,
                     });
                     return;
                 }
@@ -374,6 +377,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             backendHealth: primary.ok ? "ok" : "error",
             backendHealthMessage: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             backendUrlWarning: primary.ok ? null : primary.message ?? "Backend is unreachable.",
+            maxUploadMb: primary.ok ? primary.maxUploadMb ?? null : null,
         });
     },
     setBackendUrlInfo: (url, source, warning) =>
@@ -401,6 +405,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         backendHealth: "ok",
                         backendHealthMessage: null,
                         backendUrlWarning: null,
+                        maxUploadMb: fallback.maxUploadMb ?? null,
                     });
                     return;
                 }
@@ -410,6 +415,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             backendHealth: primary.ok ? "ok" : "error",
             backendHealthMessage: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             backendUrlWarning: primary.ok ? null : info.warning ?? primary.message ?? "Backend is unreachable.",
+            maxUploadMb: primary.ok ? primary.maxUploadMb ?? null : null,
         });
     },
     setMockMode: (value) => set({ mockMode: value }),
@@ -444,17 +450,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         try {
             const item = await client.updateManualReview(itemId, payload);
             const refreshed = await client.manualReview(docId);
-            const resolvedDocId = (item.docId || docId || "").toString();
-            set((state) => ({
+            set({
                 manualReviewQueue: refreshed,
                 manualReviewLastFetched: new Date().toISOString(),
-                readyToFinalizeByDocId: resolvedDocId
-                    ? {
-                          ...state.readyToFinalizeByDocId,
-                          [resolvedDocId]: Boolean(item.readyToFinalize),
-                      }
-                    : state.readyToFinalizeByDocId,
-            }));
+            });
             return { ok: true, data: item };
         } catch (error) {
             return { ok: false, error: (error as Error).message };
@@ -472,15 +471,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: false, error: (error as Error).message };
         }
     },
-    runRemediate: async (request) => {
-        const client = getClient(get());
-        try {
-            const response = await client.remediate(request);
-            return { ok: true, results: response.results };
-        } catch (error) {
-            return { ok: false, error: (error as Error).message };
-        }
-    },
     uploadDocument: async (file) => {
         const client = getClient(get());
         set({ isUploading: true });
@@ -495,8 +485,6 @@ export const useAppStore = create<AppState>((set, get) => ({
                 tagTree: null,
                 jobScoresByJobId: {},
                 evidenceBundlesByDocId: {},
-                finalizedPathByDocId: {},
-                readyToFinalizeByDocId: {},
                 isUploading: false,
             });
             return { ok: true, data: response };
@@ -599,34 +587,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { ok: false, error: (error as Error).message };
         }
     },
-    applyDocumentFixes: async (docId) => {
-        const client = getClient(get());
-        try {
-            const response = await client.applyFixes(docId);
-            const resolvedFixedDocId = response.fixedDocId ?? response.report?.fixedDocId ?? response.docId;
-            set({ fixedDocId: resolvedFixedDocId, fixReport: response.report ?? null });
-            if (response.report?.after?.issueCount !== undefined) {
-                set({ documentIssues: response.report.delta?.remaining ?? [] });
-            }
-            const currentJobId = get().scanJob?.jobId;
-            if (currentJobId) {
-                try {
-                    const scorePayload = await client.getJobScore(currentJobId);
-                    set((state) => ({
-                        jobScoresByJobId: {
-                            ...state.jobScoresByJobId,
-                            [currentJobId]: scorePayload.scores ?? [],
-                        },
-                    }));
-                } catch (error) {
-                    // score can be unavailable until backend updates
-                }
-            }
-            return { ok: true, data: response };
-        } catch (error) {
-            return { ok: false, error: (error as Error).message };
-        }
-    },
     fetchDocumentIssues: async (docId) => {
         const client = getClient(get());
         try {
@@ -634,63 +594,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             set({ documentIssues: issues });
             return { ok: true, data: issues };
         } catch (error) {
-            return { ok: false, error: (error as Error).message };
-        }
-    },
-    finalizeDocument: async (docId) => {
-        const client = getClient(get());
-        set({ isFinalizing: true });
-        try {
-            const response = await client.finalizeDocument(docId);
-            const finalizedPath = response.finalizedPath;
-            if (finalizedPath) {
-                set((state) => ({
-                    finalizedPathByDocId: {
-                        ...state.finalizedPathByDocId,
-                        [docId]: finalizedPath,
-                    },
-                }));
-            }
-            const [fixRes, issuesRes, manualRes, bundlesRes] = await Promise.all([
-                client.getFixReport(docId).catch(() => null),
-                client.getIssues(docId).catch(() => [] as DocumentIssue[]),
-                client.manualReview(docId).catch(() => []),
-                client.listEvidenceBundlesForDoc(docId).catch(() => []),
-            ]);
-            if (fixRes) {
-                set({ fixReport: fixRes });
-            }
-            set((state) => ({
-                documentIssues: issuesRes,
-                manualReviewQueue: manualRes,
-                manualReviewLastFetched: new Date().toISOString(),
-                evidenceBundlesByDocId: {
-                    ...state.evidenceBundlesByDocId,
-                    [docId]: bundlesRes,
-                },
-                readyToFinalizeByDocId: {
-                    ...state.readyToFinalizeByDocId,
-                    [docId]: false,
-                },
-            }));
-            const scoreJobId = response.jobId || get().scanJob?.jobId;
-            if (scoreJobId) {
-                try {
-                    const scorePayload = await client.getJobScore(scoreJobId);
-                    set((state) => ({
-                        jobScoresByJobId: {
-                            ...state.jobScoresByJobId,
-                            [scoreJobId]: scorePayload.scores ?? [],
-                        },
-                    }));
-                } catch {
-                    // non-blocking
-                }
-            }
-            set({ isFinalizing: false });
-            return { ok: true, data: response };
-        } catch (error) {
-            set({ isFinalizing: false });
             return { ok: false, error: (error as Error).message };
         }
     },

@@ -16,6 +16,13 @@ from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 
+# Below this the detector is guessing. The heuristic provider returns 0.45-0.55
+# for a clear Latin-language sample and 0.90 for a clear non-Latin script; the
+# AI providers report their own confidence. 0.4 keeps every clear case and
+# rejects the "found two English stop-words in a French document" case.
+_MIN_LANGUAGE_CONFIDENCE = 0.4
+
+
 class SetDocumentLanguageExecutor(RemediationExecutor):
     """Detect or default the document language and persist it on metadata."""
 
@@ -55,8 +62,25 @@ class SetDocumentLanguageExecutor(RemediationExecutor):
         sample = _collect_sample_text(target)
         result = self._client.detect_document_language(sample=sample)
         language = (result.text or "").strip().lower()
-        if not language:
-            language = "en"
+        # No default, and a confidence floor. This used to fall back to "en"
+        # whenever the detector had nothing — so an all-Japanese PDF got
+        # /Lang en written into it at heuristic confidence 0.25, reported as
+        # SUCCESS, and charged. A wrong language tag is worse than none: a
+        # screen reader picks its pronunciation rules from it. Below the bar
+        # the honest answer is "a human has to set this", so we SKIP and say
+        # so; the document keeps its DOCUMENT_LANGUAGE_MISSING finding.
+        if not language or result.confidence < _MIN_LANGUAGE_CONFIDENCE:
+            shown = f"{language!r} at {result.confidence:.2f}" if language else "no guess"
+            return _result(
+                action_code,
+                plan,
+                ExecutionStatus.SKIPPED,
+                (
+                    f"Could not determine the document language confidently "
+                    f"({shown} via {result.provider}); refusing to write a guess. "
+                    "Set the language manually."
+                ),
+            )
         target.metadata.language = language
         if target.metadata.properties is None:
             target.metadata.properties = {}

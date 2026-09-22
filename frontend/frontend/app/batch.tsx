@@ -380,6 +380,7 @@ export default function BatchScreen() {
 
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl);
   const mockMode = useAppStore((s) => s.mockMode);
+  const maxUploadMb = useAppStore((s) => s.maxUploadMb);
 
   const client = useMemo(
     () => createApiClient({ baseUrl: apiBaseUrl, mockMode }),
@@ -780,9 +781,17 @@ export default function BatchScreen() {
       if (!files.length) return;
       const accepted: QueueItem[] = [];
       let rejected = 0;
+      let tooLarge = 0;
+      const capBytes = maxUploadMb ? maxUploadMb * 1024 * 1024 : null;
       for (const file of files) {
         if (!/\.(pdf|docx|pptx|html|htm)$/i.test(file.name)) {
           rejected += 1;
+          continue;
+        }
+        // Reject oversized files at queue time, by name, rather than letting
+        // them fail one by one mid-batch after a full upload each.
+        if (capBytes && file.size > capBytes) {
+          tooLarge += 1;
           continue;
         }
         const id = `${batchId}-${Date.now()}-${Math.random()
@@ -804,6 +813,12 @@ export default function BatchScreen() {
           { description: "Only PDF, DOCX, PPTX, and HTML are accepted." },
         );
       }
+      if (tooLarge > 0) {
+        toast.warning(
+          `Skipped ${tooLarge} file${tooLarge === 1 ? "" : "s"} over ${maxUploadMb} MB`,
+          { description: "Compress them, or split them into parts and audit each part." },
+        );
+      }
       if (!accepted.length) return;
       setItems((prev) => [...prev, ...accepted]);
       toast.info(
@@ -811,7 +826,7 @@ export default function BatchScreen() {
         { description: `Analyzing up to ${MAX_CONCURRENCY} at a time.` },
       );
     },
-    [batchId, toast],
+    [batchId, toast, maxUploadMb],
   );
 
   const handlePick = useCallback(() => {

@@ -15,6 +15,7 @@ import { Card } from "../src/ui/components/Card";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo, useJsonLd } from "../src/ui/components/Seo";
 
 interface QA {
   q: string;
@@ -134,13 +135,35 @@ const SECTIONS: Section[] = [
   },
 ];
 
+/** schema.org FAQPage, derived from SECTIONS so Google's rich result can
+ *  never drift from what the page actually says. */
+function _faqJsonLd(): object {
+  return {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: SECTIONS.flatMap((s) =>
+      s.items.map((it) => ({
+        "@type": "Question",
+        name: it.q,
+        acceptedAnswer: { "@type": "Answer", text: it.a },
+      })),
+    ),
+  };
+}
+
 export default function FaqScreen() {
   const theme = useTheme();
+  // Google's FAQ rich result; injected at runtime (see Seo.tsx for why).
+  useJsonLd(_faqJsonLd());
   const router = useRouter();
   const isWeb = Platform.OS === "web";
 
   return (
     <Screen scroll title="FAQ">
+      <Seo
+        title="FAQ — 508 Agent Accessibility Converter"
+        description="What file types we fix, what stays private, how accurate automated 508/WCAG remediation is, what a credit costs, and how team plans work."
+      />
       <Hero
         eyebrow="FAQ"
         title="Questions, answered"
@@ -220,8 +243,8 @@ export default function FaqScreen() {
               and a human will get back to you, or read the in-depth Help &amp; glossary.
             </Text>
             <View style={styles.ctaRow}>
-              <Button title="Start free: 25 credits" onPress={() => router.push("/audit" as any)} />
-              <Button title="Read the glossary" variant="ghost" onPress={() => router.push("/help" as any)} />
+              <Button title="Start free: 25 credits" href="/audit" />
+              <Button title="Read the glossary" variant="ghost" href="/help" />
             </View>
           </Card>
         </View>

@@ -7,6 +7,7 @@ from typing import Iterable, List, Optional
 from app.analyzers.base import Analyzer
 from app.analyzers.contrast_analyzer import ContrastAnalyzer
 from app.analyzers.document_analyzer import (
+    AnalysisTruncatedAnalyzer,
     DocumentHeadingsAnalyzer,
     DocumentLanguageAnalyzer,
     DocumentTitleAnalyzer,
@@ -21,6 +22,12 @@ from app.analyzers.image_analyzer import (
     DecorativeImageAltAnalyzer,
     MissingAltTextAnalyzer,
     NonDescriptiveAltTextAnalyzer,
+)
+from app.analyzers.html_semantics_analyzer import (
+    IframeTitleAnalyzer,
+    InputAutocompleteAnalyzer,
+    LabelInNameAnalyzer,
+    PositiveTabindexAnalyzer,
 )
 from app.analyzers.link_analyzer import LinkNameMissingAnalyzer, LinkTextAnalyzer
 from app.analyzers.link_target_analyzer import LinkTargetBrokenAnalyzer
@@ -55,6 +62,13 @@ def get_default_analyzers() -> List[Analyzer]:
         LinkTextAnalyzer(),
         LinkNameMissingAnalyzer(),
         LinkTargetBrokenAnalyzer(),
+        # HTML-only: frames without a name, undeclared input purpose (1.3.5),
+        # and focus-order-breaking positive tabindex. All three fire off root
+        # counts the parser derived with the writer's own iterators.
+        IframeTitleAnalyzer(),
+        InputAutocompleteAnalyzer(),
+        PositiveTabindexAnalyzer(),
+        LabelInNameAnalyzer(),
         DocumentLanguageAnalyzer(),
         DocumentTitleAnalyzer(),
         DocumentHeadingsAnalyzer(),
@@ -67,6 +81,9 @@ def get_default_analyzers() -> List[Analyzer]:
         SlideTitleAnalyzer(),
         ScannedDocumentAnalyzer(),
         UntaggedPdfAnalyzer(),
+        # Last, so it is attached to the root AFTER any other document-level
+        # flags; the frontend sorts document-level errors first regardless.
+        AnalysisTruncatedAnalyzer(),
     ]
 
 

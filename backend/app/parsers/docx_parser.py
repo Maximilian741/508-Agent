@@ -3,8 +3,7 @@
 Two complementary entry points are exposed:
 
 * :meth:`DOCXParser.parse` returns the dict-shaped detection payload used by
-  the legacy ``/documents`` API (this format is consumed by the existing
-  ``_apply_docx_fixes`` machinery).
+  the legacy read-only ``/documents`` routes.
 * :meth:`DOCXParser.parse_to_tree` builds an :class:`AccessibilityTree` so the
   document can flow through the same analyzer + executor pipeline as PDFs.
 """
@@ -22,6 +21,7 @@ from docx import Document
 from docx.oxml.ns import qn
 from lxml import etree
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -44,6 +44,17 @@ from app.models.accessibility import (
 )
 
 
+# Decided once per process: is there a vision provider that could ever read
+# inlined image bytes? Under the heuristic provider nothing consumes them, and
+# base64-inflating every image into the tree cost tens of MB per request.
+try:
+    from app.ai.semantic_inference import vision_provider_configured as _vpc
+
+    _WANT_IMAGE_BYTES = bool(_vpc())
+except Exception:  # pragma: no cover - never let the AI module break parsing
+    _WANT_IMAGE_BYTES = True
+
+
 class DOCXParser:
     def parse(self, file_path: str) -> Dict[str, object]:
         doc = Document(file_path)
@@ -64,8 +75,9 @@ class DOCXParser:
         empty_heading_sections: List[int] = []
         prev_level: Optional[int] = None
         skipped_jumps: List[Dict[str, object]] = []
-        for idx, para in enumerate(doc.paragraphs, start=1):
-            style_name = (para.style.name or "") if para.style else ""
+        style_cache: Dict[Any, str] = {}
+        for idx, para in enumerate(iter_body_paragraphs(doc), start=1):
+            style_name = paragraph_style_name(para, style_cache)
             if not style_name.lower().startswith("heading"):
                 continue
             level = 1
@@ -93,7 +105,7 @@ class DOCXParser:
         hyperlink_count = 0
         generic_links: List[Dict[str, object]] = []
         invalid_links: List[Dict[str, object]] = []
-        for idx, para in enumerate(doc.paragraphs, start=1):
+        for idx, para in enumerate(iter_body_paragraphs(doc), start=1):
             hyperlink_nodes = list(para._p.iterfind(f".//{w_ns}hyperlink"))
             if not hyperlink_nodes:
                 continue
@@ -118,15 +130,16 @@ class DOCXParser:
                 if invalid_reason:
                     invalid_links.append({"section": idx, "text": link_text, "target": target, "reason": invalid_reason})
 
-        tables = len(doc.tables)
+        tables = len(list(iter_body_tables(doc)))
         tables_missing_headers: List[int] = []
         table_header_scope_flags: List[Dict[str, object]] = []
         generic_headers = {"column", "column 1", "column 2", "header", "n/a", "na", "value"}
-        for table_index, table in enumerate(doc.tables, start=1):
-            if not table.rows:
+        for table_index, table in enumerate(iter_body_tables(doc), start=1):
+            _rows = list(iter_table_rows(table))
+            if not _rows:
                 tables_missing_headers.append(table_index)
                 continue
-            header_cells = table.rows[0].cells
+            header_cells = _rows[0].cells
             header_text = [(cell.text or "").strip() for cell in header_cells]
             if not any(header_text):
                 tables_missing_headers.append(table_index)
@@ -176,6 +189,15 @@ class DOCXParser:
 
         title = (core.title or "").strip()
         language = (getattr(core, "language", None) or "").strip()
+        if not language:
+            # dc:language is rarely set, but Word writes the document language
+            # into styles.xml docDefaults <w:lang w:val="en-US"/> on save — and
+            # per the writer's own docstring THAT is where screen readers and
+            # Word's Accessibility Checker read it. Reading only dc:language
+            # flagged DOCUMENT_LANGUAGE_MISSING on essentially every Word
+            # document, and the "fix" then overwrote en-US with a less
+            # specific en. Same source of truth for detector and fixer now.
+            language = _docx_default_lang(doc) or ""
         properties: Dict[str, Any] = {"filename": path.name}
         if title:
             properties["title"] = title
@@ -217,8 +239,9 @@ class DOCXParser:
         list_collector: List[ListItemNode] = []
         list_marker: Optional[str] = None
 
-        for paragraph in doc.paragraphs:
-            style_name = (paragraph.style.name or "") if paragraph.style else ""
+        para_style_cache: Dict[Any, str] = {}
+        for paragraph in iter_body_paragraphs(doc):
+            style_name = paragraph_style_name(paragraph, para_style_cache)
             text = (paragraph.text or "").strip()
 
             if _is_list_paragraph(paragraph):
@@ -264,8 +287,18 @@ class DOCXParser:
             for link in link_nodes:
                 body_section.children.append(link)
 
-            # Inline images.
+            # Inline images. Hand each one nearby human text so the heuristic
+            # alt provider can derive a REAL description (the executor now
+            # refuses to write the "Image docx-img-N shown in document."
+            # placeholder). Word's own Caption-styled paragraph after the
+            # picture is best; else the paragraph's own text; else the nearest
+            # preceding paragraph with real words.
             for image in _inline_images_in_paragraph(paragraph, image_blobs, ids):
+                cap = _image_context_for_paragraph(paragraph, text)
+                if cap:
+                    if image.metadata.properties is None:
+                        image.metadata.properties = {}
+                    image.metadata.properties["caption"] = cap
                 body_section.children.append(image)
 
             if text and not link_nodes:
@@ -364,7 +397,7 @@ class DOCXParser:
                     )
 
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
-        for table in doc.tables:
+        for table in iter_body_tables(doc):
             body_section.children.append(_table_to_node(table, ids))
 
         # Ensure unique ids.
@@ -372,10 +405,10 @@ class DOCXParser:
             "filename": path.name,
             "title": title,
             "language": language,
-            "table_count": len(doc.tables),
+            "table_count": len(list(iter_body_tables(doc))),
         }
         return ParserResult(
-            document_id=path.stem or "doc",
+            document_id=derive_document_id(path),
             format="docx",
             tree=AccessibilityTree(root=root, metadata=raw_metadata),
             raw_metadata=raw_metadata,
@@ -697,6 +730,102 @@ class _IdCounter:
         return f"{prefix}-{i}"
 
 
+def _iter_sdt_aware(parent_el, want_tag: str):
+    """Direct children of ``parent_el`` with tag ``want_tag``, in document
+    order, DESCENDING into block-level content controls (w:sdt/w:sdtContent,
+    possibly nested) — and into nothing else.
+
+    Word templates — government forms especially — wrap whole sections,
+    paragraphs and table rows in content controls. python-docx's
+    ``doc.paragraphs`` / ``doc.tables`` / ``table.rows`` read only DIRECT
+    children (``./w:p`` etc.), so everything inside an SDT was invisible: a
+    form built from content controls analyzed with fewer findings than the
+    same document without them, and its fixable issues were never even
+    detected. A manual walk (not ``.iter()``) so we never descend into a
+    nested table's subtree and double-count its paragraphs.
+    """
+    sdt = qn("w:sdt")
+    sdt_content = qn("w:sdtContent")
+    for child in parent_el:
+        tag = getattr(child, "tag", None)
+        if tag == want_tag:
+            yield child
+        elif tag == sdt:
+            content = child.find(sdt_content)
+            if content is not None:
+                yield from _iter_sdt_aware(content, want_tag)
+
+
+def iter_body_paragraphs(doc):
+    """Every body-level Paragraph in document order, SDT-descended.
+
+    The writer's id-pairing indexes MUST iterate with this same helper —
+    parser and writer agree on ``docx-p-N`` ids only because they walk the
+    body identically.
+    """
+    from docx.text.paragraph import Paragraph
+
+    for el in _iter_sdt_aware(doc.element.body, qn("w:p")):
+        yield Paragraph(el, doc._body)  # noqa: SLF001
+
+
+def iter_body_tables(doc):
+    """Every body-level Table in document order, SDT-descended (see above)."""
+    from docx.table import Table
+
+    for el in _iter_sdt_aware(doc.element.body, qn("w:tbl")):
+        yield Table(el, doc._body)  # noqa: SLF001
+
+
+def iter_table_rows(table):
+    """Every row of ``table`` in order, including SDT-wrapped rows.
+
+    ``table.rows`` reads direct ``w:tr`` only; a repeating-section content
+    control wraps its rows in w:sdt and they vanished from analysis. (An
+    SDT-wrapped individual CELL is still out of scope — rare, and cell
+    addressing runs through python-docx's grid logic we don't reimplement.)
+    """
+    from docx.table import _Row
+
+    for tr in _iter_sdt_aware(table._tbl, qn("w:tr")):  # noqa: SLF001
+        yield _Row(tr, table)
+
+
+def paragraph_style_name(paragraph, cache: Dict[Any, str]) -> str:
+    """``paragraph.style.name`` without python-docx's per-paragraph cost.
+
+    ``paragraph.style`` resolves the *default* paragraph style — the case for
+    most body text, which carries no explicit ``w:pStyle`` — by walking every
+    style element in ``styles.xml`` and reading attributes off each one.
+    Profiling a 200-page document showed that single property at 89% of the
+    writer's wall time (5.7s of 6.4s, 1.7M attribute reads), and the parser
+    pays it again. At 500 pages that is ~40s across the two, most of the way
+    to a proxy timeout, for a lookup whose answer is the same for every
+    body paragraph in the file.
+
+    So: read the ``w:pStyle`` id straight off the XML and resolve it through
+    a per-document ``cache`` (style-id -> name); resolve the implicit default
+    ONCE and cache it under ``None``. Falls back to the slow property for any
+    id the cache cannot resolve, so the answer is always identical to what
+    python-docx would have said — the parser and writer must agree on ids,
+    and both call this.
+    """
+    pPr = paragraph._p.find(qn("w:pPr"))  # noqa: SLF001
+    style_id = None
+    if pPr is not None:
+        pStyle = pPr.find(qn("w:pStyle"))
+        if pStyle is not None:
+            style_id = pStyle.get(qn("w:val"))
+    if style_id in cache:
+        return cache[style_id]
+    try:
+        name = (paragraph.style.name or "") if paragraph.style else ""
+    except Exception:
+        name = ""
+    cache[style_id] = name
+    return name
+
+
 def _heading_level_from_style(style: str) -> int:
     if not style:
         return 0
@@ -763,7 +892,7 @@ def _collect_image_blobs(doc) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
             mime = "image/bmp"
         else:
             mime = "image/png"
-        blobs[rel_id] = (base64.b64encode(blob).decode("ascii"), mime)
+        blobs[rel_id] = ((base64.b64encode(blob).decode("ascii") if _WANT_IMAGE_BYTES else None), mime)
     return blobs
 
 
@@ -1111,6 +1240,64 @@ def _docx_row_is_header(row) -> bool:
     return bool(populated) and all(_cell_text_is_bold(c) for c in populated)
 
 
+def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[str]:
+    """Nearby human text describing a picture in ``paragraph``, or None.
+
+    1. The NEXT paragraph if it is Word's Caption style (that is how Word
+       itself associates a caption with a picture).
+    2. The picture paragraph's own text (an inline image in a sentence).
+    3. The nearest PRECEDING paragraph with at least three words (a lead-in
+       such as "Figure 2 shows quarterly revenue by region:").
+    Only ever text a human wrote near the image — never a filename.
+    """
+    p_el = paragraph._p  # noqa: SLF001
+    nxt = p_el.getnext()
+    if nxt is not None and nxt.tag == qn("w:p"):
+        cap = _paragraph_caption_text(nxt)
+        if cap:
+            return cap[:200]
+    own = " ".join((own_text or "").split())
+    if len(own.split()) >= 3:
+        return own[:200]
+    prev = p_el.getprevious()
+    hops = 0
+    while prev is not None and hops < 4:
+        if prev.tag == qn("w:p"):
+            txt = " ".join("".join(t.text or "" for t in prev.iter(qn("w:t"))).split())
+            if len(txt.split()) >= 3:
+                return txt[:200]
+            hops += 1
+        prev = prev.getprevious()
+    return None
+
+
+def _docx_default_lang(doc) -> Optional[str]:
+    """The document's run-default language from styles.xml, or None.
+
+    Order: docDefaults/rPrDefault/rPr/w:lang@w:val, then the Normal style's
+    rPr/w:lang. These are what Word writes and what assistive tech reads.
+    """
+    try:
+        styles_el = doc.styles.element
+    except Exception:
+        return None
+    dd = styles_el.find(qn("w:docDefaults"))
+    if dd is not None:
+        lang = dd.find(f"./{qn('w:rPrDefault')}/{qn('w:rPr')}/{qn('w:lang')}")
+        if lang is not None:
+            val = (lang.get(qn("w:val")) or "").strip()
+            if val:
+                return val
+    for st in styles_el.iterfind(qn("w:style")):
+        if (st.get(qn("w:styleId")) or "").lower() == "normal":
+            lang = st.find(f"./{qn('w:rPr')}/{qn('w:lang')}")
+            if lang is not None:
+                val = (lang.get(qn("w:val")) or "").strip()
+                if val:
+                    return val
+    return None
+
+
 _CAPTION_STYLE_VALS = {"caption"}  # Word built-in "Caption" paragraph style id
 
 
@@ -1170,7 +1357,7 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
     # grid (>=3 rows, >=2 cols), type row 0 as DATA so TABLE_MISSING_HEADERS can
     # fire. Small/ambiguous tables keep the legacy header assumption to avoid
     # false positives on layout tables.
-    all_rows = list(table.rows)
+    all_rows = list(iter_table_rows(table))
     n_cols = max((len(r.cells) for r in all_rows), default=0)
     looks_like_data_table = len(all_rows) >= 3 and n_cols >= 2
     first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
@@ -1181,7 +1368,7 @@ def _table_to_node(table, ids: _IdCounter) -> TableNode:
     seen_tc_ids: set = set()
 
     rows: List[TableRowNode] = []
-    for row_index, row in enumerate(table.rows):
+    for row_index, row in enumerate(iter_table_rows(table)):
         cells: List[TableCellNode] = []
         for cell in row.cells:
             text = (cell.text or "").strip()

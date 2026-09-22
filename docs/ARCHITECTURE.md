@@ -4,7 +4,7 @@
 
 - Deterministic first: rule detection and safe fixes are reproducible.
 - Human-in-the-loop for semantic ambiguity: unresolved or risky transformations are manual-review items.
-- Preserve originals: apply-fixes always writes copy artifacts.
+- Preserve originals: remediation always writes a copy artifact; the upload is never modified.
 - Auditability: before/after issues, fix reports, policy snapshots, and manual-review decisions are persisted.
 - Additive evolution: keep API shape stable and extend capabilities without breaking existing PDF flow.
 
@@ -35,24 +35,14 @@ Core persisted entities (sqlite3 in `backend/.runtime/508_agent.db`):
 3. Analyzer runs by doc type (PDF/DOCX/PPTX) and stores `before` issues.
 4. Baseline score can be computed from policy snapshot + issues.
 
-### Apply Fixes
+### Apply Fixes (retired)
 
-1. `POST /documents/{doc_id}/apply-fixes` generates fixed artifact copy.
-2. For PDF, optional rebuild mode may generate a rebuilt PDF.
-3. Re-analysis runs on fixed/rebuilt artifact and stores `after` issues.
-4. Delta is computed (`fixed`, `remaining`, `introduced`).
-5. Fix report and manual review items are persisted.
-6. Baseline/post-fix scores are updated for latest job.
+`POST /documents/{doc_id}/apply-fixes`, `/finalize`, `/ai-review` and the fixed/rebuilt download routes return 410. They wrote fixes (including a filename-guessed title and an assumed en-US language) and served the result with no credit check, and `ai-review` called OpenAI outside the per-job cost cap. Remediation runs only through `POST /pipeline/remediate`, which prices the job before any work, runs the approved fixes through the executors and format writers, and charges only for fixes the writer persisted into the output file.
 
 ### Manual Review
 
-1. Queue endpoints expose unresolved items.
-2. Human approves/rejects items.
-3. Approved text (e.g., missing alt text) can be applied on next apply-fixes cycle for supported paths.
-4. Optional AI assist (`POST /documents/{doc_id}/ai-review`) can propose/apply for a gated subset:
-   - v1 scope: PDF missing alt text only.
-   - AI never bypasses deterministic validators.
-   - Applied decisions are auditable via persisted AI fields.
+1. Queue endpoints expose unresolved items, including findings rejected during `/pipeline/remediate`.
+2. Human approves/rejects items. The decision is recorded for audit; it does not change any file.
 
 ### Policy Snapshot + Scoring
 

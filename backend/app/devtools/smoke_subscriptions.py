@@ -73,9 +73,12 @@ def main() -> int:
     check("annual plan has year interval", any(p["plan"] == "team_annual" and p["interval"] == "year" for p in cfg["subscriptionPlans"]))
 
     sub_id = "sub_test_123"
+    # Real Stripe events always carry payment_status / invoice status and line
+    # prices; grants require them (unpaid checkouts and unknown prices grant
+    # nothing — see smoke_subscription_webhooks).
     checkout = {"type": "checkout.session.completed", "data": {"object": {
         "id": "cs_test_1", "mode": "subscription", "subscription": sub_id, "customer": "cus_test_1",
-        "client_reference_id": user_id, "metadata": {"plan": "team", "user_id": user_id}}}}
+        "payment_status": "paid", "client_reference_id": user_id, "metadata": {"plan": "team", "user_id": user_id}}}}
     check("sub checkout -> 200", _post_event(client, checkout).status_code == 200)
     check("first-month grant (+1000)", balance() == start + 1000)
     _post_event(client, checkout)
@@ -85,22 +88,24 @@ def main() -> int:
     check("subscription active=team", sub["active"] is True and sub["plan"] == "team")
 
     cycle = {"type": "invoice.payment_succeeded", "data": {"object": {
-        "id": "in_test_1", "subscription": sub_id, "billing_reason": "subscription_cycle"}}}
+        "id": "in_test_1", "subscription": sub_id, "billing_reason": "subscription_cycle", "status": "paid",
+        "lines": {"data": [{"price": {"id": "price_team_test"}, "proration": False}]}}}}
     check("renewal invoice -> 200", _post_event(client, cycle).status_code == 200)
     check("renewal grant (+1000)", balance() == start + 2000)
     _post_event(client, cycle)
     check("invoice replay no double-grant", balance() == start + 2000)
 
     create_inv = {"type": "invoice.payment_succeeded", "data": {"object": {
-        "id": "in_test_0", "subscription": sub_id, "billing_reason": "subscription_create"}}}
+        "id": "in_test_0", "subscription": sub_id, "billing_reason": "subscription_create", "status": "paid",
+        "lines": {"data": [{"price": {"id": "price_team_test"}, "proration": False}]}}}}
     _post_event(client, create_inv)
-    check("subscription_create invoice does not grant", balance() == start + 2000)
+    check("subscription_create invoice does not double-grant the first period", balance() == start + 2000)
 
     # Annual plan grants 12x the monthly allowance up front (team_annual = 12000).
     before_annual = balance()
     annual = {"type": "checkout.session.completed", "data": {"object": {
         "id": "cs_annual", "mode": "subscription", "subscription": "sub_annual_1", "customer": "cus_1",
-        "client_reference_id": user_id, "metadata": {"plan": "team_annual", "user_id": user_id}}}}
+        "payment_status": "paid", "client_reference_id": user_id, "metadata": {"plan": "team_annual", "user_id": user_id}}}}
     _post_event(client, annual)
     check("annual checkout grants 12000", balance() == before_annual + 12000)
 

@@ -20,6 +20,7 @@ import { Hero } from "../src/ui/components/Hero";
 import { Pressable } from "react-native";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 import {
   CERT_CREDITS,
   CREDIT_PACKS,
@@ -34,6 +35,7 @@ import {
   pricePerDoc,
   priceRange,
 } from "../src/domain/pricing";
+import { linkProps } from "../src/ui/components/linkProps";
 
 const FORMATS: FormatKey[] = ["pdf", "docx", "pptx", "html"];
 
@@ -45,6 +47,10 @@ export default function PricingScreen() {
 
   return (
     <Screen scroll title="Pricing">
+      <Seo
+        title="Pricing — 508 Agent Document Accessibility Remediation"
+        description="Free scans forever. Pay-as-you-go credits from $9 or monthly plans for teams. A fixed, 508-compliant PDF typically costs a fraction of the $5–25 per page manual rate."
+      />
       <Hero
         eyebrow="PRICING"
         title="Honest, transparent pricing."
@@ -53,8 +59,8 @@ export default function PricingScreen() {
         )}–${fmtUsd(MANUAL_PER_PAGE.high)} per page. Your first ${FREE_CREDITS} credits are free, no card.`}
       >
         <View style={styles.ctaRow}>
-          <Button title={`Start free (${FREE_CREDITS} credits)`} onPress={() => router.push("/audit" as any)} />
-          <Button title="Buy credits" variant="ghost" onPress={() => router.push("/billing" as any)} />
+          <Button title={`Start free (${FREE_CREDITS} credits)`} href="/audit" />
+          <Button title="Buy credits" variant="ghost" href="/billing" />
         </View>
       </Hero>
 
@@ -74,9 +80,10 @@ export default function PricingScreen() {
           depending on volume. Analysis is always free.
         </Text>
         <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Estimate how much you would save versus manual remediation"
-          onPress={() => router.push("/savings" as any)}
+          // No accessibilityLabel — the visible text is already the label, and
+          // paraphrasing it in aria breaks WCAG 2.5.3 (Label in Name).
+          
+          {...linkProps("/savings")}
           style={({ hovered }: any) => [{ marginTop: 12, alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
@@ -193,8 +200,8 @@ export default function PricingScreen() {
           ))}
         </View>
         <View style={[styles.ctaRow, { marginTop: 16 }]}>
-          <Button title="Start free" onPress={() => router.push("/audit" as any)} />
-          <Button title="Compare plans & buy" variant="ghost" onPress={() => router.push("/billing" as any)} />
+          <Button title="Start free" href="/audit" />
+          <Button title="Compare plans & buy" variant="ghost" href="/billing" />
         </View>
       </Card>
 

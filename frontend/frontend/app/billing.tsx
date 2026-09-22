@@ -298,8 +298,9 @@ export default function BillingScreen() {
       <ComparisonTable theme={theme} />
 
       <Pressable
+        // No accessibilityLabel — the visible text is already the label, and
+        // paraphrasing it in aria breaks WCAG 2.5.3 (Label in Name).
         accessibilityRole="button"
-        accessibilityLabel="Estimate how much you would save versus manual remediation"
         onPress={() => router.push("/savings" as any)}
         style={{ marginTop: 14, alignSelf: "flex-start" }}
       >

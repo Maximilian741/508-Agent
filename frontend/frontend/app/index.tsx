@@ -23,6 +23,8 @@ import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
+import { linkProps } from "../src/ui/components/linkProps";
 
 function greetingFor(date: Date): string {
   const h = date.getHours();
@@ -117,6 +119,10 @@ export default function HomeScreen() {
 
   return (
     <Screen scroll title="Home">
+      <Seo
+        title="508 Agent — Document Accessibility Checker & Converter (PDF, Word, PPT)"
+        description="Scan any PDF, Word, PowerPoint or web page for accessibility issues free, then convert it into a 508/WCAG-compliant file with automated, reviewable fixes."
+      />
       {/* === 1. Welcome hero ============================================== */}
       <Hero
         eyebrow="HOME"
@@ -141,7 +147,9 @@ export default function HomeScreen() {
           router.push("/audit");
         }}
         accessibilityRole="button"
-        accessibilityLabel="Start an audit"
+        // Must CONTAIN the visible label below (WCAG 2.5.3 Label in Name), or a
+        // speech-input user can't activate it by saying what they see.
+        accessibilityLabel={ready ? "Start an audit" : "Start in demo mode"}
         style={({ hovered }: any) => [
           styles.bench,
           {
@@ -190,20 +198,35 @@ export default function HomeScreen() {
           >
             .PDF   .DOCX   .PPTX   .HTML
           </Text>
-          <Button
-            title={ready ? "Start an audit" : "Start in demo mode"}
-            onPress={() => {
-              if (!ready) setMockMode(true);
-              router.push("/audit");
-            }}
-          />
+          {/* VISUAL affordance only — NOT a control. The whole bench panel is
+              already the button; rendering a real <Button> here nested a
+              <button> inside a <button>, which is invalid HTML, produced a
+              duplicate tab stop, and is announced unpredictably by screen
+              readers. One panel, one control. */}
+          <View
+            style={[
+              styles.benchCta,
+              { backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm },
+            ]}
+          >
+            {/* onAccent, not a hardcoded dark: the accent is a deep burnt
+                orange in the light palette, where dark-on-dark fails 1.4.3. */}
+            <Text style={[styles.benchCtaText, { color: theme.colors.onAccent }]}>
+              {ready ? "Start an audit" : "Start in demo mode"}
+            </Text>
+          </View>
         </View>
       </Pressable>
 
-      {/* Quiet row of side tools - secondary to the bench */}
+      {/* Quiet row of side tools - secondary to the bench.
+          None of these carry an accessibilityLabel on purpose: each panel's
+          visible title and subtitle ARE its name. Hand-written labels here
+          ("Go to batch" over a panel reading "Batch mode") replaced the words
+          a speech-input user can see and say, which is a WCAG 2.5.3 failure —
+          and they drifted from the visible text as the panels were renamed. */}
       <View style={styles.toolRow}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to batch"
-          onPress={() => router.push("/batch")}
+        <Pressable 
+          {...linkProps("/batch")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -213,8 +236,8 @@ export default function HomeScreen() {
             A folder at a time
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to readability checker"
-          onPress={() => router.push("/tools/readability")}
+        <Pressable 
+          {...linkProps("/tools/readability")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -224,8 +247,8 @@ export default function HomeScreen() {
             Plain-language score (3.1.5)
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to tools contrast"
-          onPress={() => router.push("/tools/contrast")}
+        <Pressable 
+          {...linkProps("/tools/contrast")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -235,8 +258,8 @@ export default function HomeScreen() {
             WCAG ratios, side-by-side
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to palette matrix"
-          onPress={() => router.push("/tools/palette")}
+        <Pressable 
+          {...linkProps("/tools/palette")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -246,8 +269,8 @@ export default function HomeScreen() {
             Which colour pairs pass AA
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to accessibility statement generator"
-          onPress={() => router.push("/tools/accessibility-statement")}
+        <Pressable 
+          {...linkProps("/tools/accessibility-statement")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -257,8 +280,8 @@ export default function HomeScreen() {
             Publish-ready, in seconds
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to AI alt-text generator"
-          onPress={() => router.push("/tools/alt-text")}
+        <Pressable 
+          {...linkProps("/tools/alt-text")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -268,8 +291,8 @@ export default function HomeScreen() {
             Drop an image, get alt text
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to link text checker"
-          onPress={() => router.push("/tools/link-text")}
+        <Pressable 
+          {...linkProps("/tools/link-text")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -279,8 +302,8 @@ export default function HomeScreen() {
             Is “click here” hurting you?
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to heading structure checker"
-          onPress={() => router.push("/tools/headings")}
+        <Pressable 
+          {...linkProps("/tools/headings")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -290,8 +313,8 @@ export default function HomeScreen() {
             Missing H1? Skipped levels?
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to professional assessment service"
-          onPress={() => router.push("/assessment")}
+        <Pressable 
+          {...linkProps("/assessment")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -301,8 +324,8 @@ export default function HomeScreen() {
             Want a human in the loop?
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Go to help"
-          onPress={() => router.push("/help")}
+        <Pressable 
+          {...linkProps("/help")}
           style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
@@ -388,6 +411,8 @@ export default function HomeScreen() {
         <FooterLink label="About" path="/about" />
         <FooterDot />
         <FooterLink label="Security" path="/security" />
+        <FooterDot />
+        <FooterLink label="Fix guides" path="/fix" />
         <FooterDot />
         <FooterLink label="Settings" path="/settings" />
         <FooterDot />
@@ -568,8 +593,8 @@ function FooterLink({ label, path }: { label: string; path: string }) {
   const theme = useTheme();
   const router = useRouter();
   return (
-    <Pressable accessibilityRole="button"
-      onPress={() => router.push(path as any)}
+    <Pressable 
+      {...linkProps(path)}
       accessibilityLabel={label}
       style={({ hovered, focused }: any) => [
         hovered ? { opacity: 0.7 } : null,
@@ -606,6 +631,18 @@ const styles = StyleSheet.create({
     ...(Platform.OS === "web"
       ? ({ transition: "border-color 180ms ease" } as any)
       : {}),
+  },
+  benchCta: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  benchCtaText: {
+    // Colour comes from theme.colors.onAccent at the call site — the readable
+    // foreground for the accent differs per palette.
+    fontSize: 15,
+    fontWeight: "700",
   },
   benchFooter: {
     flexDirection: "row",

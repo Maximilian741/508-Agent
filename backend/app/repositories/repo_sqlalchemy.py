@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 from typing import Dict, List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from app.db.models import (
     DocumentRow,
@@ -239,7 +239,12 @@ class SqlAlchemyRepository(Repository):
             parsed = _loads(row.report_json, None)
             return parsed if isinstance(parsed, dict) else None
 
-    def add_manual_review_items(self, doc_id: str, items: List[Dict[str, object]]) -> None:
+    def add_manual_review_items(
+        self,
+        doc_id: str,
+        items: List[Dict[str, object]],
+        owner_id: Optional[str] = None,
+    ) -> None:
         if not items:
             return
         with SessionLocal() as db:
@@ -248,8 +253,12 @@ class SqlAlchemyRepository(Repository):
                 row = db.get(ManualReviewRow, item_id)
                 ai_decision = item.get("aiDecision") if isinstance(item.get("aiDecision"), dict) else None
                 if row is not None:
+                    # An existing row is only ever updated by the owner who
+                    # wrote it; doc_id and owner_id never move. An id another
+                    # tenant can reconstruct must not overwrite their item.
+                    if (row.owner_id or None) != (owner_id or None):
+                        continue
                     row.item_json = json.dumps(item)
-                    row.doc_id = doc_id
                     row.resolved = False
                     row.created_at = _parse_iso_dt(item.get("createdAt")) or row.created_at or datetime.now(UTC)
                     row.ai_decision_json = json.dumps(ai_decision) if ai_decision is not None else None
@@ -263,6 +272,7 @@ class SqlAlchemyRepository(Repository):
                         ManualReviewRow(
                             id=item_id,
                             doc_id=doc_id,
+                            owner_id=owner_id or None,
                             item_json=json.dumps(item),
                             resolved=False,
                             created_at=_parse_iso_dt(item.get("createdAt")) or datetime.now(UTC),
@@ -351,11 +361,23 @@ class SqlAlchemyRepository(Repository):
             db.commit()
             return True
 
-    def list_manual_review_items_for_doc(self, doc_id: str, include_resolved: bool = False) -> List[Dict[str, object]]:
+    def list_manual_review_items_for_doc(
+        self,
+        doc_id: str,
+        include_resolved: bool = False,
+        owner_id: Optional[str] = None,
+    ) -> List[Dict[str, object]]:
         with SessionLocal() as db:
             stmt = select(ManualReviewRow).where(ManualReviewRow.doc_id == doc_id)
             if not include_resolved:
                 stmt = stmt.where(ManualReviewRow.resolved.is_(False))
+            if owner_id:
+                # doc_id comes from an uploaded filename — it cannot decide
+                # whose queue this is. NULL owner = pre-0017 row, which belongs
+                # to the document's owner.
+                stmt = stmt.where(
+                    or_(ManualReviewRow.owner_id.is_(None), ManualReviewRow.owner_id == owner_id)
+                )
             rows = db.execute(stmt.order_by(ManualReviewRow.created_at.desc())).scalars().all()
             out: List[Dict[str, object]] = []
             for row in rows:

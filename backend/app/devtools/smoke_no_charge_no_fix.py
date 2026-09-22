@@ -44,7 +44,12 @@ def _build_docx(path: Path) -> None:
 
     doc = Document()
     doc.add_heading("Section", level=1)
-    doc.add_paragraph("Filler paragraph.")
+    # A real sentence before the picture: the alt executor now derives its
+    # description from nearby text and REFUSES to write a placeholder when
+    # there is none. "Filler paragraph." (two words) was below the bar, so the
+    # approved alt fix honestly skipped and — correctly — nothing was charged,
+    # which broke this smoke's "a real fix charges" assertion.
+    doc.add_paragraph("The chart below shows quarterly revenue by region for the year.")
     doc.add_paragraph().add_run().add_picture(io.BytesIO(_valid_png()))
     doc.save(str(path))
 

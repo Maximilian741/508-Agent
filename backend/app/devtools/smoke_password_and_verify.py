@@ -87,7 +87,10 @@ def main() -> int:
 
     print("[2] set-password")
     r = client.post(
-        "/auth/set-password", headers=headers, json={"password": "hunter2!"}
+        "/auth/set-password",
+        headers=headers,
+        # The account signed up WITH a password, so changing it needs it.
+        json={"password": "hunter2!", "currentPassword": "initpass12"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["updated"] is True
@@ -119,7 +122,10 @@ def main() -> int:
     assert r.status_code == 200, r.text
     assert r.json() == {"queued": True}
     joined = "\n".join(log_handler.records)
-    m = re.search(r"/auth/verify-email\?token=([0-9a-f]{32})", joined)
+    # The emailed link is a PAGE route on PUBLIC_BASE_URL (/verify-email?token=…),
+    # not the API path — see auth.request_verify_email.
+    assert "/auth/verify-email?token=" not in joined, "emailed link must not be the API path"
+    m = re.search(r"/verify-email\?token=([0-9a-f]{32})", joined)
     assert m, f"verify link not found in logs: {joined!r}"
     good_token = m.group(1)
     print("    captured token=", good_token[:8], "...")

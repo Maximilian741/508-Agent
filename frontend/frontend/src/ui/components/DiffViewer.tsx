@@ -48,9 +48,39 @@ import { Platform, StyleSheet, Text, View, useWindowDimensions } from "react-nat
 import { useTheme } from "../useTheme";
 import { Chip } from "./Chip";
 
+/** One entry as the WRITERS actually emit it.
+ *
+ * The shape is loose on purpose and varies per fix: some entries are
+ * `{kind, target_id, summary}`, others are `{action, target_id}` with no
+ * prose at all (html_writer's SET_DOCUMENT_LANGUAGE / SET_DOCUMENT_TITLE,
+ * FIX_CONTRAST, GENERATE_TABLE_CAPTION...). Reading `summary.trim()` off
+ * one of those threw during render and took the whole audit screen down
+ * with the error boundary — AFTER the customer had been charged and the
+ * file written. Treat every field as optional here. */
+export interface AppliedEntry {
+  kind?: string;
+  action?: string;
+  target_id?: string;
+  summary?: string;
+}
+
 export interface DiffViewerProps {
-  applied: Array<{ kind: string; target_id: string; summary: string }>;
-  skipped: Array<{ target_id: string; reason: string }>;
+  applied: Array<AppliedEntry>;
+  skipped: Array<{ target_id?: string; reason?: string }>;
+}
+
+/** Fill in what the entry didn't carry, so rendering can't throw. */
+function normalizeEntry(entry: AppliedEntry): {
+  kind: string;
+  target: string;
+  summary: string;
+} {
+  const kind = (entry.kind || entry.action || "change").toString().toLowerCase();
+  return {
+    kind,
+    target: (entry.target_id || "document").toString(),
+    summary: (entry.summary || "").toString(),
+  };
 }
 
 /**
@@ -70,7 +100,10 @@ type ParsedSummary =
  * on the strings we know about and fall through to "raw" for anything else.
  */
 function parseSummary(kind: string, summary: string): ParsedSummary {
-  const trimmed = summary.trim();
+  const trimmed = (summary || "").trim();
+  // No prose from the writer (it only recorded the action). Say what the
+  // kind means rather than rendering an empty cell.
+  if (!trimmed) return { mode: "raw", raw: `${kindLabel(kind)} applied` };
 
   // "X marked decorative" — image was demoted to a decorative artifact.
   if (/\bmarked decorative\b/i.test(trimmed)) {
@@ -208,7 +241,7 @@ export function DiffViewer({ applied, skipped }: DiffViewerProps) {
           </View>
           {applied.map((entry, index) => (
             <DiffRow
-              key={`${entry.target_id}-${entry.kind}-${index}`}
+              key={`${entry.target_id ?? "document"}-${entry.kind ?? entry.action ?? "change"}-${index}`}
               entry={entry}
               wide={showWide}
             />
@@ -252,14 +285,15 @@ export function DiffViewer({ applied, skipped }: DiffViewerProps) {
 }
 
 interface DiffRowProps {
-  entry: { kind: string; target_id: string; summary: string };
+  entry: AppliedEntry;
   wide: boolean;
 }
 
 function DiffRow({ entry, wide }: DiffRowProps) {
   const theme = useTheme();
   const styles = createStyles(theme);
-  const parsed = parseSummary(entry.kind, entry.summary);
+  const { kind, target, summary } = normalizeEntry(entry);
+  const parsed = parseSummary(kind, summary);
 
   return (
     <View
@@ -267,14 +301,14 @@ function DiffRow({ entry, wide }: DiffRowProps) {
       {...(Platform.OS === "web" ? ({ accessibilityRole: "row" as any } as any) : {})}
     >
       <View style={[styles.cell, styles.kindCol]}>
-        <Chip label={kindLabel(entry.kind)} tone={kindTone(entry.kind)} />
+        <Chip label={kindLabel(kind)} tone={kindTone(kind)} />
       </View>
       <View style={[styles.cell, styles.targetCol]}>
         <Text
           style={[theme.typography.mono, { color: theme.colors.textMuted }]}
           selectable
         >
-          {entry.target_id}
+          {target}
         </Text>
       </View>
       <View style={[styles.cell, styles.diffCol]}>

@@ -10,7 +10,7 @@ import { useMemo, useState } from "react";
 import { Platform, Pressable, PressableStateCallbackType, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
 
-import { PipelineResponse, SiteScanResponse, createApiClient } from "../src/api/client";
+import { PipelineFix, PipelineResponse, SiteScanResponse, createApiClient } from "../src/api/client";
 import { lookupIssue } from "../src/domain/issueCatalog";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
@@ -19,8 +19,22 @@ import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
 
 const SEV_ORDER: Record<string, number> = { error: 0, warning: 1, info: 2 };
+
+/** " · 3 days ago" style suffix for the previous-scan timestamp. */
+function sinceLabel(iso?: string | null): string {
+  if (!iso) return "";
+  const then = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (!Number.isFinite(then)) return "";
+  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (mins < 60) return ` · ${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return ` · ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return ` · ${days} day${days === 1 ? "" : "s"} ago`;
+}
 
 export default function ScanUrlScreen() {
   const theme = useTheme();
@@ -34,6 +48,7 @@ export default function ScanUrlScreen() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PipelineResponse | null>(null);
   const [siteResult, setSiteResult] = useState<SiteScanResponse | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   const run = async () => {
     const target = url.trim();
@@ -66,25 +81,51 @@ export default function ScanUrlScreen() {
     }
   };
 
-  // Group findings by rule so the list reads as "3× Image missing alt text".
+  // Group findings by rule so the list reads as "3× Image missing alt text",
+  // keeping the first fix we were given for that rule as the worked example.
   const grouped = useMemo(() => {
     if (!result) return [];
-    const counts = new Map<string, { ruleId: string; severity: string; count: number }>();
+    const counts = new Map<
+      string,
+      { ruleId: string; severity: string; count: number; fix?: PipelineFix | null }
+    >();
     for (const v of result.violations) {
       const prev = counts.get(v.ruleId);
-      if (prev) prev.count += 1;
-      else counts.set(v.ruleId, { ruleId: v.ruleId, severity: v.severity, count: 1 });
+      if (prev) {
+        prev.count += 1;
+        // Prefer a real engine-produced diff over generic guidance.
+        if (v.fix && (!prev.fix || (prev.fix.source !== "writer" && v.fix.source === "writer"))) {
+          prev.fix = v.fix;
+        }
+      } else {
+        counts.set(v.ruleId, { ruleId: v.ruleId, severity: v.severity, count: 1, fix: v.fix });
+      }
     }
     return Array.from(counts.values()).sort(
       (a, b) => (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9) || b.count - a.count,
     );
   }, [result]);
 
+  const copy = (value: string) => {
+    if (Platform.OS !== "web" || !value) return;
+    try {
+      (navigator as any)?.clipboard?.writeText(value);
+      setCopied(value);
+      setTimeout(() => setCopied(null), 1500);
+    } catch {
+      /* clipboard unavailable — the snippet is selectable as a fallback */
+    }
+  };
+
   const sevColor = (sev: string) =>
     sev === "error" ? theme.colors.danger : sev === "warning" ? theme.colors.warning : theme.colors.textMuted;
 
   return (
     <Screen scroll>
+      <Seo
+        title="Website Accessibility Scanner — Check Any Page for WCAG / 508 Issues Free"
+        description="Enter a URL and get a free WCAG 2.1 / Section 508 accessibility report for that page: contrast, alt text, headings, links and forms, each with a concrete fix."
+      />
       <Hero
         eyebrow="Free tool"
         title="Scan a web page or whole site for accessibility issues"
@@ -227,7 +268,7 @@ export default function ScanUrlScreen() {
             title="Want these fixed automatically?"
             message="A live site can't be auto-fixed here. Upload a document (PDF, Word, PowerPoint, HTML) and we'll remediate it for you."
           />
-          <Button title="Upload a document to auto-fix" variant="secondary" onPress={() => router.push("/audit")} />
+          <Button title="Upload a document to auto-fix" variant="secondary" href="/audit" />
         </Card>
       ) : null}
 
@@ -254,8 +295,40 @@ export default function ScanUrlScreen() {
             </View>
           </View>
 
+          {result.changes ? (
+            <View
+              style={[
+                styles.changeBar,
+                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+              ]}
+            >
+              <Text style={[styles.changeTitle, { color: theme.colors.text }]}>
+                Since your last scan{sinceLabel(result.changes.previousScanAt)}
+              </Text>
+              <View style={styles.changeRow}>
+                <Text style={[styles.changeStat, { color: theme.colors.danger }]}>
+                  {result.changes.newIssues} new
+                </Text>
+                <Text style={[styles.changeStat, { color: theme.colors.textMuted }]}>·</Text>
+                <Text style={[styles.changeStat, { color: theme.colors.accent }]}>
+                  {result.changes.resolvedIssues} fixed
+                </Text>
+                <Text style={[styles.changeStat, { color: theme.colors.textMuted }]}>·</Text>
+                <Text style={[styles.changeStat, { color: theme.colors.textMuted }]}>
+                  {result.changes.unchangedIssues} still open
+                </Text>
+              </View>
+              <Text style={[styles.fixMeta, { color: theme.colors.textMuted }]}>
+                Previously {result.changes.previousIssueCount} issue
+                {result.changes.previousIssueCount === 1 ? "" : "s"} (grade {result.changes.previousGrade || "—"}).
+                Issues are matched by content, so a page that rewrites its wording may show items as fixed and new.
+              </Text>
+            </View>
+          ) : null}
+
           {grouped.map((g) => {
             const entry = lookupIssue(g.ruleId);
+            const fix = g.fix;
             return (
               <View key={g.ruleId} style={[styles.finding, { borderTopColor: theme.colors.border }]}>
                 <View style={[styles.dot, { backgroundColor: sevColor(g.severity) }]} />
@@ -268,6 +341,75 @@ export default function ScanUrlScreen() {
                   <Text style={[styles.findingStd, { color: theme.colors.textMuted }]}>
                     {entry.standards.wcag.join(", ")}
                   </Text>
+
+                  {fix ? (
+                    <View style={[styles.fixBox, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+                      <View style={styles.fixHead}>
+                        <Text
+                          style={[
+                            styles.fixBadge,
+                            {
+                              color: fix.source === "writer" ? theme.colors.accent : theme.colors.textMuted,
+                              borderColor: fix.source === "writer" ? theme.colors.accent : theme.colors.border,
+                            },
+                          ]}
+                        >
+                          {fix.source === "writer" ? "VERIFIED FIX" : "HOW TO FIX"}
+                        </Text>
+                        {fix.after ? (
+                          <Pressable
+                            onPress={() => copy(fix.after || "")}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Copy the fix for ${entry.title}`}
+                            style={({ focused }: PressableStateCallbackType & { focused?: boolean }) => [
+                              styles.copyBtn,
+                              focused
+                                ? { outlineWidth: 2, outlineColor: theme.colors.accent, outlineStyle: "solid" }
+                                : null,
+                            ]}
+                          >
+                            <Text style={[styles.copyText, { color: theme.colors.accent }]}>
+                              {copied === fix.after ? "Copied ✓" : "Copy"}
+                            </Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+
+                      {fix.source === "writer" ? (
+                        <Text style={[styles.fixMeta, { color: theme.colors.textMuted }]}>
+                          Produced by our remediation engine on a copy of this page.
+                        </Text>
+                      ) : null}
+
+                      {fix.before ? (
+                        <>
+                          <Text style={[styles.fixLabel, { color: theme.colors.textMuted }]}>Current</Text>
+                          {/* Untrusted third-party markup — rendered as TEXT, never as HTML. */}
+                          <Text selectable style={[styles.code, { color: theme.colors.text }]}>
+                            {fix.before}
+                          </Text>
+                        </>
+                      ) : null}
+                      {fix.after ? (
+                        <>
+                          <Text style={[styles.fixLabel, { color: theme.colors.textMuted }]}>
+                            {fix.before ? "Change to" : "Example"}
+                          </Text>
+                          <Text selectable style={[styles.code, { color: theme.colors.text }]}>
+                            {fix.after}
+                          </Text>
+                        </>
+                      ) : null}
+                      {fix.note ? (
+                        <Text style={[styles.fixMeta, { color: theme.colors.textMuted }]}>{fix.note}</Text>
+                      ) : null}
+                      {fix.kind === "structural" && !fix.after ? (
+                        <Text style={[styles.fixMeta, { color: theme.colors.textMuted }]}>
+                          This one needs a structural change to the markup — upload the file and we&apos;ll rewrite it for you.
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
                 </View>
               </View>
             );
@@ -278,7 +420,7 @@ export default function ScanUrlScreen() {
             title="Want these fixed automatically?"
             message="A live web page can't be auto-fixed here. To auto-remediate a document (PDF, Word, PowerPoint, HTML), upload the file."
           />
-          <Button title="Upload a document to auto-fix" variant="secondary" onPress={() => router.push("/audit")} />
+          <Button title="Upload a document to auto-fix" variant="secondary" href="/audit" />
         </Card>
       ) : null}
     </Screen>
@@ -300,6 +442,24 @@ const styles = StyleSheet.create({
   finding: { flexDirection: "row", gap: 10, paddingTop: 12, borderTopWidth: 1 },
   dot: { width: 10, height: 10, borderRadius: 5, marginTop: 5 },
   findingTitle: { fontSize: 15, fontWeight: "600" },
+  changeBar: { borderWidth: 1, borderRadius: 8, padding: 12, gap: 6 },
+  changeTitle: { fontSize: 14, fontWeight: "700" },
+  changeRow: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  changeStat: { fontSize: 15, fontWeight: "700" },
+  fixBox: { marginTop: 10, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 },
+  fixHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  fixBadge: {
+    fontSize: 10, fontWeight: "800", letterSpacing: 0.6,
+    borderWidth: 1, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2,
+  },
+  copyBtn: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
+  copyText: { fontSize: 12, fontWeight: "700" },
+  fixLabel: { fontSize: 11, fontWeight: "700", letterSpacing: 0.4, marginTop: 4 },
+  fixMeta: { fontSize: 12, marginTop: 2 },
+  code: {
+    fontFamily: Platform.OS === "web" ? "ui-monospace, SFMono-Regular, Menlo, monospace" : "monospace",
+    fontSize: 12, lineHeight: 17,
+  },
   findingWhy: { fontSize: 13, marginTop: 2 },
   findingStd: { fontSize: 12, marginTop: 4 },
 });

@@ -258,9 +258,14 @@ def _collect_inputs(job_id: str, options: Dict[str, bool]) -> Dict[str, object]:
 
     fix_report = repo.get_fix_report(doc_id)
     if not fix_report:
-        notes.append("Fix report missing (expected until apply-fixes completes).")
+        notes.append("No fix report for this document (the legacy apply-fixes step is retired; remediation runs through /pipeline/remediate).")
 
-    manual_review = repo.list_manual_review_items_for_doc(doc_id, include_resolved=True)
+    # Owner-scoped: the bundle is hash-sealed and handed to an auditor, so it
+    # may only ever contain rows this document's owner actually filed. doc_id
+    # alone is not enough — review items are keyed by the uploaded filename.
+    manual_review = repo.list_manual_review_items_for_doc(
+        doc_id, include_resolved=True, owner_id=str(doc.get("ownerId") or "") or None
+    )
     if not manual_review:
         notes.append("No manual review items for this document.")
 

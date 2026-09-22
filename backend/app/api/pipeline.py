@@ -30,7 +30,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -50,6 +50,7 @@ from app.security.url_fetch import (
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
+    ActionCode,
     ImageNode,
     Severity,
     TableNode,
@@ -58,14 +59,24 @@ from app.models.accessibility import (
 from app.parsers import parse_to_tree
 from app.persistence import audit_log as _audit
 from app.persistence.db import get_repo
+from app.services.fix_guidance import guidance_for
 from app.services.remediation_engine import RemediationEngine
+from app.services.scan_fixes import derive_scan_fixes
+from app.services.scan_history import (
+    build_change_report,
+    diff_against_previous,
+    fingerprint_violations,
+    save_scan,
+)
 from app.services.remediation_planner import plan_remediations, RemediationPolicy
+from app.services.remediators.base import ExecutionResult, ExecutionStatus
 from app.services.remediators.registry import execute_plans
 from app.writers import write_remediated
 from app.api.credits import (
     DOC_FORMAT_COSTS,
     InsufficientCreditsError,
     spend_credits_for_user,
+    spend_credits_once_for_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,9 +96,35 @@ class PipelineSummary(BaseModel):
     title: Optional[str] = None
     language: Optional[str] = None
     pageCount: int = 0
+    # How many of those pages the parser actually READ. Equal to pageCount
+    # except when the per-upload page cap truncated the analysis, in which
+    # case ANALYSIS_TRUNCATED is also raised as a finding. Surfaced separately
+    # so the UI can say "analyzed 400 of 512 pages" rather than imply a score
+    # covers the whole file.
+    pagesAnalyzed: Optional[int] = None
     nodeCount: int = 0
     imageCount: int = 0
     tableCount: int = 0
+
+
+class PipelineFix(BaseModel):
+    """How to fix ONE finding, for surfaces we can't remediate ourselves.
+
+    ``source="writer"`` means our remediation engine actually produced this
+    change on a throwaway copy (a real diff). ``source="guidance"`` means it is
+    a hand-written pattern — an example, not something we verified — and carries
+    no ``before``. See app/services/fix_guidance.py + scan_fixes.py.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str                       # "writer" | "guidance"
+    kind: str                         # "element" | "structural" | "css" | "advice"
+    before: Optional[str] = None
+    after: Optional[str] = None
+    action: Optional[str] = None
+    note: Optional[str] = None
+    requiresHumanVerification: bool = True
 
 
 class PipelineViolation(BaseModel):
@@ -102,6 +139,9 @@ class PipelineViolation(BaseModel):
     standards: Dict[str, List[str]] = Field(default_factory=dict)
     evidence: Dict[str, Any] = Field(default_factory=dict)
     recommendedActions: List[str] = Field(default_factory=list)
+    # Only populated by the URL/site scan (a live page we can't remediate).
+    # Defaults to None so /analyze and every existing caller is unaffected.
+    fix: Optional[PipelineFix] = None
 
 
 class PipelineExecutionResult(BaseModel):
@@ -123,6 +163,25 @@ class PipelineScore(BaseModel):
     grade: str
 
 
+class ScanChangeReport(BaseModel):
+    """What changed since this URL was last scanned by this user.
+
+    Matching is by content-derived FINGERPRINT (see services/scan_history.py) —
+    a best-effort match, not per-issue lineage, because a page that rewrites its
+    copy reads as "old fixed, new appeared".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    previousScanAt: Optional[str] = None
+    previousIssueCount: int = 0
+    previousScore: float = 0.0
+    previousGrade: str = ""
+    newIssues: int = 0
+    resolvedIssues: int = 0
+    unchangedIssues: int = 0
+
+
 class PipelineResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +190,8 @@ class PipelineResponse(BaseModel):
     executions: List[PipelineExecutionResult]
     score: PipelineScore
     aiProvider: str
+    # Only set by the URL scan, and only on a re-scan of the same URL.
+    changes: Optional[ScanChangeReport] = None
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +243,14 @@ async def analyze(
             pass
 
     tree = result.tree
-    engine = RemediationEngine()
+    # /analyze is FREE (no credits, and it accepts developer API keys), yet
+    # ?execute=true runs the real executors. Pin them to the offline heuristic
+    # provider, exactly like the URL scan: requires_ai=False is not a gate
+    # (IMPROVE_LINK_TEXT still calls the inference client), so an unpinned
+    # execute=true billed the paid provider per link and per language guess.
+    from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
+
+    engine = RemediationEngine(dispatcher=RemediationDispatcher(get_offline_executors()))
     violations = await run_in_threadpool(engine.detect_violations, tree)
     actions = engine.plan_actions(violations)
     executions = (await run_in_threadpool(engine.execute, tree)) if execute else []
@@ -193,6 +261,7 @@ async def analyze(
         title=tree.root.metadata.properties.get("title"),
         language=tree.root.metadata.language,
         pageCount=int(result.raw_metadata.get("page_count") or result.raw_metadata.get("slide_count") or 0),
+        pagesAnalyzed=_pages_analyzed(tree),
         nodeCount=_count_nodes(tree),
         imageCount=_count_nodes_of(tree, ImageNode),
         tableCount=_count_nodes_of(tree, TableNode),
@@ -247,7 +316,16 @@ async def analyze(
 
     # Persist the SERVER-computed score so a certificate can be bound to a real
     # measurement (never to client-supplied numbers).
-    _persist_analysis_result(user_id, summary, score, file.filename)
+    #
+    # What we persist is the document AS FOUND, never this preview's
+    # "fixedAutomatically". /analyze writes no file: ``?execute=true`` runs the
+    # executors against a tree that is discarded when the request ends. Storing
+    # its fix count let a caller mint a verifiable certificate claiming "N
+    # issue(s) were automatically remediated" without ever calling /remediate —
+    # no bytes produced, no credit spent, nothing delivered. /remediate
+    # overwrites this row with the fixes that actually reached the file, so a
+    # certificate can only ever describe bytes that were written.
+    _persist_analysis_result(user_id, summary, _build_scan_score(violations), file.filename)
 
     # Provider name for transparency / UI badge.
     provider_name = "heuristic"
@@ -332,27 +410,48 @@ async def analyze_url(
         except Exception as exc:
             logger.exception("url scan parse failed: %s", exc)
             raise HTTPException(status_code=422, detail="Could not parse that page's HTML.")
+
+        tree = result.tree
+        engine = RemediationEngine()
+        violations = await run_in_threadpool(engine.detect_violations, tree)
+
+        # SNAPSHOT the page AS FOUND before anything can mutate the tree.
+        # derive_scan_fixes below runs the real executors on THIS SAME tree
+        # object to produce diffs, and some of them write the very fields we
+        # report (SET_DOCUMENT_TITLE writes properties["title"],
+        # SET_DOCUMENT_LANGUAGE writes metadata.language). Reading them
+        # afterwards would show the user the FIXED page — a title their page
+        # doesn't have — and would fingerprint a page that doesn't exist.
+        page_title = (tree.root.metadata.properties or {}).get("title")
+        page_language = tree.root.metadata.language
+        page_node_count = _count_nodes(tree)
+        page_image_count = _count_nodes_of(tree, ImageNode)
+        page_table_count = _count_nodes_of(tree, TableNode)
+        # Fingerprints must describe the page AS SCANNED, not as remediated.
+        scan_fingerprints = await run_in_threadpool(fingerprint_violations, violations, tree)
+
+        # "Fix it yourself": run our real remediation engine against a throwaway
+        # copy so each finding can carry the exact diff it produced. Analyze-only
+        # and AI-free (see scan_fixes) — nothing is charged, persisted, or sent
+        # back to the scanned site. Failures degrade to guidance-only.
+        fixes_by_node = await run_in_threadpool(derive_scan_fixes, tmp_path, tree)
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
 
-    tree = result.tree
-    engine = RemediationEngine()
-    violations = await run_in_threadpool(engine.detect_violations, tree)
-
     from app.models.accessibility import FLAG_DEFINITIONS
 
     summary = PipelineSummary(
         documentId=result.document_id,
         sourceFormat=result.format,
-        title=tree.root.metadata.properties.get("title"),
-        language=tree.root.metadata.language,
+        title=page_title,
+        language=page_language,
         pageCount=0,
-        nodeCount=_count_nodes(tree),
-        imageCount=_count_nodes_of(tree, ImageNode),
-        tableCount=_count_nodes_of(tree, TableNode),
+        nodeCount=page_node_count,
+        imageCount=page_image_count,
+        tableCount=page_table_count,
     )
     api_violations: List[PipelineViolation] = []
     for v in violations:
@@ -375,9 +474,26 @@ async def analyze_url(
                 # A live page isn't remediated here, so we don't advertise auto-fix
                 # actions — the UI tells the user to upload the file to fix them.
                 recommendedActions=[],
+                # ...but we DO hand over exactly what to change: a real diff from
+                # our engine when it produced one, else static guidance.
+                fix=_fix_for_violation(v, fixes_by_node),
             )
         )
     score = _build_scan_score(violations)
+
+    # "What changed since last time" — the reason to come back and re-scan.
+    # Best-effort: any failure just omits the report.
+    changes = None
+    try:
+        # Uses the fingerprints captured BEFORE derive_scan_fixes touched the
+        # tree, so the diff describes the page the user actually has.
+        report = await run_in_threadpool(
+            diff_against_previous, user_id, final_url, scan_fingerprints
+        )
+        changes = ScanChangeReport(**report) if report else None
+        await run_in_threadpool(save_scan, user_id, final_url, scan_fingerprints, score)
+    except Exception as exc:
+        logger.warning("scan history failed (scan continues): %s", exc)
 
     provider_name = "heuristic"
     try:
@@ -416,6 +532,7 @@ async def analyze_url(
         executions=[],
         score=score,
         aiProvider=provider_name,
+        changes=changes,
     )
 
 
@@ -428,6 +545,37 @@ async def analyze_url(
 SITE_SCAN_MAX_PAGES = 25
 SITE_SCAN_DEFAULT_PAGES = 10
 SITE_SCAN_BUDGET_SECONDS = 90.0
+
+
+def _fix_for_violation(v, fixes_by_node: Dict[str, Dict[str, Any]]) -> Optional[PipelineFix]:
+    """Best fix for one finding: a real writer diff if we produced one, else guidance.
+
+    A writer diff is only ever present when the writer's own ``applied`` list
+    confirmed the change, so we never show a fix that didn't happen. Matching is
+    by (node, ACTION) and only against actions THIS rule maps to — otherwise
+    every document-level finding would display the same unrelated diff, since
+    they all share ``target_id = root.id``.
+    """
+    from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG
+
+    raw = None
+    try:
+        flag = AccessibilityFlagCode(v.rule_id)
+        for action in REMEDIATION_ACTIONS_BY_FLAG.get(flag, []):
+            candidate = fixes_by_node.get(f"{v.location.node_id}|{action.action_code.value}")
+            if candidate:
+                raw = candidate
+                break
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = guidance_for(v.rule_id, v.evidence)
+    if not raw:
+        return None
+    try:
+        return PipelineFix(**raw)
+    except Exception:  # a malformed guidance entry must never break a scan
+        return None
 
 
 class SiteScanRequest(BaseModel):
@@ -650,7 +798,9 @@ def _charge_credits(user_id: str, doc_format: str, doc_id: str | None = None) ->
     try:
         from app.api.stripe_billing import ensure_balance_for
 
-        ensure_balance_for(target_id, cost)
+        # actor_id: only the wallet owner or a team admin may trigger an
+        # off-session overage charge on the owner's card — never a plain member.
+        ensure_balance_for(target_id, cost, actor_id=user_id)
     except Exception:
         pass
     try:
@@ -701,7 +851,7 @@ def _precheck_credits(user_id: str, doc_format: str) -> int:
         try:
             from app.api.stripe_billing import _overage_eligible
 
-            if _overage_eligible(target_id):
+            if _overage_eligible(target_id, actor_id=user_id):
                 return cost
         except Exception:
             pass
@@ -719,6 +869,69 @@ def _cleanup_job_dir(job_dir: Path) -> None:
         shutil.rmtree(job_dir, ignore_errors=True)
     except Exception:
         pass
+
+
+def _artifact_owner_token(user_id: str) -> str:
+    """The revocation binding a download signature is minted against.
+
+    ``"<user id>:<token_version>"``. token_version is the same counter that
+    sign-out, set-password and reset-password bump to kill session JWTs and API
+    keys — so covering it by the HMAC makes an artifact URL die with the
+    session it was minted under instead of outliving it for a full day.
+    Returns ``""`` for an unknown/absent user, which is also what the verifier
+    computes for a deleted account: a signature minted for a live owner can
+    then never match, so a deleted user's artifacts stop being reachable.
+    """
+    uid = str(user_id or "")
+    if not uid:
+        return ""
+    try:
+        from app.db.models import UserRow
+        from app.db.session_sqlalchemy import session_scope
+
+        with session_scope() as session:
+            row = session.get(UserRow, uid)
+            if row is None:
+                return ""
+            return f"{uid}:{int(row.token_version or 0)}"
+    except Exception:
+        # Never make a download depend on a transient DB hiccup: fall back to
+        # the account id alone, which still ties the URL to an existing owner.
+        return uid
+
+
+def purge_user_artifacts(user_id: str) -> int:
+    """Delete every materialized pipeline job belonging to ``user_id``.
+
+    Called when an account is deleted: the remediated documents are the user's
+    own content and must not survive them on disk. Returns the number of job
+    directories removed. Best-effort and never raises — account deletion must
+    not fail because a file was locked.
+    """
+    uid = str(user_id or "")
+    if not uid:
+        return 0
+    removed = 0
+    try:
+        root = get_settings().materialized_root / "pipeline"
+        if not root.exists():
+            return 0
+        for job_dir in root.iterdir():
+            meta_path = job_dir / "meta.json"
+            if not job_dir.is_dir() or not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str((meta or {}).get("userId") or "") != uid:
+                continue
+            _cleanup_job_dir(job_dir)
+            removed += 1
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("purge_user_artifacts failed for %s: %s", uid, exc)
+    return removed
+
 
 @router.post("/remediate")
 async def remediate(
@@ -766,6 +979,14 @@ async def remediate(
     job_id = uuid.uuid4().hex[:12]
     job_dir = settings.materialized_root / "pipeline" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
+    # Stake the owner on disk BEFORE any work. The full manifest is written at
+    # the end and overwrites this, but a download URL is now verified against
+    # the owner named here — so if that final write ever fails, the user can
+    # still reach the file they paid for instead of being locked out of it.
+    try:
+        (job_dir / "meta.json").write_text(json.dumps({"userId": user_id}), encoding="utf-8")
+    except Exception:
+        pass
 
     safe_name = Path(file.filename or "document").name
     source_path = job_dir / safe_name
@@ -817,11 +1038,49 @@ async def remediate(
                 selected_plans.append(plan)
                 break
 
+    # AI SPEND GATE. A plan whose every action is absent from
+    # _PERSISTED_ACTIONS[fmt] can never reach the output bytes, so
+    # _count_persisted_fixes will decline to charge for it — but the executor
+    # would still run, and some of them call the paid inference provider
+    # regardless of ``requires_ai`` (IMPROVE_LINK_TEXT is declared
+    # requires_ai=False and calls suggest_link_text anyway). Approving only
+    # those actions therefore bought unlimited provider calls for zero
+    # revenue, with the per-job USD cap reset on every request.
+    #
+    # Don't start charging for nothing — the honesty rule stands. Stop the
+    # SPEND: skip the executor and report the same manual-remediation outcome
+    # the user would have got, so the counts in _build_score are unchanged.
+    runnable_plans = []
+    unpersistable = []
+    for plan in selected_plans:
+        if any(_action_persists(a.action_code.value, result.format) for a in plan.actions):
+            runnable_plans.append(plan)
+            continue
+        unpersistable.extend(
+            ExecutionResult(
+                action_code=a.action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    f"Not auto-applied to the {result.format.upper()} file — this fix "
+                    "requires manual remediation in the source document."
+                ),
+            )
+            for a in plan.actions
+        )
+    if unpersistable:
+        logger.info(
+            "remediate: skipped %d approved action(s) with no %s persistence (no AI spend, no charge)",
+            len(unpersistable),
+            result.format,
+        )
+
     executions = (
-        await run_in_threadpool(execute_plans, tree, selected_plans)
-        if selected_plans
+        await run_in_threadpool(execute_plans, tree, runnable_plans)
+        if runnable_plans
         else []
     )
+    executions = list(executions) + unpersistable
 
     # Persist rejected violations into the manual_review queue so teammates
     # can pick them up via GET /manual-review.  This is best-effort: if the
@@ -843,7 +1102,11 @@ async def remediate(
             pages_list = [int(page_value)] if isinstance(page_value, int) else []
             review_items.append(
                 {
-                    "id": f"mr-{result.document_id}-{v.violation_id}",
+                    # Keyed on the server-minted job id, never on
+                    # result.document_id — that is the uploaded FILENAME, so an
+                    # id built from it is one another tenant can reconstruct
+                    # (and therefore overwrite).
+                    "id": f"mr-{job_id}-{v.violation_id}",
                     "issueId": v.violation_id,
                     "targetNodeId": v.location.node_id,
                     "reason": "User rejected during /pipeline/remediate",
@@ -859,7 +1122,10 @@ async def remediate(
             )
         try:
             REPO = get_repo()
-            REPO.add_manual_review_items(result.document_id, review_items)
+            # owner_id is what decides whose queue this is. The doc id is only
+            # a label (it comes from the filename), so without an owner anyone
+            # could file items against anyone else's document.
+            REPO.add_manual_review_items(result.document_id, review_items, owner_id=user_id)
             manual_items_created = len(review_items)
         except Exception as exc:
             logger.warning(
@@ -894,11 +1160,65 @@ async def remediate(
         isinstance(s, dict) and str(s.get("reason", "")).startswith(("failed_to_open", "copy_failed"))
         for s in _skipped
     )
+    # A failed FINAL SAVE is a hard failure on its own terms, with no
+    # ``and not _applied`` escape: ``applied`` records what the writer changed
+    # in memory, and when the save never happened none of it reached the file.
+    # pdf_writer and pptx_writer used to swallow the exception and return
+    # normally, so the charge gate saw persisted fixes and billed full price
+    # for a 0-byte PDF (the output copy had already been truncated) or a
+    # byte-identical PPTX. docx_writer lets the save raise, which is the
+    # behaviour this restores for every format.
+    _save_fail = isinstance(_skipped, list) and any(
+        isinstance(s, dict) and str(s.get("reason", "")).startswith("failed_to_save")
+        for s in _skipped
+    )
+    # The writer's content-loss gate: it built an output with LESS visible text
+    # than the source and refused to ship it. Distinct message, because the
+    # file is neither encrypted nor corrupt — we declined to risk it.
+    _lost_content = isinstance(_skipped, list) and any(
+        isinstance(s, dict) and str(s.get("reason", "")) == "output_would_lose_content"
+        for s in _skipped
+    )
+    if _lost_content and not _applied:
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "We stopped before writing this file: the fixed version came out with less "
+                "text than the original, and we will not ship a file that loses your content. "
+                "You were not charged. Please report this document so we can look at it."
+            ),
+        )
     if _hard_fail and not _applied:
         _cleanup_job_dir(job_dir)
         raise HTTPException(
             status_code=422,
             detail="Could not remediate this file — it may be encrypted or corrupted. You were not charged.",
+        )
+    if _save_fail:
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "We could not save the remediated file, so there is nothing to give you. "
+                "You were not charged. Please try again."
+            ),
+        )
+    # Belt and braces for any future writer that swallows a save the way those
+    # two did: an output that does not exist, or exists with zero bytes, is not
+    # a deliverable file whatever the writer reported.
+    try:
+        _out_size = output_path.stat().st_size
+    except OSError:
+        _out_size = 0
+    if _out_size <= 0:
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "We could not save the remediated file, so there is nothing to give you. "
+                "You were not charged. Please try again."
+            ),
         )
 
     # Honesty: only charge when at least one APPROVED fix actually succeeded AND
@@ -915,18 +1235,103 @@ async def remediate(
     # real edit, so an approved fix whose element didn't resolve, or whose
     # target already had the fix (writer no-op), must NOT be counted or charged.
     # See ``_count_persisted_fixes`` / ``_WRITER_CONFIRMED_ACTIONS``.
-    persisted_fixes = _count_persisted_fixes(executions, _applied, fmt)
-    charged = False
-    if persisted_fixes > 0:
-        # Charge AFTER the file exists. On the rare race where the wallet was
-        # drained since the precheck, this 402s and we clean up without
-        # delivering a file.
+    persisted_fixes = _count_persisted_fixes(executions, _applied, fmt, _skipped)
+
+    # Reconcile the TAG_PDF_STRUCTURE note with what the tagger ACTUALLY did.
+    # The executor runs before the writer and can only promise; the writer's
+    # pdfua summary knows how many pages fell back to a single page-level /P
+    # (unparseable stream, nested BT, op count that would not reconcile).
+    # Those pages are tagged and valid but carry NO headings/lists/tables. The
+    # disclosure lived only in writer.skipped, while the execution note the
+    # user reads still promised the full structure. Append it to the note
+    # so PipelineExecutionResult carries the truth, not just the manifest.
+    try:
+        _pdfua = write_result.get("pdfua") if isinstance(write_result, dict) else None
+        _plo = int((_pdfua or {}).get("pagesPageLevelOnly") or 0)
+        _tot = int((_pdfua or {}).get("pages") or 0)
+        if _plo > 0:
+            for _e in executions:
+                if _e.action_code == ActionCode.TAG_PDF_STRUCTURE and _e.status == ExecutionStatus.SUCCESS:
+                    _e.notes = (
+                        f"{_e.notes.rstrip('.')}. NOTE: {_plo} of {_tot} page(s) could not be broken "
+                        "into elements and were tagged as a single page-level block instead — their "
+                        "headings, lists and tables were NOT identified. The document is tagged and "
+                        "valid, but those pages need a source-application pass for full structure."
+                    )
+    except Exception:
+        pass
+
+    # Every execution the user reads must describe the FILE, not the tree we
+    # threw away. The executor runs in memory and reports what it did there;
+    # whether that reached the bytes is the same question the charge gate asks,
+    # so ask it once, for every action, and rewrite the ones that didn't land.
+    # This used to special-case TAG_PDF_STRUCTURE only, which left e.g. four
+    # status="success" "Rewrote link text X -> Y" rows on a PDF whose delivered
+    # bytes were identical to the upload.
+    _reconcile_executions(executions, _applied, fmt)
+
+    # Not charged must mean not changed. With no persisted fix the run is free,
+    # so it may deliver nothing: writers re-serialize and re-assert metadata
+    # even when nothing was approved, and the PDF writer used to tag every file
+    # — approved_violations=[] returned the 5-credit tagged PDF, uncharged and
+    # byte-identical to the paid run. Hand back the uploaded bytes instead.
+    if persisted_fixes == 0:
         try:
-            _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
-        except HTTPException:
+            shutil.copyfile(str(source_path), str(output_path))
+        except Exception as exc:
+            logger.exception("remediate: could not restore the source bytes: %s", exc)
             _cleanup_job_dir(job_dir)
-            raise
-        charged = True
+            raise HTTPException(
+                status_code=422,
+                detail="Failed to write the remediated file. You were not charged.",
+            )
+        write_result = {
+            "applied": [],
+            "skipped": [s for s in (_skipped if isinstance(_skipped, list) else []) if isinstance(s, dict)]
+            + [{"target_id": "document", "reason": "no_approved_fix_persisted: the original file is returned unchanged"}],
+        }
+
+    # THIS is the measurement a certificate may quote: a delivery, not a
+    # preview. The executions have already been reconciled against the writer,
+    # so _build_score's "fixed" is exactly the persisted count the charge gate
+    # used. It overwrites the as-found row /analyze left for this document.
+    _persist_analysis_result(
+        user_id,
+        PipelineSummary(documentId=result.document_id, sourceFormat=result.format),
+        _build_score(violations=violations, executions=executions, source_format=result.format),
+        file.filename,
+    )
+
+    charged = False
+    client_gone = False
+    if persisted_fixes > 0:
+        # If the client already left — closed the tab, or the CDN cut the
+        # request at its timeout on a long document — the response carrying
+        # downloadUrl will never arrive. Charging then would take a credit for
+        # a file the user cannot reach. So: do NOT charge, but KEEP the
+        # artifact and its manifest; GET /pipeline/jobs lists it with a fresh
+        # signed URL, and the charge is taken on first download instead. The
+        # user pays exactly once, and only for a file they can actually get.
+        try:
+            client_gone = await request.is_disconnected()
+        except Exception:
+            client_gone = False
+        if client_gone:
+            logger.warning(
+                "remediate: client disconnected before charge (job %s, user %s) — "
+                "artifact kept, credit deferred to first download",
+                job_id, user_id,
+            )
+        else:
+            # Charge AFTER the file exists. On the rare race where the wallet
+            # was drained since the precheck, this 402s and we clean up
+            # without delivering a file.
+            try:
+                _charge_credits(user_id=user_id, doc_format=fmt, doc_id=result.document_id)
+            except HTTPException:
+                _cleanup_job_dir(job_dir)
+                raise
+            charged = True
 
     # Owner email comes from the CF Access middleware (when enabled).  We
     # persist it on the job manifest so /pipeline/files can compare against
@@ -939,13 +1344,30 @@ async def remediate(
     except Exception:
         owner_email = None
 
-    signed_url = sign_file_url(job_id, output_name, ttl=settings.pipeline_artifact_ttl_seconds)
+    signed_url = sign_file_url(
+        job_id,
+        output_name,
+        ttl=settings.pipeline_artifact_ttl_seconds,
+        owner=_artifact_owner_token(user_id),
+    )
 
     response_meta = {
         "jobId": job_id,
         "filename": output_name,
         "downloadUrl": signed_url,
         "ownerEmail": owner_email,
+        # The authenticated user, so /pipeline/jobs can list this job back to
+        # them even when the response below is lost. ownerEmail alone was not
+        # enough: it is only set behind Cloudflare Access.
+        "userId": user_id,
+        "sourceFormat": fmt,
+        "documentId": result.document_id,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        # Set when the client disconnected before we could charge; the debit
+        # is taken on first download so the user is never billed for a file
+        # they could not reach.
+        "chargePending": bool(client_gone and persisted_fixes > 0),
+        "persistedFixes": int(persisted_fixes),
         "approved": sorted(approved_ids),
         "rejected": sorted(rejected_ids),
         "executions": [
@@ -1000,6 +1422,77 @@ async def remediate(
     return response_meta
 
 
+def _collect_deferred_charge(job_id: str, meta_path: Path, meta: Dict[str, Any]) -> None:
+    """Take a chargePending job's deferred credit exactly once, or raise.
+
+    /remediate defers the debit when the client left before the response, so
+    nobody pays for a file they never received; the credit is then owed on
+    first delivery, by GET /pipeline/files OR POST /pipeline/batch-zip.
+
+    Exactly once across requests and worker processes: the debit goes through
+    ``spend_credits_once_for_user`` keyed on the job id, which records the key
+    in the ledger in the same transaction as the debit. The manifest flag is
+    only a fast path. It used to be the guard, and 10 concurrent downloads of
+    one job all read chargePending=true before any wrote it back: 10 debits for
+    one file. Failure order:
+      * the debit fails (402): nothing is recorded, the flag stays set and the
+        file is withheld — top up and download later; never free, never stuck;
+      * the debit commits but the manifest write fails, or the worker dies:
+        the ledger row already carries the key, so the next delivery finds it
+        and does not charge again.
+    """
+    if not (meta or {}).get("chargePending"):
+        return
+    owner = str(meta.get("userId") or "")
+    fmt = str(meta.get("sourceFormat") or "").lstrip(".").lower()
+    if not owner or not fmt:
+        # A pending charge nobody can be billed for: withhold, don't give away.
+        raise HTTPException(status_code=404, detail="file_not_found")
+    cost = DOC_FORMAT_COSTS.get(fmt) or 5
+    # Team members draw on the team owner's shared wallet, as _charge_credits does.
+    try:
+        from app.api.teams import resolve_credit_user_id
+
+        wallet_id = resolve_credit_user_id(owner)
+    except Exception:
+        wallet_id = owner
+    key = f"pipeline-job:{job_id}"
+    try:
+        try:
+            spend_credits_once_for_user(wallet_id, cost, f"remediate_{fmt}", idempotency_key=key)
+        except InsufficientCreditsError:
+            # Short: an overage subscriber gets the usual auto top-up, then one
+            # retry. Tried AFTER the idempotent spend, so a job that is already
+            # paid can never trigger a top-up purchase.
+            try:
+                from app.api.stripe_billing import ensure_balance_for
+
+                # The payer of a deferred charge is the job's owner (the signed
+                # download has no session), so the owner is the actor: a plain
+                # team member's job can't trigger overage on the team owner's card.
+                ensure_balance_for(wallet_id, cost, actor_id=owner)
+            except Exception:
+                pass
+            spend_credits_once_for_user(wallet_id, cost, f"remediate_{fmt}", idempotency_key=key)
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=402, detail="Insufficient credits")
+
+    meta["chargePending"] = False
+    meta["charged"] = True
+    meta.setdefault("chargedAtDownload", datetime.now(timezone.utc).isoformat())
+    tmp = meta_path.with_name(f"meta.json.{uuid.uuid4().hex}.tmp")
+    try:
+        # Atomic replace: a concurrent reader never sees a torn manifest.
+        tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        tmp.replace(meta_path)
+    except Exception:
+        logger.exception("could not persist deferred-charge flag for job %s", job_id)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 class BatchZipJob(BaseModel):
     model_config = ConfigDict(extra="forbid")
     jobId: str
@@ -1019,11 +1512,19 @@ async def batch_zip(
 ):
     """Bundle several remediated files into a single ZIP download.
 
-    Each job must be one the caller produced via /pipeline/remediate. We
-    validate that the job directory + file exist and — when CF Access
-    recorded an owner on the job's meta.json — that it matches the requester,
-    mirroring the per-file download authz. Jobs that don't validate are
-    silently skipped; a ZIP with at least one file streams, else 404.
+    Each job must be one the CALLER produced via /pipeline/remediate: its
+    manifest's userId must equal the caller, the same scoping GET
+    /pipeline/jobs (where these ids come from) applies. Another tenant's job,
+    a job with no readable manifest, or a name that isn't the job's recorded
+    artifact is treated as not found and skipped. This route used to check
+    only ``ownerEmail`` — empty unless Cloudflare Access is on — so any
+    signed-in account could zip another tenant's file, or its meta.json, with
+    no signature.
+
+    A chargePending job's deferred credit is taken here exactly as GET
+    /pipeline/files takes it (``_collect_deferred_charge``); a job the wallet
+    can't cover is left out. A ZIP with at least one file streams; otherwise
+    402 when payment was the only obstacle, else 404.
     """
     import io
     import zipfile
@@ -1043,32 +1544,61 @@ async def batch_zip(
 
     buf = io.BytesIO()
     added = 0
+    unpaid = 0
     used_names: set = set()
     seen_jobs: set = set()
+    # Every requested job we do NOT put in the archive, and why. A short batch
+    # used to be indistinguishable from a complete one: the 402 fires only when
+    # NOTHING could be added, so asking for two files with credits for one
+    # returned 200 and a one-file ZIP with nothing in the body, headers or
+    # status to say so. A client that treats a 200 ZIP as the whole batch then
+    # reports a delivery that did not happen.
+    withheld: List[Tuple[str, str]] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for job in payload.jobs:
             safe_id = "".join(c for c in job.jobId if c.isalnum() or c in "-_")[:64]
             safe_name = Path(job.filename).name
             if not safe_id or not safe_name:
+                withheld.append((str(job.jobId)[:64], "invalid_job_or_filename"))
                 continue
             if (safe_id, safe_name) in seen_jobs:
                 continue  # exact-duplicate job passed twice — bundle once
             seen_jobs.add((safe_id, safe_name))
             job_dir = settings.materialized_root / "pipeline" / safe_id
-            target = job_dir / safe_name
-            if not target.exists():
-                continue
             meta_path = job_dir / "meta.json"
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                except Exception:
-                    meta = {}
-                owner_email = (meta or {}).get("ownerEmail")
-                if owner_email and (
-                    not requester_email or requester_email.lower() != str(owner_email).lower()
-                ):
-                    continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                withheld.append((safe_id, "not_found"))
+                continue  # no manifest, no owner on record: fail closed
+            if not isinstance(meta, dict) or str(meta.get("userId") or "") != user_id:
+                withheld.append((safe_id, "not_found"))
+                continue
+            owner_email = meta.get("ownerEmail")
+            if owner_email and (
+                not requester_email or requester_email.lower() != str(owner_email).lower()
+            ):
+                withheld.append((safe_id, "not_found"))
+                continue
+            # Only the job's recorded artifact — never meta.json or the upload.
+            if safe_name != str(meta.get("filename") or ""):
+                withheld.append((safe_id, "not_found"))
+                continue
+            try:
+                data = (job_dir / safe_name).read_bytes()
+            except Exception:
+                withheld.append((safe_id, "not_found"))
+                continue
+            # Bytes in hand first, then the deferred debit (if one is owed).
+            try:
+                _collect_deferred_charge(safe_id, meta_path, meta)
+            except HTTPException as exc:
+                if exc.status_code == 402:
+                    unpaid += 1
+                    withheld.append((safe_id, "payment_required"))
+                else:
+                    withheld.append((safe_id, "not_found"))
+                continue
             # De-duplicate names inside the archive (two "report-remediated.pdf").
             arc = safe_name
             n = 1
@@ -1076,20 +1606,127 @@ async def batch_zip(
                 arc = f"{Path(safe_name).stem} ({n}){Path(safe_name).suffix}"
                 n += 1
             used_names.add(arc)
-            try:
-                zf.write(str(target), arcname=arc)
-                added += 1
-            except Exception:
-                continue
+            zf.writestr(arc, data)
+            added += 1
+
+        # Say it inside the archive too, for whoever opens the ZIP rather than
+        # reading our headers.
+        if added and withheld:
+            lines = [
+                f"{added} of {added + len(withheld)} requested file(s) are in this archive.",
+                "",
+                "NOT included:",
+            ] + [
+                f"  {jid}  —  " + (
+                    "withheld until the credit for it is paid (top up, then download it again)"
+                    if why == "payment_required"
+                    else "no longer available"
+                )
+                for jid, why in withheld
+            ]
+            zf.writestr("NOT-INCLUDED.txt", "\n".join(lines) + "\n")
 
     if added == 0:
+        if unpaid:
+            raise HTTPException(status_code=402, detail="Insufficient credits")
         raise HTTPException(status_code=404, detail="no_files_available")
     buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="508-remediated-batch.zip"'},
-    )
+    headers = {
+        "Content-Disposition": 'attachment; filename="508-remediated-batch.zip"',
+        "X-Batch-Requested": str(added + len(withheld)),
+        "X-Batch-Delivered": str(added),
+        "X-Batch-Withheld": str(len(withheld)),
+    }
+    if withheld:
+        headers["X-Batch-Withheld-Jobs"] = ",".join(jid for jid, _ in withheld)[:1000]
+        if unpaid:
+            headers["X-Batch-Withheld-Unpaid"] = str(unpaid)
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)
+
+
+class PipelineJobSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobId: str
+    filename: str
+    sourceFormat: str
+    createdAt: Optional[str] = None
+    downloadUrl: str
+    charged: bool
+    chargePending: bool
+    persistedFixes: int = 0
+
+
+class PipelineJobsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobs: List[PipelineJobSummary]
+
+
+@router.get("/jobs", response_model=PipelineJobsResponse)
+async def list_recent_jobs(
+    request: Request,
+    limit: int = 20,
+    user_id: str = Depends(require_user_id),
+) -> PipelineJobsResponse:
+    """The caller's recent remediations, newest first, with fresh signed URLs.
+
+    This exists because /remediate is synchronous and its response is the ONLY
+    place the download URL used to live. Close the tab, or have the CDN cut a
+    long request at its timeout, and the file was written, sitting on disk,
+    and unreachable. Now it is one call away — and if the charge was deferred
+    because the client had already left, that is visible here too.
+
+    Owner-scoped by the userId recorded on each job manifest; jobs written
+    before that field existed are not listed (they cannot be attributed).
+    """
+    settings = get_settings()
+    root = settings.materialized_root / "pipeline"
+    limit = max(1, min(int(limit or 20), 100))
+    out: List[PipelineJobSummary] = []
+    if not root.exists():
+        return PipelineJobsResponse(jobs=out)
+    candidates: List[Tuple[float, Path, dict]] = []
+    for job_dir in root.iterdir():
+        meta_path = job_dir / "meta.json"
+        if not job_dir.is_dir() or not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str((meta or {}).get("userId") or "") != user_id:
+            continue
+        filename = str((meta or {}).get("filename") or "")
+        if not filename or not (job_dir / filename).exists():
+            continue  # artifact expired or was cleaned up
+        try:
+            mtime = meta_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((mtime, job_dir, meta))
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    # One lookup for the whole listing: every URL here is minted for the same
+    # (authenticated) owner at the same session generation.
+    owner_token = _artifact_owner_token(user_id)
+    for _mtime, job_dir, meta in candidates[:limit]:
+        job_id = job_dir.name
+        filename = str(meta.get("filename"))
+        out.append(
+            PipelineJobSummary(
+                jobId=job_id,
+                filename=filename,
+                sourceFormat=str(meta.get("sourceFormat") or Path(filename).suffix.lstrip(".") or ""),
+                createdAt=meta.get("createdAt"),
+                downloadUrl=sign_file_url(
+                    job_id, filename, ttl=settings.pipeline_artifact_ttl_seconds, owner=owner_token
+                ),
+                charged=bool(meta.get("charged")),
+                chargePending=bool(meta.get("chargePending")),
+                persistedFixes=int(meta.get("persistedFixes") or 0),
+            )
+        )
+    return PipelineJobsResponse(jobs=out)
 
 
 @router.get("/files/{job_id}/{filename}")
@@ -1102,9 +1739,16 @@ async def download_remediated_file(
 ):
     """Download an artifact previously produced by /pipeline/remediate.
 
-    Requires both the HMAC signature and (when CF Access is enabled) that
-    ``request.state.user.email`` matches the owner email recorded on the
+    Requires the HMAC signature, which is bound to the owner's CURRENT session
+    generation (see ``app.security.signing``) — so sign-out, a password change
+    and a password reset all revoke every outstanding URL, and a deleted
+    account's artifacts become unreachable. Plus, when CF Access is enabled,
+    that ``request.state.user.email`` matches the owner email recorded on the
     job's ``meta.json``.
+
+    There is deliberately still no session dependency here: the deferred-charge
+    path exists precisely because the client was gone, and the signature is the
+    credential. What changed is that the credential is now revocable.
     """
 
     settings = get_settings()
@@ -1113,34 +1757,56 @@ async def download_remediated_file(
     if not safe_id or not safe_name:
         raise HTTPException(status_code=400, detail="invalid_job_or_filename")
 
-    # Signature check.
-    ok, reason = verify_file_signature(safe_id, safe_name, exp or 0, sig or "")
-    if not ok:
-        # 410 for expired URLs feels truer than 403 — same behavior as our
-        # share-link sweep above.
-        status = 410 if reason == "url_expired" else 403
-        raise HTTPException(status_code=status, detail=reason)
-
     job_dir = settings.materialized_root / "pipeline" / safe_id
     target = job_dir / safe_name
+    meta_path = job_dir / "meta.json"
+    meta: Dict[str, Any] = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+
+    # Re-derive the revocation binding the URL was signed with. It is NOT in
+    # the URL: the job manifest names the owner, and the owner's live row
+    # carries the session generation. A deleted account resolves to "", which
+    # can never match a signature minted for a live user.
+    owner_token = _artifact_owner_token(str(meta.get("userId") or ""))
+
+    # Signature check.
+    ok, reason = verify_file_signature(safe_id, safe_name, exp or 0, sig or "", owner=owner_token)
+    if not ok:
+        # 410 for expired URLs feels truer than 403 — same behavior as our
+        # share-link sweep above. A URL that was valid but belongs to an ended
+        # session is 410 too: it is gone, not forged, and the owner can get a
+        # fresh one from GET /pipeline/jobs.
+        status = 410 if reason in ("url_expired", "url_revoked") else 403
+        raise HTTPException(status_code=status, detail=reason)
+
     if not target.exists():
         raise HTTPException(status_code=404, detail="file_not_found")
 
     # Per-resource authz: when an owner email was recorded, ensure the
     # requester (as identified by CF Access) matches it.  Skipped when the
     # job didn't capture an owner (dev mode).
-    meta_path = job_dir / "meta.json"
     if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
-            meta = {}
         owner_email = (meta or {}).get("ownerEmail")
         if owner_email:
             user = getattr(request.state, "user", None) or {}
             requester_email = user.get("email") if isinstance(user, dict) else None
             if not requester_email or requester_email.lower() != str(owner_email).lower():
                 raise HTTPException(status_code=403, detail="not_owner")
+
+        # Deferred debit: the client disconnected before /remediate could
+        # charge, so the credit is taken here, on the first successful
+        # download — exactly once even when downloads race, because the
+        # ledger (not this manifest) is the guard; see _collect_deferred_charge.
+        # If the wallet is now empty the file is withheld with a 402 — the
+        # user still has not paid for anything they did not receive.
+        if isinstance(meta, dict):
+            _collect_deferred_charge(safe_id, meta_path, meta)
 
     # Audit log: record the download.
     try:
@@ -1180,6 +1846,17 @@ def _media_type_for(name: str) -> str:
     if lower.endswith((".html", ".htm")):
         return "text/html; charset=utf-8"
     return "application/octet-stream"
+
+
+def _pages_analyzed(tree) -> Optional[int]:
+    """Pages the parser actually read, or None when it read them all."""
+    props = getattr(getattr(tree.root, "metadata", None), "properties", None) or {}
+    if not props.get("pages_truncated"):
+        return None
+    try:
+        return int(props.get("pages_processed") or 0) or None
+    except (TypeError, ValueError):
+        return None
 
 
 def _count_nodes(tree: AccessibilityTree) -> int:
@@ -1255,8 +1932,10 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "GENERATE_ALT_TEXT",
         "REMOVE_DECORATIVE_ALT_TEXT",
         # The writer reconstructs a full structure tree (headings, lists,
-        # tables, figures, artifacts + MarkInfo/ParentTree/XMP) on every
-        # untagged PDF — verified by smoke_pdf_structure/-artifacts/-ruling.
+        # tables, figures, artifacts + MarkInfo/ParentTree/XMP) on an untagged
+        # PDF when — and only when — this fix is approved. Writer-confirmed
+        # (see _WRITER_CONFIRMED_ACTIONS) — verified by smoke_pdf_structure/
+        # -artifacts/-ruling and smoke_remediate_only_approved.
         "TAG_PDF_STRUCTURE",
         # Invisible OCR text layer on scanned pages. The executor only
         # succeeds when an OCR provider is actually available, so counting
@@ -1297,6 +1976,12 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         # reads the <caption> back and TABLE_CAPTION_MISSING clears). Grounded in
         # the table's own headers/rows; routes to review like alt text.
         "GENERATE_TABLE_CAPTION",
+        # WCAG 1.3.5: fields whose purpose is unambiguous get the standard
+        # autocomplete token; WCAG 2.4.3: positive tabindex values are reset to
+        # 0. Both are written by iterators the parser counted with, so the count
+        # claimed equals the count written — verified by smoke_html_semantics.
+        "SET_INPUT_AUTOCOMPLETE",
+        "FIX_POSITIVE_TABINDEX",
     },
 }
 
@@ -1315,10 +2000,88 @@ def _action_persists(action_code: str, source_format: str) -> bool:
 #   - FIX_CONTRAST: only appended on a real recolour of a resolved element.
 #   - GENERATE_TABLE_CAPTION: only appended when a <caption> was actually
 #     inserted (guarded by ``find("caption") is None`` + a resolved table).
-_WRITER_CONFIRMED_ACTIONS = {"FIX_CONTRAST", "GENERATE_TABLE_CAPTION"}
+#   - TAG_PDF_STRUCTURE: the executor only records the request; the PDF writer
+#     marks its struct_tree entry with the action (keyed to the document root)
+#     only when a structure tree was really written. No taggable page, or a
+#     tagger failure, means no tree — and nothing counted or charged.
+#   - ADD_OCR_TEXT_LAYER: the executor returns SUCCESS as soon as an OCR
+#     provider is AVAILABLE — it cannot know whether the engine will read the
+#     scan. A blank, handwritten, low-DPI or wrong-script page recognises no
+#     words, the writer adds no overlay and records ocr_no_recognizable_pages,
+#     and the output is the unreadable scan it started as. Only the writer's
+#     applied entry proves a text layer reached the bytes.
+_WRITER_CONFIRMED_ACTIONS = {
+    "FIX_CONTRAST",
+    "GENERATE_TABLE_CAPTION",
+    "TAG_PDF_STRUCTURE",
+    "ADD_OCR_TEXT_LAYER",
+}
 
 
-def _count_persisted_fixes(executions, applied, source_format: str) -> int:
+# The honest note to put on a success the file doesn't actually carry, per
+# action. Keyed by action code; ``_NOT_PERSISTED_NOTE`` covers the rest.
+_UNCONFIRMED_NOTES = {
+    "TAG_PDF_STRUCTURE": (
+        "The structure tree could not be written into this file, so it is still "
+        "untagged. This fix was not applied and you were not charged for it."
+    ),
+    "ADD_OCR_TEXT_LAYER": (
+        "OCR recognized no text on any page of this scan, so no text layer was "
+        "added and the document is still image-only. This fix was not applied "
+        "and you were not charged for it."
+    ),
+}
+
+
+def _unconfirmed_note(action_code: str) -> str:
+    return _UNCONFIRMED_NOTES.get(
+        action_code,
+        "This fix could not be written into the file. It was not applied and you "
+        "were not charged for it.",
+    )
+
+
+def _not_persisted_note(source_format: str) -> str:
+    return (
+        f"Not applied to the {(source_format or '').upper()} file — this fix needs "
+        "manual remediation in the source document. You were not charged for it."
+    )
+
+
+def _reconcile_executions(executions, applied, source_format: str) -> None:
+    """Rewrite in place any execution whose success didn't reach the bytes.
+
+    The single honesty pass for what we REPORT, mirroring
+    :func:`_count_persisted_fixes`, which is the honesty gate for what we
+    CHARGE. Two kinds of lie get retracted:
+
+      * the action can't persist into this format at all (the executor mutated
+        a tree the writer never writes back) — e.g. IMPROVE_LINK_TEXT on a PDF;
+      * the action is writer-confirmed and the writer's ``applied`` list does
+        not confirm this target — the element didn't resolve, the tagger built
+        no tree, OCR read nothing.
+
+    Both become SKIPPED with a note saying so, so the executions array the UI
+    renders says the same thing as the file the user downloads.
+    """
+    applied_by_action: Dict[str, set] = {}
+    for a in (applied or []):
+        if isinstance(a, dict):
+            applied_by_action.setdefault(a.get("action"), set()).add(a.get("target_id"))
+    for e in executions:
+        if getattr(e.status, "value", e.status) != "success":
+            continue
+        code = e.action_code.value
+        if not _action_persists(code, source_format):
+            e.status = ExecutionStatus.SKIPPED
+            e.notes = f"{(e.notes or '').rstrip()} [{_not_persisted_note(source_format)}]".strip()
+            continue
+        if code in _WRITER_CONFIRMED_ACTIONS and e.target_node_id not in applied_by_action.get(code, set()):
+            e.status = ExecutionStatus.SKIPPED
+            e.notes = _unconfirmed_note(code)
+
+
+def _count_persisted_fixes(executions, applied, source_format: str, skipped=None) -> int:
     """Count successful executions that genuinely persist into the output file.
 
     Gates on executor-success ∩ :func:`_action_persists`, and for the
@@ -1326,7 +2089,16 @@ def _count_persisted_fixes(executions, applied, source_format: str) -> int:
     ``applied`` list (keyed by action + target) so a silent writer no-op is
     never counted or charged. This is the single honesty gate used by the
     charge path (and unit-tested by smoke_table_caption_writer).
+
+    ``skipped`` is the writer's skip list when the caller has one: a writer
+    that failed its final save wrote NOTHING, whatever it managed in memory
+    first, so the count collapses to zero. /remediate already 422s on that, but
+    keeping the gate here means a future writer that swallows a save can't
+    quietly reintroduce the charge.
     """
+    for s in (skipped or []):
+        if isinstance(s, dict) and str(s.get("reason", "")).startswith("failed_to_save"):
+            return 0
     applied_by_action: Dict[str, set] = {}
     for a in (applied or []):
         if isinstance(a, dict):

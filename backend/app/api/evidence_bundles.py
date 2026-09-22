@@ -46,6 +46,11 @@ async def create_evidence_bundle(
     # Fail closed: an unresolvable/owner-less job is denied (404).
     _require_owned_doc((job or {}).get("docId"), user_id)
     payload = options.model_dump() if options is not None else dict(DEFAULT_BUNDLE_OPTIONS)
+    # Remediated files are delivered ONLY by the charged /pipeline flow. A
+    # fixed/rebuilt artifact left over from the retired free /documents fix
+    # endpoints must not ride out inside a bundle, whatever the caller asks.
+    payload["includeFixedIfAvailable"] = False
+    payload["includeRebuiltIfAvailable"] = False
     try:
         bundle_id, bundle_hash, meta = build_evidence_bundle(job_id=job_id, options=payload)
     except ValueError as exc:

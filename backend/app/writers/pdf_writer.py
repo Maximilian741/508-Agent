@@ -12,14 +12,15 @@ substantial project on its own.  This writer takes a pragmatic v1 approach:
   caller so the UI can flag them as "needs source-app remediation".
 
 If the source PDF lacks a Catalog or pypdf can't open it, the writer copies
-the file unchanged and returns ``failed_to_open_pdf`` so the caller can fall
-back to the legacy /documents/apply-fixes pipeline (which has its own,
-heavier-weight PDF mutation code in :mod:`app.api.documents`).
+the file unchanged and returns ``failed_to_open_pdf`` so the caller knows
+nothing was applied. (The legacy /documents/apply-fixes pipeline this once
+deferred to has been retired.)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
@@ -55,12 +56,12 @@ def write_remediated_pdf(
 
     The PDF writer is intentionally conservative: only metadata and image
     /Alt entries are updated.  Everything else is recorded in ``skipped`` so
-    the caller can route the document through the heavier
-    :func:`app.api.documents._apply_pdf_fixes` instead.
+    the caller can report it as not applied.
     """
 
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    pdfua_summary: Dict[str, Any] = {}
 
     # Always start by copying source → output so we never mutate the source.
     try:
@@ -125,15 +126,22 @@ def write_remediated_pdf(
                 skipped.append({"target_id": "document", "reason": f"form_labels_failed: {exc}"})
 
     # ------- 2. Image alt text on /XObject entries --------------------
-    images_by_xobject_name: Dict[str, ImageNode] = {}
+    # Keyed by (page, XObject name), NOT by name alone. XObject names are
+    # per-page resource keys, and producers reuse them: a scanned PDF names
+    # every page's image /Im0. Keyed by name, the dict kept whichever node
+    # came LAST, and every page's /Im0 received the last page's alt text — a
+    # user's approved description of page 1 written onto page 40's picture,
+    # and reported as applied. The ImageNode records its 1-based page.
+    images_by_page_and_name: Dict[tuple, ImageNode] = {}
     for node in iter_reading_order(tree.root):
         if isinstance(node, ImageNode):
             xname = (node.metadata.properties or {}).get("xobject")
-            if isinstance(xname, str) and xname:
-                images_by_xobject_name[xname] = node
+            pg = getattr(node.metadata, "page", None)
+            if isinstance(xname, str) and xname and isinstance(pg, int):
+                images_by_page_and_name[(pg, xname)] = node
 
-    if images_by_xobject_name:
-        for page in writer.pages:
+    if images_by_page_and_name:
+        for page_index, page in enumerate(writer.pages, start=1):
             try:
                 resources = _resolve(page.get("/Resources"))
             except Exception:
@@ -149,7 +157,7 @@ def write_remediated_pdf(
                     continue
                 if obj.get("/Subtype") != "/Image":
                     continue
-                node = images_by_xobject_name.get(str(name))
+                node = images_by_page_and_name.get((page_index, str(name)))
                 if node is None:
                     continue
                 if node.is_decorative:
@@ -188,29 +196,102 @@ def write_remediated_pdf(
     # (which itself requires an available OCR provider).
     if (tree.root.metadata.properties or {}).get("ocr_text_layer_requested"):
         try:
-            _apply_ocr_text_layer(writer, applied, skipped)
+            _apply_ocr_text_layer(writer, applied, skipped, tree.root.id)
         except Exception as exc:  # pragma: no cover - defensive
             skipped.append({"target_id": "document", "reason": f"ocr_layer_failed: {exc}"})
 
     # ------- 4. Basic PDF/UA structure tree + document metadata --------
     # Turns an untagged PDF into a tagged one (MarkInfo, StructTreeRoot,
     # DisplayDocTitle, XMP). Fidelity-preserving and never corrupts.
-    try:
-        ua_report = tag_pdf(writer, tree)
-        for kind in ua_report.get("applied", []):
-            applied.append({"kind": f"pdfua_{kind}", "target_id": "document", "summary": kind})
-        if not ua_report.get("structTree"):
-            skipped.append({"target_id": "document", "reason": "pdfua_struct_tree_skipped"})
-    except Exception as exc:
-        skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
+    #
+    # ONLY as part of an approved (and charged) fix. This used to run on every
+    # PDF whatever was approved: send approved_violations=[] and the download
+    # came back fully tagged and uncharged — byte-identical to the 5-credit run.
+    #   * TAG_PDF_STRUCTURE approved: its executor recorded the request.
+    #   * ADD_OCR_TEXT_LAYER wrote a text layer in THIS run: a scanned page
+    #     carries no PDF_UNTAGGED finding of its own (there is no text to tag
+    #     until OCR adds it), so structuring the recognized text is part of the
+    #     OCR fix. Skip it and the OCR'd scan re-analyses with a "new"
+    #     PDF_UNTAGGED after "fix everything".
+    _ocr_written = any(a.get("kind") == "ocr_text_layer" for a in applied)
+    if (tree.root.metadata.properties or {}).get("tag_structure_requested") or _ocr_written:
+        try:
+            ua_report = tag_pdf(writer, tree)
+            for kind in ua_report.get("applied", []):
+                entry = {"kind": f"pdfua_{kind}", "target_id": "document", "summary": kind}
+                if kind == "struct_tree":
+                    # The writer's confirmation that the approved fix landed.
+                    # TAG_PDF_STRUCTURE is writer-confirmed in the pipeline's
+                    # charge gate: no tree written, nothing counted or charged.
+                    entry.update({"action": "TAG_PDF_STRUCTURE", "target_id": tree.root.id})
+                applied.append(entry)
+            if not ua_report.get("structTree"):
+                skipped.append({"target_id": "document", "reason": "pdfua_struct_tree_skipped"})
+            # Surface WHAT the tagger actually did. These counts were previously
+            # computed and thrown away, so a user could not tell whether their
+            # tables were handled — and "tagged" silently read as "all of them".
+            # tablesDeclined is the honest counterpart: grids we deliberately did
+            # NOT tag because we weren't sure they were data.
+            pdfua_summary = {
+                k: ua_report.get(k, 0)
+                for k in (
+                    "pages", "elements", "figures", "lists", "tables", "tablesDeclined",
+                    "links", "formWidgets", "artifacts", "readingOrderFixedPages",
+                    "perElementPages", "pagesPageLevelOnly",
+                )
+            }
+            if ua_report.get("tablesDeclined"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        f"pdfua_tables_declined: {ua_report['tablesDeclined']} table-like "
+                        "grid(s) were too sparse to tag confidently — check them by hand"
+                    ),
+                })
+            # Pages we could only wrap as one page-level block (unparseable or
+            # malformed content stream). They are valid and tagged, but carry no
+            # headings, lists or tables — so counting them alongside fully
+            # structured pages would overstate the result.
+            if ua_report.get("pagesPageLevelOnly"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        f"pdfua_page_level_only: {ua_report['pagesPageLevelOnly']} page(s) "
+                        "could not be broken into elements — they are tagged, but their "
+                        "headings, lists and tables were not identified"
+                    ),
+                })
+        except Exception as exc:
+            skipped.append({"target_id": "document", "reason": f"pdfua_tagging_failed: {exc}"})
 
+    # Save to a sibling temp file and only then move it into place. Writing
+    # straight to output_path truncated the source copy the instant the file
+    # was opened, so a save that raised (ENOSPC, a read-only volume, an AV or
+    # indexer lock, a pypdf serialization failure on an exotic document) left a
+    # ZERO-BYTE artifact where the download route would happily serve it — and
+    # the caller reported applied entries, so the pipeline charged full price.
+    # Now a failed save leaves the untouched copy on disk and returns applied=[]
+    # with a failed_to_save reason, which the pipeline treats as a hard failure.
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
-        with open(output_path, "wb") as fh:
+        with open(tmp_path, "wb") as fh:
             writer.write(fh)
+        os.replace(str(tmp_path), str(output_path))
     except Exception as exc:
-        skipped.append({"target_id": str(output_path), "reason": f"failed_to_save_pdf: {exc}"})
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.exception("Failed to save remediated pdf: %s", exc)
+        return {
+            "applied": [],
+            "skipped": skipped + [{"target_id": str(output_path), "reason": f"failed_to_save_pdf: {exc}"}],
+        }
 
-    return {"applied": applied, "skipped": skipped}
+    result: Dict[str, Any] = {"applied": applied, "skipped": skipped}
+    if pdfua_summary:
+        result["pdfua"] = pdfua_summary
+    return result
 
 
 def _resolve(obj: Any) -> Any:
@@ -262,7 +343,12 @@ def _escape_pdf_text(text: str) -> str:
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _apply_ocr_text_layer(writer: PdfWriter, applied: List[Dict[str, Any]], skipped: List[Dict[str, Any]]) -> None:
+def _apply_ocr_text_layer(
+    writer: PdfWriter,
+    applied: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+    root_id: str = "document",
+) -> None:
     """Append an INVISIBLE (render mode 3) position-matched text layer to each
     image-only page, using the active OCR provider.
 
@@ -364,10 +450,16 @@ def _apply_ocr_text_layer(writer: PdfWriter, applied: List[Dict[str, Any]], skip
         words_total += len(result.words)
 
     if pages_done:
+        # Tagged with the action + the document root the executor targeted, so
+        # ADD_OCR_TEXT_LAYER can be writer-confirmed in the pipeline's charge
+        # gate: the executor returns SUCCESS as soon as a provider is
+        # AVAILABLE, which says nothing about whether the engine could read
+        # this scan. Only this entry proves a text layer reached the bytes.
         applied.append(
             {
                 "kind": "ocr_text_layer",
-                "target_id": "document",
+                "action": "ADD_OCR_TEXT_LAYER",
+                "target_id": root_id,
                 "summary": f"invisible OCR text layer on {pages_done} page(s), {words_total} word(s)",
             }
         )

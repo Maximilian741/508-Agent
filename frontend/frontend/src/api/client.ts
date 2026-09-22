@@ -35,21 +35,11 @@ export interface ScanResponse {
     issues: Issue[];
 }
 
-export interface RemediateRequest {
-    issueId?: string;
-    targetNodeId: string;
-    actionCode: string;
-}
-
 export interface ExecutionResult {
     actionCode: string;
     targetNodeId: string;
     status: "success" | "skipped" | "not_implemented" | "ready";
     notes: string;
-}
-
-export interface RemediateResponse {
-    results: ExecutionResult[];
 }
 
 export interface ManualReviewItem {
@@ -152,32 +142,6 @@ export interface DocumentIssue {
     locationHint: string;
     recommendation: string;
     evidence?: Record<string, unknown>;
-}
-
-export interface ApplyFixesResponse {
-    docId: string;
-    fixedDocId?: string;
-    fixedPath?: string;
-    rebuiltDocId?: string;
-    rebuiltPath?: string;
-    fixed: boolean;
-    report?: FixReport;
-    jobId?: string;
-}
-
-export interface FinalizeResponse {
-    docId: string;
-    jobId?: string | null;
-    finalized: boolean;
-    finalizedPath?: string;
-    report?: FixReport;
-    counts?: {
-        remaining?: number;
-        introduced?: number;
-        pendingManual?: number;
-        approvedManual?: number;
-        rejectedManual?: number;
-    };
 }
 
 export interface FixReportItem {
@@ -287,9 +251,26 @@ export interface PipelineSummary {
     title?: string | null;
     language?: string | null;
     pageCount: number;
+    /** Pages actually read. Present only when the page cap truncated analysis. */
+    pagesAnalyzed?: number | null;
     nodeCount: number;
     imageCount: number;
     tableCount: number;
+}
+
+/**
+ * How to fix one finding on a surface we can't remediate ourselves (a live page).
+ * `source: "writer"` = a REAL diff our engine produced on a throwaway copy.
+ * `source: "guidance"` = a hand-written example pattern (never has `before`).
+ */
+export interface PipelineFix {
+    source: "writer" | "guidance";
+    kind: "element" | "structural" | "css" | "advice";
+    before?: string | null;
+    after?: string | null;
+    action?: string | null;
+    note?: string | null;
+    requiresHumanVerification: boolean;
 }
 
 export interface PipelineViolation {
@@ -302,6 +283,8 @@ export interface PipelineViolation {
     standards: { wcag_2_1: string[]; section_508: string[]; pdf_ua: string[] };
     evidence: Record<string, unknown>;
     recommendedActions: string[];
+    /** Only set by the URL/site scan. */
+    fix?: PipelineFix | null;
 }
 
 export interface PipelineExecutionResult {
@@ -319,12 +302,52 @@ export interface PipelineScore {
     grade: string;
 }
 
+/** What changed since this URL was last scanned (only on a re-scan). */
+export interface ScanChangeReport {
+    previousScanAt?: string | null;
+    previousIssueCount: number;
+    previousScore: number;
+    previousGrade: string;
+    newIssues: number;
+    resolvedIssues: number;
+    unchangedIssues: number;
+}
+
+/** A URL the user asked us to re-check on a schedule. */
+export interface Monitor {
+    id: string;
+    url: string;
+    frequency: "daily" | "weekly";
+    enabled: boolean;
+    notifyEmail: string;
+    lastRunAt?: string | null;
+    nextRunAt?: string | null;
+    lastIssueCount: number;
+    lastStatus: string;
+}
+
+/** One past remediation, from GET /pipeline/jobs. */
+export interface PipelineJob {
+    jobId: string;
+    filename: string;
+    sourceFormat: string;
+    createdAt?: string | null;
+    /** Freshly signed on every list call — safe to open directly. */
+    downloadUrl: string;
+    charged: boolean;
+    /** The client disconnected before /remediate could charge; the credit is
+     *  taken on first download instead. */
+    chargePending: boolean;
+    persistedFixes: number;
+}
+
 export interface PipelineResponse {
     summary: PipelineSummary;
     violations: PipelineViolation[];
     executions: PipelineExecutionResult[];
     score: PipelineScore;
     aiProvider: string;
+    changes?: ScanChangeReport | null;
 }
 
 export interface SitePageResult {
@@ -374,10 +397,16 @@ export interface PipelineRemediateResult {
 
 export interface ApiClient {
     scan: (payload: ScanRequest) => Promise<ScanResponse>;
-    remediate: (payload: RemediateRequest) => Promise<RemediateResponse>;
     runPipeline: (file: File, execute?: boolean) => Promise<PipelineResponse>;
     runPipelineUrl: (url: string) => Promise<PipelineResponse>;
     runSiteScan: (url: string, maxPages?: number) => Promise<SiteScanResponse>;
+    listMonitors: () => Promise<Monitor[]>;
+    /** Recent remediations with fresh download URLs — the recovery path when
+     *  a /remediate response was lost (closed tab, proxy timeout). */
+    listJobs: () => Promise<PipelineJob[]>;
+    createMonitor: (url: string, frequency: string, notifyEmail: string) => Promise<Monitor>;
+    updateMonitor: (id: string, patch: Partial<Pick<Monitor, "enabled" | "frequency" | "notifyEmail">>) => Promise<Monitor>;
+    deleteMonitor: (id: string) => Promise<void>;
     runPipelineRemediate: (
         file: File,
         approvedViolationIds: string[],
@@ -394,14 +423,10 @@ export interface ApiClient {
     startDocumentScan: (docId: string) => Promise<{ jobId: string }>;
     getJob: (jobId: string) => Promise<ScanJobResponse>;
     getIssues: (docId: string) => Promise<DocumentIssue[]>;
-    applyFixes: (docId: string) => Promise<ApplyFixesResponse>;
-    finalizeDocument: (docId: string) => Promise<FinalizeResponse>;
-    getDownloadUrl: (docId: string, variant: "original" | "fixed") => string;
     getDocumentDiff: (docId: string) => Promise<DocumentDiffResponse>;
     getDocumentSummary: (docId: string) => Promise<DocumentSummary>;
     getTagTree: (docId: string) => Promise<TagTreeResponse>;
     getFixReport: (docId: string) => Promise<FixReport>;
-    getRebuiltUrl: (docId: string) => string;
     listPolicies: () => Promise<PolicySummary[]>;
     getPolicy: (policyId: string) => Promise<PolicyDetail>;
     setJobPolicy: (jobId: string, policyPackId: string) => Promise<{ jobId: string; policy: Record<string, unknown> }>;
@@ -611,6 +636,67 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         return (await response.json()) as SiteScanResponse;
     };
 
+    // --- Monitored sites (scheduled re-scans + regression alerts) ---
+    const _monitorErr = async (response: Response, fallback: string) => {
+        const text = await response.text();
+        let detail = "";
+        try {
+            const j = JSON.parse(text);
+            detail = typeof j?.detail === "string" ? j.detail : "";
+        } catch {
+            /* non-JSON body — use the generic fallback */
+        }
+        const err = new Error(detail || fallback) as Error & { status?: number };
+        err.status = response.status;
+        return err;
+    };
+
+    const listMonitors = async (): Promise<Monitor[]> => {
+        if (mockMode) return [];
+        const response = await fetch(`${baseUrl}/monitors`, { headers: authHeaders() });
+        if (!response.ok) throw await _monitorErr(response, "Could not load your monitors");
+        return (await response.json()) as Monitor[];
+    };
+
+    const listJobs = async (): Promise<PipelineJob[]> => {
+        if (mockMode) return [];
+        const response = await fetch(`${baseUrl}/pipeline/jobs`, { headers: authHeaders() });
+        if (!response.ok) throw await _monitorErr(response, "Could not load your recent remediations");
+        const body = (await response.json()) as { jobs?: PipelineJob[] };
+        return Array.isArray(body?.jobs) ? body.jobs : [];
+    };
+
+    const createMonitor = async (url: string, frequency: string, notifyEmail: string): Promise<Monitor> => {
+        const response = await fetch(`${baseUrl}/monitors`, {
+            method: "POST",
+            body: JSON.stringify({ url, frequency, notifyEmail }),
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+        });
+        if (!response.ok) throw await _monitorErr(response, "Could not start monitoring that URL");
+        return (await response.json()) as Monitor;
+    };
+
+    const updateMonitor = async (
+        id: string,
+        patch: Partial<Pick<Monitor, "enabled" | "frequency" | "notifyEmail">>,
+    ): Promise<Monitor> => {
+        const response = await fetch(`${baseUrl}/monitors/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify(patch),
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+        });
+        if (!response.ok) throw await _monitorErr(response, "Could not update that monitor");
+        return (await response.json()) as Monitor;
+    };
+
+    const deleteMonitor = async (id: string): Promise<void> => {
+        const response = await fetch(`${baseUrl}/monitors/${id}`, {
+            method: "DELETE",
+            headers: authHeaders(),
+        });
+        if (!response.ok) throw await _monitorErr(response, "Could not remove that monitor");
+    };
+
     const runPipelineRemediate = async (
         file: File,
         approvedIds: string[],
@@ -685,25 +771,6 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
             throw err;
         }
         return await response.blob();
-    };
-
-    const remediate = async (payload: RemediateRequest): Promise<RemediateResponse> => {
-        if (mockMode) {
-            return {
-                results: [
-                    {
-                        actionCode: payload.actionCode,
-                        targetNodeId: payload.targetNodeId,
-                        status: payload.actionCode === "SET_DOCUMENT_TITLE" ? "success" : "not_implemented",
-                        notes: payload.actionCode === "SET_DOCUMENT_TITLE"
-                            ? "Set document title from None to 'Untitled Document'."
-                            : "Manual review required; queued for human review.",
-                    },
-                ],
-            };
-        }
-        if (__DEV__) console.log("[api] POST /remediate");
-        return request<RemediateResponse>("/remediate", payload);
     };
 
     const manualReview = async (docId?: string): Promise<ManualReviewItem[]> => {
@@ -805,29 +872,6 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         }
         return (await response.json()) as DocumentIssue[];
     };
-
-    const applyFixes = async (docId: string): Promise<ApplyFixesResponse> => {
-        if (mockMode) {
-            return { docId, fixed: true };
-        }
-        return request<ApplyFixesResponse>(`/documents/${docId}/apply-fixes`, {});
-    };
-
-    const finalizeDocument = async (docId: string): Promise<FinalizeResponse> => {
-        if (mockMode) {
-            return { docId, finalized: true };
-        }
-        return request<FinalizeResponse>(`/documents/${docId}/finalize`, {});
-    };
-
-    const getDownloadUrl = (docId: string, variant: "original" | "fixed") => {
-        if (variant === "fixed") {
-            return `${baseUrl}/documents/${docId}/pdf-fixed`;
-        }
-        return `${baseUrl}/documents/${docId}/pdf`;
-    };
-
-    const getRebuiltUrl = (docId: string) => `${baseUrl}/documents/${docId}/pdf-rebuilt`;
 
     const getDocumentDiff = async (docId: string): Promise<DocumentDiffResponse> => {
         if (mockMode) {
@@ -991,10 +1035,14 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
 
     return {
         scan,
-        remediate,
         runPipeline,
         runPipelineUrl,
         runSiteScan,
+        listMonitors,
+        listJobs,
+        createMonitor,
+        updateMonitor,
+        deleteMonitor,
         runPipelineRemediate,
         getPipelineFileUrl,
         batchZip,
@@ -1005,14 +1053,10 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         startDocumentScan,
         getJob,
         getIssues,
-        applyFixes,
-        finalizeDocument,
-        getDownloadUrl,
         getDocumentDiff,
         getDocumentSummary,
         getTagTree,
         getFixReport,
-        getRebuiltUrl,
         listPolicies,
         getPolicy,
         setJobPolicy,

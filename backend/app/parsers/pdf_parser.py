@@ -39,6 +39,7 @@ from pypdf.generic import (
     TextStringObject,
 )
 
+from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
     AccessibilityTree,
     ContentKind,
@@ -73,6 +74,15 @@ try:
 except (TypeError, ValueError):
     _MAX_PDF_PAGES = 400
 
+# Decided once per process: is there a vision provider that could ever read
+# inlined image bytes? See _extract_image_bytes call site.
+try:
+    from app.ai.semantic_inference import vision_provider_configured as _vpc
+
+    _WANT_IMAGE_BYTES = bool(_vpc())
+except Exception:  # pragma: no cover - never let the AI module break parsing
+    _WANT_IMAGE_BYTES = True
+
 _HEADING_RE = re.compile(r"^(?P<num>\d+(?:\.\d+){0,5})\s+(?P<text>.+)$")
 _ALL_CAPS_RE = re.compile(r"^[A-Z0-9][A-Z0-9 \-:&,'\".]+$")
 
@@ -101,6 +111,60 @@ def _classify_paragraph(text: str) -> Optional[int]:
         return 2
 
     return None
+
+
+def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Optional[str]:
+    """The largest-font text block on ``page_index``, if it reads as a title.
+
+    Reuses the tagger's block helpers (same segmentation the structure tree
+    is built from). Conservative: the block must be the strict maximum size
+    on the page, at least 1.25x the most common size (so it stands out from
+    body text), short (<= 120 chars, one line), and not a page number.
+    Anything less and we return None — a wrong title is worse than no title.
+    """
+    from pypdf.generic import ContentStream
+
+    from app.pdf.ua_tagger import _block_font_size, _block_text, _is_page_number
+
+    if page_index >= len(reader.pages):
+        return None
+    page = reader.pages[page_index]
+    try:
+        ops = ContentStream(page.get_contents(), reader).operations
+    except Exception:
+        return None
+    blocks = []
+    block = None
+    for operands, op in ops:
+        if op == b"BT":
+            block = [(operands, op)]
+        elif op == b"ET" and block is not None:
+            block.append((operands, op))
+            blocks.append(block)
+            block = None
+        elif block is not None:
+            block.append((operands, op))
+    sized = []
+    for b in blocks:
+        size = _block_font_size(b)
+        text = _block_text(b).strip()
+        if size and size > 0 and text:
+            sized.append((round(float(size), 1), text))
+    if len(sized) < 2:
+        return None
+    from collections import Counter
+
+    common = Counter(sz for sz, _ in sized).most_common(1)[0][0]
+    top = max(sz for sz, _ in sized)
+    if top < common * 1.25:
+        return None
+    tops = [t for sz, t in sized if sz == top]
+    if len(tops) != 1:
+        return None  # several equally-large blocks: no single title stands out
+    text = tops[0]
+    if len(text) > 120 or "\n" in text or _is_page_number(text):
+        return None
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +623,7 @@ class PDFParser:
 
     def parse(self, file_path: str) -> ParserResult:
         path = Path(file_path)
-        document_id = path.stem or "doc"
+        document_id = derive_document_id(path)
         reader = PdfReader(str(path))
 
         title = _document_title(reader)
@@ -575,6 +639,19 @@ class PDFParser:
             # Unlabeled fields whose /T is a real label → auto-write /TU. The
             # writer re-derives with the SAME helper so credit == what's written.
             properties["form_fields_derivable"] = ff_derivable
+        # A title CANDIDATE for SetDocumentTitleExecutor: the largest-font
+        # text block on page 1, when it is short and clearly larger than the
+        # page's body size. The heading classifier here is text-shape only
+        # (numbering / ALL CAPS / trailing colon), so an 18pt "Annual Report
+        # 2025" produced no HeadingNode and the executor fell through to
+        # "Untitled Document" — a placeholder our own analyzer flags —
+        # wrote it as the /Title, and credited it.
+        try:
+            cand = _title_candidate_from_page(reader)
+            if cand:
+                properties["title_candidate"] = cand
+        except Exception:
+            pass
         # Text colours from the content stream → contrast analysis (vs white).
         text_colors = _pdf_text_colors(reader)
         if text_colors:
@@ -608,6 +685,16 @@ class PDFParser:
             struct_info = read_struct_info(reader)
         except Exception:
             struct_info = None
+        # Disclose a structure tree we could not fully read. Downstream, the
+        # UntaggedPdfAnalyzer must NOT flag this document as untagged (it is
+        # tagged; we just could not read all of it), and the report should
+        # say the tags were only partly consulted.
+        # (root.metadata.properties, not the local dict — NodeMetadata copied
+        # the dict when the root was built above; see the pages_truncated fix.)
+        if struct_info and (struct_info.get("struct_tree_unreadable") or struct_info.get("struct_tree_truncated")):
+            root.metadata.properties["struct_tree_partial"] = True
+            if struct_info.get("struct_tree_unreadable"):
+                root.metadata.properties["struct_tree_unreadable"] = True
         tree_alt_by_xobject = (struct_info or {}).get("figure_alt_by_xobject", {})
         struct_headings = (struct_info or {}).get("headings", [])
         struct_tables = (struct_info or {}).get("tables", [])
@@ -628,8 +715,14 @@ class PDFParser:
         # truncation honestly rather than hanging.
         pages_to_process = min(page_count, _MAX_PDF_PAGES)
         if page_count > _MAX_PDF_PAGES:
-            properties["pages_truncated"] = True
-            properties["pages_processed"] = pages_to_process
+            # Write to root.metadata.properties, NOT the local `properties`
+            # dict: NodeMetadata is a pydantic model and COPIES the dict at
+            # construction (line ~590), so the two diverged the moment the
+            # root was built. Writing to the local here recorded the
+            # truncation into a dict nothing ever read again — the disclosure
+            # was dead on arrival for every over-cap document.
+            root.metadata.properties["pages_truncated"] = True
+            root.metadata.properties["pages_processed"] = pages_to_process
 
         for page_index in range(pages_to_process):
             page = reader.pages[page_index]
@@ -775,7 +868,15 @@ class PDFParser:
                     tree_alt = tree_alt_by_xobject.get(str(name).lstrip("/"))
                     if tree_alt:
                         alt_text = tree_alt
-                image_b64, image_mime = _extract_image_bytes(xobject)
+                # Only inline image bytes when a vision provider could read
+                # them. Under the heuristic provider (no AI key, or the free
+                # analyze path in most deployments) nothing consumes them, and
+                # base64-inflating up to 2 MB per image into the tree cost
+                # +94 MB RSS per request on a scan-like PDF.
+                if _WANT_IMAGE_BYTES:
+                    image_b64, image_mime = _extract_image_bytes(xobject)
+                else:
+                    image_b64, image_mime = None, None
                 section.children.append(
                     _build_image_node(
                         node_id=next_id(f"{page_label}-img{image_idx}"),

@@ -1,6 +1,5 @@
 import { FlatList, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "expo-router";
 
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
@@ -12,14 +11,11 @@ import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 
 export default function ManualReviewScreen() {
-  const router = useRouter();
   const manualReviewQueue = useAppStore((state) => state.manualReviewQueue);
   const clearManualReviewQueue = useAppStore((state) => state.clearManualReviewQueue);
   const fetchManualReview = useAppStore((state) => state.fetchManualReview);
   const clearManualReview = useAppStore((state) => state.clearManualReview);
   const updateManualReview = useAppStore((state) => state.updateManualReview);
-  const finalizeDocument = useAppStore((state) => state.finalizeDocument);
-  const isFinalizing = useAppStore((state) => state.isFinalizing);
   const lastFetched = useAppStore((state) => state.manualReviewLastFetched);
   const uploadedDocument = useAppStore((state) => state.uploadedDocument);
   const fixedDocId = useAppStore((state) => state.fixedDocId);
@@ -27,9 +23,6 @@ export default function ManualReviewScreen() {
   const mockMode = useAppStore((state) => state.mockMode);
   const theme = useTheme();
   const [editedText, setEditedText] = useState<Record<string, string>>({});
-  const [readyToFinalize, setReadyToFinalize] = useState(false);
-  const [finalizeMessage, setFinalizeMessage] = useState<string | null>(null);
-  const [finalizeError, setFinalizeError] = useState<string | null>(null);
   const [reviewFilter, setReviewFilter] = useState<"all" | "pending" | "resolved">("pending");
   const currentDocId = uploadedDocument?.docId ?? fixedDocId ?? null;
   const [scope, setScope] = useState<"current" | "all">(currentDocId ? "current" : "all");
@@ -43,7 +36,10 @@ export default function ManualReviewScreen() {
       ? `${apiBaseUrl}/documents/${currentDocId}/pdf`
       : `${apiBaseUrl}/documents/${currentDocId}/download`
     : null;
-  const fixedUrl = currentDocId ? `${apiBaseUrl}/documents/${currentDocId}/file-fixed` : null;
+  // Deliberately no "fixed document" link and no Finalize: the legacy fixed-file
+  // download and finalize endpoints are retired (they handed out remediated files
+  // without charging). Remediated files come only from Audit, which prices each
+  // fix before anything is charged.
   const scopedDocId = scope === "current" ? currentDocId ?? undefined : undefined;
 
   useEffect(() => {
@@ -57,12 +53,7 @@ export default function ManualReviewScreen() {
     status: "pending" | "approved" | "rejected",
     approvedText?: string,
   ) => {
-    const result = await updateManualReview(itemId, { status, approvedText }, scopedDocId);
-    if (result.ok && result.data?.readyToFinalize) {
-      setReadyToFinalize(true);
-      setFinalizeMessage("Ready to finalize.");
-      setFinalizeError(null);
-    }
+    await updateManualReview(itemId, { status, approvedText }, scopedDocId);
   };
 
   useEffect(() => {
@@ -97,51 +88,20 @@ export default function ManualReviewScreen() {
     [manualReviewQueue],
   );
 
-  useEffect(() => {
-    const fromQueue = pendingCount === 0 && resolvedCount > 0;
-    if (fromQueue) {
-      setReadyToFinalize(true);
-    }
-  }, [pendingCount, resolvedCount]);
   const stageMessage = useMemo(() => {
     if (pendingCount > 0) {
       return {
         title: "Next step",
-        message: `Resolve ${pendingCount} pending item(s). Finalize unlocks after pending reaches zero.`,
+        message: `Resolve ${pendingCount} pending item(s).`,
         tone: "warning" as const,
-      };
-    }
-    if (readyToFinalize && resolvedCount > 0) {
-      return {
-        title: "Ready to finalize",
-        message: "All items are resolved. Run finalize to apply approved edits to the output.",
-        tone: "info" as const,
       };
     }
     return {
       title: "Queue status",
-      message: "No pending actions right now.",
+      message: "No pending items right now.",
       tone: "success" as const,
     };
-  }, [pendingCount, readyToFinalize, resolvedCount]);
-
-  const handleFinalizeNow = async () => {
-    if (!currentDocId) {
-      setFinalizeError("No active document available for finalize.");
-      return;
-    }
-    setFinalizeError(null);
-    setFinalizeMessage(null);
-    const result = await finalizeDocument(currentDocId);
-    if (!result.ok) {
-      setFinalizeError(result.error ?? "Finalize failed.");
-      return;
-    }
-    setFinalizeMessage("Finalized. Returning to scan...");
-    setTimeout(() => {
-      router.push("/scan");
-    }, 500);
-  };
+  }, [pendingCount]);
 
   if (manualReviewQueue.length === 0) {
     return (
@@ -150,8 +110,8 @@ export default function ManualReviewScreen() {
           title={scope === "current" ? "No manual review items for this document" : "Manual review queue empty"}
           message={
             scope === "current"
-              ? "Try applying fixes first, or switch to All unresolved to review previous queued items."
-              : "No blocked remediation items are waiting for review."
+              ? "Findings you reject during an audit appear here. Switch to All unresolved to see earlier items."
+              : "No findings are waiting for review. Findings you reject during an audit appear here."
           }
           icon="spark"
           actionLabel={mockMode ? undefined : "Refresh"}
@@ -207,7 +167,7 @@ export default function ManualReviewScreen() {
           <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>{subtitle}</Text>
         </View>
         <View style={styles.buttonRow}>
-          <Button title="Back to Scan" onPress={() => router.push("/scan")} variant="ghost" />
+          <Button title="Back to Audit" href="/audit" variant="ghost" />
           <Button title="Refresh" onPress={() => fetchManualReview(scopedDocId)} variant="secondary" />
           <Button
             title="Clear Queue"
@@ -240,7 +200,7 @@ export default function ManualReviewScreen() {
 
       <InlineNotice
         title={scope === "current" ? "Reviewing current document items" : "Reviewing all unresolved queue items"}
-        message="Approve only human-verified content. Approved changes are applied on Finalize."
+        message="Approve only human-verified content. A decision is recorded for your team and does not change any file. To fix a document, run it through Audit."
         tone="info"
       />
       <InlineNotice title={stageMessage.title} message={stageMessage.message} tone={stageMessage.tone} />
@@ -250,7 +210,7 @@ export default function ManualReviewScreen() {
           <Chip label={`Pending ${pendingCount}`} tone="warning" />
           <Chip label={`Resolved ${resolvedCount}`} tone="default" />
         </View>
-        <Text style={{ color: theme.colors.textMuted }}>Resolved items are not applied until Finalize runs.</Text>
+        <Text style={{ color: theme.colors.textMuted }}>Resolving an item records the decision. It does not change a file.</Text>
         <View style={styles.scopeRow}>
           <Pressable accessibilityRole="button" accessibilityLabel="Set review filter to pending" onPress={() => setReviewFilter("pending")}>
             <Chip
@@ -278,44 +238,23 @@ export default function ManualReviewScreen() {
           </Pressable>
         </View>
       </Card>
-      {readyToFinalize && currentDocId ? (
-        <Card style={styles.card}>
-          <Text style={[styles.title, { color: theme.colors.text }]}>Ready to finalize</Text>
-          <Text style={{ color: theme.colors.textMuted }}>
-            All pending manual review items are resolved. Finalize applies approvals and refreshes results.
-          </Text>
-          <View style={styles.buttonRow}>
-            <Button
-              title={isFinalizing ? "Finalizing..." : "Finalize now"}
-              onPress={() => void handleFinalizeNow()}
-              loading={isFinalizing}
-              disabled={isFinalizing}
-              variant="secondary"
-            />
-            <Button title="Back to Scan" onPress={() => router.push("/scan")} variant="ghost" />
-          </View>
-        </Card>
-      ) : null}
-      {finalizeMessage ? <InlineNotice title="Finalize status" message={finalizeMessage} tone="success" /> : null}
-      {finalizeError ? <InlineNotice title="Finalize failed" message={finalizeError} tone="danger" /> : null}
 
       {originalUrl && (
         <Card style={styles.card}>
           <Text style={[styles.title, { color: theme.colors.text }]}>Document Preview</Text>
           <InlineNotice
             title="Preview not available in this build"
-            message="Use the links below to open the document safely."
+            message="Use the link below to open the document safely."
             tone="warning"
           />
           <View style={styles.linkRow}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => originalUrl && Linking.openURL(originalUrl)}>
+            {/* No accessibilityLabel: the visible text already says which
+                document the link opens, and "Open external link" both
+                erased that distinction (WCAG 2.4.4) and replaced the words
+                the user can see and say (WCAG 2.5.3). */}
+            <Pressable accessibilityRole="button" onPress={() => originalUrl && Linking.openURL(originalUrl)}>
               <Text style={[styles.link, { color: theme.colors.accent }]}>Open original document</Text>
             </Pressable>
-            {fixedUrl && (
-              <Pressable accessibilityRole="button" accessibilityLabel="Open external link" onPress={() => Linking.openURL(fixedUrl)}>
-                <Text style={[styles.link, { color: theme.colors.accent }]}>Open fixed document</Text>
-              </Pressable>
-            )}
           </View>
         </Card>
       )}
@@ -395,7 +334,7 @@ export default function ManualReviewScreen() {
             {!isPending && (
               <View style={styles.buttonRow}>
                 <Text style={{ color: theme.colors.textMuted }}>
-                  Decision recorded. Finalize applies approved changes to output.
+                  Decision recorded.
                 </Text>
                 <Button
                   title="Set Pending"

@@ -81,7 +81,7 @@ export default function AssessmentScreen() {
       >
         <View style={styles.ctaRow}>
           <Button title="Request an assessment" onPress={onRequest} />
-          <Button title="Or self-serve from $0.19/page" variant="ghost" onPress={() => router.push("/billing" as any)} />
+          <Button title="Or self-serve from $0.19/page" variant="ghost" href="/billing" />
         </View>
       </Hero>
 

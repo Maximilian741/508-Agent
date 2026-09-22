@@ -61,13 +61,14 @@ python -B -m app.devtools.e2e_smoke --base-url http://localhost:8000
 ## Health Checks
 
 - `GET /healthz`
-- Upload -> Scan -> Apply Fixes -> Manual Review -> Evidence Bundle
-- `GET /documents/{doc_id}/fix-report` after apply-fixes
+- Legacy `/documents` flow (read-only): Upload -> Scan -> Manual Review -> Evidence Bundle
+- Remediation: `POST /pipeline/analyze` then `POST /pipeline/remediate` (the Audit screen)
 - `GET /documents/{doc_id}/status`
 
 ## Troubleshooting
 
-- `fix-report 404`: expected until apply-fixes runs for that document.
+- `410 Gone` from `/documents/{doc_id}/apply-fixes`, `/finalize`, `/ai-review`, `/file-fixed`, `/pdf-fixed`, `/pdf-rebuilt`, `/download?variant=fixed` or `POST /remediate`: expected. Those legacy routes handed out remediated files (and AI calls) without charging and are retired; remediation runs only through `POST /pipeline/remediate`.
+- `fix-report 404`: expected for legacy `/documents` uploads; no fix report is produced any more.
 - manual review empty: no unresolved items persisted.
 - storage download 404: referenced key/path missing from storage backend.
 - storage endpoint disabled: `/storage/{key}` is blocked in production unless `ENABLE_DEV_STORAGE_ENDPOINT=true`.
@@ -75,13 +76,8 @@ python -B -m app.devtools.e2e_smoke --base-url http://localhost:8000
 - download returns 302: expected in S3 mode (presigned URL redirect).
 - CORS blocked: verify `CORS_ALLOW_ORIGINS` has exact frontend origin.
 
-## AI Manual Review (Optional, Gated)
+## AI Manual Review (Retired)
 
-- Endpoint: `POST /documents/{doc_id}/ai-review`
-  - `mode=propose`: generates `aiDecision` and validation metadata for eligible pending items.
-  - `mode=apply`: approves only proposals that pass deterministic validators and confidence threshold.
-- Current scope is intentionally narrow: PDF `missing_alt_text` / figure-alt manual review only.
-- Safety posture:
-  - Deterministic validators gate application.
-  - AI output is persisted for audit (`aiDecision`, confidence, validator status, model, timestamps).
-  - Unsupported or low-confidence cases are escalated and remain pending.
+- `POST /documents/{doc_id}/ai-review` returns 410. It called OpenAI directly, outside the per-job AI cost cap (`MAX_AI_COST_PER_JOB_USD`), with no credit check or rate limit.
+- AI alt text is generated only inside a paid `POST /pipeline/remediate` job, where every AI-backed executor shares one inference client and therefore one per-job cap.
+- Free paths (`/pipeline/analyze`, including `?execute=true`, and the URL/site scans) run executors pinned to the offline heuristic provider and never call a paid model.

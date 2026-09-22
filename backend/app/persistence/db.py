@@ -187,6 +187,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS manual_review (
               id TEXT PRIMARY KEY,
               doc_id TEXT,
+              owner_id TEXT,
               item_json TEXT,
               created_at TEXT,
               resolved INTEGER DEFAULT 0,
@@ -235,10 +236,34 @@ def init_db() -> None:
             ("validator_status", "TEXT"),
             ("ai_model", "TEXT"),
             ("ai_updated_at", "TEXT"),
+            # Who queued the item. Backfilled as NULL: pre-existing rows keep
+            # showing up for the owner of their document (see 0017).
+            ("owner_id", "TEXT"),
         ]
         for col_name, col_type in add_cols:
             if col_name not in existing_cols:
                 conn.execute(f"ALTER TABLE manual_review ADD COLUMN {col_name} {col_type}")
+        # After the backfill — the column has to exist before it can be indexed.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_manual_review_owner ON manual_review(owner_id)")
+        # users and api_keys are ORM-owned (create_all in main.py), and
+        # create_all never adds a column to an existing table. Backfill on a
+        # pre-existing sqlite DB, or every sign-in fails on a missing column.
+        orm_add_cols = [
+            ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("api_keys", "revoked_reason", "TEXT"),
+            # Refund/chargeback clawback (0018). Missing it 500s the FIRST thing
+            # a new account does — POST /auth/grant-starter reads the ledger —
+            # and the UI swallows that, so the user lands with 0 credits and no
+            # idea why. Caught by running the real signup flow in a browser.
+            ("credit_ledger", "stripe_ref", "TEXT"),
+        ]
+        for table_name, col_name, col_ddl in orm_add_cols:
+            table_cols = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if table_cols and col_name not in table_cols:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS policy_packs (
@@ -1159,7 +1184,10 @@ class SqliteRepo:
                 INSERT INTO scan_jobs(id, doc_id, status, progress, message, started_at, finished_at)
                 VALUES(?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
-                  doc_id=excluded.doc_id,
+                  -- Progress updates may rewrite status/message, never the
+                  -- document. Ownership is resolved job -> doc -> owner, so a
+                  -- job whose doc_id can move is a job whose OWNER can move.
+                  doc_id=CASE WHEN COALESCE(scan_jobs.doc_id,'')='' THEN excluded.doc_id ELSE scan_jobs.doc_id END,
                   status=excluded.status,
                   progress=excluded.progress,
                   message=excluded.message,
@@ -1272,7 +1300,12 @@ class SqliteRepo:
         except Exception:
             return None
 
-    def add_manual_review_items(self, doc_id: str, items: List[Dict[str, object]]) -> None:
+    def add_manual_review_items(
+        self,
+        doc_id: str,
+        items: List[Dict[str, object]],
+        owner_id: Optional[str] = None,
+    ) -> None:
         if not items:
             return
         conn = get_connection()
@@ -1281,12 +1314,16 @@ class SqliteRepo:
             for item in items:
                 item_id = str(item.get("id") or f"mr-{doc_id}-{int(datetime.now(UTC).timestamp() * 1000)}")
                 ai_decision = item.get("aiDecision") if isinstance(item.get("aiDecision"), dict) else None
+                # The UPSERT only ever rewrites a row the SAME owner already
+                # wrote: doc_id and owner_id are immutable once set, and the
+                # DO UPDATE is skipped entirely when the id belongs to somebody
+                # else. Without that guard an id a caller can reconstruct is
+                # enough to overwrite another tenant's queued item.
                 conn.execute(
                     """
-                    INSERT INTO manual_review(id, doc_id, item_json, created_at, resolved, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    INSERT INTO manual_review(id, doc_id, owner_id, item_json, created_at, resolved, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET
-                      doc_id=excluded.doc_id,
                       item_json=excluded.item_json,
                       ai_decision_json=excluded.ai_decision_json,
                       ai_confidence=excluded.ai_confidence,
@@ -1294,10 +1331,12 @@ class SqliteRepo:
                       validator_status=excluded.validator_status,
                       ai_model=excluded.ai_model,
                       ai_updated_at=excluded.ai_updated_at
+                    WHERE manual_review.owner_id IS excluded.owner_id
                     """,
                     (
                         item_id,
                         doc_id,
+                        owner_id or None,
                         json.dumps(item),
                         str(item.get("createdAt") or now),
                         0,
@@ -1341,18 +1380,29 @@ class SqliteRepo:
                 continue
         return out
 
-    def list_manual_review_items_for_doc(self, doc_id: str, include_resolved: bool = False) -> List[Dict[str, object]]:
+    def list_manual_review_items_for_doc(
+        self,
+        doc_id: str,
+        include_resolved: bool = False,
+        owner_id: Optional[str] = None,
+    ) -> List[Dict[str, object]]:
         conn = get_connection()
-        if include_resolved:
-            rows = conn.execute(
-                "SELECT item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at FROM manual_review WHERE doc_id=? ORDER BY created_at DESC",
-                (doc_id,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at FROM manual_review WHERE doc_id=? AND COALESCE(resolved,0)=0 ORDER BY created_at DESC",
-                (doc_id,),
-            ).fetchall()
+        where = ["doc_id=?"]
+        params: List[object] = [doc_id]
+        if not include_resolved:
+            where.append("COALESCE(resolved,0)=0")
+        if owner_id:
+            # doc_id is derived from an uploaded filename, so it alone cannot
+            # decide whose queue this is. owner_id NULL = written before the
+            # column existed; those rows belong to the document's owner, who is
+            # the only caller that reaches this far.
+            where.append("(owner_id IS NULL OR owner_id=?)")
+            params.append(owner_id)
+        rows = conn.execute(
+            "SELECT item_json, ai_decision_json, ai_confidence, ai_status, validator_status, ai_model, ai_updated_at "
+            f"FROM manual_review WHERE {' AND '.join(where)} ORDER BY created_at DESC",
+            tuple(params),
+        ).fetchall()
         out: List[Dict[str, object]] = []
         for row in rows:
             try:

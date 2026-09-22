@@ -7,12 +7,19 @@
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
+import { CATALOG_ENTRIES } from "../src/domain/issueCatalog";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
+import { ScreenReaderPreview } from "../src/ui/components/ScreenReaderPreview";
 import { useTheme } from "../src/ui/useTheme";
+import { Seo } from "../src/ui/components/Seo";
+import { linkProps } from "../src/ui/components/linkProps";
+
+/** Real number of checks, derived from the catalog so it can never drift. */
+const ISSUE_COUNT = CATALOG_ENTRIES.length;
 
 const STEPS = [
   {
@@ -71,17 +78,21 @@ export default function LandingScreen() {
   const router = useRouter();
   return (
     <Screen scroll>
+      <Seo
+        title="Make PDFs, Word & PowerPoint 508 Compliant — Accessibility Converter | 508 Agent"
+        description="Upload a PDF, Word, PowerPoint or HTML file and convert it into an accessible, Section 508 / WCAG 2.1 / PDF-UA compliant version. Free scan, automated fixes, honest reporting."
+      />
       <Hero
         eyebrow="508 AGENT"
         title="Make every document accessible, and prove it."
         subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, PowerPoint, and HTML files, fixes them automatically (including writing the alt text for your images), and hands you a conformance report. Your first audits are free."
       >
         <View style={styles.ctaRow}>
-          <Button title="Start free (25 credits)" onPress={() => router.push("/audit" as any)} />
+          <Button title="Start free (25 credits)" href="/audit" />
           <Button
             title="See pricing"
             variant="ghost"
-            onPress={() => router.push("/pricing" as any)}
+            href="/pricing"
           />
         </View>
       </Hero>
@@ -103,16 +114,36 @@ export default function LandingScreen() {
           untagged PDFs and documents to remediate, and at manual rates of $5–25 per page, that's
           a wall. 508 Agent fixes them in bulk, automatically.
         </Text>
+        {/* No accessibilityLabel: the visible text below is already a complete
+            label, and an aria-label that merely paraphrases it REPLACES the
+            name a speech-input user can say (WCAG 2.5.3 Label in Name). */}
         <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Estimate how much you would save versus manual remediation"
-          onPress={() => router.push("/savings" as any)}
+          
+          {...linkProps("/savings")}
           style={({ hovered }: any) => [{ marginTop: 12, alignSelf: "flex-start" }, hovered ? { opacity: 0.7 } : null]}
         >
           <Text style={{ color: theme.colors.accent, fontWeight: "700", fontSize: 14 }}>
             Calculate your savings vs. manual remediation
           </Text>
         </Pressable>
+      </Card>
+
+      {/* The single most persuasive thing we can show: the SAME content as a
+          sighted reader sees it and as a screen reader announces it. The damage
+          is invisible to whoever published the file — this makes it visible. */}
+      <Card variant="data">
+        <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+          Your document looks fine. Here's what it sounds like.
+        </Text>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8, marginBottom: 18 }]}>
+          Accessibility problems are invisible to the person who published the file — the page
+          looks perfect. These are five of the {ISSUE_COUNT} issues 508 Agent checks for, shown as
+          a sighted reader sees them and as assistive technology actually reads them out.
+        </Text>
+        <ScreenReaderPreview />
+        <View style={{ marginTop: 20 }}>
+          <Button title="Scan my document free" href="/audit" />
+        </View>
       </Card>
 
       <Card>
@@ -190,7 +221,9 @@ export default function LandingScreen() {
           <Pressable accessibilityRole="button" accessibilityLabel="Open the Section 508 standards (external link)" onPress={() => Linking.openURL("https://www.access-board.gov/ict/")}>
             <Chip label="Section 508" tone="info" />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
+          {/* "PDF/UA", not "PDF" — the label has to contain the chip's own
+              words to satisfy WCAG 2.5.3, same as the two chips above. */}
+          <Pressable accessibilityRole="button" accessibilityLabel="Open the PDF/UA accessibility techniques (external link)" onPress={() => Linking.openURL("https://www.w3.org/TR/WCAG21-TECHS/pdf.html")}>
             <Chip label="PDF/UA" tone="info" />
           </Pressable>
         </View>
@@ -206,30 +239,31 @@ export default function LandingScreen() {
             you're ready to scale. Fix one document or ten thousand.
           </Text>
           <View style={[styles.ctaRow, { justifyContent: "center" }]}>
-            <Button title="Start free" onPress={() => router.push("/audit" as any)} />
-            <Button title="See pricing" variant="ghost" onPress={() => router.push("/pricing" as any)} />
+            <Button title="Start free" href="/audit" />
+            <Button title="See pricing" variant="ghost" href="/pricing" />
           </View>
         </View>
       </Card>
 
       <View style={styles.footer}>
-        <FooterLink label="Pricing" onPress={() => router.push("/pricing" as any)} />
-        <FooterLink label="Savings calculator" onPress={() => router.push("/savings" as any)} />
-        <FooterLink label="FAQ" onPress={() => router.push("/faq" as any)} />
-        <FooterLink label="About" onPress={() => router.push("/about" as any)} />
-        <FooterLink label="Help" onPress={() => router.push("/help" as any)} />
-        <FooterLink label="Terms" onPress={() => router.push("/terms" as any)} />
-        <FooterLink label="Privacy" onPress={() => router.push("/privacy" as any)} />
+        <FooterLink label="Pricing" path="/pricing" />
+        <FooterLink label="Savings calculator" path="/savings" />
+        <FooterLink label="FAQ" path="/faq" />
+        <FooterLink label="Fix guides" path="/fix" />
+        <FooterLink label="About" path="/about" />
+        <FooterLink label="Help" path="/help" />
+        <FooterLink label="Terms" path="/terms" />
+        <FooterLink label="Privacy" path="/privacy" />
       </View>
     </Screen>
   );
 }
 
-function FooterLink({ label, onPress }: { label: string; onPress: () => void }) {
+function FooterLink({ label, path }: { label: string; path: string }) {
   const theme = useTheme();
   return (
-    <Pressable accessibilityRole="button"
-      onPress={onPress}
+    <Pressable
+      {...linkProps(path)}
       style={({ hovered, focused }: any) => [
         hovered ? { opacity: 0.7 } : null,
         focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,

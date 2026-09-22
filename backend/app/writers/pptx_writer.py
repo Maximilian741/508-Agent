@@ -34,6 +34,7 @@ Design notes
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -205,14 +206,28 @@ def write_remediated_pptx(
                 _pptx_theme = {}
         _apply_pptx_contrast(node, text_by_node_id, color_map, _pptx_theme, applied, skipped)
 
-    # Step 6 — persist.
+    # Step 6 — persist. Save to a sibling temp file, then move it into place,
+    # and report a failed save as applied=[] — because nothing was applied to
+    # the FILE. Swallowing the exception and returning the in-memory ``applied``
+    # list charged full price for a deck byte-identical to the user's own
+    # upload: the pipeline's hard-failure guard didn't match the reason, and its
+    # ``and not applied`` clause couldn't help, since ``applied`` records intent
+    # rather than bytes. docx_writer lets its save raise; this is the same
+    # contract, expressed through the skip list the caller already reads.
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
-        prs.save(str(output_path))
+        prs.save(str(tmp_path))
+        os.replace(str(tmp_path), str(output_path))
     except Exception as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         logger.exception("Failed to save remediated pptx: %s", exc)
-        skipped.append(
-            {"target_id": tree.root.id, "reason": f"failed_to_save_pptx:{exc}"}
-        )
+        return {
+            "applied": [],
+            "skipped": skipped + [{"target_id": tree.root.id, "reason": f"failed_to_save_pptx:{exc}"}],
+        }
 
     return {"applied": applied, "skipped": skipped}
 
@@ -573,6 +588,9 @@ def _apply_document_metadata(
     """Sync ``DocumentNode`` metadata (title, language) onto core properties."""
 
     core = prs.core_properties
+    # Read before anything is written: the parser takes the deck language from
+    # core_properties.language, so equal means no language fix was applied.
+    source_language = (getattr(core, "language", None) or "").strip()
 
     title = ""
     if root.metadata.properties:
@@ -593,7 +611,10 @@ def _apply_document_metadata(
             )
 
     language = (root.metadata.language or "").strip()
-    if language:
+    # Only a CHANGED language is written. Re-asserting the source's own value
+    # stamped a:rPr@lang onto every run of decks where nobody approved a
+    # language fix (SET_DOCUMENT_LANGUAGE runs only when the deck has none).
+    if language and language != source_language:
         try:
             core.language = language
             applied.append(
