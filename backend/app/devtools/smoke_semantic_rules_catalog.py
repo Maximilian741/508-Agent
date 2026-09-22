@@ -200,6 +200,18 @@ CAPTIONS = [
     ("Posted on September 12, 2026 by admin", "figcaption", None),
     ("September 12, 2026", "figcaption", None),
     ("Photo credit: Jane Doe", "figcaption", None),
+    # Credit lines in their other common shapes were written as alt, charged.
+    ("Photo: Jane Doe/Reuters", "figcaption", None),
+    ("Credit: City of Denver", "figcaption", None),
+    ("Courtesy of the Smith family", "figcaption", None),
+    ("(Photo by Jane Doe)", "figcaption", None),
+    ("Photograph: Getty Images", "figcaption", None),
+    ("Image: Shutterstock", "figcaption", None),
+    ("AP Photo/Mark Lennihan", "figcaption", None),
+    ("Getty Images", "figcaption", None),
+    # ...while a caption that happens to open with "Photo:" and describes
+    # the picture is kept as written.
+    ("Photo: Volunteers planting trees by the river", "figcaption", "Photo: Volunteers planting trees by the river"),
     ("https://example.com/photos/IMG_2041.png", "figcaption", None),
     ("IMG_2041.png", "title", None),
     ("Click to enlarge", "title", None),

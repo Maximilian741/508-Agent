@@ -106,9 +106,36 @@ _DATE_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 _CREDIT_RE = re.compile(
-    r"^(?:(?:photo|image|picture|illustration)\s*(?:credit|courtesy|by|source)\b|©|\(c\)\s|copyright\b|source:)",
+    r"^\(?\s*(?:(?:photo(?:graph)?|image|picture|illustration|graphic|artwork)s?\s*(?:credits?|courtesy|by|source)\b"
+    r"|credits?\s*:|courtesy\b|©|\(c\)\s|copyright\b|source:"
+    # Wire-service credit lines: "AP Photo/Mark Lennihan", "AFP Photo".
+    r"|(?:ap|afp|epa|upi|pa)\s+(?:photo|images?)\b)",
     re.IGNORECASE,
 )
+# "…/Reuters", "Jane Doe / Getty Images": a credit ending in an agency.
+_AGENCY_CREDIT_RE = re.compile(
+    r"/\s*(?:reuters|ap|afp|epa|upi|getty(?:\s+images)?|shutterstock|alamy|bloomberg|associated press"
+    r"|istock(?:photo)?|adobe\s+stock|unsplash|pexels)\s*\)?\.?$",
+    re.IGNORECASE,
+)
+# "Photo: Jane Doe", "Image: Shutterstock", "Photograph: Getty Images" — a
+# kind-of-picture label over a name or two is a credit line, not what the
+# picture shows ("Photo: Volunteers planting trees by the river" is kept).
+_LABELLED_CREDIT_RE = re.compile(r"^\(?\s*(?:photo(?:graph)?|image|picture|illustration)\s*:\s*(.+?)\)?$", re.IGNORECASE)
+
+
+def is_photo_credit(text: str) -> bool:
+    t = _collapse(text)
+    if _CREDIT_RE.match(t) or _AGENCY_CREDIT_RE.search(t):
+        return True
+    m = _LABELLED_CREDIT_RE.match(t)
+    if m:
+        words = m.group(1).split()
+        if len(words) <= 4 and all(w[:1].isupper() or not w[:1].isalpha() for w in words):
+            return True
+    return False
+
+
 # Interface instructions, not descriptions ("Click to enlarge").
 _UI_PHRASE_RE = re.compile(
     r"^(?:click|tap|hover|press|select|zoom|enlarge|open|download|watch|play)\b",
@@ -291,7 +318,7 @@ def _description_problem(desc: str) -> Optional[str]:
         return "the text near it is a web or email address, not a description"
     if is_byline_or_date(d):
         return "the text near it is a date or byline, not a description"
-    if _CREDIT_RE.match(d):
+    if is_photo_credit(d):
         return "the text near it is a photo credit, not a description"
     if is_nav_like(d):
         return "the text near it is a website menu, not a description"
