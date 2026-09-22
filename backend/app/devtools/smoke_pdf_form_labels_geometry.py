@@ -132,6 +132,25 @@ def main() -> int:
     got = _labels(captions_below())
     check("captions printed UNDER fields: no field takes the heading above it or the previous field's caption",
           got == {"Text1": None, "Text2": None}, str(got))
+    got = _labels(units_and_wraps())
+    check("'Height: [__] ft [__] in': the inches box is not labelled 'ft', the ounces box not 'lbs'",
+          got.get("Text2") is None and got.get("Text4") is None, str(got))
+    check("the box right after the row label keeps it ('Height', 'Weight'); 'Age:' keeps its short label",
+          (got.get("Text1"), got.get("Text3"), got.get("Text5")) == ("Height", "Weight", "Age"), str(got))
+    check("a label wrapped over two lines: the field is not named by its second line (lower-case start or 'or' ending)",
+          got.get("Text8") is None and got.get("Text9") is None, str(got))
+    check("a row under an instruction line keeps its label ('Name:' is not a wrapped tail)",
+          got.get("Text10") == "Name", str(got))
+    # Through the route: only what was derivable is written and charged.
+    r = pipe.remediate("units.pdf", units_and_wraps(), ids=[
+        v["id"] for v in pipe.analyze("units.pdf", units_and_wraps()).json()["violations"]
+        if v["ruleId"] == "FORM_FIELD_UNLABELED"])
+    applied = [x for x in (r.json().get("writer") or {}).get("applied", []) if x.get("kind") == "form_field_label"]
+    out = PdfReader(io.BytesIO(pipe.download(r.json())))
+    tu = {str(o.get_object().get("/T")): (str(o.get_object().get("/TU")) if o.get_object().get("/TU") is not None else None)
+          for o in out.pages[0]["/Annots"]}
+    check("route: 4 labels written, the unit / wrapped-tail boxes have no /TU",
+          len(applied) == 4 and all(tu.get(n) is None for n in ("Text2", "Text4", "Text8", "Text9")), f"{len(applied)} {tu}")
     return check.done()
 
 
@@ -145,11 +164,11 @@ def _labels(data: bytes):
     return {str(fo.get("/T")): derive_pdf_field_label(fo, lab) for fo in iter_acroform_fields(acro)}
 
 
-def _form(content: bytes, widgets) -> bytes:
+def _form(content: bytes, widgets, body_y: float = 600) -> bytes:
     w = PdfWriter()
     f = K.helvetica(w)
     for i in range(6):
-        content += K.bt("F1", 10, 72, 600 - 14 * i, K.lit("Return this application to the permit office with a copy of your ID."))
+        content += K.bt("F1", 10, 72, body_y - 14 * i, K.lit("Return this application to the permit office with a copy of your ID."))
     p = K.add_page(w, content, {"F1": f})
     refs = [K.widget(w, rect, name=name, ft=ft) for rect, name, ft in widgets]
     for ref in refs:
@@ -169,6 +188,32 @@ def yes_no_after() -> bytes:
     c = K.bt("F1", 11, 72, 700, K.lit("Do you own a vehicle?"))
     c += K.bt("F1", 11, 264, 700, K.lit("Yes")) + K.bt("F1", 11, 314, 700, K.lit("No"))
     return _form(c, [((250, 698, 260, 708), "cb_yes", "/Btn"), ((300, 698, 310, 708), "cb_no", "/Btn")])
+
+
+def units_and_wraps() -> bytes:
+    """Units printed between boxes, a label wrapped over two lines (the
+    verifier's form_units layout: these got /TU 'ft', 'lbs', 'payment of the
+    permit fee', charged)."""
+    tx = "/Tx"
+    c = K.bt("F1", 11, 72, 750, K.lit("Height:"))
+    c += K.bt("F1", 11, 174, 750, K.lit("ft")) + K.bt("F1", 11, 254, 750, K.lit("in"))
+    c += K.bt("F1", 11, 72, 720, K.lit("Weight:"))
+    c += K.bt("F1", 11, 174, 720, K.lit("lbs")) + K.bt("F1", 11, 254, 720, K.lit("oz"))
+    c += K.bt("F1", 11, 72, 690, K.lit("Age:"))
+    c += K.bt("F1", 11, 72, 660, K.lit("Name of the person who will be responsible for"))
+    c += K.bt("F1", 11, 72, 646, K.lit("payment of the permit fee:"))
+    c += K.bt("F1", 11, 72, 616, K.lit("Signature of the applicant or"))
+    c += K.bt("F1", 11, 72, 602, K.lit("Authorized Agent:"))
+    c += K.bt("F1", 11, 72, 572, K.lit("Please print clearly in ink"))
+    c += K.bt("F1", 11, 72, 558, K.lit("Name:"))
+    return _form(c, [
+        ((120, 747, 170, 762), "Text1", tx), ((200, 747, 250, 762), "Text2", tx),
+        ((120, 717, 170, 732), "Text3", tx), ((200, 717, 250, 732), "Text4", tx),
+        ((120, 687, 170, 702), "Text5", tx),
+        ((220, 643, 450, 658), "Text8", tx),
+        ((180, 599, 400, 614), "Text9", tx),
+        ((120, 555, 330, 570), "Text10", tx),
+    ], body_y=480)
 
 
 def captions_below() -> bytes:
