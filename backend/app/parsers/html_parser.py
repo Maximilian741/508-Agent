@@ -970,7 +970,8 @@ def decode_html_bytes(blob: bytes, preserve_bytes: bool = False) -> Tuple[str, H
     xd = _XML_DECL_STR_RE.match(text)
     if xd:
         xml_decl = xd.group(0)
-        text = text[xd.end():]
+        # Keep its line breaks so source line numbers stay the author's.
+        text = "\n" * xml_decl.count("\n") + text[xd.end():]
     has_doctype = bool(_DOCTYPE_RE.match(text[:4096]))
     return text, HtmlSource(
         encoding=codec, bom=bom, xml_decl=xml_decl, has_doctype=has_doctype,
@@ -1376,6 +1377,38 @@ def _image_caption(el: Any) -> Optional[str]:
     return None
 
 
+_SNIPPET_MAX = 200
+_SNIPPET_ATTR_MAX = 60
+
+
+def _start_tag_snippet(el: Any) -> str:
+    """The element's start tag as the author wrote it (attribute order kept),
+    e.g. ``<img src="charts/q3.png" width="400">`` — how a person finds THIS
+    image in their page (an image has no text to quote). Long values (a
+    data: URI) are elided; the whole snippet is capped at 200 characters."""
+    tag = _svg_local(el) if isinstance(el.tag, str) else ""
+    parts = [f"<{tag}"]
+    for key, value in el.attrib.items():
+        value = " ".join(str(value).split())
+        if len(value) > _SNIPPET_ATTR_MAX:
+            value = value[: _SNIPPET_ATTR_MAX - 1] + "…"
+        parts.append(f' {key}="{value}"')
+    snippet = "".join(parts) + ">"
+    if len(snippet) > _SNIPPET_MAX:
+        snippet = snippet[: _SNIPPET_MAX - 2] + "…>"
+    return snippet
+
+
+def _locate_props(el: Any) -> Dict[str, Any]:
+    """Where an element is, for the shared location contract: its start tag
+    and 1-based source line (HTML has no pages or coordinates)."""
+    props: Dict[str, Any] = {"snippet": _start_tag_snippet(el)}
+    line = getattr(el, "sourceline", None)
+    if isinstance(line, int) and line > 0:
+        props["line"] = line
+    return props
+
+
 def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     alt = el.get("alt")  # None = attribute absent; "" = explicitly decorative
     role = (el.get("role") or "").strip().lower()
@@ -1386,6 +1419,7 @@ def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     is_decorative = (alt == "") or role in {"presentation", "none"} or aria_hidden
     node_id = ids("html-img")
     meta = _meta(el, roottree)
+    meta.properties.update(_locate_props(el))
     # Context for alt generation, so the heuristic provider (no AI key) can
     # derive a REAL description instead of a location placeholder — which the
     # executor now refuses to write. Prefer a <figcaption> sibling, then the
@@ -1501,7 +1535,7 @@ def _build_svg(el: Any, ids: _Ids, roottree: Any) -> Optional[ImageNode]:
     if role != "img" and not drawn:
         return None
     name = _svg_accessible_name(el)
-    props: Dict[str, Any] = {"__xpath": roottree.getpath(el), "svg_inline": True}
+    props: Dict[str, Any] = {"__xpath": roottree.getpath(el), "svg_inline": True, **_locate_props(el)}
     if drawn:
         props["svg_text"] = drawn[:200]
         if len(drawn.split()) <= _SVG_MAX_NAME_WORDS and any(c.isalpha() for c in drawn):
