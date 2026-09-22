@@ -1020,6 +1020,11 @@ def _meta(el: Any, roottree: Any, ctx: Optional[Dict[str, Any]] = None) -> NodeM
     """Node metadata with the writer's xpath locator, plus contrast colours when
     a style context is supplied for a text-bearing node."""
     props: Dict[str, Any] = {"__xpath": roottree.getpath(el)}
+    # The source line, so a finding can say where on the page it is (HTML
+    # has no pages or coordinates for the location contract).
+    line = getattr(el, "sourceline", None)
+    if isinstance(line, int) and line > 0:
+        props["line"] = line
     if ctx is not None:
         props.update(_contrast_props(ctx))
     return NodeMetadata(source_format="html", properties=props)

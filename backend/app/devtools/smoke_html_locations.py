@@ -75,6 +75,14 @@ def main() -> int:
     check("the SVG badge says which SVG, and where", props[2].get("snippet", "").lower() == '<svg viewbox="0 0 10 10">' and props[2].get("line") == 8,
           f"{props[2].get('snippet')!r} line {props[2].get('line')}")
 
+    from app.models.accessibility import HeadingNode, ParagraphNode
+
+    res = HTMLParser().parse_to_tree(str(page))
+    others = {type(n).__name__: (n.metadata.properties or {}).get("line") for n in iter_reading_order(res.tree.root)
+              if isinstance(n, (HeadingNode, ParagraphNode))}
+    check("every other node carries its source line too (heading line 4, paragraph line 6)",
+          others == {"HeadingNode": 4, "ParagraphNode": 6}, str(others))
+
     x = tmp / "x.html"
     x.write_text(XHTML, encoding="utf-8")
     ximgs = _images(x)
