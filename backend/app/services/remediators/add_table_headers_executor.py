@@ -187,6 +187,10 @@ _HEADER_WORDS = frozenset(
     capacity availability deliverable deliverables milestone milestones risk risks impact likelihood
     mitigation issue issues finding findings recommendation recommendations standard standards
     guideline guidelines rule rules criterion wcag
+    employee employees student students applicant applicants participant participants member members
+    client clients customer customers patient patients resident residents instructor teacher speaker
+    speakers presenter attendee attendees volunteer volunteers recipient recipients user users guest
+    party parties website url web school schools hospital agency agencies
     nombre apellido fecha hora teléfono correo dirección ciudad estado región departamento cargo
     descripción tipo cantidad importe precio costo coste total categoría servicio programa notas
     nom prénom heure téléphone courriel adresse ville région poste statut quantité montant prix coût
