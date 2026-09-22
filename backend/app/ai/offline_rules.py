@@ -473,9 +473,24 @@ def vet_link_text(suggestion: Optional[str], original: Optional[str], target: Op
             return "the suggested name only wrapped an address in filler"
     if _EMAIL_RE.search(s) and len(_real_words(_EMAIL_RE.sub("", s))) < 2:
         return "the suggested name was an email address"
+    if _PHONE_RUN_RE.search(s) and len(_real_words(_PHONE_RUN_RE.sub("", s))) < 2:
+        # "Call +18005551212" is the tel: address read out, not a name.
+        return "the suggested name was a phone number"
     if s.startswith("#") or has_control_chars(s):
         return "the suggested name was not words"
+    words = [w.lower() for w in _real_words(s)]
+    if words and all(w in _GENERIC_LINK_WORDS for w in words):
+        # "Download", "PDF", "Link to page": says no more than "click here".
+        return "the suggested name was itself generic"
     return None
+
+
+_PHONE_RUN_RE = re.compile(r"\+?\d[\d\s().\-]{6,}\d")
+_GENERIC_LINK_WORDS = frozenset(
+    "download downloads pdf doc docx file files document documents link links page pages website site "
+    "web info information form forms view open visit access here this that more continue next previous "
+    "back submit button details item online resource resources".split()
+)
 
 
 # ---------------------------------------------------------------------------
