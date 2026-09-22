@@ -1123,6 +1123,31 @@ def _paragraph_boxes(
 # ---------------------------------------------------------------------------
 
 
+# A tagged table's / list's text must be at least this long (whitespace
+# removed) before a single contiguous match of it on the page is trusted as
+# the element's location. Two short cells ("A", "B") could match anywhere.
+_MIN_LOCATE_CHARS = 12
+
+
+def _struct_text_box(text: Optional[str], words_fn) -> Optional[Tuple[float, float, float, float]]:
+    """Where a tagged container (table / list) sits, from its own text.
+
+    ``text`` is the element's text in content-stream order (tag_reader). It
+    is located as ONE contiguous, whitespace-insensitive run in the page's
+    positioned words — specific enough that a match IS the element. Short
+    text, unreadable text or no match: None (no location, never a guess).
+    """
+    if not text or len(_compact(text)) < _MIN_LOCATE_CHARS:
+        return None
+    try:
+        words = words_fn()
+    except Exception:
+        return None
+    if not words:
+        return None
+    return _paragraph_boxes([text], words, max_skip=None)[0]
+
+
 def _node_metadata(page_index: Optional[int] = None, **properties: Any) -> NodeMetadata:
     return NodeMetadata(
         page=page_index,
@@ -1426,7 +1451,8 @@ class PDFParser:
                             id=next_id(f"{page_label}-ttable"),
                             content=NodeContent(kind=ContentKind.NONE),
                             metadata=_node_metadata(
-                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size")
+                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size"),
+                                bbox=_rel_box(_struct_text_box(t.get("text"), _words), geo),
                             ),
                             children=rows,
                             accessibility_flags=[],
@@ -1465,7 +1491,8 @@ class PDFParser:
                             id=next_id(f"{page_label}-tlist"),
                             content=NodeContent(kind=ContentKind.NONE),
                             metadata=_node_metadata(
-                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size")
+                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size"),
+                                bbox=_rel_box(_struct_text_box(l.get("text"), _words), geo),
                             ),
                             children=kid_nodes,
                             accessibility_flags=[],

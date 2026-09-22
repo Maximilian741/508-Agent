@@ -42,6 +42,8 @@ _TMP = K.isolated_env("508_smoke_structhon_")
 from pypdf import PdfReader, PdfWriter  # noqa: E402
 
 BODY = "Stormwater fees fund the drainage system that keeps streets clear during heavy rain events."
+BULLETS = ["\x95 Residential rates apply to single homes", "\x95 Commercial rates apply to shops and offices",
+           "\x95 Industrial rates apply to plants and yards"]
 LEFT = ["Crews begin pre-treating bridges when the forecast", "shows freezing rain, and plows go out once two",
         "inches of snow have fallen on the arterial roads", "that carry buses and emergency vehicles first",
         "before neighborhood streets are cleared later", "in the storm when the main roads are passable"]
@@ -77,6 +79,10 @@ def report_pdf() -> bytes:
             c += K.bt("F1", 13, 72, 530, K.lit("2.2 Capital Projects"))
             for i in range(3):
                 c += K.bt("F1", 11, 72, 500 - 14 * i, K.lit(BODY))
+        else:
+            # A bulleted list (located on re-parse from its tagged text).
+            for i, item in enumerate(BULLETS):
+                c += K.bt("F1", 11, 90, 520 - 16 * i, K.lit(item))
         K.add_page(w, c, {"F1": f})
     # bare TOC (no leaders): entry | page number
     c = K.bt("F1", 16, 72, 700, K.lit("Table of Contents"))
@@ -236,6 +242,17 @@ def main() -> int:
     check("the re-parsed TableNode is on page 7", [n.metadata.page for n in tnodes] == [7], str([n.metadata.page for n in tnodes]))
     tbl = [e for _d, s, e in K.struct_elems(r) if s == "/Table"]
     check("/Table carries /Pg", bool(tbl) and "/Pg" in tbl[0])
+    # Locations of TAGGED containers (the re-parse reads them from tags): the
+    # table's cells sit at x=72..312+, baselines y=680..632; the list's items
+    # at x=90, y=520..488. Each is located from its own text, as one run.
+    tb = tnodes[0].metadata.properties.get("bbox") if tnodes else None
+    check("the tagged table is located (bbox spans its cells)",
+          bool(tb) and 71 <= tb[0] <= 73 and tb[1] <= 632 and tb[3] >= 680 and tb[2] > 312, str(tb))
+    lnodes = [n for n in _iter(res_out.tree.root) if type(n).__name__ == "ListNode"]
+    lb = lnodes[0].metadata.properties.get("bbox") if lnodes else None
+    check("the tagged list is located on its page",
+          len(lnodes) == 1 and lnodes[0].metadata.page == 4 and bool(lb)
+          and 89 <= lb[0] <= 91 and lb[1] <= 488 and lb[3] >= 520, f"{[n.metadata.page for n in lnodes]} {lb}")
 
     # 6. PDF/UA claim
     xmp = r.trailer["/Root"]["/Metadata"].get_object().get_data()
