@@ -161,6 +161,25 @@ def _pick_title_source(
 class SetSlideTitleExecutor(RemediationExecutor):
     supported_actions = [ActionCode.SET_SLIDE_TITLE]
 
+    def __init__(self) -> None:
+        super().__init__()
+        # (tree, counts): the deck-wide boilerplate tally, computed once per
+        # tree. Recounting the whole deck for every untitled slide was
+        # O(slides^2) — 5 s of a 500-slide deck's remediation. Executors are
+        # built fresh per job (registry.get_default_executors), and holding
+        # the tree itself (compared with ``is``) means a recycled id() can
+        # never hand one deck's counts to another. Setting a title never
+        # changes paragraph text, so the tally stays true for the whole job.
+        self._counts_cache: Optional[Tuple[AccessibilityTree, Dict[str, int]]] = None
+
+    def _boilerplate_counts(self, tree: AccessibilityTree) -> Dict[str, int]:
+        cached = self._counts_cache
+        if cached is not None and cached[0] is tree:
+            return cached[1]
+        counts = _slide_text_counts(tree)
+        self._counts_cache = (tree, counts)
+        return counts
+
     def execute(self, plan: RemediationPlan, tree: Optional[AccessibilityTree] = None) -> ExecutionResult:
         action_code = self._first_action(plan)
         self._ensure_supported(action_code)
@@ -189,7 +208,7 @@ class SetSlideTitleExecutor(RemediationExecutor):
         if target.metadata.properties is None:
             target.metadata.properties = {}
         slide_no = target.metadata.properties.get("slide_number")
-        picked = _pick_title_source(target, _slide_text_counts(tree))
+        picked = _pick_title_source(target, self._boilerplate_counts(tree))
         if picked is None:
             return ExecutionResult(
                 action_code=action_code,

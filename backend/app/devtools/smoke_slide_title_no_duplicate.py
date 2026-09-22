@@ -242,6 +242,30 @@ def main() -> int:
                    if any(f.code.value == FLAG for f in n.accessibility_flags))
     check("re-analysis: only the two refused slides are still untitled", still == [3, 7], str(still))
 
+    # ---- the deck-wide boilerplate tally is computed once per job ----------
+    # It used to be recounted over the whole deck for every untitled slide
+    # (O(slides^2): 5 s of a 500-slide deck's remediation).
+    from app.services.remediators import set_slide_title_executor as sste
+
+    calls = {"n": 0}
+    real = sste._slide_text_counts
+
+    def counting(tree):
+        calls["n"] += 1
+        return real(tree)
+
+    sste._slide_text_counts = counting
+    try:
+        res3 = parse_to_tree(str(src))
+        run_analyzers(res3.tree)
+        plans3 = [p for p in plan_remediations(res3.tree, policy) if p.flag.code.value == FLAG]
+        execs3 = execute_plans(res3.tree, plans3)
+    finally:
+        sste._slide_text_counts = real
+    check("the boilerplate tally is computed once for all 10 untitled slides", calls["n"] == 1, str(calls["n"]))
+    check("and the outcome is the same as before",
+          sorted((e.target_node_id, e.status.value) for e in execs3) == sorted((k, e.status.value) for k, e in execs.items()))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 
