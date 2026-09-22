@@ -449,15 +449,23 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
             pdf_ua=[],
         ),
     ),
-    # A block of spreadsheet data whose header row we cannot identify with
-    # confidence (numbers or blanks in the first row, merged cells, a table
-    # whose header row is switched off). TABLE_MISSING_HEADERS is raised only
-    # when there IS a clear header row we can declare; this is the other case,
-    # where declaring one would be a guess.
+    # A block of spreadsheet data with no header row a screen reader can
+    # announce, that we cannot mark automatically: either its first row is not
+    # clearly headings (numbers or blanks in it, names over names, a table whose
+    # header row is switched off) and declaring one would be a guess, or the
+    # headings are clear but the range cannot safely become a table (merged
+    # cells, a filter, sheet protection, a PivotTable). TABLE_MISSING_HEADERS
+    # is raised only when we CAN declare the header row. The message must be
+    # true in both cases: a filtered range with obvious headings is not a
+    # range "with no header row we can identify".
     AccessibilityFlagCode.DATA_RANGE_HEADERS_UNCLEAR: AccessibilityFlagDefinition(
         code=AccessibilityFlagCode.DATA_RANGE_HEADERS_UNCLEAR,
         severity=Severity.ERROR,
-        message="Data range has no header row we can identify, so a screen reader cannot announce what each column means.",
+        message=(
+            "Data range has no header row a screen reader can announce, and it could not be marked "
+            "automatically (its first row is not clearly headings, or the range has merged cells, "
+            "a filter or sheet protection)."
+        ),
         standards=StandardReference(
             wcag_2_1=["1.3.1"],
             section_508=["E205.2"],
@@ -1175,8 +1183,10 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
         RemediationAction(
             action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
             description=(
-                "Add a row of column headings above the data (or turn the table's "
-                "header row on), then format the range as a table."
+                "Make sure the first row holds a heading for every column, then mark it as the "
+                "header row: turn on Header Row for an Excel table, or use Format as Table with "
+                "'My table has headers' for a plain range (clear merged cells, filters or sheet "
+                "protection first)."
             ),
             requires_ai=False,
             requires_human_review=True,

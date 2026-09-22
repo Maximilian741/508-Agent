@@ -562,6 +562,28 @@ def main() -> int:  # noqa: PLR0915
     check("picky: openpyxl refusing only OUR output is still a failure, nothing applied",
           not wr["applied"] and any(s.get("reason", "").startswith("failed_to_save_xlsx") for s in wr["skipped"]), str(wr))
 
+    # ---- 10. clear headings on a range we may not restructure --------------
+    # A filtered range with obvious headings cannot safely become a table
+    # (the filter would change), so it is left for a person - and what the
+    # person reads must not claim its header row is unidentifiable.
+    filtered = tmp / "filtered.xlsx"
+    book = xlsxwriter.Workbook(str(filtered))
+    sheet = book.add_worksheet("Orders")
+    sheet.write_row(0, 0, ["Order", "Amount", "Region"], book.add_format({"bold": True}))
+    for i in range(1, 6):
+        sheet.write_row(i, 0, [f"o{i}", i * 3, "North"])
+    sheet.autofilter("A1:C6")
+    book.close()
+    res = parse_to_tree(str(filtered))
+    t_f = next(n for n in iter_reading_order(res.tree.root) if isinstance(n, TableNode))
+    found_f = {v.rule_id: v for v in RemediationEngine().detect_violations(res.tree)}
+    desc = found_f.get("DATA_RANGE_HEADERS_UNCLEAR").description if "DATA_RANGE_HEADERS_UNCLEAR" in found_f else ""
+    check("blocked: a filtered range is left for a person, with the filter as the reason",
+          "TABLE_MISSING_HEADERS" not in found_f and "filter" in (t_f.metadata.properties.get("header_reason") or ""),
+          str(t_f.metadata.properties.get("header_reason")))
+    check("blocked: ...and the finding does not claim its headings are unidentifiable",
+          bool(desc) and "can identify" not in desc and "filter" in desc, desc)
+
     # ---- 8. inline strings (streaming writers store text in the cell) -----
     inline = tmp / "inline.xlsx"
     book = xlsxwriter.Workbook(str(inline), {"constant_memory": True})
