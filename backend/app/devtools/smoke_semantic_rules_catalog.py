@@ -388,6 +388,75 @@ def main() -> int:
     ]:
         check(f"vet alt: {text!r} {'allowed' if ok else 'refused'}", (vet_alt_text(text, node_id=node_id) is None) == ok)
 
+    # ---- what a model sends back (no network: the call is replaced) --------
+    from app.ai.offline_rules import clean_model_text
+    from app.ai.semantic_inference import ClaudeProvider, OpenAIProvider
+
+    for raw, want in [
+        ("Alt text: A red car on a wet street", "A red car on a wet street"),
+        ('"A red car on a wet street"', "A red car on a wet street"),
+        ("Caption - Sales by region", "Sales by region"),
+        ("A red car", "A red car"),
+    ]:
+        check(f"clean model text {raw!r} -> {want!r}", clean_model_text(raw) == want, clean_model_text(raw))
+    for text in [
+        "I'm sorry, but I can't describe this image.",
+        "I cannot see the image.",
+        "As an AI, I cannot view images.",
+        "Unable to generate a description",
+        "An image",
+        "A photo.",
+    ]:
+        check(f"vet alt: model answer {text!r} refused", vet_alt_text(text) is not None)
+    check("vet link: a model apology is refused",
+          vet_link_text("I'm sorry, I can't determine where this link goes", "click here", "/x") is not None)
+    check("vet caption: a model apology is refused",
+          vet_table_caption("Sorry, I cannot determine what this table shows", ["Region"]) is not None)
+
+    # The providers' real request/parse path, with urlopen replaced by a
+    # canned answer: nothing leaves this process.
+    import io as _io
+    import json as _json
+    import urllib.request as _ur
+
+    canned = {"text": ""}
+
+    class _Resp(_io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fake_urlopen(request, timeout=None):
+        url = getattr(request, "full_url", str(request))
+        if "anthropic" in url:
+            body = {"content": [{"type": "text", "text": canned["text"]}]}
+        elif "openai" in url:
+            body = {"choices": [{"message": {"content": canned["text"]}}]}
+        else:
+            raise AssertionError(f"unexpected network call in a smoke: {url}")
+        return _Resp(_json.dumps(body).encode("utf-8"))
+
+    real_urlopen = _ur.urlopen
+    _ur.urlopen = _fake_urlopen
+    try:
+        for cls in (ClaudeProvider, OpenAIProvider):
+            prov = cls(api_key="not-a-real-key")
+            for answer, want in [
+                ("en", "en"), ("pt-BR", "pt-br"), ("es.", "es"), ("Answer: fr", "fr"),
+                ("It is English (en).", ""), ("The language is en", ""), ("English", ""),
+            ]:
+                canned["text"] = answer
+                r = prov.document_language({"sample": "whatever"})
+                check(f"{cls.__name__}: language answer {answer!r} -> {want or 'abstain'!r}", r.text == want, repr(r.text))
+            canned["text"] = 'Alt text: "A red car on a wet street"'
+            r = prov.alt_text({"image_b64": "AAAA", "image_mime": "image/png"})
+            check(f"{cls.__name__}: a labelled, quoted alt answer is cleaned",
+                  r.text == "A red car on a wet street", repr(r.text))
+    finally:
+        _ur.urlopen = real_urlopen
+
     # ---- titles ----------------------------------------------------------
     for filename, want in TITLES_FROM_FILENAME:
         v = title_from_filename(filename)

@@ -289,6 +289,47 @@ _NODE_ID_ALT_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# What a model sends back
+# ---------------------------------------------------------------------------
+
+# "Alt text: A red car", "Caption - Sales by region": the model labelled its
+# answer. The label is not part of the answer.
+_MODEL_LABEL_RE = re.compile(
+    r"^\s*(?:alt(?:ernative)?[\s-]*text|alt|description|caption|link[\s-]*text|label|title|answer)\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+_WRAP_QUOTES = "\"'“”‘’`"
+# The model declined or could not see the input ("I'm sorry, I can't view
+# images", "As an AI…", "Unable to determine"). Written into a file, that is
+# worse than nothing.
+_MODEL_REFUSAL_RE = re.compile(
+    r"^(?:i'?m sorry|sorry\b|i\s+(?:am\s+)?(?:can(?:no|')?t|cannot|unable|not able|do not|don'?t)\b"
+    r"|as an ai\b|unable to\b|no image\b|there is no (?:image|picture|photo|table|link)\b|n/?a$)"
+    r"|\b(?:can(?:no|')?t|unable to|not able to)\s+(?:see|view|describe|identify|access|determine|read|tell)\b",
+    re.IGNORECASE,
+)
+# "An image", "A photo", "Picture." — a kind of thing, not what it shows.
+_GENERIC_NOUN_ONLY_RE = re.compile(
+    r"^(?:an?|the|this|one)?\s*(?:image|photo|photograph|picture|graphic|illustration|figure|icon|logo"
+    r"|screenshot|diagram|chart|drawing|img|visual)s?\.?$",
+    re.IGNORECASE,
+)
+
+
+def clean_model_text(text: Optional[str]) -> str:
+    """A model's answer without the label or quotes it wrapped it in."""
+    t = _collapse(text)
+    t = _MODEL_LABEL_RE.sub("", t, count=1).strip()
+    while len(t) >= 2 and t[0] in _WRAP_QUOTES and t[-1] in _WRAP_QUOTES:
+        t = t[1:-1].strip()
+    return t
+
+
+def is_model_refusal(text: Optional[str]) -> bool:
+    return bool(_MODEL_REFUSAL_RE.search(_collapse(text)))
+
+
 def vet_alt_text(text: Optional[str], *, node_id: Optional[str] = None) -> Optional[str]:
     """Final gate for ANY provider's alt text. Returns a refusal reason or None."""
     from app.analyzers.image_analyzer import is_nondescriptive_alt
@@ -298,6 +339,10 @@ def vet_alt_text(text: Optional[str], *, node_id: Optional[str] = None) -> Optio
         return "no description was produced"
     if has_control_chars(t):
         return "the description contained unreadable characters"
+    if is_model_refusal(t):
+        return "the automatic description was an apology or a refusal, not a description"
+    if _GENERIC_NOUN_ONLY_RE.match(t):
+        return "the description only named the kind of picture, not what it shows"
     if node_id and node_id.lower() in t.lower():
         return "the description contained an internal id instead of words"
     if _NODE_ID_ALT_RE.match(t):
@@ -445,6 +490,8 @@ def vet_link_text(suggestion: Optional[str], original: Optional[str], target: Op
     s = _collapse(suggestion)
     if not s:
         return "no link name was produced"
+    if is_model_refusal(s):
+        return "the automatic answer was an apology or a refusal, not a link name"
     if _is_generic_link_text(s):
         return "the suggested name was itself generic"
     if _normalize_text(s) == _normalize_text(original or ""):
@@ -747,6 +794,8 @@ def vet_table_caption(
             return f"the caption stated a number the table does not contain ({invented[0]})"
     if not t:
         return "no caption was produced"
+    if is_model_refusal(t):
+        return "the automatic answer was an apology or a refusal, not a caption"
     low = t.lower().strip(" .:")
     if low in _PLACEHOLDER_CAPTIONS or re.fullmatch(r"table\s*\d*", low):
         return "the caption was a placeholder"

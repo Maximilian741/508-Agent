@@ -153,6 +153,33 @@ def _abstain(provider: str, reason: str) -> InferenceResult:
     return InferenceResult(text="", confidence=0.0, provider=provider, raw={"refusal": reason})
 
 
+def _clean_model_text(text: Any) -> str:
+    """A model's answer without the label/quotes it wrapped it in."""
+    from app.ai.offline_rules import clean_model_text
+
+    return clean_model_text(str(text or ""))
+
+
+# A bare language tag: "en", "pt-BR", "zh-Hant".
+_LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$", re.IGNORECASE)
+
+
+def _coerce_language_code(result: InferenceResult) -> InferenceResult:
+    """Keep a model's language answer only when it IS a language tag.
+
+    This used to take the first two-letter word of whatever came back, so a
+    chatty "It is English (en)." became "it" (Italian) and "The language is
+    en" became "is" — written as the document language and charged. An
+    answer that is not just a tag abstains instead.
+    """
+    if result.provider == "heuristic":
+        return result  # the offline detector already answers a tag or abstains
+    text = (result.text or "").strip().strip(".").strip()
+    if _LANGUAGE_TAG_RE.match(text):
+        return InferenceResult(text=text.lower(), confidence=result.confidence, provider=result.provider, raw=result.raw)
+    return _abstain(result.provider, "the automatic language answer was not a language code")
+
+
 def refusal_reason(result: Optional[InferenceResult]) -> Optional[str]:
     """The plain-English reason a provider abstained, if it gave one."""
     raw = getattr(result, "raw", None)
@@ -313,12 +340,7 @@ class ClaudeProvider(SemanticInferenceProvider):
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
         prompt = _language_prompt(payload)
         result = self._respond(prompt, default_payload=payload, fallback=self.fallback.document_language)
-        # Coerce to ISO-639-1 short code when we can.
-        text = result.text.strip().lower()
-        match = re.search(r"\b([a-z]{2})\b", text)
-        if match:
-            return InferenceResult(text=match.group(1), confidence=result.confidence, provider=result.provider, raw=result.raw)
-        return result
+        return _coerce_language_code(result)
 
     # -- Internals -------------------------------------------------------
 
@@ -331,7 +353,7 @@ class ClaudeProvider(SemanticInferenceProvider):
     ) -> InferenceResult:
         try:
             text, raw = self._call_messages(prompt)
-            text = text.strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=0.75, provider=self.name, raw=raw)
@@ -351,7 +373,7 @@ class ClaudeProvider(SemanticInferenceProvider):
     ) -> InferenceResult:
         try:
             text, raw = self._call_messages_multimodal(prompt, image_b64, image_mime)
-            text = text.strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=confidence, provider=self.name, raw=raw)
@@ -477,10 +499,7 @@ class OpenAIProvider(SemanticInferenceProvider):
 
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
         result = self._respond(_language_prompt(payload), payload, self.fallback.document_language)
-        match = re.search(r"\b([a-z]{2})\b", result.text.lower())
-        if match:
-            return InferenceResult(text=match.group(1), confidence=result.confidence, provider=result.provider, raw=result.raw)
-        return result
+        return _coerce_language_code(result)
 
     def _respond_multimodal(
         self,
@@ -532,7 +551,7 @@ class OpenAIProvider(SemanticInferenceProvider):
                 .get("message", {})
                 .get("content", "")
             )
-            text = str(text or "").strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=0.78, provider=self.name, raw=payload)
@@ -573,7 +592,7 @@ class OpenAIProvider(SemanticInferenceProvider):
                 .get("message", {})
                 .get("content", "")
             )
-            text = str(text or "").strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=0.7, provider=self.name, raw=payload)
