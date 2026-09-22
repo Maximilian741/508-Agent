@@ -317,7 +317,9 @@ class Package:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+# One per occupied cell in the scan window (up to SCAN_ROWS x SCAN_COLS of
+# them): slots keep a dense export's window to a fraction of the memory.
+@dataclass(slots=True)
 class CellInfo:
     text: str
     kind: str            # "text" | "number" | "bool" | "error" | "formula"
@@ -885,14 +887,27 @@ def _col_of(ref: str) -> int:
     return col
 
 
+_F_TAG = _q(NS_MAIN, "f")
+_V_TAG = _q(NS_MAIN, "v")
+_IS_TAG = _q(NS_MAIN, "is")
+
+
 def _cell_text(c: etree._Element, t: str, shared: List[str]) -> Tuple[str, bool]:
     """(displayed text, has_formula) for a <c> element."""
-    f = c.find(_q(NS_MAIN, "f"))
-    has_formula = f is not None
+    # Called once per cell in the scan window (up to a million): one pass
+    # over the cell's one or two children instead of a find() per child.
+    has_formula = False
+    v = is_ = None
+    for child in c:
+        tag = child.tag
+        if tag == _V_TAG:
+            v = child
+        elif tag == _F_TAG:
+            has_formula = True
+        elif tag == _IS_TAG:
+            is_ = child
     if t == "inlineStr":
-        is_ = c.find(_q(NS_MAIN, "is"))
         return (_si_text(is_) if is_ is not None else ""), has_formula
-    v = c.find(_q(NS_MAIN, "v"))
     raw = v.text if v is not None and v.text is not None else ""
     if t == "s":
         try:

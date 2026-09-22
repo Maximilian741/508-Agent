@@ -508,6 +508,22 @@ def main() -> int:  # noqa: PLR0915
     wrong = {n: want for n, want in defaults.items() if xlsx_parser.is_default_sheet_name(n) != want}
     check("tabs: default names recognised (openpyxl's 'Sheet'/'Chart' too), real names left alone", not wrong, str(wrong))
 
+    # ---- 8. inline strings (streaming writers store text in the cell) -----
+    inline = tmp / "inline.xlsx"
+    book = xlsxwriter.Workbook(str(inline), {"constant_memory": True})
+    sheet = book.add_worksheet("Stock")
+    sheet.write_row(0, 0, ["Part", "Count"], book.add_format({"bold": True}))
+    for i in range(1, 5):
+        sheet.write_row(i, 0, [f"part {i}", i * 7])
+    book.close()
+    with zipfile.ZipFile(inline) as z:
+        is_inline = b't="inlineStr"' in z.read("xl/worksheets/sheet1.xml")
+    t_inline = next(n for n in iter_reading_order(parse_to_tree(str(inline)).tree.root) if isinstance(n, TableNode))
+    check("inline strings: read as text, and the heading row is recognised",
+          is_inline and t_inline.metadata.properties.get("header_detection") == "candidate"
+          and [c.content.text for c in t_inline.children[0].children] == ["Part", "Count"],
+          f"{is_inline} {t_inline.metadata.properties.get('header_detection')}")
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 
