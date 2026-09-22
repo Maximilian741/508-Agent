@@ -173,6 +173,33 @@ def grid_pdf() -> bytes:
     return K.to_bytes(w)
 
 
+def watermark_pdf() -> bytes:
+    """A diagonal 72pt "DRAFT" on both pages (the largest text on each)."""
+    w = PdfWriter()
+    f = K.helvetica(w)
+    for p in range(2):
+        c = b"BT /F1 72 Tf 0.7071 0.7071 -0.7071 0.7071 150 300 Tm (DRAFT) Tj ET\n"
+        if p == 0:
+            c += K.bt("F1", 20, 72, 720, K.lit("Winter Operations Plan"))
+        c += K.bt("F1", 14, 72, 690, K.lit("Section %d" % (p + 1)))
+        for i in range(10):
+            c += K.bt("F1", 11, 72, 660 - 14 * i, K.lit(BODY))
+        K.add_page(w, c, {"F1": f})
+    return K.to_bytes(w)
+
+
+def contents_first_pdf() -> bytes:
+    """Page 1 is a contents page: its largest line is "Contents"."""
+    w = PdfWriter()
+    f = K.helvetica(w)
+    c = K.bt("F1", 18, 72, 740, K.lit("Contents"))
+    for i, t in enumerate(["1. Introduction", "2. Salt Supply", "3. Plow Routes"]):
+        c += K.bt("F1", 11, 72, 700 - 20 * i, K.lit(t))
+    K.add_page(w, c, {"F1": f})
+    K.add_page(w, b"".join(K.bt("F1", 11, 72, 700 - 14 * i, K.lit(BODY)) for i in range(12)), {"F1": f})
+    return K.to_bytes(w)
+
+
 def remediate(data: bytes, name: str, *, title: bool = True):
     from app.parsers.pdf_parser import PDFParser
     from app.writers.pdf_writer import write_remediated_pdf
@@ -279,6 +306,22 @@ def main() -> int:
     _r2, _w2, out_b = remediate(memo_pdf(bold_run=True), "memo_bold_para.pdf")
     check("bold line followed by more bold (emphasis) is not a heading",
           read_struct_info(PdfReader(str(out_b)))["headings"] == [], str(read_struct_info(PdfReader(str(out_b)))["headings"]))
+    # 8. a diagonal watermark is not the title, not H1 on every page, and
+    #    (recurring) goes out of the reading order as an artifact
+    rw, ww, out_w = remediate(watermark_pdf(), "watermark.pdf")
+    check("watermark: the title candidate is the real title, not 'DRAFT'",
+          rw.tree.root.metadata.properties.get("title_candidate") == "Winter Operations Plan",
+          repr(rw.tree.root.metadata.properties.get("title_candidate")))
+    hw = [(h["level"], h["text"].strip()) for h in read_struct_info(PdfReader(str(out_w)))["headings"]]
+    check("watermark: never a heading", hw == [(1, "Winter Operations Plan"), (2, "Section 1"), (2, "Section 2")], str(hw))
+    check("watermark: recurring stamp is an /Artifact on both pages",
+          (ww.get("pdfua") or {}).get("watermarkArtifacts") == 2
+          and all("/Artifact" in K.marked_tags(PdfReader(str(out_w)), i) for i in (0, 1)), str(ww.get("pdfua")))
+    rc = PDFParser().parse(str(_write(contents_first_pdf(), "contents_first.pdf")))
+    check("a contents page's 'Contents' is never offered as the document title",
+          not rc.tree.root.metadata.properties.get("title_candidate"),
+          repr(rc.tree.root.metadata.properties.get("title_candidate")))
+
     _rg, wg, out_g = remediate(grid_pdf(), "bold_grid.pdf")
     hg = read_struct_info(PdfReader(str(out_g)))["headings"]
     check("a bold header CELL sharing its line with another cell is not a heading",
@@ -296,6 +339,12 @@ def main() -> int:
         check(f"already-tagged doc {'with' if prior else 'without'} a prior claim -> claim {'kept' if expect else 'absent'}",
               rep.get("alreadyTagged") is True and ((b"pdfuaid:part" in x) == expect), str(rep))
     return check.done()
+
+
+def _write(data: bytes, name: str) -> Path:
+    p = Path(_TMP) / name
+    p.write_bytes(data)
+    return p
 
 
 def _iter(node):

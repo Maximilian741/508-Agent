@@ -83,6 +83,27 @@ def build_toc() -> bytes:
     return K.to_bytes(w)
 
 
+def build_word_toc() -> bytes:
+    """Word-style contents: each link rect spans entry + dot leader + page no."""
+    w = PdfWriter()
+    f = K.helvetica(w)
+    rows = [("1. Introduction", "2"), ("2. Salt Supply", "2"), ("3. Plow Routes", "2")]
+    c = K.bt("F1", 18, 72, 740, K.lit("Contents"))
+    y = 700
+    for t, pg in rows:
+        c += K.bt("F1", 11, 72, y, K.lit(t)) + K.bt("F1", 11, 200, y, K.lit("." * 60)) + K.bt("F1", 11, 520, y, K.lit(pg))
+        y -= 20
+    toc = K.add_page(w, c, {"F1": f})
+    p2 = K.add_page(w, K.bt("F1", 16, 72, 720, K.lit("1. Introduction")), {"F1": f})
+    annots = []
+    y = 700
+    for _t, _pg in rows:
+        annots.append(K.link_annot(w, (72, y - 4, 530, y + 10), dest_page=p2.indirect_reference))
+        y -= 20
+    toc[K.NameObject("/Annots")] = K.ArrayObject(annots)
+    return K.to_bytes(w)
+
+
 def parse(data: bytes, name: str):
     from app.parsers.pdf_parser import PDFParser
 
@@ -123,6 +144,10 @@ def main() -> int:
     rules = [v.rule_id for v in RemediationEngine().detect_violations(res_toc.tree)]
     link_rules = [r for r in rules if r.startswith("LINK_")]
     check("a table of contents of GoTo links raises NO link findings (was 10)", link_rules == [], str(link_rules))
+    _p, res_w = parse(build_word_toc(), "word_toc.pdf")
+    wnames = [n.content.text for n in iter_reading_order(res_w.tree.root) if isinstance(n, LinkNode)]
+    check("a whole-line TOC link is named without its dot leader",
+          wnames == ["1. Introduction 2", "2. Salt Supply 2", "3. Plow Routes 2"], str(wnames))
 
     # ---- tagged output ---------------------------------------------------------
     root = res.tree.root

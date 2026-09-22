@@ -349,7 +349,7 @@ class _TextBlock(list):
     * ``fonts`` — the font resource names this block paints with.
     """
 
-    __slots__ = ("text_override", "undecodable", "fonts", "raw_len", "start_font")
+    __slots__ = ("text_override", "undecodable", "fonts", "raw_len", "start_font", "angle")
 
     def __init__(self, *args: Any) -> None:
         super().__init__(*args)
@@ -358,6 +358,54 @@ class _TextBlock(list):
         self.fonts: List[str] = []
         self.raw_len = 0
         self.start_font: Optional[str] = None
+        # Baseline direction on the page, degrees (0 = ordinary horizontal
+        # text), from the text matrix composed with the CTM at BT.
+        self.angle = 0
+
+
+def _block_angle(block_ops, ctm) -> int:
+    """Baseline angle of a block in whole degrees, snapped to 5 (0..355).
+
+    Text space maps through ``Tm x CTM``; the baseline direction is the image
+    of the x axis. Only the first ``Tm`` before the first show op counts (a
+    diagonal watermark sets it once)."""
+    import math
+
+    m = _IDENTITY_CTM
+    for operands, op in block_ops:
+        if op == b"Tm" and len(operands) >= 6:
+            try:
+                m = tuple(float(o) for o in operands[:6])
+            except (TypeError, ValueError):
+                pass
+            break
+        if op in (b"Tj", b"TJ", b"'", b'"'):
+            break
+    try:
+        a, b = _ctm_concat(m, ctm)[:2]
+        if abs(a) < 1e-9 and abs(b) < 1e-9:
+            return 0
+        return (int(round(math.degrees(math.atan2(b, a)) / 5.0)) * 5) % 360
+    except Exception:
+        return 0
+
+
+def _dominant_angle(blocks) -> int:
+    """The baseline angle carrying the most text on a page (0 on a tie/none)."""
+    vol: Counter = Counter()
+    for b in blocks:
+        vol[getattr(b, "angle", 0)] += max(1, _block_weight(b))
+    if not vol:
+        return 0
+    top = max(vol.values())
+    tops = [a for a, v in vol.items() if v == top]
+    return 0 if 0 in tops else tops[0]
+
+
+def _off_axis(block, dominant: int) -> bool:
+    """Text set at an angle to the page's own text — a diagonal "DRAFT"
+    watermark, a rotated margin label. Never a heading or a title."""
+    return getattr(block, "angle", 0) != dominant
 
 
 def _decorate_block(block: "_TextBlock", decoder: Any, start_font: Optional[str]) -> "_TextBlock":
@@ -403,16 +451,29 @@ def _iter_text_blocks(ops, decoder: Any = None):
     state = FontState()
     block = None
     start_font = None
+    ctm = _IDENTITY_CTM
+    ctm_stack: List[tuple] = []
     for operands, op in ops:
         if op == b"BT" and block is None:
             block = _TextBlock([(operands, op)])
             start_font = state.font
         elif op == b"ET" and block is not None:
             block.append((operands, op))
+            block.angle = _block_angle(block, ctm)
             yield _decorate_block(block, decoder, start_font)
             block = None
         elif block is not None:
             block.append((operands, op))
+        elif op == b"q":
+            ctm_stack.append(ctm)
+        elif op == b"Q":
+            if ctm_stack:
+                ctm = ctm_stack.pop()
+        elif op == b"cm" and len(operands) >= 6:
+            try:
+                ctm = _ctm_concat(tuple(float(o) for o in operands[:6]), ctm)
+            except (TypeError, ValueError):
+                pass
         state.feed(operands, op)
 
 
@@ -1536,7 +1597,7 @@ _BOLD_EXCLUDE_RE = re.compile(r"^(?:figure|fig\.|table|note|notes|warning|cautio
 
 def _collect_doc_structure_hints(
     pdf: PdfWriter, pages, artifact_info: tuple, font_cache: Optional[Dict[Any, Any]] = None
-) -> Tuple[Dict[float, int], set, Optional[int]]:
+) -> Tuple[Dict[float, int], set, Optional[int], frozenset]:
     """``(size->level map, bold heading keys, bold heading level)``.
 
     The size map is :func:`_heading_levels` over every non-artifact block.
@@ -1564,6 +1625,7 @@ def _collect_doc_structure_hints(
     sizes: List[float] = []
     weights: List[int] = []
     per_page: List[Tuple[int, List[Tuple["_TextBlock", float, bool, bool]]]] = []
+    off_axis_pages: Dict[str, int] = {}
     for page in pages:
         height = _page_height(page)
         try:
@@ -1572,9 +1634,22 @@ def _collect_doc_structure_hints(
             continue
         decoder = _page_decoder(pdf, page, font_cache)
         rows: List[Tuple[Any, float, bool, bool]] = []
-        for block in _iter_text_blocks(ops, decoder):
+        page_blocks = list(_iter_text_blocks(ops, decoder))
+        axis = _dominant_angle(page_blocks)
+        seen_off: set = set()
+        for block in page_blocks:
             size = _block_font_size(block)
             is_artifact = False
+            if _off_axis(block, axis):
+                # A diagonal "DRAFT" is the biggest text on the page: it must
+                # not rank as H1 or decide what "body" is. Treated like an
+                # artifact for the size/bold analysis; whether it IS one (a
+                # watermark) is decided by recurrence below.
+                t = re.sub(r"\s+", " ", _block_text(block)).strip().casefold()
+                if t and not getattr(block, "undecodable", False):
+                    seen_off.add(t)
+                rows.append((block, float(size or 0.0), True, False))
+                continue
             if size and size > 0:
                 bx, by = _block_origin(block)
                 if bx is not None and by is not None and _in_artifact_band(by, height):
@@ -1590,11 +1665,17 @@ def _collect_doc_structure_hints(
             bold = bool(block.fonts) and decoder is not None and all(decoder.is_bold(f) for f in block.fonts)
             rows.append((block, float(size or 0.0), is_artifact, bold))
         per_page.append((id(page), rows))
+        for t in seen_off:
+            off_axis_pages[t] = off_axis_pages.get(t, 0) + 1
     levels = _heading_levels(sizes, weights)
+    # A watermark: the SAME off-axis text on two or more pages ("DRAFT",
+    # "CONFIDENTIAL" set diagonally on every page). Marked /Artifact like a
+    # running header — out of the reading order, where PDF/UA puts it.
+    watermarks = frozenset(t for t, n in off_axis_pages.items() if n >= 2)
 
     body = _body_size(sizes, weights)
     if body is None:
-        return levels, set(), None
+        return levels, set(), None, watermarks
     candidates: set = set()
     for pid, rows in per_page:
         # Baselines of the page's real (non-artifact, non-empty) text blocks.
@@ -1632,9 +1713,9 @@ def _collect_doc_structure_hints(
                 continue  # last thing on the page, or followed by more bold
             candidates.add((pid, i))
     if len(candidates) < 2:
-        return levels, set(), None
+        return levels, set(), None, watermarks
     bold_level = min(6, (max(levels.values()) + 1) if levels else 1)
-    return levels, candidates, bold_level
+    return levels, candidates, bold_level, watermarks
 
 
 def _body_size(sizes: List[float], weights: Optional[List[int]] = None) -> Optional[float]:
@@ -1704,6 +1785,7 @@ def _tag_page_elements(
     font_cache: Optional[Dict[Any, Any]] = None,
     bold_keys: Optional[set] = None,
     bold_level: Optional[int] = None,
+    watermarks: frozenset = frozenset(),
 ):
     """Per-element marked content for one page.
 
@@ -1768,6 +1850,7 @@ def _tag_page_elements(
             block_start_font = font_state.font
         elif op == b"ET" and block is not None:
             block.append((operands, op))
+            block.angle = _block_angle(block, ctm)
             _decorate_block(block, decoder, block_start_font)
             segments.append(("text", block, _block_font_size(block)))
             block = None
@@ -1887,13 +1970,26 @@ def _tag_page_elements(
         if kind == "text" and idx not in cell_of and idx not in artifact_idxs:
             if _is_leader_text(_block_text(seg_ops)):
                 artifact_idxs.add(idx)
+    # Off-axis text (at an angle to the page's own text) is never a heading;
+    # when the same off-axis text recurs across pages it is a watermark and
+    # goes out of the reading order as an artifact.
+    page_axis = _dominant_angle([o for k, o, _m in segments if k == "text"])
+    off_axis_idxs: set = set()
+    for idx, (kind, seg_ops, _m) in enumerate(segments):
+        if kind != "text" or idx in cell_of or not _off_axis(seg_ops, page_axis):
+            continue
+        off_axis_idxs.add(idx)
+        if idx not in artifact_idxs and watermarks:
+            if re.sub(r"\s+", " ", _block_text(seg_ops)).strip().casefold() in watermarks:
+                artifact_idxs.add(idx)
+                pending["watermarks"] = pending.get("watermarks", 0) + 1
 
     levels = (
         doc_heading_levels
         if doc_heading_levels is not None
         else _heading_levels(
-            [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
-            [_block_weight(o) for i, (k, o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
+            [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs and i not in off_axis_idxs],
+            [_block_weight(o) for i, (k, o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs and i not in off_axis_idxs],
         )
     )
 
@@ -1965,10 +2061,12 @@ def _tag_page_elements(
                 tag = "/TH" if (_has_hdr and tcell[1] == _hdr_row) else "/TD"
             elif grp is not None:
                 tag = "/LBody"
-            elif getattr(seg_ops, "undecodable", False):
+            elif getattr(seg_ops, "undecodable", False) or idx in off_axis_idxs:
                 # Text we cannot read is never asserted to be a heading: a
                 # screen reader cannot read it either, and a nameless /Hn is
-                # its own defect.
+                # its own defect. Nor is text set at an angle to the page (a
+                # one-off diagonal stamp): it is the largest text on the page
+                # and ranked H1 on every page.
                 tag = "/P"
             else:
                 lvl = levels.get(round(meta, 1)) if meta else None
@@ -2556,7 +2654,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         alt_by_xobject = _build_alt_by_xobject(tree)
         decorative_by_page = _build_decorative_by_xobject(tree)
         artifact_info = _collect_artifact_sigs(writer, taggable, font_cache)
-        doc_levels, bold_keys, bold_level = _collect_doc_structure_hints(
+        doc_levels, bold_keys, bold_level, watermarks = _collect_doc_structure_hints(
             writer, taggable, artifact_info, font_cache
         )
         page_counters: Dict[str, int] = {"artifacts": 0}
@@ -2587,6 +2685,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                 font_cache=font_cache,
                 bold_keys=bold_keys,
                 bold_level=bold_level,
+                watermarks=watermarks,
             )
             if specs is None:
                 # Safe fallback: page-level single /P (original bytes untouched).
@@ -2797,6 +2896,9 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["tocTablesDeclined"] = page_counters.get("toc_declined", 0)
         report["headingLevelsNormalized"] = headings_clamped
         report["boldHeadings"] = page_counters.get("bold_headings", 0)
+        # Recurring off-axis stamps ("DRAFT" on every page) marked /Artifact;
+        # already included in "artifacts".
+        report["watermarkArtifacts"] = page_counters.get("watermarks", 0)
         report["undecodableTextBlocks"] = page_counters.get("undecodable_blocks", 0)
         applied.append("struct_tree")
         applied.append("mark_info")

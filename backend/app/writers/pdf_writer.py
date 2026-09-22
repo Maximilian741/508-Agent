@@ -276,7 +276,7 @@ def write_remediated_pdf(
                     "perElementPages", "pagesPageLevelOnly",
                     "figuresWithoutAlt", "decorativeImages", "readingOrderDeclinedPages",
                     "linksNamedFromPage", "headingLevelsNormalized", "tocTablesDeclined",
-                    "undecodableTextBlocks", "boldHeadings",
+                    "undecodableTextBlocks", "boldHeadings", "watermarkArtifacts",
                 )
             }
             pdfua_summary["pdfuaClaimed"] = bool(ua_report.get("pdfuaClaimed"))

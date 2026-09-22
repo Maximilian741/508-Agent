@@ -146,6 +146,16 @@ def _page_blocks(reader: PdfReader, page_index: int, font_cache: Optional[dict] 
     return list(_iter_text_blocks(ops, _page_decoder(reader, page, font_cache))), page
 
 
+# Largest-text lines that name a SECTION or a stamp, never the document.
+_GENERIC_TITLE_RE = re.compile(
+    r"^\s*(?:(?:table\s+of\s+)?contents|index|introduction|intro|abstract|overview|summary|"
+    r"executive\s+summary|preface|foreword|acknowledg(?:e)?ments?|appendix(?:\s+\w{1,3})?|"
+    r"(?:chapter|section|part|page)\s+[\divxlc]{1,4}|draft|confidential|sample|copy|void|"
+    r"for\s+official\s+use\s+only|internal\s+use\s+only|untitled(?:\s+document)?)\s*[.:]?\s*$",
+    re.IGNORECASE,
+)
+
+
 def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Optional[str]:
     """The largest-font text block on ``page_index``, if it reads as a title.
 
@@ -170,7 +180,14 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
       first few pages — where the prose actually is.
     """
     from app.pdf.text_decode import decode_ops, is_readable_text
-    from app.pdf.ua_tagger import _block_font_size, _block_weight, _is_page_number, _page_decoder
+    from app.pdf.ua_tagger import (
+        _block_font_size,
+        _block_weight,
+        _dominant_angle,
+        _is_page_number,
+        _off_axis,
+        _page_decoder,
+    )
 
     if page_index >= len(reader.pages):
         return None
@@ -179,10 +196,14 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
     if not got:
         return None
     blocks, page = got
+    # Text at an angle to the page's own text — a diagonal 72pt "DRAFT"
+    # watermark — is the largest thing on the page and was offered as the
+    # title (written, and charged). It is never a title.
+    axis = _dominant_angle(blocks)
     sized = []
     for b in blocks:
         size = _block_font_size(b)
-        if size and size > 0 and _block_weight(b) > 0:
+        if size and size > 0 and _block_weight(b) > 0 and not _off_axis(b, axis):
             sized.append((round(float(size), 1), b))
     if not sized:
         return None
@@ -197,9 +218,10 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
         more = _page_blocks(reader, pi, font_cache)
         if not more:
             continue
+        more_axis = _dominant_angle(more[0])
         for b in more[0]:
             size = _block_font_size(b)
-            if size and size > 0:
+            if size and size > 0 and not _off_axis(b, more_axis):
                 volume[round(float(size), 1)] += _block_weight(b)
     if len(volume) < 2:
         return None
@@ -225,6 +247,11 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
     if not text or len(text) > 120 or _is_page_number(text):
         return None
     if not is_readable_text(text):
+        return None
+    if _GENERIC_TITLE_RE.match(text) or len([t for t in re.findall(r"[^\W\d_]{3,}", text)]) == 0:
+        # "Contents", "Introduction", "Chapter 1", "DRAFT": the name of a
+        # section or a stamp, not of the document. A wrong title is worse
+        # than none — the missing-title finding stays open instead.
         return None
     # Cross-check against pypdf's own decoding of the page. If the page text
     # cannot be extracted at all, we cannot confirm the candidate: refuse.

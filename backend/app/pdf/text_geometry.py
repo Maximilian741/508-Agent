@@ -298,6 +298,9 @@ def _norm_rect(rect: Sequence[Any]) -> Optional[Rect]:
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+_LEADER_WORD_RE = re.compile(r"^[._·…‥]{3,}$")
+
+
 def text_in_rect(words: Sequence[Word], rect: Sequence[Any], *, max_chars: int = 150) -> Optional[str]:
     """The words printed inside ``rect`` (a link annotation), in reading order.
 
@@ -317,6 +320,10 @@ def text_in_rect(words: Sequence[Word], rect: Sequence[Any], *, max_chars: int =
     hits = [
         w for w in words
         if x0 - 0.5 <= w.cx <= x1 + 0.5 and (y0 - 1.5) <= w.y <= (y1 + 0.5)
+        # Leader dots between a contents entry and its page number are drawn
+        # layout: a Word TOC link spans the whole line, and its name was
+        # "1. Introduction ....(60 dots).... 2".
+        and not _LEADER_WORD_RE.match(w.text)
     ]
     if not hits:
         return None
