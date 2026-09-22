@@ -363,8 +363,18 @@ def _xml_bytes(root: etree._Element) -> bytes:
 
 def _build_and_verify(source: Path, dest: Path, edits: _Edits, scan: WorkbookScan) -> List[str]:
     replacements, additions, splices = _plan_parts(source, edits, scan)
-    _rewrite_zip(source, dest, replacements, additions, splices)
+    try:
+        _rewrite_zip(source, dest, replacements, additions, splices)
+    except _SpliceError as exc:
+        # Only a table conversion splices a sheet: report it like a failed
+        # verification so the caller retries without the tables and the
+        # other fixes still land.
+        return [f"could not add the table to its sheet: {exc}"]
     return _verify(dest, edits, source)
+
+
+class _SpliceError(ValueError):
+    """A sheet part we cannot find our way through to add <tableParts>."""
 
 
 # ---------------------------------------------------------------------------
@@ -866,10 +876,13 @@ def _rewrite_zip(
                 zout.writestr(zi, data)
             elif key in splices:
                 with zin.open(info) as src, zout.open(zi, "w") as dst:
-                    split = _split_sheet(src, dst.write)
-                    new_tail = _add_table_parts(split, splices[key])
+                    try:
+                        split = _split_sheet(src, dst.write)
+                        new_tail = _add_table_parts(split, splices[key])
+                    except (ValueError, etree.LxmlError, UnicodeError) as exc:
+                        raise _SpliceError(f"{info.filename}: {exc}") from exc
                     if split.head_len + len(split.tail) != info.file_size:
-                        raise ValueError(f"streaming {info.filename} lost bytes")
+                        raise _SpliceError(f"streaming {info.filename} lost bytes")
                     dst.write(new_tail)
             elif info.is_dir():
                 zout.writestr(zi, b"")

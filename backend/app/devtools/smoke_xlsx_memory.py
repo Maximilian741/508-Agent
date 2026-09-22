@@ -425,6 +425,47 @@ def main() -> int:  # noqa: PLR0915
               and sorted(tables.values()) == ["A1:C4", "E1:G5"], str(tables))
         check("splice: the cell values read back", [c.value for c in owb["Stock"]["E"][:3]] == ["Month", "M1", "M2"])
 
+    # ---- 4b. a sheet the splicer cannot walk through --------------------------
+    # A UTF-16 sheet part: our scanner (libxml2) reads it, the byte splicer
+    # does not try to. The table is left as it was, with a reason, and the
+    # workbook's other fixes still land and are the only thing charged.
+    u16_path = tmp / "u16.xlsx"
+    wb = xlsxwriter.Workbook(str(u16_path))
+    ws = wb.add_worksheet("Sales")
+    ws.write("A1", "Quarterly sales")
+    ws.write_row("A3", ["Region", "Q1", "Q2"], wb.add_format({"bold": True}))
+    for i in range(4):
+        ws.write_row(3 + i, 0, [f"R{i}", 10 + i, 20 + i])
+    wb.close()
+    with zipfile.ZipFile(str(u16_path)) as z:
+        entries = [(i, z.read(i)) for i in z.infolist()]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, body in entries:
+            if info.filename == "xl/worksheets/sheet1.xml":
+                text = body.decode("utf-8").replace('encoding="UTF-8"', 'encoding="UTF-16"', 1)
+                body = text.encode("utf-16")
+            z.writestr(info, body)
+    u16 = buf.getvalue()
+    a = analyze("u16.xlsx", u16)
+    rep = a.json() if a.status_code == 200 else {"violations": []}
+    rules = {v["ruleId"]: v["id"] for v in rep["violations"]}
+    check("utf-16 sheet: read, and its clear range is offered the fix", "TABLE_MISSING_HEADERS" in rules, a.text[:300])
+    approve = [v["id"] for v in rep["violations"] if v["ruleId"] in ("TABLE_MISSING_HEADERS", "DOCUMENT_TITLE_MISSING")]
+    set_balance(20)
+    b0 = balance()
+    rr = remediate("u16.xlsx", u16, approve)
+    body = rr.json() if rr.status_code == 200 else {}
+    writer = body.get("writer") or {}
+    actions = [a_.get("action") for a_ in writer.get("applied") or [] if isinstance(a_, dict)]
+    skipped = [s for s in writer.get("skipped") or [] if isinstance(s, dict) and s.get("action") == "ADD_TABLE_HEADERS"]
+    check("utf-16 sheet: remediate still 200, the title lands", rr.status_code == 200 and "SET_DOCUMENT_TITLE" in actions,
+          rr.text[:400])
+    check("utf-16 sheet: the table is not claimed; it is skipped with a reason",
+          "ADD_TABLE_HEADERS" not in actions and bool(skipped) and "left as it was" in str(skipped[0].get("reason")), str(body.get("skipped"))[:400])
+    check("utf-16 sheet: charged for the fix that persisted, once", body.get("persistedFixes") == 1 and b0 - balance() == 3,
+          f"{body.get('persistedFixes')} {b0}->{balance()}")
+
     # ---- 5. busy: a 503 that says so, and no charge -------------------------
     from app.writers import xlsx_writer
 
