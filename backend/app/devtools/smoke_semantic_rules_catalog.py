@@ -168,6 +168,9 @@ CAPTIONS = [
     ("Figure 2: Revenue by region", "preceding_text", None),
     ("Revenue grew in every region.", "preceding_text", None),
     ("The CEO addressing staff at the 2026 town hall", "own_paragraph", None),
+    # ...unless the picture's own paragraph opens with its figure label.
+    ("Figure 3: Organizational chart of the department", "own_paragraph", "Organizational chart of the department"),
+    ("As Figure 3 shows, the department grew", "own_paragraph", None),
     ("Manager email: Click or tap here to enter text.", "preceding_text", None),
     ("Quarterly revenue by region", None, None),
     # Written near the picture but not a description.

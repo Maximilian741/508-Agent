@@ -256,12 +256,18 @@ def alt_from_caption(caption: Optional[str], source: Optional[str]) -> Verdict:
             "It needs a person to write one sentence saying what it shows."
         )
     src = (source or "").strip().lower() or None
-    if src in UNAUTHORED_CAPTION_SOURCES:
+    had_label, desc = split_figure_label(c)
+    # The one exception: the picture sits IN a paragraph that opens with its
+    # figure label ("Figure 3: Organizational chart" + the picture, a common
+    # Word layout without the Caption style) — that paragraph is the caption.
+    # Text ABOVE a picture never is, label or not: "Figure 1: …" there is as
+    # likely to be the previous picture's caption.
+    labeled_own = src == "own_paragraph" and had_label
+    if src in UNAUTHORED_CAPTION_SOURCES and not labeled_own:
         return _refuse(
             "The only text near this picture is ordinary page text, not a caption written for it, "
             "so we did not use it. It needs a person to write one sentence saying what the picture shows."
         )
-    had_label, desc = split_figure_label(c)
     if src not in AUTHORED_CAPTION_SOURCES and not had_label:
         return _refuse(
             "The text near this picture is not marked as its caption, so we did not use it. "

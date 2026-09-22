@@ -440,6 +440,29 @@ def main() -> int:  # noqa: PLR0915
           f"charged={body.get('charged')} debit={debit} pf={body.get('persistedFixes')} ok={ok}")
     notes_are_plain(body, "docx")
 
+    # ---- 3b. DOCX: a picture inside the paragraph that opens with its label -
+    from docx import Document as _Document
+    from docx.shared import Inches as _Inches
+
+    d = _Document()
+    d.core_properties.title = "Department overview"
+    p = d.add_paragraph("Figure 3: Organizational chart of the department ")
+    p.add_run().add_picture(io.BytesIO(_PNG), width=_Inches(1))
+    d.add_paragraph("As Figure 3 shows, the department grew over the year ")
+    d.paragraphs[-1].add_run().add_picture(io.BytesIO(_PNG), width=_Inches(1))
+    buf = io.BytesIO()
+    d.save(buf)
+    found, body, out_b, debit = fix("org.docx", buf.getvalue(), DOCX, rules={"MISSING_ALT_TEXT"})
+    with zipfile.ZipFile(io.BytesIO(out_b)) as z:
+        descrs = re.findall(r'<wp:docPr[^>]*?descr="([^"]*)"', z.read("word/document.xml").decode("utf-8"))
+    check("docx: a picture in its own labeled caption paragraph gets that caption as alt",
+          "Organizational chart of the department" in descrs, str(descrs))
+    check("docx: a picture in a sentence that merely MENTIONS a figure gets no alt",
+          len([x for x in descrs if x.strip()]) == 1, str(descrs))
+    check("docx: charged once for the one real fix",
+          body.get("charged") is True and body.get("persistedFixes") == 1 and debit == DOC_FORMAT_COSTS["docx"],
+          f"{body.get('charged')} {body.get('persistedFixes')} {debit}")
+
     # ---- 4. PDF language: Spanish -> es, Portuguese -> pt, mixed -> nothing --
     for name, paras, want in (("aviso.pdf", _ES_PDF, "es"), ("aviso-pt.pdf", _PT_PDF, "pt")):
         pdf = _text_pdf(paras)
