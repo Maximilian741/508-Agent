@@ -166,6 +166,72 @@ def _pdf() -> bytes:
     return out.getvalue()
 
 
+def _pdf_drawn() -> bytes:
+    """A hand-built PDF whose geometry we know exactly (pypdf only).
+
+    Page 1 (MediaBox 0 0 612 792): a 24 pt title run and a 12 pt sentence at
+    known baselines, a picture painted by ``200 0 0 150 300 400 cm /Im1 Do``,
+    and a link annotation whose /Rect covers the words "click here".
+    Page 2 (MediaBox 100 100 712 892): the SAME picture and link, shifted by
+    (+100, +100) in user space — page-relative boxes must come out identical.
+    """
+    from pypdf import PdfWriter
+    from pypdf.annotations import Link
+    from pypdf.generic import (
+        ArrayObject,
+        DecodedStreamObject,
+        DictionaryObject,
+        FloatObject,
+        NameObject,
+        NumberObject,
+    )
+
+    w = PdfWriter()
+    font = w._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+        NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+    }))
+    img = DecodedStreamObject()
+    img.set_data(Image.new("RGB", (40, 30), (200, 30, 30)).tobytes())
+    img.update({
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Image"),
+        NameObject("/Width"): NumberObject(40),
+        NameObject("/Height"): NumberObject(30),
+        NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+        NameObject("/BitsPerComponent"): NumberObject(8),
+    })
+    img_ref = w._add_object(img)
+
+    def page(dx: float, dy: float, box) -> None:
+        pg = w.add_blank_page(612, 792)
+        pg[NameObject("/MediaBox")] = ArrayObject([FloatObject(v) for v in box])
+        pg[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+            NameObject("/XObject"): DictionaryObject({NameObject("/Im1"): img_ref}),
+        })
+        body = (
+            f"BT /F1 24 Tf {72 + dx} {700 + dy} Td (Annual Report) Tj ET\n"
+            f"BT /F1 12 Tf {72 + dx} {660 + dy} Td (For the details, click here today.) Tj ET\n"
+            f"q 200 0 0 150 {300 + dx} {400 + dy} cm /Im1 Do Q\n"
+        ).encode("latin-1")
+        cs = DecodedStreamObject()
+        cs.set_data(body)
+        pg[NameObject("/Contents")] = w._add_object(cs)
+
+    page(0, 0, (0, 0, 612, 792))
+    page(100, 100, (100, 100, 712, 892))
+    # "For the details, " is 93.4 pt of 12 pt Helvetica and "click here" 57.4 pt,
+    # so the words sit at x 165.4-222.8 on baseline 660 (page 1).
+    w.add_annotation(0, Link(rect=(164, 655, 224, 672), url="https://example.com/details"))
+    w.add_annotation(1, Link(rect=(264, 755, 324, 772), url="https://example.com/details"))
+    out = io.BytesIO()
+    w.write(out)
+    return out.getvalue()
+
+
 def main() -> int:
     failures = 0
 
@@ -402,6 +468,94 @@ def main() -> int:
         and links[0]["location"]["pageSize"] == [400.0, 300.0],
         [l["location"] for l in links][:1],
     )
+
+    # ---- PDF geometry measured from the content stream ---------------------------
+    drawn = _pdf_drawn()
+    vs = contract("pdf-drawn", analyze("drawn.pdf", drawn, "application/pdf"), "pdf")
+    imgs = sorted((v for v in vs if v["evidence"].get("node_type") == "image"), key=lambda v: v["location"]["page"] or 0)
+    check(
+        "pdf: each picture's box is where its page paints it (cm + Do), page-relative on both pages",
+        [i["location"]["page"] for i in imgs] == [1, 2]
+        and all(
+            i["location"]["kind"] == "pdf-region"
+            and i["location"]["bbox"] == [300.0, 400.0, 500.0, 550.0]
+            and i["location"]["pageSize"] == [612.0, 792.0]
+            and thumb_ok(i["location"]["thumbnail"])
+            for i in imgs
+        ),
+        [i["location"] | {"thumbnail": bool(i["location"]["thumbnail"])} for i in imgs],
+    )
+    links = sorted((v for v in vs if v["ruleId"] == "LINK_TEXT_NON_DESCRIPTIVE"), key=lambda v: v["location"]["page"] or 0)
+    check(
+        "pdf: a link shows the words drawn under its /Rect, inside their sentence",
+        len(links) == 2
+        and all(
+            l["location"]["highlight"] == "click here"
+            and l["location"]["snippet"] == "For the details, click here today."
+            for l in links
+        ),
+        [l["location"] for l in links],
+    )
+    check(
+        "pdf: link boxes are page-relative (page 2's MediaBox starts at 100,100)",
+        [l["location"]["bbox"] for l in links] == [[164.0, 655.0, 224.0, 672.0]] * 2,
+        [l["location"]["bbox"] for l in links],
+    )
+
+    from app.models.accessibility import (
+        AccessibilityTree as _Tree,
+        ContentKind as _CK,
+        DocumentNode as _Doc,
+        HeadingNode as _H,
+        NodeContent as _NC,
+        NodeLocation as _NL,
+        NodeMetadata as _NM,
+        ParagraphNode as _P,
+        SectionNode as _S,
+        Violation as _V,
+    )
+    from app.services.finding_location import build_locations as _build
+
+    drawn_path = _TMP / "drawn.pdf"
+    drawn_path.write_bytes(drawn)
+
+    def _node(cls, nid: str, page_no: int, text: str, **kw):
+        return cls(id=nid, content=_NC(kind=_CK.TEXT, text=text), metadata=_NM(page=page_no, source_format="pdf"), **kw)
+
+    p1 = _S(id="s1", content=_NC(kind=_CK.NONE), metadata=_NM(page=1, source_format="pdf"), children=[
+        _node(_H, "h1", 1, "Annual Report", level=1),
+        _node(_P, "twice-a", 1, "For the details, click here today."),
+        _node(_P, "twice-b", 1, "For the details, click here today."),
+        _node(_P, "often", 1, "he"),
+        _node(_P, "absent", 1, "Not on this page at all"),
+    ])
+    p2 = _S(id="s2", content=_NC(kind=_CK.NONE), metadata=_NM(page=2, source_format="pdf"), children=[
+        _node(_H, "h2", 2, "Annual Report", level=3),
+    ])
+    gtree = _Tree(root=_Doc(id="d", content=_NC(kind=_CK.NONE), metadata=_NM(source_format="pdf"), children=[p1, p2]))
+    gl = _build(
+        gtree,
+        [
+            _V(violation_id=f"v-{n}", rule_id="HEADING_LEVEL_JUMP", severity="warning", description="x", location=_NL(node_id=n))
+            for n in ("h1", "h2", "twice-a", "often", "absent")
+        ],
+        "pdf",
+        drawn_path,
+    )
+    h1 = gl["v-h1"]["bbox"] or [0, 0, 0, 0]
+    check(
+        "pdf: a heading's box is measured from its own text run (starts at x=72, spans baseline 700)",
+        gl["v-h1"]["kind"] == "pdf-region" and h1[0] == 72.0 and h1[1] < 700 < h1[3] and 200 < h1[2] < 240,
+        gl["v-h1"],
+    )
+    check("pdf: the same heading on the offset page gets the same page-relative box", gl["v-h2"]["bbox"] == gl["v-h1"]["bbox"], gl["v-h2"])
+    check(
+        "pdf: text found twice in the page's parsed text gets NO box (never possibly the wrong one)",
+        gl["v-twice-a"]["bbox"] is None and gl["v-twice-a"]["page"] == 1 and gl["v-twice-a"]["snippet"],
+        gl["v-twice-a"],
+    )
+    check("pdf: text drawn more than once on the page gets NO box", gl["v-often"]["bbox"] is None, gl["v-often"])
+    check("pdf: text not drawn on the page gets NO box", gl["v-absent"]["bbox"] is None and gl["v-absent"]["kind"] == "text", gl["v-absent"])
 
     leaked = {p.name for p in Path(tempfile.gettempdir()).glob("508loc_*")} - loc_copies_before
     check("the private upload copies used for thumbnails are all deleted (docx/html/pptx/pdf)", not leaked, leaked)

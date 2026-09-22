@@ -22,9 +22,18 @@ worse than none:
   mutates the tree (a rewritten link text would otherwise be shown as the
   problem).
 * Geometry comes from what the parser recorded (``properties["bbox"]``,
-  ``properties["page_size"]``) or, for a few PDF objects whose geometry lives
-  in the file itself (link annotations, form-field widgets, page boxes), from
-  the source bytes — never from a guess.
+  ``properties["page_size"]``) or, for PDF objects whose geometry lives in the
+  file itself, from the source bytes — never from a guess:
+    - link annotations and form-field widgets: their own ``/Rect``;
+    - pictures: the transformation matrix in force where the page's content
+      stream paints that XObject (``cm`` ... ``/Name Do``);
+    - text (headings, paragraphs, typed lists, the words under a link): the
+      text-show operators' measured start and advance, and ONLY when the
+      finding's text occurs exactly once on its page. Two equal headings on
+      one page get no box rather than possibly the wrong one.
+  Every PDF box is page-relative (the MediaBox's lower-left corner is the
+  origin, as ``pageSize`` is the MediaBox's size) — identical to raw user
+  space for the usual ``[0 0 w h]`` MediaBox.
 * Thumbnails decode the image bytes the parser kept, or read the same image
   back from the source file by the reference the parser recorded (DOCX
   relationship id, PPTX shape id, PDF XObject name, HTML ``data:`` src). It
@@ -74,6 +83,16 @@ THUMB_BUDGET_SECONDS = 4.0
 MAX_THUMB_SOURCE_PIXELS = 40_000_000
 MAX_THUMB_SOURCE_BYTES = 12 * 1024 * 1024
 MAX_THUMB_PNG_BYTES = 160 * 1024
+# Budget for reading PDF page geometry (content-stream walks) per response. A
+# page is read at most once; past the budget a finding keeps its page number,
+# snippet and page size and simply has no box.
+GEOMETRY_BUDGET_SECONDS = 3.0
+# Glyph extent above / below the baseline, in em, for a text highlight box.
+# Horizontal extent and baseline are measured from the content stream; only
+# the vertical padding of the box uses these typical font metrics.
+_ASCENT_EM = 0.9
+_DESCENT_EM = 0.25
+_MAX_RUN_CHARS_MEASURED = 600
 
 _TABLE_FLAGS = {
     "TABLE_MISSING_HEADERS",
@@ -240,6 +259,9 @@ class _Context:
         self._pdf_reader: Any = None
         self._pdf_failed = False
         self._pdf_link_rects: Dict[int, List[Tuple[Optional[str], List[float]]]] = {}
+        self._pdf_geo: Dict[int, Optional["_PdfPageGeometry"]] = {}
+        self._page_flat: Dict[int, str] = {}
+        self._geo_deadline = time.monotonic() + GEOMETRY_BUDGET_SECONDS
         self._html_doc: Any = None
 
     # -- tree index ----------------------------------------------------------
@@ -396,7 +418,8 @@ class _Context:
                         action = annot.get("/A")
                         action = action.get_object() if hasattr(action, "get_object") else action
                         if hasattr(action, "get") and action.get("/URI") is not None:
-                            uri = str(action.get("/URI"))
+                            # Same normalisation as the parser's _safe_text.
+                            uri = str(action.get("/URI")).strip() or None
                         rects.append((uri, [float(x) for x in annot.get("/Rect") or []]))
             except Exception:
                 rects = []
@@ -408,6 +431,82 @@ class _Context:
         if (target or None) != (uri or None):
             return None
         return self._quad(rect)
+
+    def _geometry(self, page: Optional[int]) -> Optional["_PdfPageGeometry"]:
+        """The page's measured text runs and picture placements (read once)."""
+        if self.fmt != "pdf" or not page:
+            return None
+        if page in self._pdf_geo:
+            return self._pdf_geo[page]
+        geo: Optional[_PdfPageGeometry] = None
+        if time.monotonic() <= self._geo_deadline:
+            reader = self._pdf()
+            if reader is not None:
+                try:
+                    if 1 <= page <= len(reader.pages):
+                        geo = _PdfPageGeometry.read(reader.pages[page - 1])
+                except Exception:
+                    logger.debug("finding_location: page %s geometry failed", page, exc_info=True)
+                    geo = None
+        self._pdf_geo[page] = geo
+        return geo
+
+    def _page_text_occurrences(self, page: int, needle: str) -> int:
+        """How often ``needle`` (whitespace-free) occurs in the tree's text for
+        ``page`` — 0, 1 or 2 (meaning "more than once")."""
+        flat = self._page_flat.get(page)
+        if flat is None:
+            parts: List[str] = []
+            for n in self.nodes.values():
+                if getattr(getattr(n, "metadata", None), "page", None) == page and not isinstance(n, SectionNode):
+                    parts.append("".join(_own_text(n).split()))
+            flat = chr(31).join(parts)  # a separator no text contains
+            self._page_flat[page] = flat
+        first = flat.find(needle)
+        if first < 0:
+            return 0
+        return 1 if flat.find(needle, first + 1) < 0 else 2
+
+    def _pdf_text_bbox(self, page: Optional[int], text: str) -> Optional[List[float]]:
+        """The box of ``text`` on ``page``, only when it occurs there exactly
+        once — both in the parsed text and in the page's own text runs."""
+        if self.fmt != "pdf" or not page or not text:
+            return None
+        needle = "".join(_norm(text).split())
+        if len(needle) < 2 or self._page_text_occurrences(page, needle) > 1:
+            return None
+        geo = self._geometry(page)
+        if geo is None:
+            return None
+        return self._quad(geo.find_text(needle))
+
+    def _pdf_page_box(self, page: Optional[int]) -> Optional[Tuple[float, float, float, float]]:
+        if self.fmt != "pdf" or not page:
+            return None
+        reader = self._pdf()
+        if reader is None:
+            return None
+        try:
+            box = reader.pages[page - 1].mediabox
+            return float(box.left), float(box.bottom), float(box.width), float(box.height)
+        except Exception:
+            return None
+
+    def _page_relative(self, bbox: List[float], page: Optional[int]) -> Optional[List[float]]:
+        """Shift a user-space box so the MediaBox's lower-left is the origin
+        (what ``pageSize`` measures), clipped to the page; None if it is off
+        the page entirely. Unchanged when the source can't be read."""
+        box = self._pdf_page_box(page)
+        if box is None:
+            return bbox
+        ox, oy, w, h = box
+        x0 = min(max(bbox[0] - ox, 0.0), w)
+        x1 = min(max(bbox[2] - ox, 0.0), w)
+        y0 = min(max(bbox[1] - oy, 0.0), h)
+        y1 = min(max(bbox[3] - oy, 0.0), h)
+        if x1 - x0 <= 0 or y1 - y0 <= 0:
+            return None
+        return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
 
     # -- the location --------------------------------------------------------
 
@@ -438,6 +537,13 @@ class _Context:
                 loc["snippet"] = caption or None
             if self.thumbs is not None:
                 loc["thumbnail"] = self.thumbs.for_image(node, page)
+            if bbox is None and self.fmt == "pdf":
+                # Where the page paints this picture (its first placement).
+                geo = self._geometry(page)
+                name = str(props.get("xobject") or "").lstrip("/")
+                placements = geo.images.get(name) if (geo is not None and name) else None
+                if placements:
+                    bbox = self._quad(placements[0])
         elif isinstance(node, (TableNode, TableRowNode, TableCellNode)) or rule in _TABLE_FLAGS:
             loc["kind"] = "table"
             table = node
@@ -451,17 +557,25 @@ class _Context:
             self._link(node, loc, rule)
             if bbox is None:
                 bbox = self._pdf_link_bbox(node, page)
+                if bbox is not None:
+                    self._pdf_link_words(loc, page, bbox)
         elif isinstance(node, HeadingNode):
             text = _own_text(node)
             if text:
                 loc["snippet"], loc["highlight"] = _window(text, text)
+                if bbox is None:
+                    bbox = self._pdf_text_bbox(page, text)
             else:
                 # An empty heading has no text of its own; show what follows it.
                 after = self._next_text_after(node)
                 loc["snippet"] = after[:SNIPPET_MAX] or None
             loc["kind"] = "text"
         elif isinstance(node, ParagraphNode) and rule == "LIST_STRUCTURE_INVALID":
-            self._fake_list(node, loc)
+            members = self._fake_list(node, loc)
+            if bbox is None and self.fmt == "pdf":
+                bbox = _union(
+                    [self._pdf_text_bbox(self._page(m) or page, _own_text(m)) for m in members[:12]]
+                )
         elif isinstance(node, ListNode):
             items = [_deep_text(c, 80) for c in (node.children or [])]
             joined = "\n".join(t for t in items if t)[:SNIPPET_MAX]
@@ -481,13 +595,20 @@ class _Context:
             if text:
                 loc["snippet"], loc["highlight"] = _window(text, text)
                 loc["kind"] = "text"
+                if bbox is None and _own_text(node):
+                    bbox = self._pdf_text_bbox(page, _own_text(node))
 
         if bbox is not None:
             loc["bbox"] = bbox
-        if loc["page"] is not None and loc["pageSize"] is None and (bbox is not None or self.fmt == "pdf"):
+        if loc["bbox"] is not None and self.fmt == "pdf":
+            loc["bbox"] = self._page_relative(loc["bbox"], loc["page"])
+        if loc["page"] is not None and loc["pageSize"] is None and (loc["bbox"] is not None or self.fmt == "pdf"):
             loc["pageSize"] = self._page_size(node, loc["page"])
         if loc["bbox"] is not None and loc["pageSize"] is not None:
             loc["kind"] = "pdf-region"
+        elif loc["bbox"] is not None:
+            # A box with no page frame to draw it in is no location at all.
+            loc["bbox"] = None
         # Contract invariant: highlight is a literal substring of snippet.
         if loc["highlight"] and (not loc["snippet"] or loc["highlight"] not in loc["snippet"]):
             loc["highlight"] = None
@@ -529,7 +650,20 @@ class _Context:
         else:
             loc["kind"] = "document" if loc["page"] is None else "text"
 
-    def _fake_list(self, node: ParagraphNode, loc: Dict[str, Any]) -> None:
+    def _pdf_link_words(self, loc: Dict[str, Any], page: Optional[int], rect: List[float]) -> None:
+        """Show the words the link annotation covers on the page, when the
+        page's text runs put any under its /Rect. (The tree's PDF link "text"
+        is the URI or /Contents — not what a reader sees on the page.)"""
+        geo = self._geometry(page)
+        if geo is None:
+            return
+        context, words = geo.words_in(rect)
+        if not words:
+            return
+        loc["snippet"], loc["highlight"] = _window(context, words)
+        loc["kind"] = "text"
+
+    def _fake_list(self, node: ParagraphNode, loc: Dict[str, Any]) -> List[Any]:
         props = node.metadata.properties or {}
         run_ids = props.get("fake_list_run_ids")
         members: List[Any] = []
@@ -553,6 +687,7 @@ class _Context:
         if lines:
             m = _LIST_MARKER_RE.match(lines[0])
             loc["highlight"] = m.group(1) if m else lines[0][:SNIPPET_MAX]
+        return members
 
     # -- document-level findings that are really about ONE element -------------
 
@@ -714,6 +849,191 @@ class _Context:
     def close(self) -> None:
         if self.thumbs is not None:
             self.thumbs.close()
+
+
+# ---------------------------------------------------------------------------
+# PDF page geometry, measured from the content stream
+# ---------------------------------------------------------------------------
+
+
+def _union(boxes: Iterable[Optional[List[float]]]) -> Optional[List[float]]:
+    real = [b for b in boxes if b]
+    if not real:
+        return None
+    return [min(b[0] for b in real), min(b[1] for b in real), max(b[2] for b in real), max(b[3] for b in real)]
+
+
+def _mat_mult(m: Tuple[float, ...], n: Tuple[float, ...]) -> Tuple[float, ...]:
+    """``m x n`` for PDF matrices ``[a b c d e f]`` (row-vector convention)."""
+    a, b, c, d, e, f = m
+    A, B, C, D, E, F = n
+    return (
+        a * A + b * C,
+        a * B + b * D,
+        c * A + d * C,
+        c * B + d * D,
+        e * A + f * C + E,
+        e * B + f * D + F,
+    )
+
+
+def _image_placements(ops: List[Tuple[Any, bytes]]) -> Dict[str, List[List[float]]]:
+    """``{xobject name: [bbox, ...]}`` for every ``Do`` in a page's own content
+    stream: the unit square mapped through the CTM in force at that ``Do``."""
+    identity = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    ctm = identity
+    stack: List[Tuple[float, ...]] = []
+    out: Dict[str, List[List[float]]] = {}
+    for operands, op in ops:
+        if op == b"q":
+            stack.append(ctm)
+        elif op == b"Q":
+            ctm = stack.pop() if stack else identity
+        elif op == b"cm" and len(operands) == 6:
+            try:
+                ctm = _mat_mult(tuple(float(x) for x in operands), ctm)
+            except (TypeError, ValueError):
+                continue
+        elif op == b"Do" and operands:
+            a, b, c, d, e, f = ctm
+            xs = [e, a + e, c + e, a + c + e]
+            ys = [f, b + f, d + f, b + d + f]
+            name = str(operands[0]).lstrip("/")
+            out.setdefault(name, []).append([min(xs), min(ys), max(xs), max(ys)])
+    return out
+
+
+class _PdfRun:
+    """One text-show operation: its decoded text, baseline and x extent."""
+
+    __slots__ = ("tj", "text", "x0", "x1", "base", "fh")
+
+    def __init__(self, tj: Any) -> None:
+        self.tj = tj
+        self.text = str(getattr(tj, "txt", "") or "")
+        self.x0 = float(tj.tx)
+        self.x1 = float(tj.displaced_tx)
+        self.base = float(tj.ty)
+        self.fh = abs(float(tj.font_height))
+
+    def x_at(self, i: int) -> float:
+        """x where character ``i`` starts (``len(text)`` = where the run ends)."""
+        if i <= 0:
+            return self.x0
+        if i >= len(self.text):
+            return self.x1
+        t = self.tj.transform
+        return float(t[4] + self.tj.word_tx(self.text[:i]) * t[0])
+
+    def box(self, i: int, j: int) -> List[float]:
+        xa, xb = self.x_at(i), self.x_at(j)
+        return [min(xa, xb), self.base - _DESCENT_EM * self.fh, max(xa, xb), self.base + _ASCENT_EM * self.fh]
+
+
+def _text_runs(page: Any, ops: List[Tuple[Any, bytes]]) -> List[_PdfRun]:
+    """The page's upright text runs, positioned by pypdf's layout-mode text
+    state machine (the same one ``extract_text(extraction_mode="layout")``
+    uses; pinned pypdf). Text in rotated or mirrored runs is left out."""
+    from pypdf._text_extraction._layout_mode._fixed_width_page import recurs_to_target_op
+    from pypdf._text_extraction._layout_mode._text_state_manager import TextStateManager
+
+    fonts = page._layout_mode_fonts()
+    mgr = TextStateManager()
+    it = iter(ops)
+    tjs: List[Any] = []
+    while True:
+        try:
+            operands, op = next(it)
+        except StopIteration:
+            break
+        if op in (b"BT", b"q"):
+            _groups, found = recurs_to_target_op(it, mgr, b"ET" if op == b"BT" else b"Q", fonts, True)
+            tjs.extend(found)
+        elif op == b"cm":
+            mgr.add_cm(*operands)
+        else:
+            mgr.set_state_param(op, operands)
+    runs: List[_PdfRun] = []
+    for tj in tjs:
+        if getattr(tj, "rotated", False) or getattr(tj, "flip_vertical", False):
+            continue
+        run = _PdfRun(tj)
+        if run.text and run.fh > 0 and run.x1 >= run.x0:
+            runs.append(run)
+    return runs
+
+
+class _PdfPageGeometry:
+    def __init__(self, runs: List[_PdfRun], images: Dict[str, List[List[float]]]) -> None:
+        self.runs = runs
+        self.images = images
+        chars: List[str] = []
+        where: List[Tuple[int, int]] = []
+        for ri, run in enumerate(runs):
+            for ci, ch in enumerate(run.text):
+                if not ch.isspace():
+                    chars.append(ch)
+                    where.append((ri, ci))
+        self._flat = "".join(chars)
+        self._where = where
+
+    @classmethod
+    def read(cls, page: Any) -> "_PdfPageGeometry":
+        from pypdf.generic import ContentStream
+
+        if page.get("/Contents") is None:
+            return cls([], {})
+        ops = ContentStream(page["/Contents"].get_object(), page.pdf, "bytes").operations
+        images = _image_placements(ops)
+        try:
+            runs = _text_runs(page, ops)
+        except Exception:
+            # An unusual font or operator: pictures keep their boxes; text
+            # findings on this page simply get none.
+            logger.debug("finding_location: text runs unavailable", exc_info=True)
+            runs = []
+        return cls(runs, images)
+
+    def find_text(self, needle: str) -> Optional[List[float]]:
+        """Box of the ONE place ``needle`` (whitespace-free) is drawn, else None."""
+        if not needle:
+            return None
+        first = self._flat.find(needle)
+        if first < 0 or self._flat.find(needle, first + 1) >= 0:
+            return None
+        spans: Dict[int, Tuple[int, int]] = {}
+        for ri, ci in self._where[first:first + len(needle)]:
+            lo, hi = spans.get(ri, (ci, ci))
+            spans[ri] = (min(lo, ci), max(hi, ci))
+        return _union(self.runs[ri].box(lo, hi + 1) for ri, (lo, hi) in spans.items())
+
+    def words_in(self, rect: List[float]) -> Tuple[str, str]:
+        """``(context, words)``: the characters whose centre is inside ``rect``,
+        and the full text of the runs they belong to."""
+        x0, y0, x1, y1 = rect
+        picked: List[Tuple[int, int, int]] = []
+        for ri, run in enumerate(self.runs):
+            mid = run.base + (_ASCENT_EM - _DESCENT_EM) / 2.0 * run.fh
+            if not (y0 <= mid <= y1) or run.x1 < x0 or run.x0 > x1 or not run.text.strip():
+                continue
+            if len(run.text) > _MAX_RUN_CHARS_MEASURED:
+                continue  # per-character measuring is quadratic; not for a whole page in one run
+            lo = hi = -1
+            prev = run.x_at(0)
+            for ci in range(len(run.text)):
+                nxt = run.x_at(ci + 1)
+                if x0 <= (prev + nxt) / 2.0 <= x1:
+                    if lo < 0:
+                        lo = ci
+                    hi = ci
+                prev = nxt
+            if lo >= 0:
+                picked.append((ri, lo, hi))
+        if not picked:
+            return "", ""
+        words = _norm(" ".join(self.runs[ri].text[lo:hi + 1] for ri, lo, hi in picked))
+        context = _norm(" ".join(self.runs[ri].text for ri, _lo, _hi in picked))
+        return context, words
 
 
 # ---------------------------------------------------------------------------
