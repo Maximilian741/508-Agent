@@ -143,6 +143,15 @@ LINKS = [
     ("read more", "https://example.com/article?id=8812", None),
     ("https://example.com/reports/q3.pdf", "https://example.com/reports/q3.pdf", None),
     ("download", "https://example.com/downloads/setup-v2.3.1-win64.zip", None),
+    # A slug that only tells the reader what to do, a program file, a data
+    # interface: each was written as link text and charged.
+    ("click here", "https://example.com/click-here-to-download.pdf", None),
+    ("click here", "https://example.com/assets/js/app-bundle.js", None),
+    ("click here", "https://example.com/api/v1/users/list-all", None),
+    # A picture's file name reads as words, marked as an image (not "... jpg").
+    ("click here", "https://example.com/photos/sunset-beach.jpg", "Sunset beach (image)"),
+    # A versioned docs path is still a page with words.
+    ("click here", "https://example.com/docs/v2/getting-started-guide", "Getting started guide"),
     ("more info", "https://www.ssa.gov/benefits/retirement/planner/agereduction.html", None),
     ("learn more", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", None),
     ("link", "http://192.168.1.10:8080/admin", None),

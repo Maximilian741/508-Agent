@@ -462,8 +462,15 @@ _FILE_KINDS = {
     "ppt": "PowerPoint", "pptx": "PowerPoint", "zip": "ZIP file",
     "mp4": "video", "mov": "video", "mp3": "audio", "wav": "audio",
     "txt": "text file", "odt": "document", "epub": "e-book",
+    "jpg": "image", "jpeg": "image", "png": "image", "gif": "image", "webp": "image",
+    "svg": "image", "tif": "image", "tiff": "image", "heic": "image",
 }
 _WEB_PAGE_EXTS = {"html", "htm", "php", "asp", "aspx", "jsp", "cfm", "shtml", "xhtml"}
+# Program and data files a browser fetches for a page ("app-bundle.js"): their
+# file names describe code, not anything a reader is being sent to.
+_CODE_EXTS = {"js", "mjs", "cjs", "css", "json", "xml", "map", "ts", "wasm", "woff", "woff2", "ttf", "otf", "ico"}
+# Path segments of a programming interface ("/api/v1/users/list-all").
+_API_SEGMENT_RE = re.compile(r"^(?:api|apis|graphql|rpc)$", re.IGNORECASE)
 # Tokens that name the container, not the content ("index", "view", "IMG").
 _JUNK_SLUG_TOKENS = {
     "index", "default", "home", "page", "pages", "file", "files", "download", "downloads",
@@ -540,6 +547,11 @@ def link_text_from_target(original: Optional[str], target: Optional[str]) -> Ver
     last = unquote(segments[-1])
     stem, ext = os.path.splitext(last)
     ext = ext.lower().lstrip(".")
+    if ext in _CODE_EXTS or any(_API_SEGMENT_RE.match(seg) for seg in segments[:-1]):
+        return _refuse(
+            "This link points at a program file or a data interface, and its address names code, "
+            "not what a reader will find. A person needs to write what it links to."
+        )
     if ext and ext not in _FILE_KINDS and ext not in _WEB_PAGE_EXTS:
         # "setup-v2.3.1" — the "extension" is part of the name.
         stem, ext = last, ""
@@ -563,7 +575,8 @@ def link_text_from_target(original: Optional[str], target: Optional[str]) -> Ver
     phrase = phrase[:1].upper() + phrase[1:]
     kind = _FILE_KINDS.get(ext)
     text = f"{phrase} ({kind})" if kind else phrase
-    if _is_generic_link_text(phrase) or _is_generic_link_text(text) or len(text) > 100:
+    generic_only = all(w.lower() in _GENERIC_LINK_WORDS for w in _real_words(phrase))
+    if generic_only or _is_generic_link_text(phrase) or _is_generic_link_text(text) or len(text) > 100:
         return _refuse(
             "The link's address is itself a generic phrase, so it can't be turned into a better name. "
             "A person needs to write what it links to."
@@ -632,7 +645,10 @@ _PHONE_RUN_RE = re.compile(r"\+?\d[\d\s().\-]{6,}\d")
 _GENERIC_LINK_WORDS = frozenset(
     "download downloads pdf doc docx file files document documents link links page pages website site "
     "web info information form forms view open visit access here this that more continue next previous "
-    "back submit button details item online resource resources".split()
+    "back submit button details item online resource resources"
+    # What the reader is told to DO, not where the link goes ("Click here to
+    # download", "Read now").
+    " click tap press please now read learn see get go".split()
 )
 
 
