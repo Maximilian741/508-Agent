@@ -386,23 +386,31 @@ class _TextBlock(list):
 def _block_angle(block_ops, ctm) -> int:
     """Baseline angle of a block in whole degrees, snapped to 5 (0..355).
 
-    Text space maps through ``Tm x CTM``; the baseline direction is the image
-    of the x axis. Only the first ``Tm`` before the first show op counts (a
-    diagonal watermark sets it once)."""
+    Text space maps through ``Tm x CTM`` as they stand at the block's FIRST
+    show op; the baseline direction is the image of the x axis. ``ctm`` is
+    the CTM at BT. A ``cm`` inside BT is part of it: PyMuPDF's
+    ``insert_text(morph=...)`` writes a diagonal stamp's rotation there, and
+    reading the CTM at BT alone called that stamp upright (it became the
+    title and the H1 of every page)."""
     import math
 
     m = _IDENTITY_CTM
+    cur = ctm
     for operands, op in block_ops:
-        if op == b"Tm" and len(operands) >= 6:
+        if op == b"cm" and len(operands) >= 6:
+            try:
+                cur = _ctm_concat(tuple(float(o) for o in operands[:6]), cur)
+            except (TypeError, ValueError):
+                pass
+        elif op == b"Tm" and len(operands) >= 6:
             try:
                 m = tuple(float(o) for o in operands[:6])
             except (TypeError, ValueError):
                 pass
-            break
-        if op in (b"Tj", b"TJ", b"'", b'"'):
+        elif op in (b"Tj", b"TJ", b"'", b'"'):
             break
     try:
-        a, b = _ctm_concat(m, ctm)[:2]
+        a, b = _ctm_concat(m, cur)[:2]
         if abs(a) < 1e-9 and abs(b) < 1e-9:
             return 0
         return (int(round(math.degrees(math.atan2(b, a)) / 5.0)) * 5) % 360
@@ -410,22 +418,83 @@ def _block_angle(block_ops, ctm) -> int:
         return 0
 
 
-def _dominant_angle(blocks) -> int:
-    """The baseline angle carrying the most text on a page (0 on a tie/none)."""
+def _block_cm_after(block_ops, ctm):
+    """The CTM after a block: a ``cm`` inside BT (MuPDF) outlives the ET."""
+    for operands, op in block_ops:
+        if op == b"cm" and len(operands) >= 6:
+            try:
+                ctm = _ctm_concat(tuple(float(o) for o in operands[:6]), ctm)
+            except (TypeError, ValueError):
+                pass
+    return ctm
+
+
+def _dominant_angle(blocks, prefer: int = 0) -> int:
+    """The page's text axis: the baseline angle shared by the most text
+    BLOCKS; characters break a tie, then ``prefer`` (upright by default).
+
+    It used to be a character vote. On a sparse cover one long diagonal
+    "DRAFT - NOT FOR DISTRIBUTION" out-weighed the upright title and date
+    together, so the watermark became the page's own axis, the real title
+    counted as "off-axis", and the stamp was written as the document title
+    and tagged H1. A stamp is one block; a page's text is several."""
+    n: Counter = Counter()
     vol: Counter = Counter()
     for b in blocks:
-        vol[getattr(b, "angle", 0)] += max(1, _block_weight(b))
-    if not vol:
-        return 0
-    top = max(vol.values())
-    tops = [a for a, v in vol.items() if v == top]
-    return 0 if 0 in tops else tops[0]
+        w = _block_weight(b)
+        if w <= 0:
+            continue
+        ang = getattr(b, "angle", 0)
+        n[ang] += 1
+        vol[ang] += w
+    if not n:
+        return prefer
+    top = max(n.values())
+    tops = [a for a, c in n.items() if c == top]
+    if len(tops) > 1:
+        if prefer in tops:
+            return prefer
+        best = max(vol[a] for a in tops)
+        tops = [a for a in tops if vol[a] == best]
+    return prefer if prefer in tops else tops[0]
 
 
 def _off_axis(block, dominant: int) -> bool:
     """Text set at an angle to the page's own text — a diagonal "DRAFT"
     watermark, a rotated margin label. Never a heading or a title."""
     return getattr(block, "angle", 0) != dominant
+
+
+def _norm_block_text(block) -> str:
+    return re.sub(r"\s+", " ", _block_text(block)).strip().casefold()
+
+
+def _page_axes(pages_blocks) -> Tuple[List[int], frozenset]:
+    """Each page's text axis, and the document's watermark texts.
+
+    A watermark is the same text set at an angle to the page's own text on
+    two or more pages ("DRAFT - NOT FOR DISTRIBUTION" stamped diagonally on
+    every page). Watermarks then do not vote on any page's axis: on a sparse
+    cover a stamp drawn as two blocks still out-numbered the title, and
+    became the page's H1 and the document title.
+    """
+    naive = [_dominant_angle(bs) for bs in pages_blocks]
+    off_pages: Counter = Counter()
+    for bs, ax in zip(pages_blocks, naive):
+        here = {
+            _norm_block_text(b) for b in bs
+            if _off_axis(b, ax) and not getattr(b, "undecodable", False)
+        }
+        here.discard("")
+        off_pages.update(here)
+    marks = frozenset(t for t, n in off_pages.items() if n >= 2)
+    if not marks:
+        return naive, marks
+    axes = [
+        _dominant_angle([b for b in bs if _norm_block_text(b) not in marks])
+        for bs in pages_blocks
+    ]
+    return axes, marks
 
 
 def _decorate_block(block: "_TextBlock", decoder: Any, start_font: Optional[str]) -> "_TextBlock":
@@ -480,6 +549,7 @@ def _iter_text_blocks(ops, decoder: Any = None):
         elif op == b"ET" and block is not None:
             block.append((operands, op))
             block.angle = _block_angle(block, ctm)
+            ctm = _block_cm_after(block, ctm)
             yield _decorate_block(block, decoder, start_font)
             block = None
         elif block is not None:
@@ -1652,7 +1722,7 @@ def _collect_doc_structure_hints(
     sizes: List[float] = []
     weights: List[int] = []
     per_page: List[Tuple[int, List[Tuple["_TextBlock", float, bool, bool]]]] = []
-    off_axis_pages: Dict[str, int] = {}
+    loaded: List[Tuple[Any, float, Any, List["_TextBlock"]]] = []
     for page in pages:
         height = _page_height(page)
         try:
@@ -1660,10 +1730,12 @@ def _collect_doc_structure_hints(
         except Exception:
             continue
         decoder = _page_decoder(pdf, page, font_cache)
+        loaded.append((page, height, decoder, list(_iter_text_blocks(ops, decoder))))
+    # Page axes with the watermark texts left out of the vote; a watermark
+    # is the same text on two or more pages, off-axis on at least one.
+    axes, watermarks = _page_axes([bs for _p, _h, _d, bs in loaded])
+    for (page, height, decoder, page_blocks), axis in zip(loaded, axes):
         rows: List[Tuple[Any, float, bool, bool]] = []
-        page_blocks = list(_iter_text_blocks(ops, decoder))
-        axis = _dominant_angle(page_blocks)
-        seen_off: set = set()
         for block in page_blocks:
             size = _block_font_size(block)
             is_artifact = False
@@ -1671,10 +1743,7 @@ def _collect_doc_structure_hints(
                 # A diagonal "DRAFT" is the biggest text on the page: it must
                 # not rank as H1 or decide what "body" is. Treated like an
                 # artifact for the size/bold analysis; whether it IS one (a
-                # watermark) is decided by recurrence below.
-                t = re.sub(r"\s+", " ", _block_text(block)).strip().casefold()
-                if t and not getattr(block, "undecodable", False):
-                    seen_off.add(t)
+                # watermark) is decided by recurrence (``watermarks``).
                 rows.append((block, float(size or 0.0), True, False))
                 continue
             if size and size > 0:
@@ -1692,13 +1761,10 @@ def _collect_doc_structure_hints(
             bold = bool(block.fonts) and decoder is not None and all(decoder.is_bold(f) for f in block.fonts)
             rows.append((block, float(size or 0.0), is_artifact, bold))
         per_page.append((id(page), rows))
-        for t in seen_off:
-            off_axis_pages[t] = off_axis_pages.get(t, 0) + 1
     levels = _heading_levels(sizes, weights)
-    # A watermark: the SAME off-axis text on two or more pages ("DRAFT",
-    # "CONFIDENTIAL" set diagonally on every page). Marked /Artifact like a
+    # ``watermarks`` (the SAME off-axis text on two or more pages: "DRAFT",
+    # "CONFIDENTIAL" set diagonally on every page) are marked /Artifact like a
     # running header — out of the reading order, where PDF/UA puts it.
-    watermarks = frozenset(t for t, n in off_axis_pages.items() if n >= 2)
 
     body = _body_size(sizes, weights)
     if body is None:
@@ -1878,6 +1944,7 @@ def _tag_page_elements(
         elif op == b"ET" and block is not None:
             block.append((operands, op))
             block.angle = _block_angle(block, ctm)
+            ctm = _block_cm_after(block, ctm)
             _decorate_block(block, decoder, block_start_font)
             segments.append(("text", block, _block_font_size(block)))
             block = None
@@ -2004,14 +2071,18 @@ def _tag_page_elements(
     # Off-axis text (at an angle to the page's own text) is never a heading;
     # when the same off-axis text recurs across pages it is a watermark and
     # goes out of the reading order as an artifact.
-    page_axis = _dominant_angle([o for k, o, _m in segments if k == "text"])
+    # A known watermark does not vote on the page's axis (see _page_axes).
+    page_axis = _dominant_angle([
+        o for k, o, _m in segments
+        if k == "text" and not (watermarks and _norm_block_text(o) in watermarks)
+    ])
     off_axis_idxs: set = set()
     for idx, (kind, seg_ops, _m) in enumerate(segments):
         if kind != "text" or idx in cell_of or not _off_axis(seg_ops, page_axis):
             continue
         off_axis_idxs.add(idx)
         if idx not in artifact_idxs and watermarks:
-            if re.sub(r"\s+", " ", _block_text(seg_ops)).strip().casefold() in watermarks:
+            if _norm_block_text(seg_ops) in watermarks:
                 artifact_idxs.add(idx)
                 pending["watermarks"] = pending.get("watermarks", 0) + 1
 

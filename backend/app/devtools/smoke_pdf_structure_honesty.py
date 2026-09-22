@@ -188,6 +188,45 @@ def watermark_pdf() -> bytes:
     return K.to_bytes(w)
 
 
+_WM = "DRAFT - NOT FOR DISTRIBUTION"
+
+
+def watermark_shape_pdf(shape: str) -> bytes:
+    """A stamp that used to become the title and the H1.
+
+    "sparse": Tm-rotated 44pt stamp on a cover with only a 28pt title and a
+    14pt date (the stamp carried more characters than the cover's text).
+    "cm_in_bt": PyMuPDF insert_text(morph=...) shape, the rotation written as
+    a ``cm`` INSIDE BT (read as upright before), on dense pages.
+    "two_blocks": the stamp drawn as two blocks (two lines) on the sparse
+    cover, out-numbering its title and date.
+    """
+    w = PdfWriter()
+    f = K.helvetica(w)
+    fb = K.helvetica(w, bold=True)
+
+    def stamp() -> bytes:
+        if shape == "cm_in_bt":
+            return (b"q\nBT\n.70711 .70711 -.70711 .70711 215.05 -35.18 cm\n1 0 0 1 150 242 Tm\n/F1 40 Tf "
+                    + K.lit(_WM) + b" Tj\nET\nQ\n")
+        out = b"BT /F1 44 Tf 0.7071 0.7071 -0.7071 0.7071 120 250 Tm %s Tj ET\n" % K.lit(
+            _WM if shape == "sparse" else "DRAFT -")
+        if shape == "two_blocks":
+            out += b"BT /F1 44 Tf 0.7071 0.7071 -0.7071 0.7071 160 210 Tm %s Tj ET\n" % K.lit("NOT FOR DISTRIBUTION")
+        return out
+
+    for p in range(3):
+        c = stamp()
+        if p == 0 and shape != "cm_in_bt":
+            c += K.bt("F2", 28, 72, 600, K.lit("Snow Plan")) + K.bt("F1", 14, 72, 570, K.lit("2026"))
+        else:
+            c += K.bt("F2", 20 if p == 0 else 16, 72, 720, K.lit("Winter Operations Plan" if p == 0 else f"Section {p}"))
+            for i in range(14):
+                c += K.bt("F1", 11, 72, 690 - 15 * i, K.lit(BODY))
+        K.add_page(w, c, {"F1": f, "F2": fb})
+    return K.to_bytes(w)
+
+
 def contents_first_pdf(big: str = "Contents") -> bytes:
     """Page 1 is a contents page: its largest line is "Contents"."""
     w = PdfWriter()
@@ -336,6 +375,20 @@ def main() -> int:
     check("watermark: recurring stamp is an /Artifact on both pages",
           (ww.get("pdfua") or {}).get("watermarkArtifacts") == 2
           and all("/Artifact" in K.marked_tags(PdfReader(str(out_w)), i) for i in (0, 1)), str(ww.get("pdfua")))
+    # The shapes that still got through: a sparse cover (the stamp out-voted
+    # the page's own text), a cm inside BT (read as upright), a two-block stamp.
+    for shape, title, first_h in (("sparse", "Snow Plan", "Snow Plan"),
+                                  ("cm_in_bt", "Winter Operations Plan", "Winter Operations Plan"),
+                                  ("two_blocks", "Snow Plan", "Snow Plan")):
+        rs, ws, out_s = remediate(watermark_shape_pdf(shape), f"wm_{shape}.pdf")
+        cand = rs.tree.root.metadata.properties.get("title_candidate")
+        check(f"watermark ({shape}): the title candidate is the real title, never the stamp", cand == title, repr(cand))
+        hs = [(h["level"], h["text"].strip()) for h in read_struct_info(PdfReader(str(out_s)))["headings"]]
+        check(f"watermark ({shape}): the stamp is never a heading; the real title is the H1",
+              hs[:1] == [(1, first_h)] and not any("DRAFT" in t or "DISTRIBUTION" in t for _l, t in hs), str(hs))
+        n_art = (ws.get("pdfua") or {}).get("watermarkArtifacts")
+        check(f"watermark ({shape}): the stamp is an /Artifact on every page",
+              n_art == (6 if shape == "two_blocks" else 3), str(n_art))
     rc = PDFParser().parse(str(_write(contents_first_pdf(), "contents_first.pdf")))
     check("a contents page's 'Contents' is never offered as the document title",
           not rc.tree.root.metadata.properties.get("title_candidate"),

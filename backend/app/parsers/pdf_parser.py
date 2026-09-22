@@ -187,10 +187,12 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
     from app.pdf.text_decode import decode_ops, is_readable_text
     from app.pdf.ua_tagger import (
         _block_font_size,
+        _block_text,
         _block_weight,
-        _dominant_angle,
         _is_page_number,
+        _norm_block_text,
         _off_axis,
+        _page_axes,
         _page_decoder,
     )
 
@@ -201,14 +203,23 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
     if not got:
         return None
     blocks, page = got
+    others = []
+    for pi in range(page_index + 1, min(len(reader.pages), page_index + 5)):
+        more = _page_blocks(reader, pi, font_cache)
+        if more:
+            others.append(more[0])
     # Text at an angle to the page's own text — a diagonal 72pt "DRAFT"
     # watermark — is the largest thing on the page and was offered as the
-    # title (written, and charged). It is never a title.
-    axis = _dominant_angle(blocks)
+    # title (written, and charged). It is never a title. The page's axis is
+    # voted by blocks with the document's recurring watermarks left out, so
+    # a long stamp on a sparse cover cannot make the real title "off-axis".
+    axes, marks = _page_axes([blocks] + others)
+    axis = axes[0]
     sized = []
     for b in blocks:
         size = _block_font_size(b)
-        if size and size > 0 and _block_weight(b) > 0 and not _off_axis(b, axis):
+        if (size and size > 0 and _block_weight(b) > 0 and not _off_axis(b, axis)
+                and _norm_block_text(b) not in marks):
             sized.append((round(float(size), 1), b))
     if not sized:
         return None
@@ -219,12 +230,8 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
     volume: Counter = Counter()
     for sz, b in sized:
         volume[sz] += _block_weight(b)
-    for pi in range(page_index + 1, min(len(reader.pages), page_index + 5)):
-        more = _page_blocks(reader, pi, font_cache)
-        if not more:
-            continue
-        more_axis = _dominant_angle(more[0])
-        for b in more[0]:
+    for more_blocks, more_axis in zip(others, axes[1:]):
+        for b in more_blocks:
             size = _block_font_size(b)
             if size and size > 0 and not _off_axis(b, more_axis):
                 volume[round(float(size), 1)] += _block_weight(b)
@@ -258,6 +265,17 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
         # section or a stamp, not of the document. A wrong title is worse
         # than none — the missing-title finding stays open instead.
         return None
+    # The same words on the next pages, set at an angle or as large as here:
+    # a stamp or a banner ("DRAFT - NOT FOR DISTRIBUTION", "Internal Review
+    # Copy"), not this document's name.
+    key = _compact(text)
+    for more_blocks, more_axis in zip(others, axes[1:]):
+        for b in more_blocks:
+            if _compact(_block_text(b)) != key:
+                continue
+            size = _block_font_size(b)
+            if _off_axis(b, more_axis) or (size and float(size) >= 0.8 * top):
+                return None
     # Cross-check against pypdf's own decoding of the page. If the page text
     # cannot be extracted at all, we cannot confirm the candidate: refuse.
     try:
