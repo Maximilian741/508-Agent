@@ -346,7 +346,7 @@ class DOCXParser:
 
             if text and not link_nodes:
                 para_props = _text_color_props(paragraph, theme_colors)
-                is_fake_heading = _looks_like_fake_heading(paragraph, style_name, text)
+                is_fake_heading = _looks_like_fake_heading(paragraph, style_name, text, styles)
                 if is_fake_heading:
                     # Visually a heading (Title/Subtitle style, or short
                     # all-bold large text) but NOT a real Heading style —
@@ -1868,7 +1868,43 @@ def _group_fake_list_runs(body_children: List[Any]) -> None:
     flush()
 
 
-def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
+# "2.1 Data Sources", "4.3.2 Retention Periods": a multi-level section
+# number, then a capitalised word.
+_NUMBERED_SUBHEADING_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){1,3}\.?\s+(\S)")
+
+
+def _looks_like_numbered_subheading(p_el, styles: "DocxStyleResolver", style_name: str, t: str) -> bool:
+    """A body-size, all-bold line that opens with a multi-level section
+    number ("2.1 Data Sources") — the everyday report's subsection heading,
+    typed in bold at text size. The 14pt rule never saw it, so a report whose
+    sections were promoted kept its subsections as plain text.
+
+    Precision guards: the number must have at least two levels (a bold
+    "1. Submit the form" is a list step, not a heading), the word after it
+    must start with a capital letter, every visible run must be bold after
+    styles are applied, the line must not be smaller than body text, and
+    table-of-contents lines are never headings.
+    """
+    if style_name.strip().lower().startswith("toc"):
+        return False
+    m = _NUMBERED_SUBHEADING_RE.match(t)
+    if not m or not m.group(1).isupper():
+        return False
+    sid = styles.paragraph_style_id(p_el)
+    runs = visible_runs(p_el)
+    if not runs or not all(styles.run_bold(r, sid) for r in runs):
+        return False
+    body_el = styles.style_run_element(styles.default_paragraph_style_id, qn("w:sz"))
+    try:
+        body_pt = int(body_el.get(qn("w:val"))) / 2.0 if body_el is not None else 10.0
+    except (TypeError, ValueError):
+        body_pt = 10.0
+    return max(styles.run_size_pt(r, sid) for r in runs) >= body_pt
+
+
+def _looks_like_fake_heading(
+    paragraph, style_name: str, text: str, styles: Optional["DocxStyleResolver"] = None
+) -> bool:
     """True when a plain paragraph is visually presented as a heading.
 
     The classic title-page failure: 24pt bold text typed as a normal paragraph
@@ -1881,6 +1917,8 @@ def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
       >= 14pt on some run. Ordinary bold emphasis inside body text fails the
       size requirement; bold labels fail nothing else often enough that the
       size requirement is what keeps precision high.
+    * Or it is a bold, body-size numbered subsection line ("2.1 Data
+      Sources") — see :func:`_looks_like_numbered_subheading`.
     """
     sn = (style_name or "").strip().lower()
     if sn in ("title", "subtitle"):
@@ -1891,6 +1929,8 @@ def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
         return False
     if t.endswith((".", "!", "?", ";", ":", ",")):
         return False
+    if styles is not None and _looks_like_numbered_subheading(paragraph._p, styles, style_name or "", t):  # noqa: SLF001
+        return True
 
     saw_text_run = False
     max_size_pt = 0.0

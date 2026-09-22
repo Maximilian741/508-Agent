@@ -18,6 +18,9 @@ re-parse of the OUTPUT:
     gap the source ALREADY has (H2 -> H4) does not drag a line that looks
     like the H2 underneath it; when the look and the no-skip rule disagree
     (a 20pt line between an H3 and an H4) the promotion is declined
+  * a bold, body-size numbered subsection ("2.1 Data Sources") is detected
+    and lands one level under its section; a bold list step, a number
+    ("2.1 million residents"), a non-bold line and a TOC line are not
   * a heading style missing from styles.xml is CREATED (with its outline
     level) so the promotion lands, and the writer confirms it
   * appearance is pinned: the promoted line keeps its size, weight, colour,
@@ -190,6 +193,46 @@ def main() -> int:
           [outline.get(t) for t in ("1. Executive Summary", "2. Priority Areas", "3. Recommendations")] == [2, 2, 2],
           str(outline))
     check("report: no heading-level jump", _flags(after.tree, JUMP) == 0)
+
+    # ===== B2. Bold body-size numbered subsections ("2.1 Data Sources") =======
+    # The 14pt rule never saw a subsection typed in bold at text size, so the
+    # report's sections were promoted and its subsections stayed plain text.
+    # Precision: a bold one-level "1. Submit the form" (a list step), a
+    # lower-case "2.1 million residents", a non-bold "3.2 Scope" and a TOC
+    # line are NOT headings.
+    d = Document()
+    d.core_properties.title = "Subsections"
+    _fake(d, "Annual Data Report", 20)
+    _body(d)
+    _fake(d, "2. Methods", 14)
+    _body(d)
+    _fake(d, "2.1 Data Sources", 12)
+    _body(d)
+    _fake(d, "2.2 Survey Design", 12)
+    _body(d)
+    _fake(d, "1. Submit the form", 12)          # a bold list step, not a heading
+    _fake(d, "2.1 million residents", 12)       # a number, not a section
+    _fake(d, "3.2 Scope", 12, bold=False)       # not bold
+    toc = d.add_paragraph()
+    toc.add_run("4.1 Retention").bold = True
+    toc.style = d.styles.add_style("TOC 2", 1)  # a table-of-contents line
+    _body(d)
+    src = tmp / "subsections.docx"
+    d.save(str(src))
+    res, execs, wr, after = _fix_fake_headings(src, tmp / "subsections_fixed.docx")
+    flagged = sorted(
+        (n.content.text or "") for n in iter_reading_order(res.tree.root)
+        for f in n.accessibility_flags if f.code.value == FAKE_H
+    )
+    check("subsections: the two bold numbered subsections are flagged; list step / number / "
+          "plain / TOC lines are not",
+          flagged == sorted(["Annual Data Report", "2. Methods", "2.1 Data Sources", "2.2 Survey Design"]),
+          str(flagged))
+    outline = dict(_outline(after.tree))
+    check("subsections: title H1, section H2, subsections H3 under it",
+          [outline.get(t) for t in ("Annual Data Report", "2. Methods", "2.1 Data Sources", "2.2 Survey Design")]
+          == [1, 2, 3, 3], str(outline))
+    check("subsections: no heading-level jump", _flags(after.tree, JUMP) == 0)
 
     # ===== C. Heading 2 is NOT defined in styles.xml (a real Word file) =======
     d = Document()
