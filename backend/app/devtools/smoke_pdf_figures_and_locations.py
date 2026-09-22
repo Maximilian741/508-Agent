@@ -45,7 +45,7 @@ from pypdf.generic import ArrayObject, FloatObject, NameObject  # noqa: E402
 CAPTION = "Figure 1. Tons of rock salt applied per winter season, 2021-2025."
 
 
-def build(crop_offset: float = 0.0) -> bytes:
+def build(crop_offset: float = 0.0, rotate: int = 0) -> bytes:
     w = PdfWriter()
     f = K.helvetica(w)
     chart = K.gray_image(w, 60, 30, 90)
@@ -62,6 +62,8 @@ def build(crop_offset: float = 0.0) -> bytes:
         page[NameObject("/CropBox")] = ArrayObject(
             [FloatObject(v) for v in (crop_offset, crop_offset, 612 - crop_offset, 792 - crop_offset)]
         )
+    if rotate:
+        page[NameObject("/Rotate")] = K.NumberObject(rotate)
     return K.to_bytes(w)
 
 
@@ -175,6 +177,21 @@ def main() -> int:
     check("chart page_size", cp.get("page_size") == [612.0, 792.0], str(cp.get("page_size")))
     thumb = cp.get("thumbnail") or ""
     check("undescribed image carries a PNG data-URI thumbnail", thumb.startswith("data:image/png;base64,") and len(thumb) < 90_000)
+    # A TALL image: the thumbnail is at most 240 px on its longer side.
+    import base64
+
+    from PIL import Image
+
+    wt = PdfWriter()
+    ft = K.helvetica(wt)
+    tall = K.gray_image(wt, 120, 900, 60)
+    ct = K.bt("F1", 11, 72, 740, K.lit("A tall infographic follows.")) + b"q 100 0 0 600 72 100 cm /ImT Do Q\n"
+    K.add_page(wt, ct, {"F1": ft}, xobjects={"ImT": tall})
+    _pt, rt = parse(K.to_bytes(wt), "tall.pdf")
+    tn = [n for n in iter_reading_order(rt.tree.root) if isinstance(n, ImageNode)]
+    tt = (tn[0].metadata.properties.get("thumbnail") or "") if tn else ""
+    dims = Image.open(io.BytesIO(base64.b64decode(tt.split(",", 1)[1]))).size if tt.startswith("data:image/png;base64,") else None
+    check("a tall image's thumbnail is <= 240 px on its longer side", bool(dims) and max(dims) <= 240, str(dims))
     texts = [n for n in nodes if isinstance(n, (ParagraphNode, HeadingNode))]
     boxed = [n for n in texts if n.metadata.properties.get("bbox")]
     check("every text node is located", texts and len(boxed) == len(texts), f"{len(boxed)}/{len(texts)}")
@@ -186,6 +203,13 @@ def main() -> int:
     check("CropBox offset normalised (bbox relative to the visible page)",
           c2.metadata.properties.get("bbox") == [64.0, 464.0, 364.0, 614.0]
           and c2.metadata.properties.get("page_size") == [540.0, 720.0], str(c2.metadata.properties.get("bbox")))
+
+    _src3, res3 = parse(build(rotate=90), "rot.pdf")
+    c3 = [n for n in iter_reading_order(res3.tree.root) if isinstance(n, ImageNode) and n.metadata.properties.get("xobject") == "/Im1"][0]
+    check("a /Rotate 90 page: bbox stays in PDF user space, and the rotation is recorded beside it",
+          c3.metadata.properties.get("bbox") == [100.0, 500.0, 400.0, 650.0]
+          and c3.metadata.properties.get("page_rotate") == 90
+          and "page_rotate" not in cp, str(c3.metadata.properties.get("page_rotate")))
 
     # ---- 1 + 2. the tagged output --------------------------------------------
     root = res.tree.root

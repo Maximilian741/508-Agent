@@ -1396,7 +1396,7 @@ class PDFParser:
             section = SectionNode(
                 id=next_id(f"{page_label}-section"),
                 content=NodeContent(kind=ContentKind.TEXT, text=f"Page {page_index + 1}"),
-                metadata=_node_metadata(page_index=page_index + 1, page_size=geo.get("page_size")),
+                metadata=_node_metadata(page_index=page_index + 1, page_size=geo.get("page_size"), page_rotate=geo.get("rotate")),
                 children=[],
                 accessibility_flags=[],
             )
@@ -1450,7 +1450,7 @@ class PDFParser:
                             level=heading_level,
                             content=NodeContent(kind=ContentKind.TEXT, text=paragraph),
                             metadata=_node_metadata(
-                                page_index=page_index + 1, bbox=bbox, page_size=geo.get("page_size")
+                                page_index=page_index + 1, bbox=bbox, page_size=geo.get("page_size"), page_rotate=geo.get("rotate")
                             ),
                             children=[],
                             accessibility_flags=[],
@@ -1462,7 +1462,7 @@ class PDFParser:
                             id=next_id(f"{page_label}-p{para_index}"),
                             content=NodeContent(kind=ContentKind.TEXT, text=paragraph),
                             metadata=_node_metadata(
-                                page_index=page_index + 1, bbox=bbox, page_size=geo.get("page_size")
+                                page_index=page_index + 1, bbox=bbox, page_size=geo.get("page_size"), page_rotate=geo.get("rotate")
                             ),
                             children=[],
                             accessibility_flags=[],
@@ -1487,7 +1487,7 @@ class PDFParser:
                             content=NodeContent(kind=ContentKind.TEXT, text=htext),
                             metadata=_node_metadata(
                                 page_index=page_index + 1, from_tags=True, bbox=hbox,
-                                page_size=geo.get("page_size"),
+                                page_size=geo.get("page_size"), page_rotate=geo.get("rotate"),
                             ),
                             children=[],
                             accessibility_flags=[],
@@ -1527,7 +1527,7 @@ class PDFParser:
                             id=next_id(f"{page_label}-ttable"),
                             content=NodeContent(kind=ContentKind.NONE),
                             metadata=_node_metadata(
-                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size"),
+                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size"), page_rotate=geo.get("rotate"),
                                 bbox=_rel_box(_struct_text_box(t.get("text"), _words), geo),
                             ),
                             children=rows,
@@ -1567,7 +1567,7 @@ class PDFParser:
                             id=next_id(f"{page_label}-tlist"),
                             content=NodeContent(kind=ContentKind.NONE),
                             metadata=_node_metadata(
-                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size"),
+                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size"), page_rotate=geo.get("rotate"),
                                 bbox=_rel_box(_struct_text_box(l.get("text"), _words), geo),
                             ),
                             children=kid_nodes,
@@ -1610,6 +1610,7 @@ class PDFParser:
                 extra: Dict[str, Any] = {
                     "bbox": _rel_box(raw_box, geo),
                     "page_size": geo.get("page_size"),
+                    "page_rotate": geo.get("rotate"),
                 }
                 if caption:
                     # The figure's own printed caption — authored words on the
@@ -1667,7 +1668,7 @@ class PDFParser:
                 link_meta = _node_metadata(
                     page_index=page_index + 1,
                     bbox=_rel_box(link.get("rect"), geo),
-                    page_size=geo.get("page_size"),
+                    page_size=geo.get("page_size"), page_rotate=geo.get("rotate"),
                     link_text_source=source,
                 )
                 if not text:
@@ -1845,12 +1846,12 @@ def _image_thumbnail(xobject: Any) -> Optional[str]:
         # Keep each preview small: a report can carry dozens of them.
         for max_w in (_THUMB_MAX_W, 160):
             t = img
-            if t.width > max_w:
-                ratio = max_w / float(t.width)
-                t = t.resize((max_w, max(1, int(t.height * ratio))))
-            if t.height > 2 * max_w:
-                ratio = (2 * max_w) / float(t.height)
-                t = t.resize((max(1, int(t.width * ratio)), 2 * max_w))
+            # The location contract: a thumbnail is at most 240 px on its
+            # LONGER side (a tall image used to come back 240 x 480).
+            longest = max(t.width, t.height)
+            if longest > max_w:
+                ratio = max_w / float(longest)
+                t = t.resize((max(1, int(t.width * ratio)), max(1, int(t.height * ratio))))
             buf = BytesIO()
             t.save(buf, format="PNG", optimize=True)
             data = buf.getvalue()
