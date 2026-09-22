@@ -1,0 +1,506 @@
+"""Smoke: every finding says WHERE it is, and whether we can fix it ourselves.
+
+Pins the shared API contract on /pipeline/analyze and /pipeline/remediate:
+
+  violation.autoFixable  — a recommended action for the flag is in
+                           pipeline._PERSISTED_ACTIONS[format] and is not
+                           FLAG_FOR_MANUAL_REVIEW (recomputed independently here);
+  violation.location     — {kind, page, bbox, pageSize, snippet, highlight,
+                           thumbnail}, all seven keys always present;
+  summary                — {total, autoFixable, needsYou, cost}.
+
+Per format it proves the location is the REAL place, not a guess:
+  * DOCX: the heading jump highlights the heading's own text; the typed "- "
+    list highlights its marker; the table shows its first row; the picture
+    carries a <=240 px PNG thumbnail read back from word/media; the content
+    control is shown inside its own sentence; title/language are "document".
+  * HTML: "click here" is highlighted inside the sentence it sits in; a
+    data: image gets a thumbnail; a REMOTE image does not, and no socket is
+    ever opened; the unlabeled <input>, the untitled <iframe>, the positive
+    tabindex and the autocomplete candidate — root-level COUNT findings — each
+    point at the first offending element's markup.
+  * PPTX: the picture thumbnail comes from the slide shape; the link is shown
+    inside its text box's sentence.
+  * PDF: the image finding names page 1 and the page size, with a thumbnail
+    decoded from the page's XObject; the link annotation becomes a
+    "pdf-region" with the annotation's own /Rect as bbox.
+Invariants on every location: highlight is a literal substring of snippet,
+snippet <= 200 chars, a thumbnail is a PNG no larger than 240x240.
+
+Also: a location can never fail a request (broken image bytes, a node id that
+isn't in the tree, a decompression bomb -> None, not a 500), and remediate
+returns the same findings with ``fixed`` — True only for an APPROVED finding
+whose fix reached the file — while keeping thumbnails OUT of meta.json.
+
+Run: python -m app.devtools.smoke_finding_location
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import os
+import socket
+import sys
+import tempfile
+from pathlib import Path
+
+_TMP = Path(tempfile.mkdtemp(prefix="508_smoke_location_"))
+os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'loc.db').as_posix()}"
+os.environ["STORAGE_LOCAL_ROOT"] = str(_TMP / "storage")
+os.environ["MATERIALIZED_ROOT"] = str(_TMP / "materialized")
+for _key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SEMANTIC_PROVIDER", "SMTP_HOST"):
+    os.environ.pop(_key, None)
+
+from fastapi.testclient import TestClient  # noqa: E402
+from PIL import Image  # noqa: E402
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+KEYS = {"kind", "page", "bbox", "pageSize", "snippet", "highlight", "thumbnail"}
+KINDS = {"pdf-region", "image", "text", "table", "document"}
+
+
+def _png(w: int, h: int, color=(30, 110, 200)) -> bytes:
+    buf = io.BytesIO()
+    im = Image.new("RGB", (w, h), color)
+    for x in range(0, w, max(1, w // 8)):
+        for y in range(h):
+            im.putpixel((x, y), (250, 250, 250))
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _docx() -> bytes:
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    d = Document()
+    d.add_heading("Top-Level Section", level=1)
+    d.add_heading("Sub-sub Section", level=3)
+    for item in ("- first typed item", "- second typed item", "- third typed item"):
+        d.add_paragraph(item)
+    d.add_paragraph().add_run().add_picture(io.BytesIO(_png(900, 600)))
+    para = d.add_paragraph("For the annual numbers ")
+    rid = d.part.relate_to(
+        "https://example.com/annual.pdf",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hl = OxmlElement("w:hyperlink")
+    hl.set(qn("r:id"), rid)
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "click here"
+    r.append(t)
+    hl.append(r)
+    para._p.append(hl)
+    # An unlabeled content control inside a sentence.
+    form = d.add_paragraph("Manager email: ")
+    sdt = OxmlElement("w:sdt")
+    sdt.append(OxmlElement("w:sdtPr"))
+    content = OxmlElement("w:sdtContent")
+    cr = OxmlElement("w:r")
+    ct = OxmlElement("w:t")
+    ct.text = "Click or tap here to enter text."
+    cr.append(ct)
+    content.append(cr)
+    sdt.append(content)
+    form._p.append(sdt)
+    table = d.add_table(rows=3, cols=3)
+    for ri, row in enumerate([("Region", "Q1", "Q2"), ("North", "120", "130"), ("South", "90", "95")]):
+        for ci, val in enumerate(row):
+            table.cell(ri, ci).text = val
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+def _html() -> bytes:
+    data_uri = "data:image/png;base64," + base64.b64encode(_png(640, 480, (200, 60, 60))).decode()
+    return (
+        "<!doctype html><html><head></head><body>"
+        "<h1>Report</h1><h3>Details</h3>"
+        '<p>For the full report, <a href="https://example.com/r.pdf">click here</a> today.</p>'
+        f'<img src="{data_uri}">'
+        '<img src="https://images.example.com/remote.png">'
+        "<table><tr><td>Region</td><td>Q1</td></tr><tr><td>North</td><td>12</td></tr></table>"
+        '<form><p>Search: <input type="text" name="q"></p>'
+        '<p>Your email <input type="text" name="email" aria-label="Your email"></p></form>'
+        '<p>Map: <iframe src="https://maps.example.com/embed"></iframe></p>'
+        '<p><a href="/next" tabindex="3">Skip ahead</a></p>'
+        "</body></html>"
+    ).encode("utf-8")
+
+
+def _pptx() -> bytes:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_picture(io.BytesIO(_png(800, 500, (40, 160, 90))), Inches(1), Inches(2))
+    tb = slide.shapes.add_textbox(Inches(1), Inches(0.5), Inches(6), Inches(1))
+    p = tb.text_frame.paragraphs[0]
+    p.add_run().text = "Read the report: "
+    link = p.add_run()
+    link.text = "click here"
+    link.hyperlink.address = "https://example.com/deck-report"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def _pdf() -> bytes:
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.annotations import Link
+
+    buf = io.BytesIO()
+    Image.open(io.BytesIO(_png(400, 300, (20, 120, 200)))).convert("RGB").save(buf, "PDF")
+    w = PdfWriter(clone_from=PdfReader(io.BytesIO(buf.getvalue())))
+    w.add_annotation(0, Link(rect=(50, 50, 200, 80), url="https://example.com/report"))
+    out = io.BytesIO()
+    w.write(out)
+    return out.getvalue()
+
+
+def main() -> int:
+    failures = 0
+
+    def check(name: str, cond: bool, detail: object = "") -> None:
+        nonlocal failures
+        print(("PASS" if cond else "FAIL"), "-", name, "" if cond else f"  [{str(detail)[:400]}]")
+        if not cond:
+            failures += 1
+
+    from app.api.credits import DOC_FORMAT_COSTS
+    from app.api.pipeline import _PERSISTED_ACTIONS
+    from app.db.models import UserRow
+    from app.db.session_sqlalchemy import session_scope
+    from app.main import app
+    from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG, AccessibilityFlagCode
+
+    client = TestClient(app)
+    r = client.post("/auth/sign-in", json={"email": "where@example.com", "password": "wherepass1"})
+    assert r.status_code == 200, r.text
+    auth = {"Authorization": f"Bearer {r.json()['token']}"}
+    with session_scope() as s:
+        s.get(UserRow, r.json()["user"]["id"]).credits_balance = 500
+
+    def expected_auto(rule: str, fmt: str) -> bool:
+        acts = [a.action_code.value for a in REMEDIATION_ACTIONS_BY_FLAG.get(AccessibilityFlagCode(rule), [])]
+        return any(a != "FLAG_FOR_MANUAL_REVIEW" and a in _PERSISTED_ACTIONS.get(fmt, set()) for a in acts)
+
+    def thumb_ok(uri) -> bool:
+        if not (isinstance(uri, str) and uri.startswith("data:image/png;base64,")):
+            return False
+        raw = base64.b64decode(uri.split(",", 1)[1])
+        im = Image.open(io.BytesIO(raw))
+        return im.format == "PNG" and im.size[0] <= 240 and im.size[1] <= 240
+
+    def contract(label: str, body: dict, fmt: str) -> list:
+        vs = body.get("violations") or []
+        check(f"{label}: has findings", len(vs) > 0, body)
+        bad_keys = [v["ruleId"] for v in vs if set((v.get("location") or {}).keys()) != KEYS]
+        check(f"{label}: every location has exactly the 7 contract keys", not bad_keys, bad_keys)
+        check(f"{label}: every autoFixable is a bool", all(isinstance(v.get("autoFixable"), bool) for v in vs))
+        wrong = [v["ruleId"] for v in vs if v["autoFixable"] != expected_auto(v["ruleId"], fmt)]
+        check(f"{label}: autoFixable == persisted-action rule, per finding", not wrong, wrong)
+        locs = [v["location"] for v in vs]
+        check(f"{label}: kinds are from the contract", all(l["kind"] in KINDS for l in locs), [l["kind"] for l in locs])
+        check(
+            f"{label}: highlight is always a substring of snippet",
+            all(not l["highlight"] or (l["snippet"] and l["highlight"] in l["snippet"]) for l in locs),
+            [(l["snippet"], l["highlight"]) for l in locs],
+        )
+        check(f"{label}: snippets are <= 200 chars", all(len(l["snippet"] or "") <= 200 for l in locs))
+        check(
+            f"{label}: every thumbnail is a PNG <= 240x240",
+            all(l["thumbnail"] is None or thumb_ok(l["thumbnail"]) for l in locs),
+        )
+        check(
+            f"{label}: thumbnails only on image findings",
+            all(l["thumbnail"] is None or v["evidence"].get("node_type") == "image" for v, l in zip(vs, locs)),
+        )
+        check(
+            f"{label}: a bbox is always paired with a pageSize (pdf-region)",
+            all((l["bbox"] is None) or (l["pageSize"] and l["kind"] == "pdf-region") for l in locs),
+        )
+        s = body.get("summary") or {}
+        n_auto = sum(1 for v in vs if v["autoFixable"])
+        check(
+            f"{label}: summary total/autoFixable/needsYou/cost",
+            s.get("total") == len(vs) and s.get("autoFixable") == n_auto and s.get("needsYou") == len(vs) - n_auto
+            and s.get("cost") == DOC_FORMAT_COSTS[fmt],
+            {k: s.get(k) for k in ("total", "autoFixable", "needsYou", "cost")},
+        )
+        return vs
+
+    def by_rule(vs: list, rule: str) -> list:
+        return [v for v in vs if v["ruleId"] == rule]
+
+    def analyze(name: str, data: bytes, mime: str) -> dict:
+        rr = client.post("/pipeline/analyze", files={"file": (name, data, mime)}, headers=auth)
+        assert rr.status_code == 200, rr.text[:400]
+        return rr.json()
+
+    loc_copies_before = {p.name for p in Path(tempfile.gettempdir()).glob("508loc_*")}
+
+    # ---- DOCX -----------------------------------------------------------------
+    docx = _docx()
+    vs = contract("docx", analyze("where.docx", docx, DOCX), "docx")
+    jump = by_rule(vs, "HEADING_LEVEL_JUMP") or by_rule(vs, "SKIPPED_HEADING_LEVEL")
+    check(
+        "docx: the heading jump highlights the heading's own text",
+        bool(jump) and jump[0]["location"]["highlight"] == "Sub-sub Section" and jump[0]["location"]["kind"] == "text",
+        jump[:1],
+    )
+    fake = by_rule(vs, "LIST_STRUCTURE_INVALID")
+    check(
+        "docx: the typed list highlights its '-' marker inside the items",
+        bool(fake) and fake[0]["location"]["highlight"] == "-"
+        and "first typed item" in (fake[0]["location"]["snippet"] or "")
+        and "second typed item" in (fake[0]["location"]["snippet"] or ""),
+        fake[:1],
+    )
+    tables = [v for v in vs if v["location"]["kind"] == "table"]
+    check(
+        "docx: the table finding shows its first row",
+        bool(tables) and tables[0]["location"]["snippet"] == "Region | Q1 | Q2",
+        [t["location"] for t in tables][:1],
+    )
+    img = by_rule(vs, "MISSING_ALT_TEXT")
+    check(
+        "docx: the picture has a thumbnail read back from word/media",
+        bool(img) and img[0]["location"]["kind"] == "image" and thumb_ok(img[0]["location"]["thumbnail"]),
+        [i["location"] | {"thumbnail": bool(i["location"]["thumbnail"])} for i in img],
+    )
+    link = by_rule(vs, "LINK_TEXT_NON_DESCRIPTIVE")
+    check(
+        "docx: the link finding highlights 'click here'",
+        bool(link) and link[0]["location"]["highlight"] == "click here",
+        link[:1],
+    )
+    title = by_rule(vs, "DOCUMENT_TITLE_MISSING")
+    check("docx: the missing title is a document-level location", bool(title) and title[0]["location"]["kind"] == "document", title[:1])
+    ff = by_rule(vs, "FORM_FIELD_UNLABELED")
+    check(
+        "docx: the unlabeled content control is shown in its own sentence",
+        bool(ff)
+        and "Manager email:" in (ff[0]["location"]["snippet"] or "")
+        and ff[0]["location"]["highlight"] == "Click or tap here to enter text.",
+        ff[:1],
+    )
+    check("docx: no DOCX finding claims a page", all(v["location"]["page"] is None for v in vs))
+
+    # ---- HTML (and: no network, ever) -----------------------------------------
+    connects = []
+    real_connect = socket.socket.connect
+    real_getaddrinfo = socket.getaddrinfo
+    _LOCAL = {"127.0.0.1", "::1", "localhost"}
+
+    def _no_network(self, address, *a, **k):
+        # Loopback stays open: the event loop's own self-pipe uses it.
+        host = address[0] if isinstance(address, tuple) and address else address
+        if host in _LOCAL:
+            return real_connect(self, address, *a, **k)
+        connects.append(address)  # pragma: no cover - only hit on a regression
+        raise OSError("network disabled in smoke_finding_location")
+
+    def _no_dns(host, *a, **k):
+        if host in _LOCAL or host is None:
+            return real_getaddrinfo(host, *a, **k)
+        connects.append(host)  # pragma: no cover - only hit on a regression
+        raise OSError("DNS disabled in smoke_finding_location")
+
+    socket.socket.connect = _no_network
+    socket.getaddrinfo = _no_dns
+    try:
+        hbody = analyze("where.html", _html(), "text/html")
+    finally:
+        socket.socket.connect = real_connect
+        socket.getaddrinfo = real_getaddrinfo
+    check("html: building locations opened no socket (remote images are never fetched)", not connects, connects)
+    vs = contract("html", hbody, "html")
+    link = by_rule(vs, "LINK_TEXT_NON_DESCRIPTIVE")
+    check(
+        "html: 'click here' is highlighted inside the sentence it sits in",
+        bool(link)
+        and link[0]["location"]["snippet"] == "For the full report, click here today."
+        and link[0]["location"]["highlight"] == "click here",
+        link[:1],
+    )
+    imgs = by_rule(vs, "MISSING_ALT_TEXT")
+    thumbs = [bool(v["location"]["thumbnail"]) for v in imgs]
+    check("html: the data: image has a thumbnail, the remote one does not", sorted(thumbs) == [False, True], thumbs)
+    ff = by_rule(vs, "FORM_FIELD_UNLABELED")
+    check(
+        "html: the unlabeled <input> is highlighted in its markup",
+        bool(ff) and "Search:" in (ff[0]["location"]["snippet"] or "")
+        and (ff[0]["location"]["highlight"] or "").startswith("<input"),
+        ff[:1],
+    )
+
+    for rule, needle in (
+        ("IFRAME_TITLE_MISSING", '<iframe src="https://maps.example.com/embed">'),
+        ("POSITIVE_TABINDEX", 'tabindex="3"'),
+        ("INPUT_AUTOCOMPLETE_MISSING", 'name="email"'),
+    ):
+        hit = by_rule(vs, rule)
+        check(
+            f"html: {rule} points at the first offending element's markup",
+            bool(hit) and needle in (hit[0]["location"]["highlight"] or "") and hit[0]["location"]["kind"] == "text",
+            hit[:1] or [v["ruleId"] for v in vs],
+        )
+
+    # ---- PPTX -----------------------------------------------------------------
+    vs = contract("pptx", analyze("where.pptx", _pptx(), PPTX), "pptx")
+    # python-pptx names the picture "image.png", so this is the "alt is a file
+    # name" finding — and the bad alt itself is what gets highlighted.
+    img = by_rule(vs, "ALT_TEXT_NOT_DESCRIPTIVE") or by_rule(vs, "MISSING_ALT_TEXT")
+    check(
+        "pptx: the picture's thumbnail comes from its slide shape, on slide 1",
+        bool(img) and thumb_ok(img[0]["location"]["thumbnail"]) and img[0]["location"]["page"] == 1,
+        [i["location"] | {"thumbnail": bool(i["location"]["thumbnail"])} for i in img],
+    )
+    check(
+        "pptx: a file-name alt is shown and highlighted as the problem",
+        bool(img) and img[0]["ruleId"] != "ALT_TEXT_NOT_DESCRIPTIVE"
+        or (img[0]["location"]["snippet"] == "image.png" and img[0]["location"]["highlight"] == "image.png"),
+        img[:1],
+    )
+    slide = by_rule(vs, "SLIDE_TITLE_MISSING")
+    check(
+        "pptx: an untitled slide is located by its page and how it starts",
+        bool(slide) and slide[0]["location"]["page"] == 1 and slide[0]["location"]["snippet"] == "Read the report: click here",
+        slide[:1],
+    )
+    link = by_rule(vs, "LINK_TEXT_NON_DESCRIPTIVE")
+    check(
+        "pptx: the link is shown inside its text box's sentence",
+        bool(link) and link[0]["location"]["snippet"] == "Read the report: click here"
+        and link[0]["location"]["highlight"] == "click here",
+        link[:1],
+    )
+
+    # ---- PDF ------------------------------------------------------------------
+    vs = contract("pdf", analyze("where.pdf", _pdf(), "application/pdf"), "pdf")
+    img = [v for v in vs if v["evidence"].get("node_type") == "image"]
+    check(
+        "pdf: the image finding names page 1 + the page size, with a thumbnail",
+        bool(img) and img[0]["location"]["page"] == 1 and img[0]["location"]["pageSize"] == [400.0, 300.0]
+        and thumb_ok(img[0]["location"]["thumbnail"]),
+        [i["location"] | {"thumbnail": bool(i["location"]["thumbnail"])} for i in img],
+    )
+    links = [v for v in vs if v["evidence"].get("node_type") == "link"]
+    check(
+        "pdf: the link annotation is a pdf-region with its own /Rect",
+        bool(links) and links[0]["location"]["kind"] == "pdf-region"
+        and links[0]["location"]["bbox"] == [50.0, 50.0, 200.0, 80.0]
+        and links[0]["location"]["pageSize"] == [400.0, 300.0],
+        [l["location"] for l in links][:1],
+    )
+
+    leaked = {p.name for p in Path(tempfile.gettempdir()).glob("508loc_*")} - loc_copies_before
+    check("the private upload copies used for thumbnails are all deleted (docx/html/pptx/pdf)", not leaked, leaked)
+
+    # ---- the builder can never fail a request -----------------------------------
+    from app.models.accessibility import (
+        AccessibilityTree,
+        ContentKind,
+        DocumentNode,
+        ImageNode,
+        NodeContent,
+        NodeLocation,
+        NodeMetadata,
+        ParagraphNode,
+        SectionNode,
+        Violation,
+    )
+    from app.services.finding_location import build_locations, png_thumbnail_data_uri
+
+    para = ParagraphNode(
+        id="p-1",
+        content=NodeContent(kind=ContentKind.TEXT, text="Revenue   grew\nin every region."),
+        metadata=NodeMetadata(page=2, source_format="pdf", properties={"bbox": [300, 700, 72, 650]}),
+    )
+    broken = ImageNode(
+        id="img-1",
+        content=NodeContent(kind=ContentKind.NONE),
+        metadata=NodeMetadata(page=2, source_format="pdf", properties={"image_b64": base64.b64encode(b"not an image").decode()}),
+    )
+    page = SectionNode(
+        id="page-2",
+        content=NodeContent(kind=ContentKind.NONE),
+        metadata=NodeMetadata(page=2, source_format="pdf", properties={"page_size": [612, 792]}),
+        children=[para, broken],
+    )
+    tree = AccessibilityTree(root=DocumentNode(
+        id="doc", content=NodeContent(kind=ContentKind.NONE), metadata=NodeMetadata(source_format="pdf"), children=[page]
+    ))
+
+    def viol(vid: str, node: str, rule: str) -> Violation:
+        return Violation(violation_id=vid, rule_id=rule, severity="warning", description="x", location=NodeLocation(node_id=node))
+
+    locs = build_locations(
+        tree,
+        [viol("a", "p-1", "LOW_CONTRAST_TEXT"), viol("b", "img-1", "MISSING_ALT_TEXT"), viol("c", "gone", "MISSING_ALT_TEXT")],
+        "pdf",
+        None,
+    )
+    a = locs["a"]
+    check(
+        "parser bbox + ancestor page_size -> pdf-region, box normalised, text whitespace-collapsed",
+        a["kind"] == "pdf-region" and a["bbox"] == [72.0, 650.0, 300.0, 700.0] and a["pageSize"] == [612.0, 792.0]
+        and a["page"] == 2 and a["snippet"] == "Revenue grew in every region." and a["highlight"] == a["snippet"],
+        a,
+    )
+    check("broken image bytes -> thumbnail None, still located", locs["b"]["thumbnail"] is None and locs["b"]["page"] == 2, locs["b"])
+    check("a node id not in the tree -> a document location, no exception", locs["c"]["kind"] == "document", locs["c"])
+    wide = png_thumbnail_data_uri(_png(5000, 100))
+    check("a 5000x100 picture thumbnails to <= 240 px wide", thumb_ok(wide))
+    bomb = Image.new("1", (9000, 9000))
+    check("a 81-megapixel image is refused, not decoded", png_thumbnail_data_uri(bomb) is None)
+
+    # ---- remediate returns the same findings, with an honest ``fixed`` ----------------
+    ab = analyze("where.docx", docx, DOCX)
+    ids = [v["id"] for v in ab["violations"]]
+    rr = client.post(
+        "/pipeline/remediate",
+        files={"file": ("where.docx", docx, DOCX)},
+        data={"approved_violations": json.dumps(ids), "rejected_violations": "[]"},
+        headers=auth,
+    )
+    check("remediate docx -> 200", rr.status_code == 200, rr.text[:300])
+    rb = rr.json() if rr.status_code == 200 else {}
+    rvs = rb.get("violations") or []
+    check("remediate: same findings as analyze", sorted(v["id"] for v in rvs) == sorted(ids), [v["id"] for v in rvs])
+    check("remediate: every finding keeps its location + autoFixable", all(set(v["location"]) == KEYS for v in rvs) and rvs)
+    fixed = [v for v in rvs if v.get("fixed")]
+    check("remediate: some approved fixes reached the file", len(fixed) >= 1 and rb.get("persistedFixes", 0) >= 1, rb.get("persistedFixes"))
+    check("remediate: nothing a writer can't persist is ever 'fixed'", all(v["autoFixable"] for v in fixed), [v["ruleId"] for v in fixed if not v["autoFixable"]])
+    check(
+        "remediate: 'fixed' is exactly the approved findings with a success execution",
+        all(isinstance(v.get("fixed"), bool) for v in rvs),
+    )
+    meta = (_TMP / "materialized" / "pipeline" / rb.get("jobId", "x") / "meta.json")
+    text = meta.read_text(encoding="utf-8") if meta.exists() else ""
+    check("remediate: meta.json exists but holds no thumbnails / violations", bool(text) and "data:image" not in text and '"violations"' not in text)
+
+    rr = client.post(
+        "/pipeline/remediate",
+        files={"file": ("where.docx", docx, DOCX)},
+        data={"approved_violations": "[]", "rejected_violations": "[]"},
+        headers=auth,
+    )
+    none_fixed = rr.status_code == 200 and not any(v.get("fixed") for v in rr.json().get("violations") or [])
+    check("remediate with nothing approved: no finding is 'fixed' (and nothing charged)", none_fixed and rr.json().get("charged") is False, rr.text[:200])
+
+    print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -55,6 +55,12 @@ def main() -> int:
 
     # With SMTP configured and email unverified -> 403 verify_email_first.
     os.environ["SMTP_HOST"] = "smtp.example.com"
+    # Sign-up now mails the verification link when SMTP is configured; record
+    # it instead of letting smtplib dial smtp.example.com from a smoke.
+    import app.api.auth as _auth_mod
+
+    _real_send = _auth_mod.send_email
+    _auth_mod.send_email = lambda **kw: True
     try:
         r2 = client.post(
             "/auth/sign-in",
@@ -68,6 +74,7 @@ def main() -> int:
         )
     finally:
         os.environ.pop("SMTP_HOST", None)
+        _auth_mod.send_email = _real_send
 
     # --- 1. password reset --------------------------------------------------
     # Request: response identical whether or not the account exists.
