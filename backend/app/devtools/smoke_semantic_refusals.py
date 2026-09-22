@@ -51,6 +51,12 @@ os.environ["STORAGE_LOCAL_ROOT"] = str(_TMP / "storage")
 os.environ["MATERIALIZED_ROOT"] = str(_TMP / "materialized")
 for _key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SEMANTIC_PROVIDER"):
     os.environ.pop(_key, None)
+# The per-IP limiter allows 60 requests a minute on /pipeline, /credits and
+# /tools; this smoke makes more than that. A section that needs its own
+# bucket sends CF-Connecting-IP, which the app only reads when told it sits
+# behind a proxy (see security/rate_limit.py). Requests without the header
+# still key on the test client, exactly as before.
+os.environ["TRUST_PROXY_HEADERS"] = "true"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from pypdf import PdfReader, PdfWriter  # noqa: E402
@@ -123,6 +129,48 @@ ALL_BAD_HTML = (
     "<table><tr><td>Emergency contact</td><td></td></tr><tr><td>Phone</td><td></td></tr></table>"
     "</body></html>"
 )
+
+
+# Verifier round 9: a French page ("à" was Portuguese-only evidence and it was
+# tagged pt), pictures whose title attribute is a CMS file name or stock id
+# (each written as alt and charged), and a fact-sheet table whose first
+# label/value pair was promoted to column headers.
+_JUNK_TITLES = (
+    "sunset-beach-2", "banner_final", "shutterstock_123456789", "iStock-1162893421",
+    "Untitled design (3)", "WhatsApp Image 2024-03-01 at 10.15.22",
+)
+FRENCH_FACTS_HTML = (
+    "<!doctype html><html><head><title>Journée portes ouvertes</title></head><body>"
+    "<h1>Programme de la journée portes ouvertes</h1>"
+    "<p>Accueil à 9 h à la mairie, visite du musée à 11 h, déjeuner à midi à la cantine scolaire.</p>"
+    "<p>Atelier de peinture à 14 h à la bibliothèque, puis retour à la gare à 17 h.</p>"
+    "<p>Rendez-vous à l'entrée principale. Inscription gratuite à l'accueil.</p>"
+    + "".join(f'<p><img src="t{i}.png" title="{t}"></p>' for i, t in enumerate(_JUNK_TITLES))
+    + '<p><img src="good.png" title="Le maire coupe le ruban devant la nouvelle bibliothèque"></p>'
+    '<table id="t-facts"><tr><td>Organisation</td><td>Riverside Trust</td></tr>'
+    "<tr><td>Founded</td><td>1998</td></tr><tr><td>Employees</td><td>240</td></tr>"
+    "<tr><td>Turnover</td><td>£4.2m</td></tr></table>"
+    "</body></html>"
+)
+
+
+def _facts_docx() -> bytes:
+    from docx import Document
+
+    doc = Document()
+    doc.core_properties.title = "Riverside Trust fact sheet"
+    doc.add_paragraph(
+        "The trust runs parks, a museum and two libraries along the river, and publishes this "
+        "summary every year for its members."
+    )
+    t = doc.add_table(rows=4, cols=2)
+    for r, row in enumerate((("Organisation", "Riverside Trust"), ("Founded", "1998"),
+                             ("Employees", "240"), ("Turnover", "£4.2m"))):
+        for c, v in enumerate(row):
+            t.cell(r, c).text = v
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 def _docx_bytes() -> bytes:
@@ -400,6 +448,45 @@ def main() -> int:  # noqa: PLR0915
     check("all-bad html: a half-English, half-French page gets no language guess",
           "didn't guess" in lang_note, lang_note)
     notes_are_plain(body, "all-bad html")
+
+    # ---- 2b. French page, file-name titles, a fact-sheet table --------------
+    headers["CF-Connecting-IP"] = "198.51.100.29"  # its own rate-limit bucket
+    raw = FRENCH_FACTS_HTML.encode("utf-8")
+    found, body, out_b, debit = fix(
+        "portes-ouvertes.html", raw, HTML,
+        rules={"MISSING_ALT_TEXT", "DOCUMENT_LANGUAGE_MISSING", "TABLE_MISSING_HEADERS"},
+    )
+    out = out_b.decode("utf-8")
+    check("fr html: an 'à'-heavy French page is tagged fr (not pt)",
+          re.search(r'<html[^>]*\blang="fr"', out) is not None, re.search(r"<html[^>]*>", out).group(0))
+    written = re.findall(r'<img src="t\d\.png"[^>]*\balt="([^"]*)"', out)
+    check("fr html: no file-name / stock-id title became alt text", not written, str(written))
+    check("fr html: a real sentence in a title still became the alt",
+          'alt="Le maire coupe le ruban devant la nouvelle bibliothèque"' in out,
+          re.findall(r'<img src="good\.png"[^>]*>', out)[:1])
+    facts_tbl = re.search(r'<table id="t-facts">.*?</table>', out, re.S).group(0)
+    check("fr html: the fact sheet's 'Organisation | Riverside Trust' row NOT promoted",
+          "<th" not in facts_tbl, facts_tbl[:160])
+    tbl_refusal = (by_action(body, "ADD_TABLE_HEADERS", "skipped") or [{"notes": ""}])[0]["notes"]
+    check("fr html: the fact sheet was refused with the label/value reason",
+          "a label and its value" in tbl_refusal and "not charged" in tbl_refusal, tbl_refusal)
+    check("fr html: exactly two fixes persisted (the real title's alt, the language)",
+          body.get("persistedFixes") == 2, str(body.get("persistedFixes")))
+    check("fr html: charged the HTML price once for them",
+          body.get("charged") is True and debit == DOC_FORMAT_COSTS["html"], f"{body.get('charged')} {debit}")
+    again = analyze("portes-ouvertes-fixed.html", out_b, HTML)
+    missing = [v for v in again["violations"] if v["ruleId"] == "MISSING_ALT_TEXT"]
+    check("fr html: a re-scan still reports every picture whose title was a file name",
+          len(missing) == len(_JUNK_TITLES), f"{len(missing)} != {len(_JUNK_TITLES)}")
+    found, body, out_b, debit = fix("facts.docx", _facts_docx(), DOCX, rules={"TABLE_MISSING_HEADERS"})
+    with zipfile.ZipFile(io.BytesIO(out_b)) as z:
+        docxml = z.read("word/document.xml").decode("utf-8")
+    check("facts docx: the TABLE_MISSING_HEADERS finding exists (sanity)",
+          any(v["ruleId"] == "TABLE_MISSING_HEADERS" for v in found["violations"]))
+    check("facts docx: no repeating header row on the fact sheet, nothing charged",
+          "tblHeader" not in docxml and body.get("charged") is False and debit == 0,
+          f"tblHeader={'tblHeader' in docxml} charged={body.get('charged')} debit={debit}")
+    headers.pop("CF-Connecting-IP", None)
 
     # ---- 3. DOCX -------------------------------------------------------------
     docx_raw = _docx_bytes()
