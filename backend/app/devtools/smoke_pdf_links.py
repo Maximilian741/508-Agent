@@ -88,7 +88,10 @@ def _build(with_links: bool):
     page[NameObject("/Contents")] = w._add_object(cs)
     page[NameObject("/Resources")] = res
     if with_links:
-        a1 = _link_annot(w, "https://data.example.gov/portal", (40, 470, 200, 492))
+        # Over blank space: no printed words to name it, so the URI fallback
+        # applies. (A rect over text is named by that text — pinned in
+        # smoke_pdf_links_named_by_page.)
+        a1 = _link_annot(w, "https://data.example.gov/portal", (40, 300, 200, 322))
         a2 = _link_annot(w, "https://example.gov/method", (40, 440, 200, 462), contents="Methodology notes")
         page[NameObject("/Annots")] = ArrayObject([a1, a2])
     tree = AccessibilityTree(

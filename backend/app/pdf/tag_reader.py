@@ -64,12 +64,41 @@ def _mcid_content(reader: PdfReader, page_index: int) -> Dict[int, Dict[str, Any
 
     from pypdf.generic import ContentStream  # local import keeps module light
 
+    from app.pdf.text_decode import FontDecoder, FontState, operand_bytes, show_strings
+
     out: Dict[int, Dict[str, Any]] = {}
     try:
         page = reader.pages[page_index]
         ops = ContentStream(page.get_contents(), reader).operations
     except Exception:
         return out
+    try:
+        decoder: Optional[FontDecoder] = FontDecoder(page)
+    except Exception:
+        decoder = None
+    font_state = FontState()
+
+    def text_of(operands: Any, op: bytes) -> str:
+        """Decoded text of one show op. Composite-font text goes through the
+        font's ToUnicode map; text we cannot decode contributes NOTHING — a
+        heading must never read back as the Python repr of glyph bytes
+        ("b'\\x00:\\x00L...'"), which is what ``str(ByteStringObject)`` gave."""
+        parts: List[str] = []
+        for s in show_strings(operands, op):
+            if decoder is not None and decoder.is_composite(font_state.font):
+                t = decoder.decode(font_state.font, operand_bytes(s))
+                if t:
+                    parts.append(t)
+                continue
+            if isinstance(s, str):
+                parts.append(str(s))
+            elif decoder is not None:
+                t = decoder.decode_unicode(font_state.font, operand_bytes(s))
+                if t:
+                    parts.append(t)
+            else:
+                parts.append(operand_bytes(s).decode("latin-1", "ignore"))
+        return "".join(parts)
 
     stack: List[Optional[int]] = []
 
@@ -86,6 +115,7 @@ def _mcid_content(reader: PdfReader, page_index: int) -> Dict[int, Dict[str, Any
 
     for operands, op in ops:
         try:
+            font_state.feed(operands, op)
             if op == b"BDC":
                 mcid = None
                 if len(operands) >= 2:
@@ -101,16 +131,10 @@ def _mcid_content(reader: PdfReader, page_index: int) -> Dict[int, Dict[str, Any
             elif op == b"EMC":
                 if stack:
                     stack.pop()
-            elif op in (b"Tj", b"'", b'"'):
+            elif op in (b"Tj", b"'", b'"', b"TJ"):
                 m = current()
                 if m is not None and operands:
-                    bucket(m)["text"] += str(operands[0] if op != b'"' else operands[2]) + " "
-            elif op == b"TJ":
-                m = current()
-                if m is not None and operands and isinstance(operands[0], (list, ArrayObject)):
-                    bucket(m)["text"] += "".join(
-                        str(x) for x in operands[0] if not isinstance(x, (int, float))
-                    ) + " "
+                    bucket(m)["text"] += text_of(operands, op) + " "
             elif op == b"Do":
                 m = current()
                 if m is not None and operands:
@@ -167,6 +191,30 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
                         pass
         return got
 
+    def first_page(elem: Any, depth: int = 0) -> Optional[int]:
+        """Page of an element's first descendant that says which page it is on.
+
+        Containers (/Table, /L) routinely carry no /Pg of their own — the
+        cells and items do. Without this a table on page 2 was attributed to
+        page 1 (``None`` coerced to 0 by the parser)."""
+        if depth > 12:
+            return None
+        el = _resolve(elem)
+        if not isinstance(el, DictionaryObject):
+            return None
+        pg = _page_index_for(el.get("/Pg"), page_ids)
+        if pg is not None:
+            return pg
+        k = _resolve(el.get("/K"))
+        kids = k if isinstance(k, (list, ArrayObject)) else ([k] if k is not None else [])
+        for kid in kids[:8]:
+            kr = _resolve(kid)
+            if isinstance(kr, DictionaryObject):
+                got = first_page(kr, depth + 1)
+                if got is not None:
+                    return got
+        return None
+
     truncated = {"hit": False, "max_depth": 0}
 
     def walk(elem: Any, page_ctx: Optional[int], depth: int = 0) -> None:
@@ -187,6 +235,8 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
             return
         s = _norm_s(el.get("/S"), role_map)
         pg = _page_index_for(el.get("/Pg"), page_ids)
+        if pg is None and s in ("Table", "L"):
+            pg = first_page(el)
         page = pg if pg is not None else page_ctx
 
         if s in _HEADING_TAGS:

@@ -41,7 +41,8 @@ from app.models.accessibility import (
     ImageNode,
     iter_reading_order,
 )
-from app.parsers.pdf_parser import derive_pdf_field_label, iter_acroform_fields
+from app.parsers.pdf_parser import FieldLabeler, derive_pdf_field_label, iter_acroform_fields
+from app.pdf.text_decode import is_readable_text
 from app.pdf.ua_tagger import tag_pdf
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ def write_remediated_pdf(
 
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    notices: List[Dict[str, Any]] = []
     pdfua_summary: Dict[str, Any] = {}
 
     # Always start by copying source → output so we never mutate the source.
@@ -74,15 +76,41 @@ def write_remediated_pdf(
     # to the unchanged copy rather than crash the request.
     try:
         reader = PdfReader(str(output_path))
-        if reader.is_encrypted:
+        encrypted = bool(reader.is_encrypted)
+        if encrypted:
             try:
-                reader.decrypt("")  # try the empty/owner password
+                reader.decrypt("")  # an owner-password-only file opens with ""
             except Exception:
                 pass
         writer = PdfWriter(clone_from=reader)
     except Exception as exc:
         skipped.append({"target_id": str(source_path), "reason": f"failed_to_open_pdf: {exc}"})
         return {"applied": applied, "skipped": skipped}
+
+    # An owner-password PDF opens without a password but carries permission
+    # restrictions. Cloning into a fresh PdfWriter used to write the fixed
+    # copy UNENCRYPTED — the restrictions silently gone. Keep them exactly:
+    # the same encryption dictionary, file key and /ID, so the author's owner
+    # password still unlocks the output and its /P permissions are unchanged.
+    # If that cannot be done faithfully, refuse rather than strip.
+    if encrypted:
+        why = _preserve_encryption(reader, writer)
+        if why:
+            skipped.append({
+                "target_id": str(source_path),
+                "reason": (
+                    "failed_to_open_pdf: this PDF is protected with security settings we "
+                    f"cannot keep on a fixed copy ({why}); remove the protection and upload it again"
+                ),
+            })
+            return {"applied": [], "skipped": skipped}
+        notices.append({
+            "target_id": "document",
+            "notice": (
+                "pdf_protection_preserved: this PDF's security settings (its permissions and "
+                "owner password) were kept on the fixed copy"
+            ),
+        })
 
     # ------- 1. Document metadata -------------------------------------
     title = None
@@ -95,6 +123,14 @@ def write_remediated_pdf(
             existing_metadata = dict(reader.metadata or {})
         except Exception:
             existing_metadata = {}
+        if title and not is_readable_text(str(title)):
+            # Last line of defence: never write glyph codes or control bytes
+            # as the document title (the Type0 "\x00:\x00L..." /Title). The
+            # parser no longer produces one; if anything ever does, the title
+            # stays unset and the missing-title finding stays open.
+            skipped.append({"target_id": tree.root.id, "reason": "title_unreadable: refused to write an unreadable title"})
+            title = None
+            tree.root.metadata.properties.pop("title", None)
         if title:
             existing_metadata["/Title"] = str(title)
             applied.append({"kind": "title", "target_id": tree.root.id, "summary": f"Title -> {title!r}"})
@@ -238,8 +274,50 @@ def write_remediated_pdf(
                     "pages", "elements", "figures", "lists", "tables", "tablesDeclined",
                     "links", "formWidgets", "artifacts", "readingOrderFixedPages",
                     "perElementPages", "pagesPageLevelOnly",
+                    "figuresWithoutAlt", "decorativeImages", "readingOrderDeclinedPages",
+                    "linksNamedFromPage", "headingLevelsNormalized", "tocTablesDeclined",
+                    "undecodableTextBlocks", "boldHeadings",
                 )
             }
+            pdfua_summary["pdfuaClaimed"] = bool(ua_report.get("pdfuaClaimed"))
+            if ua_report.get("pdfuaBlockers"):
+                pdfua_summary["pdfuaBlockers"] = list(ua_report["pdfuaBlockers"])
+            # Everything below is DISCLOSURE: work the tagger did not do, said
+            # in words, in the list the user reads. None of it is counted.
+            if ua_report.get("figuresWithoutAlt"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        f"pdfua_figures_without_alt: {ua_report['figuresWithoutAlt']} image(s) are now "
+                        "tagged as figures (so screen readers find them) but still need a text description"
+                    ),
+                })
+            if ua_report.get("readingOrderDeclinedPages"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        f"pdfua_reading_order_declined: {ua_report['readingOrderDeclinedPages']} page(s) "
+                        "look like two columns but were left in the order they were written — "
+                        "check them with a screen reader"
+                    ),
+                })
+            if ua_report.get("undecodableTextBlocks"):
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        "pdfua_text_unreadable: some text uses a font with no Unicode mapping, so we "
+                        "could not read it — it is tagged, but no heading, list or table was inferred from it"
+                    ),
+                })
+            if ua_report.get("structTree") and not ua_report.get("pdfuaClaimed"):
+                reasons = "; ".join(ua_report.get("pdfuaBlockers") or []) or "not every requirement could be verified"
+                skipped.append({
+                    "target_id": "document",
+                    "reason": (
+                        "pdfua_not_claimed: the file is tagged, but we did not mark it PDF/UA-conformant "
+                        f"because {reasons}"
+                    ),
+                })
             if ua_report.get("tablesDeclined"):
                 skipped.append({
                     "target_id": "document",
@@ -291,7 +369,53 @@ def write_remediated_pdf(
     result: Dict[str, Any] = {"applied": applied, "skipped": skipped}
     if pdfua_summary:
         result["pdfua"] = pdfua_summary
+    if notices:
+        result["notices"] = notices
     return result
+
+
+def _preserve_encryption(reader: PdfReader, writer: PdfWriter) -> str:
+    """Re-apply the source's own encryption to ``writer``; "" on success.
+
+    Keeps the encryption dictionary (/O, /U, /P, algorithm), the decrypted
+    file key and the document /ID, so the output opens exactly like the
+    source: same permissions, and the author's owner password still works.
+    Returns a short reason when that is not possible (the caller refuses the
+    file rather than write it unprotected).
+    """
+    try:
+        enc = getattr(reader, "_encryption", None)
+        if enc is None or not enc.is_decrypted():
+            return "the file could not be opened without a password"
+        entry = _resolve(reader.trailer.get("/Encrypt"))
+        if not isinstance(entry, DictionaryObject):
+            return "no encryption dictionary"
+        if str(entry.get("/Filter") or "") != "/Standard":
+            return "a non-standard security handler"
+        em = entry.get("/EncryptMetadata")
+        if em is not None and not bool(em):
+            return "unencrypted-metadata mode"
+        # The file key of the standard handler (R2-R4) is derived from /ID[0];
+        # the output must carry the SAME identifier or nothing decrypts.
+        src_id = _resolve(reader.trailer.get("/ID"))
+        if isinstance(src_id, ArrayObject) and len(src_id) >= 1:
+            first = src_id[0]
+            second = src_id[1] if len(src_id) > 1 else src_id[0]
+            writer._ID = ArrayObject([  # noqa: SLF001
+                first.clone(writer) if hasattr(first, "clone") else first,
+                second.clone(writer) if hasattr(second, "clone") else second,
+            ])
+        if not getattr(writer, "_ID", None):
+            return "no document ID"
+        clone = DictionaryObject()
+        for k, v in entry.items():
+            clone[NameObject(str(k))] = v.clone(writer) if hasattr(v, "clone") else v
+        writer._add_object(clone)  # noqa: SLF001
+        writer._encrypt_entry = clone  # noqa: SLF001
+        writer._encryption = enc  # noqa: SLF001
+        return ""
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"unsupported ({type(exc).__name__})"
 
 
 def _resolve(obj: Any) -> Any:
@@ -323,8 +447,13 @@ def _apply_pdf_form_labels(
         acro = None
     if not isinstance(acro, DictionaryObject):
         return
+    # Same geometry pass the parser counted with (same pages, same content —
+    # the tagger has not rewritten anything yet), so charged == written.
+    from app.parsers.pdf_parser import _MAX_PDF_PAGES
+
+    labeler = FieldLabeler(writer, max_pages=_MAX_PDF_PAGES)
     for fo in iter_acroform_fields(acro):
-        label = derive_pdf_field_label(fo)
+        label = derive_pdf_field_label(fo, labeler)
         if not label:
             continue
         try:

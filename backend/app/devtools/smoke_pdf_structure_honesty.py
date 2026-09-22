@@ -1,0 +1,249 @@
+"""Smoke: the PDF tagger never creates a new defect, never claims what it did
+not verify, and says out loud what it left alone.
+
+Pinned (each built as a PDF, tagged, and read back from the output file):
+
+  1. Heading levels by raw font-size rank skipped levels (26pt title -> H1,
+     14pt subtitle -> H4 because 18/16pt headings exist elsewhere): re-auditing
+     our own output raised HEADING_LEVEL_JUMP — new manual work we created.
+     Levels are now contiguous in reading order, and re-analysis is clean.
+  2. A cover page (26pt / 14pt / 10pt, one block each) refused its title
+     because page-1 block counting called 26pt "body". Body is now the size
+     carrying the most characters over the first pages.
+  3. A table of contents (entry | page number) was tagged /Table, and
+     re-analysis raised a NEW TABLE_MISSING_HEADERS. It now stays paragraphs
+     (tocTablesDeclined), and dot-leader lines are /Artifact.
+  4. A two-column page the tagger declined to reorder (lines that pair up
+     across the gutter) shipped as "tagged" with nothing said. It is now
+     counted as readingOrderDeclinedPages and disclosed in writer.skipped —
+     never counted as fixed. (The reorder logic itself is unchanged.)
+  5. /Table and /L now carry /Pg: a table on page 2 is read back on page 2
+     (it used to come back as page 1).
+  6. XMP pdfuaid:part is written only when every verifiable check passes
+     (fonts embedded, no untagged painting, title, language, no undescribed
+     image ...); otherwise omitted with the reasons in writer.skipped. An
+     already-tagged document's own claim is carried over, never invented.
+
+Usage:
+    python -m app.devtools.smoke_pdf_structure_honesty
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import sys
+from pathlib import Path
+
+from app.devtools import _pdf_fixture_kit as K
+
+_TMP = K.isolated_env("508_smoke_structhon_")
+
+from pypdf import PdfReader, PdfWriter  # noqa: E402
+
+BODY = "Stormwater fees fund the drainage system that keeps streets clear during heavy rain events."
+LEFT = ["Crews begin pre-treating bridges when the forecast", "shows freezing rain, and plows go out once two",
+        "inches of snow have fallen on the arterial roads", "that carry buses and emergency vehicles first",
+        "before neighborhood streets are cleared later", "in the storm when the main roads are passable"]
+RIGHT = ["The department stocks rock salt at four depots", "across the city, and brine is mixed on site at",
+         "the central garage so trucks can reload quickly", "during long storms that last through the night",
+         "while crews rotate on twelve hour shifts until", "every route on the map has been completed"]
+
+
+def report_pdf() -> bytes:
+    w = PdfWriter()
+    f = K.helvetica(w)
+    # cover: one block per size
+    c = K.bt("F1", 26, 72, 600, K.lit("Stormwater Utility Annual Report"))
+    c += K.bt("F1", 14, 72, 560, K.lit("Fiscal Year 2026"))
+    c += K.bt("F1", 10, 72, 100, K.lit("City of Springfield | Public Works"))
+    K.add_page(w, c, {"F1": f})
+    # contents with dot leaders
+    c = K.bt("F1", 18, 72, 720, K.lit("Contents"))
+    y = 680
+    for t, pg in [("1. Introduction", "3"), ("2. Program Overview", "3"), ("3. Rates", "4"), ("4. Outlook", "4")]:
+        c += K.bt("F1", 11, 72, y, K.lit(t)) + K.bt("F1", 11, 200, y, K.lit("." * 60)) + K.bt("F1", 11, 520, y, K.lit(pg))
+        y -= 20
+    K.add_page(w, c, {"F1": f})
+    # chapters: 16pt / 13pt headings, 11pt body
+    for p in range(2):
+        c = K.bt("F1", 16, 72, 720, K.lit("1. Introduction" if p == 0 else "3. Rates"))
+        c += K.bt("F1", 13, 72, 690, K.lit("2.1 Rate Structure" if p == 0 else "3.1 Residential"))
+        for i in range(8):
+            c += K.bt("F1", 11, 72, 660 - 14 * i, K.lit(BODY))
+        K.add_page(w, c, {"F1": f})
+    # bare TOC (no leaders): entry | page number
+    c = K.bt("F1", 16, 72, 700, K.lit("Table of Contents"))
+    y = 660
+    for t, pg in [("Introduction", "3"), ("Overview", "3"), ("Rates", "4"), ("Outlook", "5")]:
+        c += K.bt("F1", 11, 72, y, K.lit(t)) + K.bt("F1", 11, 520, y, K.lit(pg))
+        y -= 20
+    K.add_page(w, c, {"F1": f})
+    # two-column page whose lines pair up across the gutter
+    c = b""
+    y = 700
+    for a, b in zip(LEFT, RIGHT):
+        c += K.bt("F1", 10, 72, y, K.lit(a)) + K.bt("F1", 10, 320, y, K.lit(b))
+        y -= 14
+    K.add_page(w, c, {"F1": f})
+    # a data table on its own page (page 7)
+    c = K.bt("F1", 16, 72, 720, K.lit("Rates by Class"))
+    y = 680
+    for row in [("Class", "Rate", "Units"), ("Residential", "4.10", "ERU"), ("Commercial", "6.25", "ERU"), ("Industrial", "8.00", "ERU")]:
+        x = 72
+        for cell in row:
+            c += K.bt("F1", 10, x, y, K.lit(cell))
+            x += 120
+        y -= 16
+    K.add_page(w, c, {"F1": f})
+    return K.to_bytes(w)
+
+
+def clean_pdf() -> bytes:
+    """Qualifies for a PDF/UA claim: embedded font, text only."""
+    lines = ["Annual Snow Plan", "Plows run on arterial roads first and then on residential streets."]
+    w = PdfWriter()
+    f = K.type0_font(w, set("".join(lines)), embedded=True)
+    c = K.bt("F1", 20, 72, 720, K.type0_hex(lines[0]))
+    for i in range(6):
+        c += K.bt("F1", 11, 72, 690 - 14 * i, K.type0_hex(lines[1]))
+    K.add_page(w, c, {"F1": f})
+    return K.to_bytes(w)
+
+
+MEMO_BODY = "The winter operations budget was approved by the council on Monday evening."
+
+
+def memo_pdf(*, headings: int = 3, bold_run: bool = False) -> bytes:
+    """Memo style: bold 11pt section heads over 11pt body text."""
+    w = PdfWriter()
+    f = K.helvetica(w)
+    fb = K.helvetica(w, bold=True)
+    c = b""
+    y = 720
+    for h in ["MEMORANDUM", "Purpose", "Background"][:headings]:
+        c += K.bt("FB", 11, 72, y, K.lit(h))
+        y -= 16
+        if bold_run:  # a bold paragraph: emphasis, not a heading
+            c += K.bt("FB", 11, 72, y, K.lit("This whole paragraph is set in bold for emphasis."))
+            y -= 16
+        for _ in range(3):
+            c += K.bt("F1", 11, 72, y, K.lit(MEMO_BODY))
+            y -= 14
+        y -= 10
+    K.add_page(w, c, {"F1": f, "FB": fb})
+    return K.to_bytes(w)
+
+
+def remediate(data: bytes, name: str, *, title: bool = True):
+    from app.parsers.pdf_parser import PDFParser
+    from app.writers.pdf_writer import write_remediated_pdf
+
+    src = Path(_TMP) / name
+    src.write_bytes(data)
+    res = PDFParser().parse(str(src))
+    root = res.tree.root
+    root.metadata.properties["tag_structure_requested"] = True
+    if title:
+        root.metadata.properties["title"] = root.metadata.properties.get("title_candidate") or "Report"
+    root.metadata.language = "en-US"
+    out = Path(_TMP) / ("out_" + name)
+    wr = write_remediated_pdf(src, res.tree, out)
+    return res, wr, out
+
+
+def main() -> int:
+    from app.parsers.pdf_parser import PDFParser
+    from app.pdf.tag_reader import read_struct_info
+    from app.services.remediation_engine import RemediationEngine
+
+    check = K.Checker()
+    data = report_pdf()
+    res, wr, out = remediate(data, "report.pdf")
+    ua = wr.get("pdfua") or {}
+    props = res.tree.root.metadata.properties
+
+    # 2. cover title
+    check("cover title found (26pt among 26/14/10 on page 1)",
+          props.get("title_candidate") == "Stormwater Utility Annual Report", repr(props.get("title_candidate")))
+
+    # 1. heading levels
+    r = PdfReader(str(out))
+    info = read_struct_info(r)
+    levels = [h["level"] for h in info["headings"]]
+    check("headings found", len(levels) >= 5, str(info["headings"]))
+    check("no heading level skips in the output", all(b <= a + 1 for a, b in zip(levels, levels[1:])), str(levels))
+    check("the tagger reports what it normalised", int(ua.get("headingLevelsNormalized") or 0) >= 1, str(ua))
+    res_out = PDFParser().parse(str(out))
+    rules = [v.rule_id for v in RemediationEngine().detect_violations(res_out.tree)]
+    check("re-analysis: no HEADING_LEVEL_JUMP we created", "HEADING_LEVEL_JUMP" not in rules, str(rules))
+
+    # 3. TOC
+    check("bare TOC is not tagged as a table", int(ua.get("tocTablesDeclined") or 0) == 1, str(ua))
+    check("only the real data table is a /Table", ua.get("tables") == 1, str(ua))
+    check("re-analysis: no NEW TABLE_MISSING_HEADERS", "TABLE_MISSING_HEADERS" not in rules, str(rules))
+    toc_tags = K.marked_tags(r, 1)
+    check("dot leaders are /Artifact (4 of them)", toc_tags.count("/Artifact") >= 4, str(toc_tags))
+
+    # 4. reading order disclosure
+    check("paired two-column page: declined, counted, NOT fixed",
+          ua.get("readingOrderDeclinedPages") == 1 and ua.get("readingOrderFixedPages") == 0, str(ua))
+    reasons = " ".join(s.get("reason", "") for s in wr.get("skipped", []))
+    check("...and disclosed in writer.skipped", "pdfua_reading_order_declined: 1 page(s)" in reasons, reasons[:400])
+
+    # 5. /Pg on containers
+    tables = info["tables"]
+    check("the table on page 7 is read back on page 7 (index 6)", [t["page"] for t in tables] == [6], str(tables))
+    tnodes = [n for n in _iter(res_out.tree.root) if type(n).__name__ == "TableNode"]
+    check("the re-parsed TableNode is on page 7", [n.metadata.page for n in tnodes] == [7], str([n.metadata.page for n in tnodes]))
+    tbl = [e for _d, s, e in K.struct_elems(r) if s == "/Table"]
+    check("/Table carries /Pg", bool(tbl) and "/Pg" in tbl[0])
+
+    # 6. PDF/UA claim
+    xmp = r.trailer["/Root"]["/Metadata"].get_object().get_data()
+    check("not claimed: base-14 font not embedded + declined page", b"pdfuaid:part" not in xmp and ua.get("pdfuaClaimed") is False)
+    check("the reasons are given", "pdfua_not_claimed" in reasons and "not embedded" in reasons, reasons[-300:])
+    _res2, wr2, out2 = remediate(clean_pdf(), "clean.pdf")
+    xmp2 = PdfReader(str(out2)).trailer["/Root"]["/Metadata"].get_object().get_data()
+    check("claimed when every check passes", (wr2.get("pdfua") or {}).get("pdfuaClaimed") is True
+          and b"<pdfuaid:part>1</pdfuaid:part>" in xmp2, str((wr2.get("pdfua") or {}).get("pdfuaBlockers")))
+    _res3, wr3, out3 = remediate(clean_pdf(), "untitled.pdf", title=False)
+    xmp3 = PdfReader(str(out3)).trailer["/Root"]["/Metadata"].get_object().get_data()
+    check("...but not without a title", b"pdfuaid:part" not in xmp3
+          and "the document has no title" in ((wr3.get("pdfua") or {}).get("pdfuaBlockers") or []))
+
+    # 7. bold body-size headings (memo style)
+    _rm, wm, outm = remediate(memo_pdf(), "memo.pdf")
+    hm = read_struct_info(PdfReader(str(outm)))["headings"]
+    check("memo: bold 11pt section heads become headings",
+          [h["text"].strip() for h in hm] == ["MEMORANDUM", "Purpose", "Background"]
+          and (wm.get("pdfua") or {}).get("boldHeadings") == 3, str(hm))
+    _r1, w1, out1 = remediate(memo_pdf(headings=1), "memo1.pdf")
+    check("a single bold line proves nothing: no heading",
+          read_struct_info(PdfReader(str(out1)))["headings"] == [], str((w1.get("pdfua") or {}).get("boldHeadings")))
+    _r2, _w2, out_b = remediate(memo_pdf(bold_run=True), "memo_bold_para.pdf")
+    check("bold line followed by more bold (emphasis) is not a heading",
+          read_struct_info(PdfReader(str(out_b)))["headings"] == [], str(read_struct_info(PdfReader(str(out_b)))["headings"]))
+
+    # already-tagged: carry the author's claim over, never add one
+    from app.pdf.ua_tagger import _xmp_packet, tag_pdf
+
+    for prior, expect in ((1, True), (None, False)):
+        w = PdfWriter(clone_from=PdfReader(io.BytesIO(out2.read_bytes() if prior else out.read_bytes())))
+        rep = tag_pdf(w, res.tree)
+        buf = io.BytesIO()
+        w.write(buf)
+        x = PdfReader(buf).trailer["/Root"]["/Metadata"].get_object().get_data()
+        check(f"already-tagged doc {'with' if prior else 'without'} a prior claim -> claim {'kept' if expect else 'absent'}",
+              rep.get("alreadyTagged") is True and ((b"pdfuaid:part" in x) == expect), str(rep))
+    return check.done()
+
+
+def _iter(node):
+    yield node
+    for c in getattr(node, "children", []) or []:
+        yield from _iter(c)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

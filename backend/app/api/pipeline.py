@@ -235,7 +235,9 @@ async def analyze(
         result = await run_in_threadpool(parse_to_tree, str(tmp_path))
     except Exception as exc:
         logger.exception("pipeline parse failed: %s", exc)
-        raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.")
+        # A parser that knows WHY it failed (e.g. a password-protected PDF)
+        # carries a user_message; everything else keeps the generic sentence.
+        raise HTTPException(status_code=422, detail=getattr(exc, "user_message", None) or "Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.")
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -1010,7 +1012,8 @@ async def remediate(
         _cleanup_job_dir(job_dir)
         raise HTTPException(
             status_code=422,
-            detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.",
+            detail=getattr(exc, "user_message", None)
+            or "Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.",
         )
 
     tree = result.tree
@@ -1258,6 +1261,19 @@ async def remediate(
                         "headings, lists and tables were NOT identified. The document is tagged and "
                         "valid, but those pages need a source-application pass for full structure."
                     )
+        # Same reconciliation for the other things the tagger deliberately
+        # left undone (pdf_writer words them; see app/pdf/ua_tagger.py).
+        _undone = [
+            str(s.get("reason", "")).split(": ", 1)[1]
+            for s in (_skipped or [])
+            if isinstance(s, dict)
+            and str(s.get("reason", "")).startswith(("pdfua_reading_order_declined:", "pdfua_figures_without_alt:"))
+            and ": " in str(s.get("reason", ""))
+        ]
+        if _undone:
+            for _e in executions:
+                if _e.action_code == ActionCode.TAG_PDF_STRUCTURE and _e.status == ExecutionStatus.SUCCESS:
+                    _e.notes = f"{_e.notes.rstrip('.')}. NOTE: " + "; ".join(_undone) + "."
     except Exception:
         pass
 

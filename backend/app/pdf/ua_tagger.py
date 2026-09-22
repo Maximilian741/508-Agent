@@ -46,6 +46,7 @@ from pypdf.generic import (
     ContentStream,
     DecodedStreamObject,
     DictionaryObject,
+    FloatObject,
     IndirectObject,
     NameObject,
     NullObject,
@@ -67,8 +68,11 @@ def _resolve(obj: Any) -> Any:
     return obj
 
 
-def _xmp_packet(title: Optional[str], language: Optional[str]) -> bytes:
-    """Build a minimal, valid XMP packet with dc:title + pdfuaid:part."""
+def _xmp_packet(title: Optional[str], language: Optional[str], pdfua_part: Optional[int] = None) -> bytes:
+    """Build a minimal, valid XMP packet with dc:title (+ pdfuaid:part).
+
+    ``pdfuaid:part`` asserts that the file CONFORMS to PDF/UA. It is included
+    only when the caller has a basis for that claim (see :func:`tag_pdf`)."""
     def esc(s: str) -> str:
         return (
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -82,15 +86,16 @@ def _xmp_packet(title: Optional[str], language: Optional[str]) -> bytes:
             "</rdf:Alt></dc:title>"
         )
     lang_attr = f' xml:lang="{esc(str(language))}"' if language else ""
+    part_block = f"<pdfuaid:part>{int(pdfua_part)}</pdfuaid:part>" if pdfua_part else ""
+    ua_ns = ' xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/"' if pdfua_part else ""
     packet = (
         '<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>'
         '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
         '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
         f'<rdf:Description rdf:about=""{lang_attr} '
-        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
-        'xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/">'
+        f'xmlns:dc="http://purl.org/dc/elements/1.1/"{ua_ns}>'
         f"{title_block}"
-        "<pdfuaid:part>1</pdfuaid:part>"
+        f"{part_block}"
         "</rdf:Description>"
         "</rdf:RDF></x:xmpmeta>"
         '<?xpacket end="w"?>'
@@ -218,6 +223,26 @@ def _build_alt_by_xobject(tree: AccessibilityTree) -> Dict[int, Dict[str, str]]:
     return out
 
 
+def _build_decorative_by_xobject(tree: AccessibilityTree) -> Dict[int, set]:
+    """1-based page -> XObject names the analysis tree marks DECORATIVE.
+
+    Those images are wrapped ``/Artifact`` (kept out of the reading order, the
+    PDF/UA way to say "decoration") instead of being tagged as figures."""
+    out: Dict[int, set] = {}
+    try:
+        from app.models.accessibility import ImageNode, iter_reading_order
+
+        for node in iter_reading_order(tree.root):
+            if isinstance(node, ImageNode) and node.is_decorative and not node.alt_text:
+                xname = (node.metadata.properties or {}).get("xobject")
+                pg = getattr(node.metadata, "page", None)
+                if isinstance(xname, str) and xname and isinstance(pg, int):
+                    out.setdefault(pg, set()).add(xname.lstrip("/"))
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return out
+
+
 def _count_text_ops(ops) -> int:
     return sum(1 for _, opc in ops if opc in (b"Tj", b"TJ", b"'", b'"'))
 
@@ -309,8 +334,111 @@ def _operand_str(obj: Any) -> str:
         return ""
 
 
+class _TextBlock(list):
+    """A BT..ET op list that also knows what its text SAYS.
+
+    Behaves exactly like the plain op list every helper already takes (it is
+    re-emitted verbatim into the content stream), plus:
+
+    * ``text_override`` — the decoded text when the block shows glyphs in a
+      composite (``/Type0``) font, where the raw operand bytes are 2-byte glyph
+      ids, not characters. ``""`` when that text could not be decoded: every
+      text test then sees nothing and makes no claim (fail closed). ``None``
+      for simple fonts, whose raw bytes remain the source of truth.
+    * ``undecodable`` — True when a composite font had no usable ToUnicode.
+    * ``fonts`` — the font resource names this block paints with.
+    """
+
+    __slots__ = ("text_override", "undecodable", "fonts", "raw_len", "start_font")
+
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        self.text_override: Optional[str] = None
+        self.undecodable = False
+        self.fonts: List[str] = []
+        self.raw_len = 0
+        self.start_font: Optional[str] = None
+
+
+def _decorate_block(block: "_TextBlock", decoder: Any, start_font: Optional[str]) -> "_TextBlock":
+    """Fill in ``block``'s decoded text (see :class:`_TextBlock`). Never raises."""
+    block.start_font = start_font
+    if decoder is None:
+        return block
+    try:
+        from app.pdf.text_decode import FontState, decode_ops, operand_bytes, show_strings
+
+        # Cheap pass first: which fonts does the block paint with? Only a
+        # block that uses a composite font needs decoding at all (the common
+        # single-byte case keeps its raw-bytes path untouched, at no cost).
+        state = FontState(start_font)
+        for operands, op in block:
+            state.feed(operands, op)
+            if op in (b"Tj", b"TJ", b"'", b'"') and state.font and state.font not in block.fonts:
+                block.fonts.append(state.font)
+        if not any(decoder.is_composite(f) for f in block.fonts):
+            return block
+        text, used_composite, _end = decode_ops(block, decoder, start_font)
+        if used_composite:
+            block.text_override = text if text is not None else ""
+            block.undecodable = text is None
+        if block.undecodable:
+            n = 0
+            for operands, op in block:
+                if op in (b"Tj", b"TJ", b"'", b'"'):
+                    for s in show_strings(operands, op):
+                        n += len(operand_bytes(s))
+            block.raw_len = n
+    except Exception:  # pragma: no cover - decoding is best-effort
+        logger.debug("block decode failed", exc_info=True)
+    return block
+
+
+def _iter_text_blocks(ops, decoder: Any = None):
+    """Yield each top-level BT..ET block of ``ops`` as a decorated
+    :class:`_TextBlock`, tracking the text font across blocks (``Tf`` is
+    graphics state: it persists past ET and is saved/restored by q/Q)."""
+    from app.pdf.text_decode import FontState
+
+    state = FontState()
+    block = None
+    start_font = None
+    for operands, op in ops:
+        if op == b"BT" and block is None:
+            block = _TextBlock([(operands, op)])
+            start_font = state.font
+        elif op == b"ET" and block is not None:
+            block.append((operands, op))
+            yield _decorate_block(block, decoder, start_font)
+            block = None
+        elif block is not None:
+            block.append((operands, op))
+        state.feed(operands, op)
+
+
+def _block_weight(block_ops) -> int:
+    """Characters a block carries, for the body-size vote. An undecodable
+    composite block still carries text (about one glyph per 2 bytes) even
+    though we will not read it."""
+    if getattr(block_ops, "undecodable", False):
+        return max(1, int(getattr(block_ops, "raw_len", 0) or 0) // 2)
+    return len(_block_text(block_ops).strip())
+
+
+def _page_decoder(pdf: Any, page: Any, cache: Optional[Dict[Any, Any]] = None):
+    try:
+        from app.pdf.text_decode import FontDecoder
+
+        return FontDecoder(page, cache)
+    except Exception:  # pragma: no cover
+        return None
+
+
 def _block_text(block_ops) -> str:
     """Concatenate the visible text shown by a BT..ET block's Tj/TJ/'/" ops."""
+    override = getattr(block_ops, "text_override", None)
+    if override is not None:
+        return override
     parts: List[str] = []
     for operands, op in block_ops:
         if op == b"Tj" and operands:
@@ -428,6 +556,10 @@ def _row0_is_header(run) -> bool:
     row0 = [str(blk[3]).strip() for blk in run[0]]
     if not any(row0):
         return False  # a blank top row labels nothing
+    # Text we cannot read (glyph codes from an undecodable composite font)
+    # is no evidence of labels: claim no header rather than guess.
+    if any(any(ord(ch) < 0x20 and ch not in "\t\r\n" for ch in t) for t in row0):
+        return False
     if any(_cell_is_numericish(t) for t in row0):
         return False  # numbers on top -> this is data, not a header row
     return True
@@ -450,26 +582,13 @@ _MIN_GUTTER = 40.0            # points of clear horizontal space between columns
 
 
 
-def _detect_two_columns(points) -> Optional[float]:
-    """Return the gutter x of a clear 2-column layout of FLOWING TEXT, or None.
+def _gutter_candidate(points) -> Optional[float]:
+    """The x of a clear vertical gutter with PROSE on both sides, or None.
 
-    ``points`` is ``[(x, y, text), ...]``.
-
-    Deliberately strict, because reordering a page that is NOT two-column
-    CREATES the very defect we're fixing. An adversarial review proved that a
-    gap-in-x test alone is nowhere near enough: a label/value form (labels at
-    x=72, values at x=300) and a table of contents (entry at x=72, page number
-    at x=500) both match "two clusters of origins", and linearizing them
-    column-major separates every label from its value — catastrophic, and
-    reported as a fix. Neither is rescued by the table/list guards, because the
-    table detector deliberately rejects forms and TOCs.
-
-    So a gutter must ALSO survive two content tests:
-      * both sides must read like PROSE (median >3 words), which a column of
-        short labels or bare page numbers never does; and
-      * the sides must not be ROW-PAIRED — if most left blocks have a right
-        block on the same baseline, the page is row-structured (form, TOC,
-        data sheet), not two flowing columns.
+    The geometric + content half of :func:`_detect_two_columns` (without the
+    row-pairing test). On its own it is NOT enough to reorder a page — forms
+    and Q/A sheets pass it — but it is enough to say "this page looks like two
+    columns", which is what the reading-order disclosure needs.
     """
     xs = sorted(p[0] for p in points)
     n = len(xs)
@@ -495,6 +614,81 @@ def _detect_two_columns(points) -> Optional[float]:
 
     if _median_words(left_pts) <= 3 or _median_words(right_pts) <= 3:
         return None
+    return best_at
+
+
+_LEADER_RE = re.compile(r"^[\s.·•…‥_]*$")
+
+
+def _is_leader_text(text: str) -> bool:
+    """A block made only of leader dots (at least five of them)."""
+    t = (text or "").strip()
+    if len(t) < 5 or not _LEADER_RE.match(t):
+        return False
+    dots = sum(1 for ch in t if ch in ".·…‥")
+    return dots >= 5 and "_" not in t
+
+
+def _column_order(leaves) -> Tuple[list, bool, bool]:
+    """``(leaves, reordered, declined)`` for one page.
+
+    ``reordered`` / the returned order come from
+    :func:`_reorder_leaves_for_columns`, unchanged. ``declined`` is True when
+    the page LOOKS like two columns of prose (a gutter with prose on both
+    sides) whose column-major order differs from the stream order, and we
+    did not reorder it — the page ships in stream order, and that must be
+    said out loud rather than read as "tagged".
+    """
+    out, changed = _reorder_leaves_for_columns(leaves)
+    if changed:
+        return out, True, False
+    try:
+        text_leaves = [
+            lf for lf in leaves
+            if lf.get("bx") is not None and lf.get("by") is not None and lf.get("tag") != "/Figure"
+        ]
+        if len(text_leaves) < _MIN_COLUMN_BLOCKS:
+            return out, False, False
+        pts = [(lf["bx"], lf["by"], lf.get("text") or "") for lf in text_leaves]
+        g = _gutter_candidate(pts)
+        if g is None:
+            return out, False, False
+        column_major = (
+            _top_to_bottom([lf for lf in text_leaves if lf["bx"] < g])
+            + _top_to_bottom([lf for lf in text_leaves if lf["bx"] >= g])
+        )
+        looks_interleaved = [id(x) for x in column_major] != [id(x) for x in text_leaves]
+        return out, False, bool(looks_interleaved)
+    except Exception:  # pragma: no cover - disclosure must never break tagging
+        return out, False, False
+
+
+def _detect_two_columns(points) -> Optional[float]:
+    """Return the gutter x of a clear 2-column layout of FLOWING TEXT, or None.
+
+    ``points`` is ``[(x, y, text), ...]``.
+
+    Deliberately strict, because reordering a page that is NOT two-column
+    CREATES the very defect we're fixing. An adversarial review proved that a
+    gap-in-x test alone is nowhere near enough: a label/value form (labels at
+    x=72, values at x=300) and a table of contents (entry at x=72, page number
+    at x=500) both match "two clusters of origins", and linearizing them
+    column-major separates every label from its value — catastrophic, and
+    reported as a fix. Neither is rescued by the table/list guards, because the
+    table detector deliberately rejects forms and TOCs.
+
+    So a gutter must ALSO survive two content tests:
+      * both sides must read like PROSE (median >3 words), which a column of
+        short labels or bare page numbers never does; and
+      * the sides must not be ROW-PAIRED — if most left blocks have a right
+        block on the same baseline, the page is row-structured (form, TOC,
+        data sheet), not two flowing columns.
+    """
+    best_at = _gutter_candidate(points)
+    if best_at is None:
+        return None
+    left_pts = [p for p in points if p[0] < best_at]
+    right_pts = [p for p in points if p[0] >= best_at]
 
     # --- structure test: row-paired content is a form/TOC, never two columns ---
     paired = 0
@@ -566,7 +760,49 @@ def _reorder_leaves_for_columns(leaves) -> Tuple[list, bool]:
     return (out, True) if changed else (leaves, False)
 
 
-def _detect_table_groups(segments, exclude=frozenset()):
+_CONTENTS_RE = re.compile(r"^\s*(?:table\s+of\s+)?contents\s*$|^\s*index\s*$", re.IGNORECASE)
+_PAGE_REF_RE = re.compile(r"^(?:\d{1,4}|[ivxlc]{1,7})$", re.IGNORECASE)
+
+
+def _is_contents_heading(text: str) -> bool:
+    return bool(_CONTENTS_RE.match(text or ""))
+
+
+def _looks_like_toc(run, ctx: Optional[Dict[str, Any]]) -> bool:
+    """A grid that is a table of CONTENTS, not a data table.
+
+    Entry text on the left, a bare page number in the last column, page
+    numbers never decreasing down the rows — and either a "Contents" heading
+    on the page or the numbers set far out at the right margin. Tagging this
+    as a /Table made a screen reader announce a data grid, and re-auditing our
+    own output raised TABLE_MISSING_HEADERS: a new finding the input never
+    had. Declined grids stay plain paragraphs (never counted as tables, and
+    not counted as "declined tables" either — nothing was missed).
+    """
+    if not ctx:
+        return False
+    ncols = len(run[0])
+    if ncols not in (2, 3) or len(run) < 3:
+        return False
+    last = [str(r[-1][3]).strip() for r in run]
+    first = [str(r[0][3]).strip() for r in run]
+    if not all(_PAGE_REF_RE.match(t) for t in last):
+        return False
+    if not all(any(c.isalpha() for c in t) for t in first):
+        return False
+    digits = [int(t) for t in last if t.isdigit()]
+    if len(digits) == len(last):
+        if any(b < a for a, b in zip(digits, digits[1:])):
+            return False
+    elif not ctx.get("has_contents"):
+        return False  # roman numerals: only with an explicit Contents heading
+    gap = float(run[0][-1][1]) - float(run[0][0][1])
+    width = float(ctx.get("width") or 0.0)
+    wide = width > 0 and gap >= 0.4 * width
+    return bool(ctx.get("has_contents") or wide)
+
+
+def _detect_table_groups(segments, exclude=frozenset(), toc_ctx: Optional[Dict[str, Any]] = None):
     """Reconstruct DATA tables from positioned text blocks (high-precision).
 
     A table is a run of >=3 consecutive rows (text blocks sharing a baseline,
@@ -626,6 +862,9 @@ def _detect_table_groups(segments, exclude=frozenset()):
         if any(lo < f < hi for f in figure_idxs for lo, hi in [(min(seg_idxs), max(seg_idxs))]):
             return False
         if not _looks_like_data_cells(run):
+            return False
+        if _looks_like_toc(run, toc_ctx):
+            toc_ctx["declined"] = int(toc_ctx.get("declined") or 0) + 1
             return False
         for rr, r in enumerate(run):
             for cc, blk in enumerate(r):
@@ -1223,7 +1462,7 @@ def _is_page_number(text: str) -> bool:
     return bool(t) and bool(_PAGENUM_RE.match(t) or _ROMAN_RE.match(t))
 
 
-def _page_band_blocks(pdf: PdfWriter, page) -> List[tuple]:
+def _page_band_blocks(pdf: PdfWriter, page, font_cache: Optional[Dict[Any, Any]] = None) -> List[tuple]:
     """``(pos_sig, text)`` for each text block in this page's header/footer band."""
     height = _page_height(page)
     if not height:
@@ -1233,24 +1472,16 @@ def _page_band_blocks(pdf: PdfWriter, page) -> List[tuple]:
     except Exception:
         return []
     out: List[tuple] = []
-    block = None
-    for operands, op in ops:
-        if op == b"BT":
-            block = [(operands, op)]
-        elif op == b"ET" and block is not None:
-            block.append((operands, op))
-            x, y = _block_origin(block)
-            if x is not None and y is not None and _in_artifact_band(y, height):
-                t = _block_text(block).strip()
-                if t:
-                    out.append((_artifact_sig(x, y), t))
-            block = None
-        elif block is not None:
-            block.append((operands, op))
+    for block in _iter_text_blocks(ops, _page_decoder(pdf, page, font_cache)):
+        x, y = _block_origin(block)
+        if x is not None and y is not None and _in_artifact_band(y, height):
+            t = _block_text(block).strip()
+            if t:
+                out.append((_artifact_sig(x, y), t))
     return out
 
 
-def _collect_artifact_sigs(pdf: PdfWriter, pages) -> tuple:
+def _collect_artifact_sigs(pdf: PdfWriter, pages, font_cache: Optional[Dict[Any, Any]] = None) -> tuple:
     """Identify pagination artifacts that recur across >=2 pages.
 
     A running head/footer is the SAME text at the SAME band position page to
@@ -1268,7 +1499,7 @@ def _collect_artifact_sigs(pdf: PdfWriter, pages) -> tuple:
         return (frozenset(), frozenset())
     pos_texts: Dict[tuple, List[str]] = {}
     for page in pages:
-        for sig, text in _page_band_blocks(pdf, page):
+        for sig, text in _page_band_blocks(pdf, page, font_cache):
             pos_texts.setdefault(sig, []).append(text)
 
     text_keys = set()
@@ -1285,7 +1516,9 @@ def _collect_artifact_sigs(pdf: PdfWriter, pages) -> tuple:
     return (frozenset(text_keys), frozenset(pagenum_positions))
 
 
-def _collect_doc_heading_levels(pdf: PdfWriter, pages, artifact_info: tuple) -> Dict[float, int]:
+def _collect_doc_heading_levels(
+    pdf: PdfWriter, pages, artifact_info: tuple, font_cache: Optional[Dict[Any, Any]] = None
+) -> Dict[float, int]:
     """Compute ONE document-wide font-size → heading-level map.
 
     Per-page maps produce inconsistent levels: a 20pt title on page 1 makes a
@@ -1294,39 +1527,154 @@ def _collect_doc_heading_levels(pdf: PdfWriter, pages, artifact_info: tuple) -> 
     Collect sizes across all pages (excluding pagination artifacts so a
     repeating 10pt running head can't masquerade as the body size).
     """
+    return _collect_doc_structure_hints(pdf, pages, artifact_info, font_cache)[0]
+
+
+# A bold line that is a caption/admonition label, not a section heading.
+_BOLD_EXCLUDE_RE = re.compile(r"^(?:figure|fig\.|table|note|notes|warning|caution|source|sources|important)\b", re.IGNORECASE)
+
+
+def _collect_doc_structure_hints(
+    pdf: PdfWriter, pages, artifact_info: tuple, font_cache: Optional[Dict[Any, Any]] = None
+) -> Tuple[Dict[float, int], set, Optional[int]]:
+    """``(size->level map, bold heading keys, bold heading level)``.
+
+    The size map is :func:`_heading_levels` over every non-artifact block.
+
+    Bold headings at BODY size — the memo/letter style ("MEMORANDUM",
+    "Purpose", "Background" set in Helvetica-Bold 11pt over 11pt body) — are
+    invisible to a size ranking, so such documents got no headings at all.
+    Precision first; a block qualifies only when ALL of:
+
+    * every glyph it paints is in a bold face, at the body size (not already
+      a size-ranked heading);
+    * it is short (<= 80 chars, <= 12 words), readable, starts with a letter
+      or digit, does not end like a sentence or a label (. , ; :), is not a
+      list item, a page number, or a Figure/Table/Note/Warning label;
+    * the NEXT text block in the stream is not bold (a bold paragraph is
+      emphasis, not a heading);
+    * at least two such blocks exist in the document (one bold line proves
+      nothing).
+
+    Keys are ``(id(page), block ordinal)``; the level is one below the
+    deepest size-ranked heading (H1 when there are none). Table cells and
+    list items are excluded again at tagging time.
+    """
     text_keys, pagenum_positions = artifact_info
     sizes: List[float] = []
     weights: List[int] = []
+    per_page: List[Tuple[int, List[Tuple["_TextBlock", float, bool, bool]]]] = []
     for page in pages:
         height = _page_height(page)
         try:
             ops = ContentStream(page.get_contents(), pdf).operations
         except Exception:
             continue
-        block = None
-        for operands, op in ops:
-            if op == b"BT":
-                block = [(operands, op)]
-            elif op == b"ET" and block is not None:
-                block.append((operands, op))
-                size = _block_font_size(block)
-                if size and size > 0:
-                    is_artifact = False
-                    bx, by = _block_origin(block)
-                    if bx is not None and by is not None and _in_artifact_band(by, height):
-                        sig = _artifact_sig(bx, by)
-                        t = _block_text(block).strip()
-                        if (sig, t.casefold()) in text_keys or (
-                            sig in pagenum_positions and _is_page_number(t)
-                        ):
-                            is_artifact = True
-                    if not is_artifact:
-                        sizes.append(size)
-                        weights.append(len(_block_text(block).strip()))
-                block = None
-            elif block is not None:
-                block.append((operands, op))
-    return _heading_levels(sizes, weights)
+        decoder = _page_decoder(pdf, page, font_cache)
+        rows: List[Tuple[Any, float, bool, bool]] = []
+        for block in _iter_text_blocks(ops, decoder):
+            size = _block_font_size(block)
+            is_artifact = False
+            if size and size > 0:
+                bx, by = _block_origin(block)
+                if bx is not None and by is not None and _in_artifact_band(by, height):
+                    sig = _artifact_sig(bx, by)
+                    t = _block_text(block).strip()
+                    if (sig, t.casefold()) in text_keys or (
+                        sig in pagenum_positions and _is_page_number(t)
+                    ):
+                        is_artifact = True
+                if not is_artifact:
+                    sizes.append(size)
+                    weights.append(_block_weight(block))
+            bold = bool(block.fonts) and decoder is not None and all(decoder.is_bold(f) for f in block.fonts)
+            rows.append((block, float(size or 0.0), is_artifact, bold))
+        per_page.append((id(page), rows))
+    levels = _heading_levels(sizes, weights)
+
+    body = _body_size(sizes, weights)
+    if body is None:
+        return levels, set(), None
+    candidates: set = set()
+    for pid, rows in per_page:
+        for i, (block, size, is_artifact, bold) in enumerate(rows):
+            if not bold or is_artifact or getattr(block, "undecodable", False):
+                continue
+            if abs(round(size, 1) - body) > 0.5 or levels.get(round(size, 1)):
+                continue
+            t = re.sub(r"\s+", " ", _block_text(block)).strip()
+            if not t or len(t) > 80 or len(t.split()) > 12 or not t[0].isalnum():
+                continue
+            # ":" too: a bold "Name:" is a form label or a run-in lead, not a
+            # section heading.
+            if t[-1] in ".,;:" or _is_list_item(t) or _is_page_number(t) or _BOLD_EXCLUDE_RE.match(t):
+                continue
+            if any(ord(ch) < 32 for ch in t) or not any(ch.isalpha() for ch in t):
+                continue
+            nxt = next((r for r in rows[i + 1:] if not r[2] and _block_text(r[0]).strip()), None)
+            if nxt is None or nxt[3]:
+                continue  # last thing on the page, or followed by more bold
+            candidates.add((pid, i))
+    if len(candidates) < 2:
+        return levels, set(), None
+    bold_level = min(6, (max(levels.values()) + 1) if levels else 1)
+    return levels, candidates, bold_level
+
+
+def _body_size(sizes: List[float], weights: Optional[List[int]] = None) -> Optional[float]:
+    """The size carrying the most characters (smaller wins a tie), or None."""
+    volume: Counter = Counter()
+    for i, s in enumerate(sizes):
+        if s and s > 0:
+            w = 1
+            if weights is not None and i < len(weights):
+                w = max(1, int(weights[i] or 0))
+            volume[round(s, 1)] += w
+    if not volume:
+        return None
+    top = max(volume.values())
+    return min(s for s, v in volume.items() if v == top)
+
+
+def _page_image_xobjects(page) -> Dict[str, str]:
+    """``{name: subtype}`` for the page's XObject resources (``/Image`` or
+    ``/Form``). Unresolvable entries are simply absent — callers treat an
+    unknown ``Do`` as raw content and make no claim about it."""
+    out: Dict[str, str] = {}
+    try:
+        node = page
+        res = None
+        for _ in range(32):
+            if node is None:
+                break
+            res = _resolve(node.get("/Resources")) if "/Resources" in node else None
+            if isinstance(res, DictionaryObject):
+                break
+            node = _resolve(node.get("/Parent"))
+        if not isinstance(res, DictionaryObject):
+            return out
+        xo = _resolve(res.get("/XObject")) if "/XObject" in res else None
+        if not isinstance(xo, DictionaryObject):
+            return out
+        for name, ref in xo.items():
+            obj = _resolve(ref)
+            if isinstance(obj, DictionaryObject):
+                out[str(name).lstrip("/")] = str(obj.get("/Subtype") or "")
+    except Exception:
+        logger.debug("xobject listing failed", exc_info=True)
+    return out
+
+
+def _unit_square_bbox(ctm) -> Optional[Tuple[float, float, float, float]]:
+    """User-space bbox of an image XObject painted under ``ctm`` (images map
+    the unit square through the CTM)."""
+    try:
+        pts = [_ctm_apply(ctm, x, y) for x, y in ((0, 0), (1, 0), (0, 1), (1, 1))]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return (min(xs), min(ys), max(xs), max(ys))
+    except Exception:
+        return None
 
 
 def _tag_page_elements(
@@ -1336,6 +1684,10 @@ def _tag_page_elements(
     artifact_info: tuple = (frozenset(), frozenset()),
     counters: Optional[Dict[str, int]] = None,
     doc_heading_levels: Optional[Dict[float, int]] = None,
+    decorative_xobjects: Optional[set] = None,
+    font_cache: Optional[Dict[Any, Any]] = None,
+    bold_keys: Optional[set] = None,
+    bold_level: Optional[int] = None,
 ):
     """Per-element marked content for one page.
 
@@ -1366,9 +1718,29 @@ def _tag_page_elements(
     orig_text = _count_text_ops(ops)
 
     # Pass 1 — split into ordered segments, preserving non-block ("raw") ops.
-    segments = []  # (kind, ops, meta);  kind in {"raw", "text", "figure"}
+    #   "text"     a BT..ET block (a decorated _TextBlock; meta = font size)
+    #   "figure"   a drawn IMAGE XObject (meta = {"alt", "bbox"}). EVERY image
+    #              is tagged: with /Alt when the analysis tree has one, and
+    #              without it otherwise. An image left out of the tree is
+    #              invisible to assistive tech and fails PDF/UA 7.1 (content
+    #              must be tagged or an artifact) — we used to do exactly that
+    #              for every image without alt. We never invent the missing
+    #              description; the re-analysis still reports it.
+    #   "artifact" a drawn image the tree marks decorative -> /Artifact.
+    #   "raw"      everything else, re-emitted verbatim. Form XObjects stay
+    #              raw: they can carry text, and a /Figure would hide it.
+    from app.pdf.text_decode import FontState
+
+    decoder = _page_decoder(pdf, page, font_cache)
+    xobject_kinds = _page_image_xobjects(page)
+    decorative_xobjects = decorative_xobjects or set()
+    font_state = FontState()
+    ctm = _IDENTITY_CTM
+    ctm_stack: List[tuple] = []
+    segments = []  # (kind, ops, meta)
     raw = []
     block = None
+    block_start_font = None
     for operands, op in ops:
         if op == b"BT":
             if block is not None:
@@ -1376,25 +1748,48 @@ def _tag_page_elements(
             if raw:
                 segments.append(("raw", raw, None))
                 raw = []
-            block = [(operands, op)]
+            block = _TextBlock([(operands, op)])
+            block_start_font = font_state.font
         elif op == b"ET" and block is not None:
             block.append((operands, op))
+            _decorate_block(block, decoder, block_start_font)
             segments.append(("text", block, _block_font_size(block)))
             block = None
         elif block is not None:
             block.append((operands, op))
         elif op == b"Do":
             xname = str(operands[0]).lstrip("/") if operands else ""
-            alt = alt_by_xobject.get(xname)
-            if alt:
+            kind = xobject_kinds.get(xname)
+            if kind == "/Image":
                 if raw:
                     segments.append(("raw", raw, None))
                     raw = []
-                segments.append(("figure", [(operands, op)], alt))
+                if xname in decorative_xobjects and not alt_by_xobject.get(xname):
+                    segments.append(("artifact", [(operands, op)], None))
+                else:
+                    segments.append((
+                        "figure",
+                        [(operands, op)],
+                        {"alt": alt_by_xobject.get(xname) or None, "bbox": _unit_square_bbox(ctm)},
+                    ))
             else:
                 raw.append((operands, op))
         else:
             raw.append((operands, op))
+        # Graphics state bookkeeping (after classification; Do reads the CTM
+        # in force when it is painted).
+        font_state.feed(operands, op)
+        if block is None:
+            if op == b"q":
+                ctm_stack.append(ctm)
+            elif op == b"Q":
+                if ctm_stack:
+                    ctm = ctm_stack.pop()
+            elif op == b"cm" and len(operands) >= 6:
+                try:
+                    ctm = _ctm_concat(tuple(float(o) for o in operands[:6]), ctm)
+                except Exception:
+                    pass
     if block is not None:  # unterminated BT — don't risk it
         return None
     if raw:
@@ -1405,10 +1800,31 @@ def _tag_page_elements(
     # Page-local counter accumulator. Merged into the shared `counters` only
     # after the page commits its rewritten stream (see the end of Pass 2).
     pending: Dict[str, int] = {}
+    n_undecodable = sum(1 for k, o, _m in segments if k == "text" and getattr(o, "undecodable", False))
+    if n_undecodable:
+        pending["undecodable_blocks"] = n_undecodable
+    # Untagged painting (rules, boxes, vector art, inline images, Form
+    # XObjects) is left exactly as drawn — we cannot tell a table rule from a
+    # chart — but it means this page cannot be CLAIMED PDF/UA-conformant.
+    if any(k == "raw" and _raw_paints(o, xobject_kinds) for k, o, _m in segments):
+        pending["untagged_paint_pages"] = 1
 
     # Pass 1.4 — reconstruct tables from positioned text (cells get tagged
     # TH/TD and are excluded from list/heading/paragraph/artifact handling).
-    cell_of, tables = _detect_table_groups(segments)
+    try:
+        _pw = float(page.mediabox.width)
+    except Exception:
+        _pw = 0.0
+    toc_ctx: Dict[str, Any] = {
+        "width": _pw,
+        "has_contents": any(
+            _is_contents_heading(_block_text(o)) for k, o, _m in segments if k == "text"
+        ),
+        "declined": 0,
+    }
+    cell_of, tables = _detect_table_groups(segments, toc_ctx=toc_ctx)
+    if toc_ctx["declined"]:
+        pending["toc_declined"] = toc_ctx["declined"]
 
     # Pass 1.4b — ruling-line tables (additive). Bordered grids whose cells
     # contain prose / labels / a single column — which the text heuristic
@@ -1448,13 +1864,20 @@ def _tag_page_elements(
             t = _block_text(seg_ops).strip()
             if (sig, t.casefold()) in text_keys or (sig in pagenum_positions and _is_page_number(t)):
                 artifact_idxs.add(idx)
+    # Dot leaders ("..........") between a contents entry and its page number
+    # are drawn layout, not words: a screen reader voicing sixty "dot"s is the
+    # classic TOC failure. A block made ONLY of leader dots is an artifact.
+    for idx, (kind, seg_ops, _m) in enumerate(segments):
+        if kind == "text" and idx not in cell_of and idx not in artifact_idxs:
+            if _is_leader_text(_block_text(seg_ops)):
+                artifact_idxs.add(idx)
 
     levels = (
         doc_heading_levels
         if doc_heading_levels is not None
         else _heading_levels(
             [m for i, (k, _o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
-            [len(_block_text(o).strip()) for i, (k, o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
+            [_block_weight(o) for i, (k, o, m) in enumerate(segments) if k == "text" and m and i not in artifact_idxs],
         )
     )
 
@@ -1476,12 +1899,11 @@ def _tag_page_elements(
         run.clear()
 
     for idx, (kind, seg_ops, _meta) in enumerate(segments):
-        if kind == "raw":
+        if kind in ("raw", "artifact") or idx in artifact_idxs:
             continue
         if (
             kind == "text"
             and idx not in cell_of
-            and idx not in artifact_idxs
             and _is_list_item(_block_text(seg_ops))
         ):
             run.append(idx)
@@ -1495,16 +1917,24 @@ def _tag_page_elements(
     table_cell_mcid: Dict[tuple, int] = {}  # (tid,row,col) -> mcid
     n_artifacts = 0
     mcid = 0
+    text_ordinal = -1
+    bold_keys = bold_keys or set()
+    page_key = id(page)
     for idx, (kind, seg_ops, meta) in enumerate(segments):
+        if kind == "text":
+            text_ordinal += 1
         if kind == "raw":
             new_ops.extend(seg_ops)
             continue
-        if idx in artifact_idxs:
-            # Pagination artifact: wrap /Artifact BMC..EMC, NOT in the tree.
+        if idx in artifact_idxs or kind == "artifact":
+            # Pagination artifact / dot leader / decorative image: wrap
+            # /Artifact BMC..EMC, NOT in the tree.
             new_ops.append(([NameObject("/Artifact")], b"BMC"))
             new_ops.extend(seg_ops)
             new_ops.append(([], b"EMC"))
             n_artifacts += 1
+            if kind == "artifact":
+                pending["decorative_images"] = pending.get("decorative_images", 0) + 1
             continue
         tcell = cell_of.get(idx) if kind == "text" else None
         grp = group_of.get(idx) if kind == "text" else None
@@ -1519,13 +1949,23 @@ def _tag_page_elements(
                 tag = "/TH" if (_has_hdr and tcell[1] == _hdr_row) else "/TD"
             elif grp is not None:
                 tag = "/LBody"
+            elif getattr(seg_ops, "undecodable", False):
+                # Text we cannot read is never asserted to be a heading: a
+                # screen reader cannot read it either, and a nameless /Hn is
+                # its own defect.
+                tag = "/P"
             else:
                 lvl = levels.get(round(meta, 1)) if meta else None
+                if not lvl and bold_level and (page_key, text_ordinal) in bold_keys:
+                    lvl = bold_level
+                    pending["bold_headings"] = pending.get("bold_headings", 0) + 1
                 tag = f"/H{lvl}" if lvl else "/P"
             alt = None
+            fbbox = None
         else:  # figure
             tag = "/Figure"
-            alt = meta
+            alt = (meta or {}).get("alt")
+            fbbox = (meta or {}).get("bbox")
         # Block origin: x indents nested list items, and (x, y) together drive
         # the column-aware reading-order correction below.
         bx, by = _block_origin(seg_ops)
@@ -1541,6 +1981,8 @@ def _tag_page_elements(
             # Needed by the column detector's prose test — a page of short
             # labels must never be linearized as two columns.
             "text": btext,
+            "bbox": fbbox,
+            "size": meta if kind == "text" else None,
         })
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
@@ -1597,9 +2039,16 @@ def _tag_page_elements(
     except Exception:
         _rotation = 0
     if _rotation == 0:
-        leaves, reordered = _reorder_leaves_for_columns(leaves)
+        leaves, reordered, declined = _column_order(leaves)
         if reordered and counters is not None:
             counters["reading_order_fixed"] = counters.get("reading_order_fixed", 0) + 1
+        # The honest complement: this page LOOKS like two columns of prose
+        # whose stream order interleaves them, and we did not reorder it (a
+        # table/list/figure on the page, rows that pair up like a form, a
+        # third column...). It is delivered in stream order and must be
+        # disclosed, never counted as fixed.
+        if declined and counters is not None:
+            counters["reading_order_declined"] = counters.get("reading_order_declined", 0) + 1
 
     # Pass 3 — build nested specs. A table emits one /Table -> /TR -> /TH|/TD at
     # the position of its first cell; a list run emits /L -> /LI -> /LBody;
@@ -1644,18 +2093,34 @@ def _tag_page_elements(
                     if tcs:
                         trs.append({"s": "/TR", "kids": tcs})
                 if trs:
-                    specs.append({"s": "/Table", "kids": trs})
+                    ys = [lf["by"] for lf in leaves if lf["table"] is not None and lf["table"][0] == tid and lf.get("by") is not None]
+                    tspec: Dict[str, Any] = {"s": "/Table", "kids": trs}
+                    if ys:
+                        tspec["yspan"] = (min(ys), max(ys))
+                    specs.append(tspec)
             i += 1  # this cell is already inside the table spec
         elif grp is not None:
             items = []
+            ys = []
             while i < len(leaves) and leaves[i]["group"] == grp and leaves[i]["table"] is None:
                 items.append((leaves[i]["mcid"], leaves[i].get("x")))
+                if leaves[i].get("by") is not None:
+                    ys.append(leaves[i]["by"])
                 i += 1
-            specs.append(_build_nested_list(items, group_numbering.get(grp)))
+            lspec = _build_nested_list(items, group_numbering.get(grp))
+            if ys:
+                lspec["yspan"] = (min(ys), max(ys))
+            specs.append(lspec)
         else:
             node = {"s": leaf["tag"], "mcid": leaf["mcid"]}
+            # Position of the block (not written to the file): lets link and
+            # form-field elements be placed next to the text on their line.
+            if leaf.get("bx") is not None and leaf.get("by") is not None:
+                node["pos"] = (leaf["bx"], leaf["by"])
             if leaf["alt"]:
                 node["alt"] = leaf["alt"]
+            if leaf.get("bbox"):
+                node["bbox"] = leaf["bbox"]
             specs.append(node)
             i += 1
     return specs
@@ -1715,6 +2180,26 @@ def _build_struct_elem(
                 NameObject("/ListNumbering"): NameObject(spec["ln"]),
             }
         )
+    elif spec["s"] == "/Figure" and spec.get("bbox"):
+        # Where the figure is on the page (PDF 32000 14.8.5.4.3 layout BBox):
+        # read off the CTM it was painted under, i.e. a fact, not a guess.
+        try:
+            x0, y0, x1, y1 = (float(v) for v in spec["bbox"])
+            if x1 > x0 and y1 > y0:
+                elem[NameObject("/A")] = DictionaryObject(
+                    {
+                        NameObject("/O"): NameObject("/Layout"),
+                        NameObject("/BBox"): ArrayObject(
+                            [FloatObject(round(v, 2)) for v in (x0, y0, x1, y1)]
+                        ),
+                    }
+                )
+        except Exception:
+            pass
+    # /Pg on EVERY element of this page, containers included (PDF 32000 allows
+    # it on any StructElem). A /Table or /L used to carry none, so readers —
+    # ours included — attributed a table on page 2 to page 1.
+    elem[NameObject("/Pg")] = page.indirect_reference
     kids = spec.get("kids")
     if kids:
         kid_refs = ArrayObject()
@@ -1724,13 +2209,216 @@ def _build_struct_elem(
             )
         elem[NameObject("/K")] = kid_refs
     else:
-        elem[NameObject("/Pg")] = page.indirect_reference
         elem[NameObject("/K")] = NumberObject(spec["mcid"])
         if spec.get("alt"):
             elem[NameObject("/Alt")] = TextStringObject(str(spec["alt"]))
             stats["figures"] += 1
+        elif spec["s"] == "/Figure":
+            # Tagged so it is in the reading order, but still undescribed —
+            # counted separately so "figures" keeps meaning "with alt".
+            stats["figures_no_alt"] = stats.get("figures_no_alt", 0) + 1
         mcid_to_ref[spec["mcid"]] = ref
     return ref
+
+
+_PAINT_OPS = {b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"sh", b"INLINE IMAGE", b"BI"}
+
+
+def _raw_paints(seg_ops, xobject_kinds: Dict[str, str]) -> bool:
+    """True when a raw (untagged) segment PAINTS something: a path, a shading,
+    an inline image or a Form XObject. Such content is neither tagged nor an
+    artifact, which PDF/UA forbids (Matterhorn 01-005)."""
+    for operands, op in seg_ops:
+        if op in _PAINT_OPS:
+            return True
+        if op == b"Do" and operands:
+            if xobject_kinds.get(str(operands[0]).lstrip("/")) != "/Image":
+                return True
+    return False
+
+
+def _font_embedded(font: Any) -> bool:
+    font = _resolve(font)
+    if not isinstance(font, DictionaryObject):
+        return False
+    sub = str(font.get("/Subtype") or "")
+    if sub == "/Type3":
+        return True  # glyphs are content-stream procedures inside the font
+    if sub == "/Type0":
+        desc = _resolve(font.get("/DescendantFonts"))
+        if isinstance(desc, (list, ArrayObject)) and desc:
+            return _font_embedded(desc[0])
+        return False
+    fd = _resolve(font.get("/FontDescriptor"))
+    if not isinstance(fd, DictionaryObject):
+        return False
+    return any(k in fd for k in ("/FontFile", "/FontFile2", "/FontFile3"))
+
+
+def _unembedded_fonts(pages) -> List[str]:
+    """BaseFont names of fonts the pages use without embedding them
+    (PDF/UA-1 7.21.4.1 requires every font program to be embedded)."""
+    from app.pdf.text_decode import page_fonts
+
+    missing: List[str] = []
+    for page in pages:
+        fonts = page_fonts(page)
+        if not isinstance(fonts, DictionaryObject):
+            continue
+        for _name, ref in fonts.items():
+            f = _resolve(ref)
+            if not _font_embedded(f):
+                base = str((f or {}).get("/BaseFont") or "unnamed").lstrip("/")
+                if base not in missing:
+                    missing.append(base)
+    return missing
+
+
+_STANDARD_ENCODINGS = {"/WinAnsiEncoding", "/MacRomanEncoding", "/StandardEncoding", "/PDFDocEncoding"}
+
+
+def _fonts_without_unicode(pages) -> List[str]:
+    """Fonts whose glyphs cannot be mapped to Unicode reliably: no /ToUnicode
+    and no standard encoding (symbolic TrueType, custom Type3, Identity-H
+    without a map). PDF/UA-1 7.21.7 requires the mapping."""
+    from app.pdf.text_decode import page_fonts
+
+    out: List[str] = []
+    for page in pages:
+        fonts = page_fonts(page)
+        if not isinstance(fonts, DictionaryObject):
+            continue
+        for _name, ref in fonts.items():
+            f = _resolve(ref)
+            if not isinstance(f, DictionaryObject) or "/ToUnicode" in f:
+                continue
+            enc = _resolve(f.get("/Encoding"))
+            base_enc = None
+            if isinstance(enc, DictionaryObject):
+                base_enc = str(enc.get("/BaseEncoding") or "")
+                ok = base_enc in _STANDARD_ENCODINGS and "/Differences" not in enc
+            else:
+                ok = str(enc or "") in _STANDARD_ENCODINGS
+            if str(f.get("/Subtype") or "") == "/Type1" and enc is None:
+                ok = True  # a standard Type1 font's built-in encoding is Latin text
+            if not ok:
+                base = str(f.get("/BaseFont") or "unnamed").lstrip("/")
+                if base not in out:
+                    out.append(base)
+    return out
+
+
+def _pending_review_alt_count(tree: AccessibilityTree) -> int:
+    """Image descriptions our own alt step wrote in this run and flagged for
+    human review — a conformance claim cannot rest on unreviewed alt text."""
+    n = 0
+    try:
+        from app.models.accessibility import ImageNode, iter_reading_order
+
+        for node in iter_reading_order(tree.root):
+            if isinstance(node, ImageNode) and (node.metadata.properties or {}).get("alt_text_pending_review"):
+                n += 1
+    except Exception:  # pragma: no cover
+        return 0
+    return n
+
+
+def _existing_xmp(catalog: DictionaryObject) -> bytes:
+    try:
+        md = _resolve(catalog.get("/Metadata"))
+        return md.get_data() if md is not None else b""
+    except Exception:
+        return b""
+
+
+_PDFUA_PART_RE = re.compile(rb"pdfuaid:part\s*(?:>\s*|=\s*[\"'])\s*(\d)")
+
+
+def _clamp_heading_specs(specs: List[Dict[str, Any]], state: Dict[str, Any]) -> int:
+    """Keep heading levels contiguous in reading order (no H1 -> H4 jumps).
+
+    Levels come from a font-size ranking, which knows nothing about order: a
+    14pt subtitle under a 26pt title ranked H4 because 18pt and 16pt headings
+    existed elsewhere, and re-auditing our own output raised
+    HEADING_LEVEL_JUMP — a new defect we had created. Each heading is clamped
+    to at most one level below the previous heading (Matterhorn 14-003).
+    Relative order of sizes is kept; content is never touched. Returns how
+    many headings changed level.
+    """
+    changed = 0
+    for spec in specs:
+        s = str(spec.get("s") or "")
+        m = re.fullmatch(r"/H([1-6])", s)
+        if not m:
+            continue
+        lvl = int(m.group(1))
+        prev = state.get("prev")
+        if prev is not None and lvl > prev + 1:
+            lvl = prev + 1
+            spec["s"] = f"/H{lvl}"
+            changed += 1
+        state["prev"] = lvl
+    return changed
+
+
+def _annot_rect(a_obj: Any) -> Optional[Tuple[float, float, float, float]]:
+    try:
+        vals = [float(v) for v in list(_resolve(a_obj.get("/Rect")))[:4]]
+        x0, y0, x1, y1 = vals
+        return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    except Exception:
+        return None
+
+
+def _placement_index(specs: List[Dict[str, Any]], rect, kind: str) -> Optional[Tuple[int, str]]:
+    """Where an annotation's element belongs among a page's top-level specs.
+
+    ``(index, "after"|"before")`` next to the text on the SAME line — the
+    block a link sits in, a form field's label — or None (append, as before).
+    Pure ordering: the annotation and the text are unchanged. It fixes the
+    screen-reader experience of hearing every label on a form and then every
+    field, because all /Form elements were appended after the page's text.
+    """
+    if rect is None:
+        return None
+    x0, y0, x1, y1 = rect
+    h = max(1.0, y1 - y0)
+    same_line = []
+    for i, sp in enumerate(specs):
+        pos = sp.get("pos")
+        if not pos:
+            continue
+        bx, by = pos
+        if bx is None or by is None:
+            continue
+        if (y0 - 0.35 * h - 2.0) <= by <= (y1 + 1.0):
+            same_line.append((i, bx))
+    if not same_line:
+        # Inside a list or table (a list of links, a form laid out as a
+        # grid): keep the element right after that container.
+        for i, sp in enumerate(specs):
+            ysp = sp.get("yspan")
+            if ysp and (y0 - 2.0) <= ysp[1] and (y1 + 2.0) >= ysp[0]:
+                return (i, "after")
+        if kind == "widget":
+            # A label printed directly ABOVE the field, at its left edge.
+            above = [
+                (i, sp["pos"][1]) for i, sp in enumerate(specs)
+                if sp.get("pos") and sp["pos"][0] is not None and sp["pos"][1] is not None
+                and y1 < sp["pos"][1] <= y1 + 30.0 and abs(sp["pos"][0] - x0) <= 24.0
+            ]
+            if above:
+                return (min(above, key=lambda t: t[1])[0], "after")
+        return None
+    left = [(i, bx) for i, bx in same_line if bx <= (x1 if kind == "link" else x0 + 1.0)]
+    if left:
+        i = max(left, key=lambda t: t[1])[0]
+        return (i, "after")
+    right = [(i, bx) for i, bx in same_line if bx >= x1 - 1.0]
+    if right and kind == "widget":
+        i = min(right, key=lambda t: t[1])[0]
+        return (i, "before")
+    return None
 
 
 def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
@@ -1741,9 +2429,17 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
     * pages with existing marked content or no content are skipped;
     * the structure step is isolated so a failure still lands metadata and
       never corrupts the file.
+
+    The XMP ``pdfuaid:part`` identifier — a claim that the file CONFORMS to
+    PDF/UA-1 — is written only when every check this module can verify passes
+    (``report["pdfuaClaimed"]``); otherwise it is omitted and
+    ``report["pdfuaBlockers"]`` says why in plain words. It used to be
+    written unconditionally, labelling files with untagged images and
+    unembedded fonts as conformant.
     """
-    report: Dict[str, Any] = {"applied": [], "structTree": False}
+    report: Dict[str, Any] = {"applied": [], "structTree": False, "pdfuaClaimed": False}
     applied: List[str] = report["applied"]
+    blockers: List[str] = []
 
     title: Optional[str] = None
     language: Optional[str] = None
@@ -1779,19 +2475,32 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         except Exception as exc:
             logger.debug("set DisplayDocTitle failed: %s", exc)
 
-    try:
-        meta = DecodedStreamObject()
-        meta.set_data(_xmp_packet(title, language))
-        meta[NameObject("/Type")] = NameObject("/Metadata")
-        meta[NameObject("/Subtype")] = NameObject("/XML")
-        catalog[NameObject("/Metadata")] = writer._add_object(meta)  # noqa: SLF001
-        applied.append("xmp_metadata")
-    except Exception as exc:
-        logger.debug("write XMP failed: %s", exc)
+    prior_xmp = _existing_xmp(catalog)
+
+    def _write_xmp(claim_part: Optional[int]) -> None:
+        try:
+            meta = DecodedStreamObject()
+            meta.set_data(_xmp_packet(title, language, pdfua_part=claim_part))
+            meta[NameObject("/Type")] = NameObject("/Metadata")
+            meta[NameObject("/Subtype")] = NameObject("/XML")
+            catalog[NameObject("/Metadata")] = writer._add_object(meta)  # noqa: SLF001
+            applied.append("xmp_metadata")
+        except Exception as exc:
+            logger.debug("write XMP failed: %s", exc)
 
     # ---- Never modify an already-tagged document's structure --------------
     if _is_already_tagged(catalog):
         report["alreadyTagged"] = True
+        # We did not build (or verify) this structure tree, so we assert
+        # nothing about it. An identifier the AUTHOR already wrote is theirs
+        # and is carried over unchanged — dropping it silently would be its
+        # own misstatement.
+        m = _PDFUA_PART_RE.search(prior_xmp or b"")
+        carried = int(m.group(1)) if m else None
+        report["pdfuaClaimed"] = bool(carried)
+        if carried:
+            report["pdfuaClaimCarriedOver"] = True
+        _write_xmp(carried)
         return report
 
     # ---- Structure tree over taggable pages only --------------------------
@@ -1800,36 +2509,53 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         # alt map is keyed by it, and `taggable` is a filtered subset whose
         # own index would drift the moment any page is skipped.
         page_numbers = {id(p): i for i, p in enumerate(writer.pages, start=1)}
-        taggable = [p for p in writer.pages if _is_taggable_page(writer, p)]
+        all_pages = list(writer.pages)
+        taggable = [p for p in all_pages if _is_taggable_page(writer, p)]
         if not taggable:
             report["structSkipped"] = "no_taggable_pages"
-            return report
+            blockers.append("no page could be given a structure tree")
+            raise _NoStructure()
 
         struct_root = DictionaryObject()
         struct_root_ref = writer._add_object(struct_root)  # noqa: SLF001
         doc_elem = DictionaryObject()
         doc_elem_ref = writer._add_object(doc_elem)  # noqa: SLF001
 
+        font_cache: Dict[Any, Any] = {}
         alt_by_xobject = _build_alt_by_xobject(tree)
-        artifact_info = _collect_artifact_sigs(writer, taggable)
-        doc_levels = _collect_doc_heading_levels(writer, taggable, artifact_info)
+        decorative_by_page = _build_decorative_by_xobject(tree)
+        artifact_info = _collect_artifact_sigs(writer, taggable, font_cache)
+        doc_levels, bold_keys, bold_level = _collect_doc_structure_hints(
+            writer, taggable, artifact_info, font_cache
+        )
         page_counters: Dict[str, int] = {"artifacts": 0}
         elem_refs: List[IndirectObject] = []  # all struct elems, reading order
         nums = ArrayObject()
         figures = 0
+        figures_no_alt = 0
         per_element_pages = 0
         lists_tagged = 0
         tables_tagged = 0
         links_tagged = 0
+        links_named_from_page = 0
         forms_tagged = 0
+        widgets_without_name = 0
+        other_annots = 0
+        headings_clamped = 0
+        heading_state: Dict[str, Any] = {}
         # Annotation ParentTree keys live ABOVE the page keys; a number tree's
         # /Nums must stay ascending, so collect and append them after the loop.
         next_annot_key = len(taggable)
         annot_nums: List[Tuple[int, IndirectObject]] = []
         for key, page in enumerate(taggable):
-            page_alt = alt_by_xobject.get(page_numbers.get(id(page), -1), {})
+            pno = page_numbers.get(id(page), -1)
+            page_alt = alt_by_xobject.get(pno, {})
             specs = _tag_page_elements(
-                writer, page, page_alt, artifact_info, page_counters, doc_levels
+                writer, page, page_alt, artifact_info, page_counters, doc_levels,
+                decorative_xobjects=decorative_by_page.get(pno, set()),
+                font_cache=font_cache,
+                bold_keys=bold_keys,
+                bold_level=bold_level,
             )
             if specs is None:
                 # Safe fallback: page-level single /P (original bytes untouched).
@@ -1837,21 +2563,24 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                 specs = [{"s": "/P", "mcid": 0}]
             else:
                 per_element_pages += 1
+            headings_clamped += _clamp_heading_specs(specs, heading_state)
 
             # Build the page's (possibly nested) struct elements. Leaves register
             # their MCID -> ref so the ParentTree can index back to them.
             mcid_to_ref: Dict[int, IndirectObject] = {}
-            stats = {"figures": 0}
+            stats = {"figures": 0, "figures_no_alt": 0}
+            page_refs: List[IndirectObject] = []
             for spec in specs:
                 ref = _build_struct_elem(
                     writer, spec, doc_elem_ref, page, mcid_to_ref, stats
                 )
-                elem_refs.append(ref)  # top-level elems are the Document's kids
+                page_refs.append(ref)  # top-level elems are the Document's kids
                 if spec.get("s") == "/L":
                     lists_tagged += 1
                 elif spec.get("s") == "/Table":
                     tables_tagged += 1
             figures += stats["figures"]
+            figures_no_alt += stats.get("figures_no_alt", 0)
 
             # ParentTree row: index = MCID -> the leaf StructElem that owns it.
             page_arr = ArrayObject()
@@ -1867,6 +2596,22 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
             # structure elements (Matterhorn 28-011) and form widgets nested
             # in /Form elements, each via an OBJR reference with a ParentTree
             # entry pointing back at the element.
+            after: Dict[int, List[IndirectObject]] = {}
+            before: Dict[int, List[IndirectObject]] = {}
+            tail: List[IndirectObject] = []
+            words_cache: Dict[str, Any] = {}
+
+            def _page_words():
+                if "w" not in words_cache:
+                    try:
+                        from app.pdf.text_geometry import all_words, page_spans
+
+                        sp = page_spans(page, writer)
+                        words_cache["w"] = all_words(sp) if sp is not None else []
+                    except Exception:
+                        words_cache["w"] = []
+                return words_cache["w"]
+
             for a in list(page.get("/Annots") or []):
                 try:
                     a_obj = a.get_object()
@@ -1878,6 +2623,12 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                 elif subtype == "/Widget":
                     elem_s = "/Form"
                 else:
+                    try:
+                        hidden = bool(int(a_obj.get("/F") or 0) & 2)
+                    except Exception:
+                        hidden = False
+                    if subtype not in ("/Popup",) and not hidden:
+                        other_annots += 1
                     continue
                 a_ref = a if isinstance(a, IndirectObject) else None
                 if a_ref is None:
@@ -1899,22 +2650,40 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                     }
                 )
                 annot_elem_ref = writer._add_object(annot_elem)  # noqa: SLF001
-                elem_refs.append(annot_elem_ref)
+                rect = _annot_rect(a_obj)
+                place = _placement_index(specs, rect, "link" if subtype == "/Link" else "widget")
+                if place is None:
+                    tail.append(annot_elem_ref)
+                elif place[1] == "after":
+                    after.setdefault(place[0], []).append(annot_elem_ref)
+                else:
+                    before.setdefault(place[0], []).append(annot_elem_ref)
                 a_obj[NameObject("/StructParent")] = NumberObject(next_annot_key)
                 annot_nums.append((next_annot_key, annot_elem_ref))
                 next_annot_key += 1
-                # Accessible description (Matterhorn 28-012): /Contents falls
-                # back to the URI action for links, or the field's /TU label
-                # for widgets, when none is present.
+                # Accessible description (Matterhorn 28-012). A link is named by
+                # the words printed under it — what a sighted reader sees —
+                # falling back to its URI only when no text is there. A widget
+                # falls back to its /TU label.
                 if not str(a_obj.get("/Contents") or "").strip():
                     fallback = ""
                     if subtype == "/Link":
                         try:
-                            action = a_obj.get("/A")
-                            action = action.get_object() if hasattr(action, "get_object") else action
-                            fallback = str((action or {}).get("/URI") or "").strip()
+                            from app.pdf.text_geometry import text_in_rect
+
+                            visible = text_in_rect(_page_words(), a_obj.get("/Rect") or [])
                         except Exception:
-                            fallback = ""
+                            visible = None
+                        if visible:
+                            fallback = visible
+                            links_named_from_page += 1
+                        else:
+                            try:
+                                action = a_obj.get("/A")
+                                action = action.get_object() if hasattr(action, "get_object") else action
+                                fallback = str((action or {}).get("/URI") or "").strip()
+                            except Exception:
+                                fallback = ""
                     else:
                         fallback = str(a_obj.get("/TU") or "").strip()
                     if fallback:
@@ -1923,6 +2692,16 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
                     links_tagged += 1
                 else:
                     forms_tagged += 1
+                    if not str(a_obj.get("/TU") or "").strip():
+                        parent = _resolve(a_obj.get("/Parent"))
+                        if not (isinstance(parent, DictionaryObject) and str(parent.get("/TU") or "").strip()):
+                            widgets_without_name += 1
+
+            for i, ref in enumerate(page_refs):
+                elem_refs.extend(before.get(i, []))
+                elem_refs.append(ref)
+                elem_refs.extend(after.get(i, []))
+            elem_refs.extend(tail)
 
         doc_elem.update(
             {
@@ -1954,10 +2733,15 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         report["structTree"] = True
         report["pages"] = len(taggable)
         report["elements"] = len(elem_refs)
+        # "figures" keeps meaning figures WITH a description; the undescribed
+        # ones are tagged (so they are in the reading order) and counted apart.
         report["figures"] = figures
+        report["figuresWithoutAlt"] = figures_no_alt
+        report["decorativeImages"] = page_counters.get("decorative_images", 0)
         report["lists"] = lists_tagged
         report["tables"] = tables_tagged
         report["links"] = links_tagged
+        report["linksNamedFromPage"] = links_named_from_page
         report["formWidgets"] = forms_tagged
         report["artifacts"] = page_counters.get("artifacts", 0)
         report["perElementPages"] = per_element_pages
@@ -1971,18 +2755,81 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         # Pages whose columns were interleaved in the content stream and are
         # now presented in correct visual reading order by the structure tree.
         report["readingOrderFixedPages"] = page_counters.get("reading_order_fixed", 0)
+        # Pages that LOOK two-column (and interleaved) but were left in stream
+        # order — disclosed, never counted as fixed.
+        report["readingOrderDeclinedPages"] = page_counters.get("reading_order_declined", 0)
         # Table-SHAPED grids we deliberately DECLINED to tag (too sparse to be
         # sure they're data). Surfaced so "N tables tagged" is never read as
         # "all of your tables were handled" — a silent under-count is the kind
         # of quiet overclaim this project refuses.
         report["tablesDeclined"] = page_counters.get("tables_declined", 0)
+        report["tocTablesDeclined"] = page_counters.get("toc_declined", 0)
+        report["headingLevelsNormalized"] = headings_clamped
+        report["boldHeadings"] = page_counters.get("bold_headings", 0)
+        report["undecodableTextBlocks"] = page_counters.get("undecodable_blocks", 0)
         applied.append("struct_tree")
         applied.append("mark_info")
+
+        # ---- May this file claim PDF/UA-1? Only if nothing we can check fails.
+        if len(taggable) != len(all_pages):
+            blockers.append(f"{len(all_pages) - len(taggable)} page(s) could not be tagged")
+        if report["pagesPageLevelOnly"]:
+            blockers.append(f"{report['pagesPageLevelOnly']} page(s) are tagged only as one block")
+        if not title:
+            blockers.append("the document has no title")
+        if not language:
+            blockers.append("the document language is not set")
+        if figures_no_alt:
+            blockers.append(f"{figures_no_alt} image(s) still need a text description")
+        if report["readingOrderDeclinedPages"]:
+            blockers.append(
+                f"{report['readingOrderDeclinedPages']} page(s) may have a two-column reading order we did not change"
+            )
+        if report["tablesDeclined"]:
+            blockers.append(f"{report['tablesDeclined']} table-like grid(s) were not tagged")
+        if report["undecodableTextBlocks"]:
+            blockers.append("some text uses a font with no Unicode mapping")
+        if widgets_without_name:
+            blockers.append(f"{widgets_without_name} form field(s) have no accessible name")
+        if other_annots:
+            blockers.append(f"{other_annots} comment/markup annotation(s) are not tagged")
+        if page_counters.get("untagged_paint_pages"):
+            blockers.append(
+                f"{page_counters['untagged_paint_pages']} page(s) draw lines, shapes or embedded "
+                "graphics that are neither tagged nor marked as decoration"
+            )
+        unembedded = _unembedded_fonts(taggable)
+        if unembedded:
+            shown = ", ".join(unembedded[:3]) + ("…" if len(unembedded) > 3 else "")
+            blockers.append(f"{len(unembedded)} font(s) are not embedded ({shown})")
+        unmapped = _fonts_without_unicode(taggable)
+        if unmapped:
+            blockers.append(f"{len(unmapped)} font(s) have no reliable Unicode mapping")
+        enc = getattr(writer, "_encryption", None)
+        try:
+            if enc is not None and not (int(enc.P) & (1 << 9)):
+                blockers.append("the file's security settings block text extraction for assistive technology")
+        except Exception:
+            pass
+        pending_alt = _pending_review_alt_count(tree)
+        if pending_alt:
+            blockers.append(f"{pending_alt} image description(s) were generated automatically and await review")
+    except _NoStructure:
+        pass
     except Exception as exc:
         logger.warning("PDF struct-tree tagging failed (essentials still applied): %s", exc)
         report["structError"] = str(exc)
+        blockers.append("the structure tree could not be completed")
 
+    claim = report["structTree"] and not blockers
+    report["pdfuaClaimed"] = bool(claim)
+    report["pdfuaBlockers"] = blockers
+    _write_xmp(1 if claim else None)
     return report
+
+
+class _NoStructure(Exception):
+    """Internal: no taggable page; skip to the metadata tail."""
 
 
 __all__ = ["tag_pdf"]

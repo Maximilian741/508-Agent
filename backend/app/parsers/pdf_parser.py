@@ -35,9 +35,25 @@ from pypdf.generic import (
     DictionaryObject,
     IndirectObject,
     NameObject,
+    NullObject,
     NumberObject,
     TextStringObject,
 )
+
+
+class PdfPasswordProtectedError(ValueError):
+    """The PDF needs a password to OPEN (a user password), so it cannot be read.
+
+    Carries a ``user_message`` the API returns verbatim instead of the generic
+    "invalid or corrupted file" — which is what a password-protected PDF used
+    to be reported as.
+    """
+
+    user_message = (
+        "This PDF is password-protected, so we can't open it. Remove the password "
+        "(in Acrobat: File > Properties > Security > No Security) and upload it again. "
+        "You were not charged."
+    )
 
 from app.parsers.document_id import derive_document_id
 from app.models.accessibility import (
@@ -113,56 +129,110 @@ def _classify_paragraph(text: str) -> Optional[int]:
     return None
 
 
-def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Optional[str]:
-    """The largest-font text block on ``page_index``, if it reads as a title.
+def _compact(text: str) -> str:
+    """Casefolded text with ALL whitespace removed, for tolerant containment."""
+    return re.sub(r"\s+", "", (text or "")).casefold()
 
-    Reuses the tagger's block helpers (same segmentation the structure tree
-    is built from). Conservative: the block must be the strict maximum size
-    on the page, at least 1.25x the most common size (so it stands out from
-    body text), short (<= 120 chars, one line), and not a page number.
-    Anything less and we return None — a wrong title is worse than no title.
-    """
-    from pypdf.generic import ContentStream
 
-    from app.pdf.ua_tagger import _block_font_size, _block_text, _is_page_number
+def _page_blocks(reader: PdfReader, page_index: int, font_cache: Optional[dict] = None):
+    """Decorated text blocks of one page (see ua_tagger._iter_text_blocks)."""
+    from app.pdf.ua_tagger import _iter_text_blocks, _page_decoder
 
-    if page_index >= len(reader.pages):
-        return None
     page = reader.pages[page_index]
     try:
         ops = ContentStream(page.get_contents(), reader).operations
     except Exception:
         return None
-    blocks = []
-    block = None
-    for operands, op in ops:
-        if op == b"BT":
-            block = [(operands, op)]
-        elif op == b"ET" and block is not None:
-            block.append((operands, op))
-            blocks.append(block)
-            block = None
-        elif block is not None:
-            block.append((operands, op))
+    return list(_iter_text_blocks(ops, _page_decoder(reader, page, font_cache))), page
+
+
+def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Optional[str]:
+    """The largest-font text block on ``page_index``, if it reads as a title.
+
+    Reuses the tagger's block helpers (same segmentation the structure tree
+    is built from). Conservative: the block must be the strict maximum size
+    on the page, at least 1.25x the document's BODY size (so it stands out
+    from body text), short (<= 120 chars, one line), and not a page number.
+    Anything less and we return None — a wrong title is worse than no title.
+
+    Two ways this used to go wrong, both now closed:
+
+    * Composite (Type0 / Identity-H) fonts. Block text was the raw operand
+      bytes — 2-byte glyph ids — and "\\x00:\\x00L\\x00Q..." was written as the
+      document /Title and charged. The candidate is now the font-DECODED text,
+      must read as human text (no control characters), and must also appear
+      in pypdf's own ``extract_text`` of the page. Anything we cannot decode,
+      or cannot confirm, is refused.
+    * Cover pages. "Body" was the most common size by BLOCK COUNT on page 1,
+      so a cover with one 26pt title, one 14pt subtitle and one 10pt footer
+      picked 26pt (ties resolve first) as body and refused an unmistakable
+      title. Body is now the size carrying the most characters over the
+      first few pages — where the prose actually is.
+    """
+    from app.pdf.text_decode import decode_ops, is_readable_text
+    from app.pdf.ua_tagger import _block_font_size, _block_weight, _is_page_number, _page_decoder
+
+    if page_index >= len(reader.pages):
+        return None
+    font_cache: dict = {}
+    got = _page_blocks(reader, page_index, font_cache)
+    if not got:
+        return None
+    blocks, page = got
     sized = []
     for b in blocks:
         size = _block_font_size(b)
-        text = _block_text(b).strip()
-        if size and size > 0 and text:
-            sized.append((round(float(size), 1), text))
-    if len(sized) < 2:
+        if size and size > 0 and _block_weight(b) > 0:
+            sized.append((round(float(size), 1), b))
+    if not sized:
         return None
+
+    # Body size: character-weighted over the first pages (page 1 included).
     from collections import Counter
 
-    common = Counter(sz for sz, _ in sized).most_common(1)[0][0]
-    top = max(sz for sz, _ in sized)
-    if top < common * 1.25:
+    volume: Counter = Counter()
+    for sz, b in sized:
+        volume[sz] += _block_weight(b)
+    for pi in range(page_index + 1, min(len(reader.pages), page_index + 5)):
+        more = _page_blocks(reader, pi, font_cache)
+        if not more:
+            continue
+        for b in more[0]:
+            size = _block_font_size(b)
+            if size and size > 0:
+                volume[round(float(size), 1)] += _block_weight(b)
+    if len(volume) < 2:
         return None
-    tops = [t for sz, t in sized if sz == top]
+    top_volume = max(volume.values())
+    body = min(s for s, v in volume.items() if v == top_volume)
+    top = max(sz for sz, _ in sized)
+    if top < body * 1.25:
+        return None
+    tops = [b for sz, b in sized if sz == top]
     if len(tops) != 1:
         return None  # several equally-large blocks: no single title stands out
-    text = tops[0]
-    if len(text) > 120 or "\n" in text or _is_page_number(text):
+
+    decoder = _page_decoder(reader, page, font_cache)
+    if decoder is None:
+        return None
+    target = tops[0]
+    text, _composite, _end = decode_ops(
+        target, decoder, getattr(target, "start_font", None), unicode_simple=True
+    )
+    if text is None:
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or len(text) > 120 or _is_page_number(text):
+        return None
+    if not is_readable_text(text):
+        return None
+    # Cross-check against pypdf's own decoding of the page. If the page text
+    # cannot be extracted at all, we cannot confirm the candidate: refuse.
+    try:
+        page_text = page.extract_text() or ""
+    except Exception:
+        return None
+    if _compact(text) not in _compact(page_text):
         return None
     return text
 
@@ -173,12 +243,30 @@ def _title_candidate_from_page(reader: PdfReader, page_index: int = 0) -> Option
 
 
 def _safe_text(value: Any) -> str:
+    """A PDF text value as a stripped str, or "" when there is no text.
+
+    pypdf represents ``/Title null`` as a ``NullObject`` — which is TRUTHY and
+    whose ``str()`` is the literal ``"NullObject"``. That string became the
+    document title (Info, XMP ``dc:title``, the viewer's title bar with
+    DisplayDocTitle on) on every PyMuPDF-produced PDF, and it suppressed the
+    missing-title finding. Only real strings count as text.
+    """
     if value is None:
         return ""
     try:
-        return str(value).strip()
+        value = _resolve(value)
+        if value is None or isinstance(value, NullObject):
+            return ""
+        if not isinstance(value, (str, bytes)):
+            return ""
+        if isinstance(value, bytes):
+            value = value.decode("latin-1", "ignore")
+        text = str(value).strip()
     except Exception:
         return ""
+    if text in ("NullObject", "None", "null"):
+        return ""
+    return text
 
 
 def _document_title(reader: PdfReader) -> str:
@@ -190,10 +278,9 @@ def _document_title(reader: PdfReader) -> str:
             value = metadata.get(key)
         except Exception:
             value = None
-        if value:
-            text = _safe_text(value)
-            if text:
-                return text
+        text = _safe_text(value)
+        if text:
+            return text
     return ""
 
 
@@ -376,24 +463,207 @@ def _clean_pdf_field_name(raw: object) -> Optional[str]:
     return t
 
 
-def derive_pdf_field_label(fo: object) -> Optional[str]:
+def derive_pdf_field_label(fo: object, labeler: "Optional[FieldLabeler]" = None) -> Optional[str]:
     """Confident accessible label for one unlabeled AcroForm field, or None.
 
     Shared by the parser (to count how many are derivable) and the writer (to
     write exactly those), so the credited count always equals what is written.
-    Only ``/Tx`` (text) and ``/Ch`` (choice) fields are labeled from ``/T``;
-    ``/Btn`` (checkbox / radio / pushbutton) ``/T`` is frequently the export
-    VALUE ("Yes", "Male") rather than a label, so those stay manual.
+
+    1. ``/Tx`` (text) and ``/Ch`` (choice) fields are labeled from a clean,
+       human ``/T``. ``/Btn`` ``/T`` is frequently the export VALUE ("Yes",
+       "Male") rather than a label, so it is never used.
+    2. Otherwise, when a :class:`FieldLabeler` is supplied, the words PRINTED
+       next to the field on the page ("Date of birth:" to its left, "I certify
+       ..." to a checkbox's right). The labeler refuses anything ambiguous.
     """
     try:
-        if fo.get("/FT") == "/Btn":
-            return None
         tu = fo.get("/TU")
         if tu and str(tu).strip():
             return None  # already has an accessible name
-        return _clean_pdf_field_name(fo.get("/T"))
+        if _field_type(fo) != "/Btn":
+            name = _clean_pdf_field_name(fo.get("/T"))
+            if name:
+                return name
+        if labeler is not None:
+            return labeler.label_for(fo)
+        return None
     except Exception:
         return None
+
+
+def _field_type(fo: Any) -> str:
+    """``/FT`` of a field, inherited from its parents when absent."""
+    node = fo
+    for _ in range(16):
+        if node is None:
+            return ""
+        try:
+            ft = node.get("/FT")
+        except Exception:
+            return ""
+        if ft is not None:
+            return str(ft)
+        node = _resolve(node.get("/Parent")) if "/Parent" in node else None
+    return ""
+
+
+def _field_flags(fo: Any) -> int:
+    node = fo
+    for _ in range(16):
+        if node is None:
+            return 0
+        try:
+            ff = node.get("/Ff")
+            if ff is not None:
+                return int(ff)
+        except Exception:
+            return 0
+        node = _resolve(node.get("/Parent")) if "/Parent" in node else None
+    return 0
+
+
+def _field_widgets(fo: Any) -> List[Any]:
+    """The widget annotation dicts of one field (itself, or its /Kids)."""
+    try:
+        if str(fo.get("/Subtype") or "") == "/Widget" or "/Rect" in fo:
+            return [fo]
+        kids = _resolve(fo.get("/Kids")) if "/Kids" in fo else None
+        out = []
+        for k in kids or []:
+            kr = _resolve(k)
+            if isinstance(kr, DictionaryObject) and (
+                str(kr.get("/Subtype") or "") == "/Widget" or "/Rect" in kr
+            ):
+                out.append(kr)
+        return out
+    except Exception:
+        return []
+
+
+def _rect_key(rect: Any) -> Optional[Tuple[float, ...]]:
+    try:
+        vals = [float(v) for v in list(rect)[:4]]
+        x0, y0, x1, y1 = vals
+        return (round(min(x0, x1), 1), round(min(y0, y1), 1), round(max(x0, x1), 1), round(max(y0, y1), 1))
+    except Exception:
+        return None
+
+
+class FieldLabeler:
+    """Labels printed next to AcroForm widgets, derived from page geometry.
+
+    Built once per document from the SAME content the writer later edits, so
+    the parser's derivable count and the writer's /TU writes come from one
+    computation. Keys are ``(page_index, rect, /T)`` — stable across pypdf's
+    reader and the writer's clone, whose object numbers differ.
+
+    Refusals (the field stays manual): radio buttons and push buttons, fields
+    with several widgets, no label found, a label claimed by two widgets,
+    anything unreadable.
+    """
+
+    def __init__(self, pdf: Any, max_pages: Optional[int] = None) -> None:
+        self.labels: Dict[tuple, str] = {}
+        self.page_of_widget: Dict[int, int] = {}
+        self.boxes: Dict[tuple, Tuple[int, Tuple[float, ...]]] = {}
+        try:
+            self._build(pdf, max_pages)
+        except Exception:
+            logger.debug("FieldLabeler failed", exc_info=True)
+            self.labels = {}
+
+    @staticmethod
+    def _key(page_index: int, rect: Tuple[float, ...], fo: Any) -> tuple:
+        try:
+            t = str(fo.get("/T") or "")
+        except Exception:
+            t = ""
+        return (page_index, rect, t)
+
+    def _build(self, pdf: Any, max_pages: Optional[int]) -> None:
+        from app.pdf.text_geometry import all_words, label_for_widget, page_spans
+
+        pages = list(pdf.pages)
+        if max_pages is not None:
+            pages = pages[:max_pages]
+        for pi, page in enumerate(pages):
+            annots = _resolve(page.get("/Annots")) if "/Annots" in page else None
+            if not isinstance(annots, (list, ArrayObject)):
+                continue
+            widgets = []
+            for ref in annots:
+                a = _resolve(ref)
+                if not isinstance(a, DictionaryObject) or str(a.get("/Subtype") or "") != "/Widget":
+                    continue
+                if isinstance(ref, IndirectObject):
+                    self.page_of_widget[ref.idnum] = pi
+                rk = _rect_key(a.get("/Rect"))
+                if rk is None:
+                    continue
+                widgets.append((a, rk))
+            if not widgets:
+                continue
+            spans = page_spans(page, pdf)
+            if spans is None:
+                continue
+            words = all_words(spans)
+            rects = [rk for _a, rk in widgets]
+            claims: Dict[tuple, List[tuple]] = {}
+            found: Dict[tuple, str] = {}
+            for a, rk in widgets:
+                field = a if "/T" in a else _resolve(a.get("/Parent"))
+                if not isinstance(field, DictionaryObject):
+                    continue
+                if len(_field_widgets(field)) != 1:
+                    continue  # radio groups / mirrored widgets: ambiguous
+                ft = _field_type(field)
+                ff = _field_flags(field)
+                if ft in ("/Tx", "/Ch"):
+                    kind = "text"
+                elif ft == "/Btn" and not (ff & (1 << 15)) and not (ff & (1 << 16)):
+                    kind = "check"
+                else:
+                    continue
+                key = self._key(pi, rk, field)
+                self.boxes[key] = (pi, rk)
+                got = label_for_widget(rk, words, rects, kind=kind)
+                if not got:
+                    continue
+                label, word_keys = got
+                found[key] = label
+                for wk in word_keys:
+                    claims.setdefault(wk, []).append(key)
+            # A printed word may label ONE field. Shared -> both stay manual.
+            contested = {k for keys in claims.values() if len(keys) > 1 for k in keys}
+            for key, label in found.items():
+                if key not in contested:
+                    self.labels[key] = label
+
+    def _field_key(self, fo: Any) -> Optional[tuple]:
+        ws = _field_widgets(fo)
+        if len(ws) != 1:
+            return None
+        w = ws[0]
+        rk = _rect_key(w.get("/Rect"))
+        if rk is None:
+            return None
+        pi = None
+        ref = getattr(w, "indirect_reference", None)
+        if ref is not None:
+            pi = self.page_of_widget.get(ref.idnum)
+        if pi is None:
+            return None
+        return self._key(pi, rk, fo)
+
+    def label_for(self, fo: Any) -> Optional[str]:
+        key = self._field_key(fo)
+        return self.labels.get(key) if key is not None else None
+
+    def box_for(self, fo: Any) -> Optional[Tuple[int, Tuple[float, ...]]]:
+        key = self._field_key(fo)
+        if key is None:
+            return None
+        return self.boxes.get(key) or (key[0], key[1])
 
 
 def iter_acroform_fields(acro: object):
@@ -408,12 +678,17 @@ def iter_acroform_fields(acro: object):
             continue
 
 
-def _form_field_label_counts(reader: PdfReader) -> "tuple[int, int, int]":
+def _form_field_label_counts(
+    reader: PdfReader, locations: Optional[List[Dict[str, Any]]] = None
+) -> "tuple[int, int, int]":
     """Return ``(total, unlabeled, derivable)`` AcroForm fields.
 
     "Unlabeled" means no ``/TU`` (the field's accessible label/tooltip — what AT
     announces). ``derivable`` is how many unlabeled fields have a confident
-    label we can auto-write from their ``/T`` (the rest stay manual).
+    label we can auto-write — from a clean ``/T`` or from the words printed
+    next to the field (the rest stay manual). When ``locations`` is given, one
+    ``{page, bbox, name, derivable}`` entry per unlabeled field is appended so
+    a finding can show WHERE the field is.
     """
     total = 0
     unlabeled = 0
@@ -425,6 +700,7 @@ def _form_field_label_counts(reader: PdfReader) -> "tuple[int, int, int]":
         acro = acro.get_object() if hasattr(acro, "get_object") else acro
         if not acro:
             return (0, 0, 0)
+        labeler = FieldLabeler(reader, max_pages=_MAX_PDF_PAGES)
         for fo in iter_acroform_fields(acro):
             try:
                 # Pushbuttons are counted (conservative) but never auto-labeled.
@@ -432,8 +708,18 @@ def _form_field_label_counts(reader: PdfReader) -> "tuple[int, int, int]":
                 tu = fo.get("/TU")
                 if not tu or not str(tu).strip():
                     unlabeled += 1
-                    if derive_pdf_field_label(fo):
+                    ok = bool(derive_pdf_field_label(fo, labeler))
+                    if ok:
                         derivable += 1
+                    if locations is not None and len(locations) < 200:
+                        box = labeler.box_for(fo)
+                        if box is not None:
+                            locations.append({
+                                "page": box[0] + 1,
+                                "bbox": list(box[1]),
+                                "name": _safe_text(fo.get("/T"))[:80],
+                                "derivable": ok,
+                            })
             except Exception:
                 continue
     except Exception:
@@ -571,7 +857,101 @@ def _extract_image_bytes(xobject: Dict[str, Any]) -> Tuple[Optional[str], Option
     return encoded, mime
 
 
-def _link_annotations(page: Any) -> List[Dict[str, Any]]:
+class _DestResolver:
+    """Resolve internal link destinations to ``#page-N`` targets.
+
+    A PDF link is internal when it carries ``/Dest`` or a ``/GoTo`` action —
+    the table of contents of nearly every long report. The parser used to read
+    ``/A /URI`` only, so every TOC entry became a link with NO target (flagged
+    LINK_TARGET_BROKEN) and the text "(link)" (flagged non-descriptive): ten
+    manual-review items for a five-line contents page that works perfectly.
+    A destination that genuinely does not resolve still reads as broken.
+    """
+
+    def __init__(self, reader: Any) -> None:
+        self._reader = reader
+        self._page_ids: Optional[Dict[int, int]] = None
+        self._named: Optional[Dict[str, Any]] = None
+
+    def _pages(self) -> Dict[int, int]:
+        if self._page_ids is None:
+            self._page_ids = {}
+            try:
+                for i, p in enumerate(self._reader.pages):
+                    ref = getattr(p, "indirect_reference", None)
+                    if ref is not None:
+                        self._page_ids[ref.idnum] = i
+            except Exception:
+                pass
+        return self._page_ids
+
+    def _names(self) -> Dict[str, Any]:
+        if self._named is None:
+            try:
+                self._named = dict(self._reader.named_destinations or {})
+            except Exception:
+                self._named = {}
+        return self._named
+
+    def resolve(self, dest: Any) -> str:
+        dest = _resolve(dest)
+        if isinstance(dest, DictionaryObject) and "/D" in dest:
+            dest = _resolve(dest.get("/D"))
+        if isinstance(dest, (list, ArrayObject)) and dest:
+            first = dest[0]
+            if isinstance(first, IndirectObject):
+                idx = self._pages().get(first.idnum)
+                if idx is not None:
+                    return f"#page-{idx + 1}"
+                return ""
+            try:  # remote-style integer page index
+                return f"#page-{int(first) + 1}"
+            except Exception:
+                return ""
+        name = _safe_text(dest) if isinstance(dest, (str, bytes)) else ""
+        if name:
+            named = self._names().get(name) or self._names().get("/" + name.lstrip("/"))
+            if named is not None:
+                try:
+                    pg = getattr(named, "page", None)
+                    if isinstance(pg, IndirectObject):
+                        idx = self._pages().get(pg.idnum)
+                        if idx is not None:
+                            return f"#page-{idx + 1}"
+                    elif isinstance(pg, int) and not isinstance(pg, bool):
+                        return f"#page-{int(pg) + 1}"
+                except Exception:
+                    pass
+                return "#" + name.lstrip("/")
+        return ""
+
+
+def _link_target(annot: DictionaryObject, dests: Optional[_DestResolver]) -> str:
+    action = _resolve(annot.get("/A")) if "/A" in annot else None
+    if isinstance(action, DictionaryObject):
+        kind = str(action.get("/S") or "")
+        if kind == "/URI" or action.get("/URI") is not None:
+            return _safe_text(action.get("/URI"))
+        if kind == "/GoTo":
+            return dests.resolve(action.get("/D")) if dests else ""
+        if kind in ("/GoToR", "/Launch", "/GoToE"):
+            f = _resolve(action.get("/F"))
+            if isinstance(f, DictionaryObject):
+                f = f.get("/UF") or f.get("/F")
+            fname = _safe_text(f)
+            return fname
+        if kind == "/Named":
+            n = _safe_text(action.get("/N")).lstrip("/")
+            return f"#{n}" if n else ""
+        if kind == "/JavaScript":
+            return "javascript:"
+        return ""
+    if "/Dest" in annot:
+        return dests.resolve(annot.get("/Dest")) if dests else ""
+    return ""
+
+
+def _link_annotations(page: Any, dests: Optional[_DestResolver] = None) -> List[Dict[str, Any]]:
     annots_obj = _resolve(page.get("/Annots")) if "/Annots" in page else None
     if not isinstance(annots_obj, (list, ArrayObject)):
         return []
@@ -582,15 +962,160 @@ def _link_annotations(page: Any) -> List[Dict[str, Any]]:
             continue
         if annot.get("/Subtype") != "/Link":
             continue
-        target = ""
-        action = _resolve(annot.get("/A")) if "/A" in annot else None
-        if isinstance(action, DictionaryObject):
-            uri = action.get("/URI")
-            if uri is not None:
-                target = _safe_text(uri)
+        try:
+            target = _link_target(annot, dests)
+        except Exception:
+            target = ""
         contents = _safe_text(annot.get("/Contents"))
-        links.append({"target": target, "contents": contents})
+        links.append({"target": target, "contents": contents, "rect": _rect_key(annot.get("/Rect"))})
     return links
+
+
+def _image_placements(ops) -> Dict[str, Tuple[float, float, float, float]]:
+    """``{xobject_name: bbox}`` — where each image is FIRST painted, from the
+    CTM in force at its ``Do`` (images map the unit square through the CTM)."""
+    from app.pdf.ua_tagger import _IDENTITY_CTM, _ctm_concat, _unit_square_bbox
+
+    out: Dict[str, Tuple[float, float, float, float]] = {}
+    ctm = _IDENTITY_CTM
+    stack: List[tuple] = []
+    in_text = False
+    for operands, op in ops:
+        if op == b"BT":
+            in_text = True
+        elif op == b"ET":
+            in_text = False
+        elif in_text:
+            continue
+        elif op == b"q":
+            stack.append(ctm)
+        elif op == b"Q":
+            if stack:
+                ctm = stack.pop()
+        elif op == b"cm" and len(operands) >= 6:
+            try:
+                ctm = _ctm_concat(tuple(float(o) for o in operands[:6]), ctm)
+            except Exception:
+                pass
+        elif op == b"Do" and operands:
+            name = str(operands[0]).lstrip("/")
+            if name not in out:
+                bb = _unit_square_bbox(ctm)
+                if bb is not None:
+                    out[name] = bb
+    return out
+
+
+# A figure caption is authored text that NAMES the figure it sits under.
+# "Table N" is deliberately absent: that captions a table, not an image.
+_FIGURE_CAPTION_RE = re.compile(
+    r"^(?:figure|fig\.?|chart|graph|photo(?:graph)?|image|map|diagram|exhibit|illustration|plate|infographic)"
+    r"\s*(?:\d+(?:[.\-]\d+)*[a-z]?|[ivxlc]{1,6})\s*[.:)\-–—]?\s+\S",
+    re.IGNORECASE,
+)
+
+
+def _caption_for_image(bbox, words) -> Optional[str]:
+    """The "Figure N. ..." caption printed directly under (or over) an image.
+
+    Evidence only: a line that STARTS with a figure label, whose baseline is
+    within ~2.5 line-heights of the image's bottom (or top) edge, and which
+    overlaps the image horizontally. Up to three contiguous lines are taken
+    when the caption wraps. Anything else — body text, a heading, a caption
+    two paragraphs away — is not a caption, and nothing is returned.
+    """
+    if not bbox or not words:
+        return None
+    from app.pdf.text_geometry import _reading_sorted
+
+    x0, y0, x1, y1 = bbox
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    lines: List[List[Any]] = []
+    for w in _reading_sorted(words):
+        if lines and abs(lines[-1][0].y - w.y) <= max(2.0, 0.3 * w.size):
+            lines[-1].append(w)
+        else:
+            lines.append([w])
+
+    def overlaps(line) -> bool:
+        lx0 = min(w.x0 for w in line)
+        lx1 = max(w.x1 for w in line)
+        return lx1 > x0 + 1 and lx0 < x1 - 1
+
+    best = None
+    for i, line in enumerate(lines):
+        text = " ".join(w.text for w in line).strip()
+        if not _FIGURE_CAPTION_RE.match(text) or not overlaps(line):
+            continue
+        size = max(w.size for w in line)
+        y = line[0].y
+        below = y < y0 and (y0 - y) <= 2.5 * size + 2
+        above = y > y1 and (y - y1) <= 2.0 * size + 2
+        if not (below or above):
+            continue
+        parts = [text]
+        # Wrapped continuation lines: same left edge, one line-pitch down.
+        prev = line
+        for nxt in lines[i + 1 : i + 3]:
+            if abs(min(w.x0 for w in nxt) - min(w.x0 for w in line)) > 6:
+                break
+            if not (0 < prev[0].y - nxt[0].y <= 1.6 * size):
+                break
+            if _FIGURE_CAPTION_RE.match(" ".join(w.text for w in nxt)):
+                break
+            parts.append(" ".join(w.text for w in nxt).strip())
+            prev = nxt
+        cand = re.sub(r"\s+", " ", " ".join(parts)).strip()
+        dist = (y0 - y) if below else (y - y1)
+        if best is None or dist < best[0]:
+            best = (dist, cand)
+    if best is None:
+        return None
+    from app.pdf.text_decode import is_readable_text
+
+    cap = best[1]
+    if len(cap) > 400 or not is_readable_text(cap):
+        return None
+    return cap
+
+
+def _paragraph_boxes(
+    paragraphs: List[str], words, max_skip: Optional[int] = 400
+) -> List[Optional[Tuple[float, float, float, float]]]:
+    """Locate each extracted paragraph on the page (union of its word boxes).
+
+    ``extract_text`` and the positioned words come from the same content
+    stream in the same order, so a whitespace-insensitive sequential match
+    finds each paragraph; one that cannot be matched gets None (no location
+    rather than a wrong one).
+    """
+    from app.pdf.text_geometry import union_bbox, word_bbox
+
+    out: List[Optional[Tuple[float, float, float, float]]] = []
+    if not words:
+        return [None] * len(paragraphs)
+    stream = []
+    owner: List[int] = []
+    for wi, w in enumerate(words):
+        c = _compact(w.text)
+        stream.append(c)
+        owner.extend([wi] * len(c))
+    flat = "".join(stream)
+    cursor = 0
+    for para in paragraphs:
+        needle = _compact(para)
+        if not needle:
+            out.append(None)
+            continue
+        at = flat.find(needle, cursor)
+        if at < 0 or (max_skip is not None and at - cursor > max_skip):
+            out.append(None)
+            continue
+        idxs = sorted(set(owner[at : at + len(needle)]))
+        out.append(union_bbox(word_bbox(words[i]) for i in idxs))
+        cursor = at + len(needle)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -626,19 +1151,47 @@ class PDFParser:
         document_id = derive_document_id(path)
         reader = PdfReader(str(path))
 
+        # Encryption. pypdf silently opens an owner-password-only PDF (empty
+        # user password); a PDF that needs a password to OPEN cannot be read at
+        # all, and used to surface as "invalid, uncorrupted PDF" — say what it
+        # is instead.
+        encrypted = False
+        try:
+            encrypted = bool(reader.is_encrypted)
+        except Exception:
+            encrypted = False
+        if encrypted:
+            try:
+                from pypdf import PasswordType
+
+                opened = reader.decrypt("")
+            except Exception:
+                opened = None
+            if not opened or opened == PasswordType.NOT_DECRYPTED:
+                raise PdfPasswordProtectedError("pdf requires a user password")
+
         title = _document_title(reader)
         language = _document_language(reader)
 
         properties: Dict[str, Any] = {}
         if title:
             properties["title"] = title
-        ff_total, ff_unlabeled, ff_derivable = _form_field_label_counts(reader)
+        if encrypted:
+            properties["pdf_encrypted"] = True
+        field_locations: List[Dict[str, Any]] = []
+        ff_total, ff_unlabeled, ff_derivable = _form_field_label_counts(reader, field_locations)
         if ff_total:
             properties["form_fields_total"] = ff_total
             properties["form_fields_unlabeled"] = ff_unlabeled
-            # Unlabeled fields whose /T is a real label → auto-write /TU. The
-            # writer re-derives with the SAME helper so credit == what's written.
+            # Unlabeled fields with a confident label (a clean /T, or the words
+            # printed next to the field) → auto-write /TU. The writer
+            # re-derives with the SAME helpers so credit == what's written.
             properties["form_fields_derivable"] = ff_derivable
+            if field_locations:
+                # Where each unlabeled field is (page, PDF user-space bbox,
+                # origin bottom-left) — the form finding is document-level,
+                # so its locations ride on the root.
+                properties["form_fields_unlabeled_locations"] = field_locations
         # A title CANDIDATE for SetDocumentTitleExecutor: the largest-font
         # text block on page 1, when it is short and clearly larger than the
         # page's body size. The heading classifier here is text-shape only
@@ -724,33 +1277,80 @@ class PDFParser:
             root.metadata.properties["pages_truncated"] = True
             root.metadata.properties["pages_processed"] = pages_to_process
 
+        dests = _DestResolver(reader)
+        font_cache: Dict[Any, Any] = {}
+        # Small previews of undescribed images so a finding can SHOW which
+        # picture it means. Capped per document: a scan-heavy PDF must not
+        # decode hundreds of page images just to draw thumbnails.
+        _thumbnail_budget = {"left": _MAX_THUMBNAILS}
+        extraction_failed_pages: List[int] = []
+        undecodable_pages: List[int] = []
+
         for page_index in range(pages_to_process):
             page = reader.pages[page_index]
             page_label = f"page-{page_index + 1}"
+            # Page geometry for finding locations: bboxes are PDF user-space
+            # points relative to the visible page box's bottom-left corner.
+            geo = _page_geometry(page)
             section = SectionNode(
                 id=next_id(f"{page_label}-section"),
                 content=NodeContent(kind=ContentKind.TEXT, text=f"Page {page_index + 1}"),
-                metadata=_node_metadata(page_index=page_index + 1),
+                metadata=_node_metadata(page_index=page_index + 1, page_size=geo.get("page_size")),
                 children=[],
                 accessibility_flags=[],
             )
+            _spans_cache: Dict[str, Any] = {}
+
+            def _words():
+                if "w" not in _spans_cache:
+                    from app.pdf.text_geometry import all_words, page_spans
+
+                    spans = page_spans(page, reader)
+                    _spans_cache["w"] = all_words(spans) if spans is not None else None
+                return _spans_cache["w"]
 
             # --- Text → headings + paragraphs -------------------------------
+            extract_failed = False
             try:
                 raw_text = page.extract_text() or ""
             except Exception:
+                # A decode failure is NOT "no text". pypdf 4.2 raises on some
+                # producers' ToUnicode CMaps (MuPDF's 5-hex-digit bfrange
+                # destinations); treating that as an empty page hid
+                # PDF_UNTAGGED and reported a broken document as nearly clean.
                 raw_text = ""
+                extract_failed = True
             page_text_chars = len((raw_text or "").strip())
+            if extract_failed or _page_uses_composite_font(page):
+                op_chars, undecodable_share = _text_op_census(reader, page, font_cache)
+            else:
+                op_chars, undecodable_share = 0, 0.0
+            if extract_failed and op_chars > 0:
+                extraction_failed_pages.append(page_index + 1)
+                page_text_chars = op_chars
+            elif undecodable_share >= 0.5 and op_chars > 0:
+                # Composite fonts without a ToUnicode map: extract_text
+                # "succeeds" into glyph-id nonsense. Count the text (it exists
+                # and needs structure) but do not analyse the nonsense.
+                undecodable_pages.append(page_index + 1)
+                raw_text = ""
+                page_text_chars = max(page_text_chars, op_chars)
             total_text_chars += page_text_chars
-            for para_index, paragraph in enumerate(_split_paragraphs(raw_text), start=1):
+            paragraphs = _split_paragraphs(raw_text)
+            words = _words() if paragraphs else None
+            boxes = _paragraph_boxes(paragraphs, words) if words else [None] * len(paragraphs)
+            for para_index, paragraph in enumerate(paragraphs, start=1):
                 heading_level = None if use_tag_headings else _classify_paragraph(paragraph)
+                bbox = _rel_box(boxes[para_index - 1], geo)
                 if heading_level is not None:
                     section.children.append(
                         HeadingNode(
                             id=next_id(f"{page_label}-h{para_index}"),
                             level=heading_level,
                             content=NodeContent(kind=ContentKind.TEXT, text=paragraph),
-                            metadata=_node_metadata(page_index=page_index + 1),
+                            metadata=_node_metadata(
+                                page_index=page_index + 1, bbox=bbox, page_size=geo.get("page_size")
+                            ),
                             children=[],
                             accessibility_flags=[],
                         )
@@ -760,7 +1360,9 @@ class PDFParser:
                         ParagraphNode(
                             id=next_id(f"{page_label}-p{para_index}"),
                             content=NodeContent(kind=ContentKind.TEXT, text=paragraph),
-                            metadata=_node_metadata(page_index=page_index + 1),
+                            metadata=_node_metadata(
+                                page_index=page_index + 1, bbox=bbox, page_size=geo.get("page_size")
+                            ),
                             children=[],
                             accessibility_flags=[],
                         )
@@ -771,12 +1373,21 @@ class PDFParser:
                 for h_idx, h in enumerate(
                     (h for h in struct_headings if h.get("page") == page_index), start=1
                 ):
+                    htext = h.get("text") or ""
+                    hbox = None
+                    if htext.strip():
+                        ws = _words()
+                        if ws:
+                            hbox = _rel_box(_paragraph_boxes([htext], ws, max_skip=None)[0], geo)
                     section.children.append(
                         HeadingNode(
                             id=next_id(f"{page_label}-th{h_idx}"),
                             level=max(1, min(6, int(h.get("level") or 1))),
-                            content=NodeContent(kind=ContentKind.TEXT, text=h.get("text") or ""),
-                            metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
+                            content=NodeContent(kind=ContentKind.TEXT, text=htext),
+                            metadata=_node_metadata(
+                                page_index=page_index + 1, from_tags=True, bbox=hbox,
+                                page_size=geo.get("page_size"),
+                            ),
                             children=[],
                             accessibility_flags=[],
                         )
@@ -814,7 +1425,9 @@ class PDFParser:
                         TableNode(
                             id=next_id(f"{page_label}-ttable"),
                             content=NodeContent(kind=ContentKind.NONE),
-                            metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
+                            metadata=_node_metadata(
+                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size")
+                            ),
                             children=rows,
                             accessibility_flags=[],
                         )
@@ -851,7 +1464,9 @@ class PDFParser:
                         ListNode(
                             id=next_id(f"{page_label}-tlist"),
                             content=NodeContent(kind=ContentKind.NONE),
-                            metadata=_node_metadata(page_index=page_index + 1, from_tags=True),
+                            metadata=_node_metadata(
+                                page_index=page_index + 1, from_tags=True, page_size=geo.get("page_size")
+                            ),
                             children=kid_nodes,
                             accessibility_flags=[],
                         )
@@ -859,7 +1474,14 @@ class PDFParser:
 
             # --- Images ------------------------------------------------------
             page_image_count = 0
-            for image_idx, (name, xobject) in enumerate(_iter_image_xobjects(page, reader), start=1):
+            page_images = _iter_image_xobjects(page, reader)
+            placements: Dict[str, Tuple[float, float, float, float]] = {}
+            if page_images:
+                try:
+                    placements = _image_placements(ContentStream(page.get_contents(), reader).operations)
+                except Exception:
+                    placements = {}
+            for image_idx, (name, xobject) in enumerate(page_images, start=1):
                 page_image_count += 1
                 alt_text, decorative = _alt_for_xobject(xobject)
                 if alt_text is None and not decorative:
@@ -877,6 +1499,27 @@ class PDFParser:
                     image_b64, image_mime = _extract_image_bytes(xobject)
                 else:
                     image_b64, image_mime = None, None
+                raw_box = placements.get(str(name).lstrip("/"))
+                caption = None
+                if raw_box is not None and not alt_text and not decorative:
+                    ws = _words()
+                    caption = _caption_for_image(raw_box, ws) if ws else None
+                extra: Dict[str, Any] = {
+                    "bbox": _rel_box(raw_box, geo),
+                    "page_size": geo.get("page_size"),
+                }
+                if caption:
+                    # The figure's own printed caption — authored words on the
+                    # page, next to the image. The alt-text step reads
+                    # properties["caption"], exactly as it does for a DOCX
+                    # Caption paragraph or an HTML <figcaption>.
+                    extra["caption"] = caption
+                    extra["caption_source"] = "figure_label"
+                if not alt_text and not decorative and _thumbnail_budget["left"] > 0:
+                    thumb = _image_thumbnail(xobject)
+                    if thumb:
+                        _thumbnail_budget["left"] -= 1
+                        extra["thumbnail"] = thumb
                 section.children.append(
                     _build_image_node(
                         node_id=next_id(f"{page_label}-img{image_idx}"),
@@ -886,6 +1529,7 @@ class PDFParser:
                         xobject_name=name,
                         image_b64=image_b64,
                         image_mime=image_mime,
+                        extra=extra,
                     )
                 )
             # A page with image content but essentially no extractable text is
@@ -895,14 +1539,49 @@ class PDFParser:
                 image_only_pages += 1
 
             # --- Links -------------------------------------------------------
-            for link_idx, link in enumerate(_link_annotations(page), start=1):
-                contents = link["contents"] or link["target"] or "(link)"
+            # The link's name is the words PRINTED under its rectangle — what a
+            # sighted reader sees and what the tagger nests in /Link. Then the
+            # author's /Contents. An external URI is a last resort (it is what
+            # AT falls back to, and the analyzer rightly flags it); an internal
+            # "#page-N" target is never a name.
+            for link_idx, link in enumerate(_link_annotations(page, dests), start=1):
+                visible = None
+                if link.get("rect") is not None:
+                    ws = _words()
+                    if ws:
+                        from app.pdf.text_geometry import text_in_rect
+
+                        visible = text_in_rect(ws, link["rect"])
+                target = link["target"] or ""
+                if visible:
+                    text, source = visible, "page"
+                elif link["contents"]:
+                    text, source = link["contents"], "contents"
+                elif target and not target.startswith("#"):
+                    text, source = target, "uri"
+                else:
+                    text, source = "", "none"
+                link_meta = _node_metadata(
+                    page_index=page_index + 1,
+                    bbox=_rel_box(link.get("rect"), geo),
+                    page_size=geo.get("page_size"),
+                    link_text_source=source,
+                )
+                if not text:
+                    # Nothing printed under it, no /Contents, no URI: the link
+                    # has no accessible name at all (LINK_NAME_MISSING), which
+                    # is what it is — not "(link)" text passed off as a name.
+                    link_meta.properties["__link_nameless"] = True
                 section.children.append(
                     LinkNode(
                         id=next_id(f"{page_label}-link{link_idx}"),
-                        target=link["target"] or None,
-                        content=NodeContent(kind=ContentKind.TEXT, text=contents or "link"),
-                        metadata=_node_metadata(page_index=page_index + 1),
+                        target=target or None,
+                        content=(
+                            NodeContent(kind=ContentKind.TEXT, text=text)
+                            if text
+                            else NodeContent(kind=ContentKind.NONE)
+                        ),
+                        metadata=link_meta,
                         children=[],
                         accessibility_flags=[],
                     )
@@ -914,6 +1593,13 @@ class PDFParser:
         root.metadata.properties["page_count"] = page_count
         root.metadata.properties["total_text_chars"] = total_text_chars
         root.metadata.properties["image_only_pages"] = image_only_pages
+        if extraction_failed_pages:
+            # Pages whose text exists (show-text operators paint it) but could
+            # not be decoded to characters. Disclosed, and nothing derived from
+            # those pages' bytes — a title, a header row — is claimed.
+            root.metadata.properties["text_extraction_failed_pages"] = extraction_failed_pages[:200]
+        if undecodable_pages:
+            root.metadata.properties["text_undecodable_pages"] = undecodable_pages[:200]
 
         # Is this a TAGGED PDF (has a structure tree)? Untagged PDFs are the
         # single most common real-world accessibility failure — and the thing
@@ -943,6 +1629,135 @@ class PDFParser:
         )
 
 
+_MAX_THUMBNAILS = 30
+_THUMB_MAX_W = 240
+# Never decode an image bigger than this just to preview it (pixels).
+_THUMB_MAX_SOURCE_PIXELS = 4_000_000  # full-page 300-dpi scans (~8.4 MP) are skipped
+
+
+def _page_geometry(page: Any) -> Dict[str, Any]:
+    """The visible page box: ``{"page_size": [w, h], "origin": (x, y)}``.
+
+    Uses the CropBox (what a viewer shows; pypdf defaults it to the
+    MediaBox). Finding bboxes are reported relative to its bottom-left corner
+    so ``[0, 0, w, h]`` is always the whole visible page.
+    """
+    try:
+        box = page.cropbox
+        x0, y0 = float(box.left), float(box.bottom)
+        w, h = float(box.width), float(box.height)
+        if w <= 0 or h <= 0:
+            return {}
+        out: Dict[str, Any] = {"page_size": [round(w, 2), round(h, 2)], "origin": (x0, y0)}
+        try:
+            rot = int(page.get("/Rotate", 0) or 0) % 360
+        except Exception:
+            rot = 0
+        if rot:
+            out["rotate"] = rot
+        return out
+    except Exception:
+        return {}
+
+
+def _rel_box(box: Any, geo: Dict[str, Any]) -> Optional[List[float]]:
+    """``box`` (user space) relative to the page box origin, clamped to it."""
+    if not box or not geo or "page_size" not in geo:
+        return None
+    try:
+        ox, oy = geo.get("origin", (0.0, 0.0))
+        w, h = geo["page_size"]
+        x0, y0, x1, y1 = (float(v) for v in list(box)[:4])
+        x0, x1 = sorted((x0 - ox, x1 - ox))
+        y0, y1 = sorted((y0 - oy, y1 - oy))
+        x0, y0 = max(0.0, x0), max(0.0, y0)
+        x1, y1 = min(float(w), x1), min(float(h), y1)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return [round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1)]
+    except Exception:
+        return None
+
+
+def _page_uses_composite_font(page: Any) -> bool:
+    """Does the page's font resource dict hold a /Type0 font? (cheap check)"""
+    from app.pdf.text_decode import page_fonts
+
+    try:
+        fonts = page_fonts(page)
+        if not isinstance(fonts, DictionaryObject):
+            return False
+        return any(
+            str((_resolve(ref) or {}).get("/Subtype") or "") == "/Type0" for _n, ref in fonts.items()
+        )
+    except Exception:
+        return True  # unsure: take the careful path
+
+
+def _text_op_census(reader: Any, page: Any, font_cache: Dict[Any, Any]) -> Tuple[int, float]:
+    """``(chars, undecodable_share)`` from the page's show-text operators.
+
+    Independent of ``extract_text``: counts what the content stream PAINTS
+    (about one character per byte for simple fonts, per 2 bytes for
+    composite fonts), and what share of it is in a composite font we cannot
+    map to Unicode.
+    """
+    from app.pdf.ua_tagger import _block_weight, _iter_text_blocks, _page_decoder
+
+    try:
+        ops = ContentStream(page.get_contents(), reader).operations
+    except Exception:
+        return 0, 0.0
+    total = 0
+    bad = 0
+    for b in _iter_text_blocks(ops, _page_decoder(reader, page, font_cache)):
+        w = _block_weight(b)
+        total += w
+        if getattr(b, "undecodable", False):
+            bad += w
+    return total, (bad / total if total else 0.0)
+
+
+def _image_thumbnail(xobject: Any) -> Optional[str]:
+    """A small PNG preview (<= 240 px wide) as a data URI, or None.
+
+    Decoded with pypdf's own image support (Pillow). JPEGs are decoded at a
+    reduced scale; anything huge, exotic or failing is simply skipped — a
+    missing preview is fine, a stalled request is not.
+    """
+    try:
+        w = int(xobject.get("/Width") or 0)
+        h = int(xobject.get("/Height") or 0)
+        if w <= 0 or h <= 0 or w * h > _THUMB_MAX_SOURCE_PIXELS:
+            return None
+        from io import BytesIO
+
+        from pypdf.filters import _xobj_to_image
+
+        _ext, _img_bytes, img = _xobj_to_image(xobject)
+        if img is None:
+            return None
+        if img.mode not in ("RGB", "L", "RGBA", "LA"):
+            img = img.convert("RGB")
+        # Keep each preview small: a report can carry dozens of them.
+        for max_w in (_THUMB_MAX_W, 160):
+            t = img
+            if t.width > max_w:
+                ratio = max_w / float(t.width)
+                t = t.resize((max_w, max(1, int(t.height * ratio))))
+            if t.height > 2 * max_w:
+                ratio = (2 * max_w) / float(t.height)
+                t = t.resize((max(1, int(t.width * ratio)), 2 * max_w))
+            buf = BytesIO()
+            t.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+            if len(data) <= 60_000:
+                return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+        return None
+    except Exception:
+        return None
+
+
 def _build_image_node(
     *,
     node_id: str,
@@ -952,11 +1767,15 @@ def _build_image_node(
     xobject_name: str,
     image_b64: Optional[str] = None,
     image_mime: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> ImageNode:
     properties: Dict[str, Any] = {"xobject": xobject_name}
     if image_b64:
         properties["image_b64"] = image_b64
         properties["image_mime"] = image_mime or "image/png"
+    for k, v in (extra or {}).items():
+        if v is not None:
+            properties[k] = v
     metadata = NodeMetadata(
         page=page,
         source_format="pdf",
