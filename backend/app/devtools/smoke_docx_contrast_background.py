@@ -31,6 +31,7 @@ write -> re-parse):
   14. a shape behind the body text on a page the file does not name: body
       text not measured
   15. Word's page WATERMARK does not switch measuring off
+  16. ... but a dark shape that only borrows the watermark's name does
 
 Usage:
     python -m app.devtools.smoke_docx_contrast_background
@@ -228,16 +229,20 @@ def build_body_panel(path: Path) -> Path:
     return _save(doc, path)
 
 
-def build_watermark(path: Path) -> Path:
-    """Case 15: Word's VML DRAFT watermark in the header."""
+def build_watermark(path: Path, real: bool = True) -> Path:
+    """Case 15: Word's VML DRAFT watermark in the header. ``real=False``: a
+    dark full-page rectangle that merely carries the watermark's name."""
     doc = Document()
     hdr = doc.sections[0].header
+    body = ('<v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt" string="DRAFT"/>'
+            if real else "")
+    fill = "silver" if real else f"#{NAVY}"
     _append_run_xml(hdr.paragraphs[0], (
         f'<w:r {_NS}><w:pict><v:shape id="PowerPlusWaterMarkObject357831064" o:spid="_x0000_s2049" '
         'type="#_x0000_t136" style="position:absolute;margin-left:0;margin-top:0;width:412pt;height:164pt;'
         'z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;'
-        'mso-position-vertical:center;mso-position-vertical-relative:margin" fillcolor="silver" stroked="f">'
-        '<v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt" string="DRAFT"/></v:shape></w:pict></w:r>'
+        f'mso-position-vertical:center;mso-position-vertical-relative:margin" fillcolor="{fill}" stroked="f">'
+        f'{body}</v:shape></w:pict></w:r>'
     ))
     _run(doc.add_paragraph(), "Grey text under a watermark", "999999")
     return _save(doc, path)
@@ -412,6 +417,11 @@ def main() -> int:
     wm = next((n for n in _nodes(res.tree) if (n.content.text or "") == "Grey text under a watermark"), None)
     check("15. Word's page watermark does not switch measuring off", _flagged(wm),
           str(wm and wm.metadata.properties))
+    res = _analyze(build_watermark(tmp / "fake_watermark.docx", real=False))
+    fake = next((n for n in _nodes(res.tree) if (n.content.text or "") == "Grey text under a watermark"), None)
+    check("16. a dark panel that only borrows the watermark's name still counts as behind the text",
+          fake is not None and "explicit_text_colors" not in (fake.metadata.properties or {}),
+          str(fake and fake.metadata.properties))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

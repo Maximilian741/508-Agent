@@ -807,11 +807,24 @@ def _behind_text_shapes(root_el) -> List[Any]:
             continue
         if not _Z_BEHIND_RE.search(shape.get("style") or ""):
             continue
-        ident = f"{shape.get('id') or ''} {shape.get(f'{_O_NS}spid') or ''}".lower()
-        if "watermark" in ident:
+        if _is_word_watermark(shape):
             continue
         out.append(shape)
     return out
+
+
+def _is_word_watermark(shape) -> bool:
+    """Word's own page watermark (Design > Watermark): a pale WordArt text
+    ("DRAFT") or a washed-out picture, centred on the page. Only those two
+    exact shapes are excused — a dark picture watermark without washout, or
+    any other shape that merely carries the name, still counts as behind."""
+    ident = shape.get("id") or ""
+    if ident.startswith("PowerPlusWaterMarkObject"):
+        return shape.find(f"{_VML_NS}textpath") is not None
+    if ident.startswith("WordPictureWatermark"):
+        img = shape.find(f"{_VML_NS}imagedata")
+        return img is not None and bool(img.get("gain")) and bool(img.get("blacklevel"))
+    return False
 
 
 class _Backgrounds:
