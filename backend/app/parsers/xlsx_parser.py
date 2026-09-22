@@ -434,7 +434,10 @@ _DEFAULT_SHEET_WORDS = (
 )
 _DEFAULT_CHART_WORDS = ("chart", "graph", "diagramm", "gráfico", "grafico", "graphique", "wykres", "grafiek")
 _DEFAULT_SHEET_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(w) for w in _DEFAULT_SHEET_WORDS + _DEFAULT_CHART_WORDS) + r")\s*\d+$",
+    r"^(?:" + "|".join(re.escape(w) for w in _DEFAULT_SHEET_WORDS + _DEFAULT_CHART_WORDS) + r")\s*\d+$"
+    # openpyxl (and so most Python-generated reports) names the first sheet
+    # plain "Sheet" and a chart sheet plain "Chart": defaults with no number.
+    r"|^(?:sheet|worksheet|chart)$",
     re.IGNORECASE,
 )
 

@@ -502,6 +502,12 @@ def main() -> int:  # noqa: PLR0915
     check("title: ...and so does the label right above the data", title_of("labelled.xlsx", labelled) == "Department budget 2025",
           repr(title_of("labelled.xlsx", labelled)))
 
+    # ---- 7. default tab names, including openpyxl's number-less ones -------
+    defaults = {"Sheet1": True, "Sheet": True, "Chart": True, "Chart2": True, "Feuil3": True, "Tabelle1": True,
+                "Summary": False, "Sheets": False, "List": False, "Q3 Sheet": False, "Sheet 2 notes": False}
+    wrong = {n: want for n, want in defaults.items() if xlsx_parser.is_default_sheet_name(n) != want}
+    check("tabs: default names recognised (openpyxl's 'Sheet'/'Chart' too), real names left alone", not wrong, str(wrong))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 
