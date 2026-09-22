@@ -10,7 +10,8 @@
     "build:web": "expo export -p web --output-dir dist",
     "typecheck": "tsc --noEmit",
     "check:contrast": "node scripts/check-contrast.mjs",
-    "check:design": "node scripts/check-design.mjs"
+    "check:design": "node scripts/check-design.mjs",
+    "check:fix-plan": "node scripts/check-fix-plan.mjs"
   },
   "dependencies": {
     "@expo/vector-icons": "~15.0.3",

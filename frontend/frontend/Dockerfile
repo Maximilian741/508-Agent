@@ -40,6 +40,9 @@ RUN node scripts/check-contrast.mjs
 # Fails the build if pixel art spreads beyond the logo, a third-party or
 # pixel font sneaks in, or the first-visit tour starts auto-opening again.
 RUN node scripts/check-design.mjs
+# Fails the build if the one-step fixer would promise, price or report a fix
+# differently from the response, or show an error as raw JSON.
+RUN node scripts/check-fix-plan.mjs
 # Routing (/pricing -> pricing.html), security headers and a CSP whose
 # inline-script hashes come from this exact bundle.
 RUN node scripts/render-nginx-conf.mjs dist /app/nginx.conf

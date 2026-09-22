@@ -189,6 +189,12 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
       const head = resultHeadline(p);
       setStatus(`${head.title} ${head.body}`);
       focusSoon(headingRef);
+      // The button's label quotes the balance: make it the current one.
+      if (loadToken()) {
+        void refreshAccount().then((a) => {
+          if (a && id === runId.current) setAccount(a);
+        });
+      }
       if (opts.thenFix && p.auto.length > 0) void latest.current.startFix(f, r);
     } catch (e) {
       if (id !== runId.current) return;

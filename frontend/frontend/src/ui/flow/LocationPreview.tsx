@@ -381,8 +381,8 @@ function PropertiesCard({
         <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>File properties</Text>
       ) : null}
       {shown.map((r) => (
-        <View key={r.k} style={styles.propRow}>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted, minWidth: 92 }]}>{r.k}</Text>
+        <View key={r.k} style={compact ? { gap: 2 } : styles.propRow}>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted, minWidth: compact ? 0 : 92 }]}>{r.k}</Text>
           <Text
             style={[
               theme.typography.body,
