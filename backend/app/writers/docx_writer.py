@@ -396,7 +396,7 @@ def _apply_document_metadata(
 
     core = doc.core_properties
 
-    language = (root.metadata.language or "").strip()
+    language = _xml_safe((root.metadata.language or "").strip()).strip()
     # Write the language only when it CHANGED from what the source already
     # declares — dc:language, else the styles.xml w:lang default, the parser's
     # own order. Re-asserting it copied a w:lang-derived "en-US" into
@@ -437,7 +437,7 @@ def _apply_document_metadata(
             )
 
     title = (root.metadata.properties.get("title") if root.metadata.properties else None) or ""
-    title = title.strip()
+    title = _xml_safe(str(title).strip()).strip()
     if title:
         try:
             core.title = title
@@ -576,7 +576,7 @@ def _apply_image(
         )
         return
 
-    alt_text = (image.alt_text or "").strip()
+    alt_text = _xml_safe((image.alt_text or "").strip()).strip()
     if not alt_text:
         # Nothing to write — leave as-is and record the skip so callers can
         # see we deliberately did not blank an existing description.
@@ -610,7 +610,7 @@ def _apply_link(
     if getattr(hyperlink, "tag", None) not in (qn("w:hyperlink"), qn("w:fldSimple")):
         skipped.append({"target_id": link.id, "reason": "hyperlink_not_found_in_source"})
         return
-    new_text = (link.content.text or "").strip() if link.content else ""
+    new_text = _xml_safe((link.content.text or "").strip()).strip() if link.content else ""
     if not new_text:
         skipped.append({"target_id": link.id, "reason": "empty_link_text"})
         return
@@ -1062,6 +1062,12 @@ def _apply_table_cell(
         return  # nothing to do — we only promote rows for header cells
     if reference is not None and reference.cell_type == TableCellType.HEADER:
         return  # already a header in the source — nothing was approved here
+    if (cell.metadata.properties or {}).get("synthesized") if cell.metadata else False:
+        # A cell of a header row the executor SYNTHESIZED: it has no source
+        # element by design, and _apply_synthetic_table_header inserts the
+        # whole row. Reporting each such cell as "not found" was noise in the
+        # skipped list the customer sees.
+        return
 
     pair = table_cells_by_id.get(cell.id)
     if not (isinstance(pair, tuple) and len(pair) == 2):
@@ -1142,17 +1148,21 @@ def _apply_synthetic_table_header(
 
 
 def _xml_safe(text: str) -> str:
-    """Drop characters XML 1.0 forbids (NUL + C0 controls except tab/CR/LF).
+    """Drop characters XML 1.0 forbids (NUL + C0 controls except tab/CR/LF,
+    lone surrogates, U+FFFE / U+FFFF).
 
     lxml raises ``ValueError: All strings must be XML compatible`` when a w:t
-    ``.text`` contains them — an AI-provided caption could carry a stray control
-    byte, which would otherwise abort the whole write and lose every fix.
+    ``.text`` or an attribute contains them — an AI-provided caption, alt text,
+    link text or title could carry a stray control byte, which aborted the
+    whole write: the customer got a 422 and no file for one bad character.
     """
     if not text:
         return text
     return "".join(
         ch for ch in text
-        if ch in ("\t", "\n", "\r") or ord(ch) >= 0x20
+        if (ch in ("\t", "\n", "\r") or ord(ch) >= 0x20)
+        and not (0xD800 <= ord(ch) <= 0xDFFF)
+        and ch not in ("￾", "￿")
     )
 
 
@@ -1280,12 +1290,17 @@ def _insert_docx_header_row(docx_table, texts: List[str]) -> None:
         tc.append(para)
         tr.append(tc)
 
-    # Insert before the first existing row (after <w:tblPr>/<w:tblGrid>).
-    first_tr = tbl.find(qn("w:tr"))
-    if first_tr is not None:
-        first_tr.addprevious(tr)
+    # The new row goes first: right after <w:tblGrid> (CT_Tbl is tblPr,
+    # tblGrid, then the rows). Placing it before the first DIRECT <w:tr> put
+    # it at the very END of a table whose rows all live in a repeating-section
+    # content control (<w:sdt>), i.e. a "header" under the last data row.
+    anchor = tbl.find(qn("w:tblGrid"))
+    if anchor is None:
+        anchor = tbl.find(qn("w:tblPr"))
+    if anchor is not None:
+        anchor.addnext(tr)
     else:
-        tbl.append(tr)
+        tbl.insert(0, tr)
 
 
 # ---------------------------------------------------------------------------

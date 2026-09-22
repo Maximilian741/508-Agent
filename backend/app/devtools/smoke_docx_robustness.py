@@ -23,6 +23,10 @@ tracked changes, nested tables, text boxes, 500 pages) showed going wrong:
     style are left alone when only the title is fixed
   * the output gate: if the saved file does not re-open, the SOURCE bytes are
     restored, nothing is reported applied, and the pipeline counts 0
+  * a control byte in generated alt text, link text or a title is dropped —
+    it used to abort the whole write (422, no file for the customer)
+  * a synthesized header row goes on TOP of a table whose rows all live in a
+    repeating-section content control (it was appended after the last row)
 
 Usage:
     python -m app.devtools.smoke_docx_robustness
@@ -53,13 +57,19 @@ import app.writers.docx_writer as docx_writer  # noqa: E402
 from app.analyzers.registry import run_analyzers  # noqa: E402
 from app.api.pipeline import _count_persisted_fixes  # noqa: E402
 from app.models.accessibility import (  # noqa: E402
+    ContentKind,
     HeadingNode,
     ImageNode,
     LinkNode,
     ListItemNode,
+    NodeContent,
+    NodeMetadata,
     ParagraphNode,
+    TableCellNode,
     TableCellType,
+    TableHeaderScope,
     TableNode,
+    TableRowNode,
     iter_reading_order,
 )
 from app.parsers import parse_to_tree  # noqa: E402
@@ -426,6 +436,100 @@ def main() -> int:
             data = zin.read(n)
             zout.writestr(n, data[:-20] if n == "word/document.xml" else data)
     check("gate: the real check rejects a truncated document.xml", real(bad) is not None)
+
+    # ===== 8. One bad character does not cost the customer the whole file ====
+    # A control byte in generated alt text / link text / title made lxml raise
+    # mid-write; /remediate answered 422 and the customer got NO file for one
+    # stray character. It is dropped and every fix still lands.
+    d = Document()
+    d.add_heading("Control characters", 1)
+    d.add_paragraph("Body text long enough to be prose next to the picture below.")
+    d.add_picture(_png(8), width=Inches(1))
+    lp = d.add_paragraph("Read the report ")
+    lrid = d.part.relate_to("https://example.gov/report",
+                            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                            is_external=True)
+    hl = OxmlElement("w:hyperlink"); hl.set(qn("r:id"), lrid)
+    hr = OxmlElement("w:r"); ht = OxmlElement("w:t"); ht.text = "here"; hr.append(ht); hl.append(hr)
+    lp._p.append(hl)
+    src = tmp / "ctrl.docx"
+    d.save(str(src))
+    res = parse_to_tree(str(src))
+    for n in iter_reading_order(res.tree.root):
+        if isinstance(n, ImageNode):
+            n.alt_text = "Bar chart of revenue\x01 by quarter\x0b"
+        if isinstance(n, LinkNode):
+            n.content.text = "Annual report\x07 2026"
+    res.tree.root.metadata.properties["title"] = "Budget\x0c Summary\ud800"
+    out = tmp / "ctrl_fixed.docx"
+    try:
+        wr = write_remediated_docx(src, res.tree, out)
+        crashed = None
+    except Exception as exc:  # the regression
+        wr, crashed = {"applied": [], "skipped": []}, repr(exc)
+    check("control chars: the write completes", crashed is None, str(crashed))
+    kinds = sorted(a.get("kind") for a in wr["applied"])
+    check("control chars: alt, link and title all applied", kinds == ["document_title", "image_alt_text", "link_text"],
+          str(wr))
+    if crashed is None:
+        od = Document(str(out))
+        with zipfile.ZipFile(out) as z:
+            droot = etree.fromstring(z.read("word/document.xml"))
+        descr = [dp.get("descr") for dp in droot.iter("{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}docPr")]
+        ltext = ["".join(t.text or "" for t in h.iter(f"{W}t")) for h in droot.iter(f"{W}hyperlink")]
+        check("control chars: stripped, words kept",
+              descr == ["Bar chart of revenue by quarter"] and ltext == ["Annual report 2026"]
+              and od.core_properties.title == "Budget Summary", str((descr, ltext, od.core_properties.title)))
+
+    # ===== 9. A synthesized header row goes on TOP, even when rows are in an SDT
+    d = Document()
+    d.add_heading("Repeating section", 1)
+    body = d.element.body
+    tbl = parse_xml(
+        f'<w:tbl {nsdecls("w")}><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>'
+        '<w:sdt><w:sdtPr><w:alias w:val="Rows"/></w:sdtPr><w:sdtContent>'
+        + "".join(
+            f'<w:tr><w:tc><w:p><w:r><w:t>{a}</w:t></w:r></w:p></w:tc>'
+            f'<w:tc><w:p><w:r><w:t>{b}</w:t></w:r></w:p></w:tc></w:tr>'
+            for a, b in (("North", "120"), ("South", "95"), ("East", "140"))
+        )
+        + "</w:sdtContent></w:sdt></w:tbl>"
+    )
+    body.insert(len(body) - 1, tbl)
+    src = tmp / "sdt_rows.docx"
+    d.save(str(src))
+    res = parse_to_tree(str(src))
+    tnode = _nodes(res.tree, TableNode)[0]
+    synth = TableRowNode(
+        id=f"{tnode.id}-thead", content=NodeContent(kind=ContentKind.NONE),
+        metadata=NodeMetadata(properties={"synthesized": True}), accessibility_flags=[],
+        children=[
+            TableCellNode(id=f"{tnode.id}-th-{i}", cell_type=TableCellType.HEADER,
+                          header_scope=TableHeaderScope.COLUMN,
+                          content=NodeContent(kind=ContentKind.TEXT, text=t),
+                          metadata=NodeMetadata(properties={"synthesized": True}),
+                          children=[], accessibility_flags=[])
+            for i, t in enumerate(("Region", "Sales"))
+        ],
+    )
+    tnode.children.insert(0, synth)
+    out = tmp / "sdt_rows_fixed.docx"
+    wr = write_remediated_docx(src, res.tree, out)
+    with zipfile.ZipFile(out) as z:
+        droot = etree.fromstring(z.read("word/document.xml"))
+    t_el = droot.find(f".//{W}body/{W}tbl")
+    order = [etree.QName(c).localname for c in t_el]
+    first_tr = t_el.find(f"{W}tr")
+    check("sdt rows: the synthesized header row is the table's FIRST row (not after the last)",
+          order[:3] == ["tblPr", "tblGrid", "tr"] and first_tr is not None
+          and first_tr.find(f"{W}trPr/{W}tblHeader") is not None, str(order))
+    check("sdt rows: synthesized cells are not reported as 'not found' noise",
+          not [s for s in wr["skipped"] if s.get("reason") == "cell_not_found_in_source"], str(wr["skipped"]))
+    res2 = parse_to_tree(str(out))
+    t2 = _nodes(res2.tree, TableNode)[0]
+    check("sdt rows: re-parse reads Region | Sales as the header row, data rows intact",
+          [c.content.text for c in t2.children[0].children] == ["Region", "Sales"] and len(t2.children) == 4,
+          str([[c.content.text for c in r.children] for r in t2.children]))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
