@@ -76,6 +76,7 @@ from app.parsers.xlsx_parser import (
     parse_xml,
     rels_part_for,
     scan_workbook,
+    xlsx_work_slot,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ class _TableEdit:
     part: str = ""
     name: str = ""
     table_id: int = 0
+    rid: str = ""
 
 
 @dataclass
@@ -122,8 +124,13 @@ class _Edits:
 
 
 def write_remediated_xlsx(source_path: Path, tree: AccessibilityTree, output_path: Path) -> Dict[str, Any]:
-    source_path = Path(source_path)
-    output_path = Path(output_path)
+    # Scanning the source again (to diff against) and rewriting the package
+    # share the parser's per-process XLSX slots: see xlsx_work_slot.
+    with xlsx_work_slot():
+        return _write_remediated_xlsx(Path(source_path), tree, Path(output_path))
+
+
+def _write_remediated_xlsx(source_path: Path, tree: AccessibilityTree, output_path: Path) -> Dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source_path, output_path)
 
@@ -348,14 +355,325 @@ def _xml_bytes(root: etree._Element) -> bytes:
 
 
 def _build_and_verify(source: Path, dest: Path, edits: _Edits, scan: WorkbookScan) -> List[str]:
-    replacements, additions = _plan_parts(source, edits, scan)
-    _rewrite_zip(source, dest, replacements, additions)
+    replacements, additions, splices = _plan_parts(source, edits, scan)
+    _rewrite_zip(source, dest, replacements, additions, splices)
     return _verify(dest, edits, source)
 
 
-def _plan_parts(source: Path, edits: _Edits, scan: WorkbookScan) -> Tuple[Dict[str, bytes], List[Tuple[str, bytes]]]:
+# ---------------------------------------------------------------------------
+# Adding <tableParts> to a sheet part without parsing it
+#
+# A sheet part can be tens of megabytes of <row>/<c> elements; building an
+# lxml tree of it just to append one element cost ~10x its size (a 4 MB
+# ledger export peaked at 950 MB). <tableParts> lives AFTER <sheetData> (only
+# <extLst> may follow it), so the part is streamed: everything up to the end
+# of <sheetData> is copied byte for byte, and only the short tail after it is
+# edited. Verification then proves the head is byte-identical to the source
+# and re-reads the tail.
+# ---------------------------------------------------------------------------
+
+_SPLICE_CHUNK = 1 << 20
+_SPLICE_KEEP = 4096                 # longer than any token searched for
+_SPLICE_MAX_PROLOG = 1 << 20        # the root tag must start within this
+_NAME = rb"[A-Za-z_][\w.\-]*"
+_ATTRS = rb"(?:\s+[^\s=<>/]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*"
+_PROLOG_ITEM_RE = re.compile(rb"\s*(?:<\?.*?\?>|<!--.*?-->|<!DOCTYPE[^>\[]*(?:\[.*?\])?\s*>)", re.S)
+_ROOT_TAG_RE = re.compile(rb"\s*(?P<tag><(?P<qname>(?:" + _NAME + rb":)?worksheet)" + _ATTRS + rb"\s*>)")
+# A tag whose name is (prefix:)sheetData, matched at the '<' before a
+# "sheetData" found with bytes.find (a regex scan of every '<' in a 60 MB
+# part was ~0.4 s; find() is ~20x faster).
+_SHEETDATA_TAG_RE = re.compile(
+    rb"<(?P<close>/?)(?:" + _NAME + rb":)?sheetData(?:\s[^<>]*?)?(?P<self>/?)>"
+)
+_OPENERS = ((b"<!--", b"-->"), (b"<![CDATA[", b"]]>"), (b"<?", b"?>"))
+_TAIL_TOKEN_RE = re.compile(
+    rb"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>"
+    rb"|<(?P<close>/?)(?P<prefix>(?:" + _NAME + rb":)?)(?P<local>" + _NAME + rb")(?P<attrs>" + _ATTRS + rb")\s*(?P<self>/?)>",
+    re.S,
+)
+_COUNT_ATTR_RE = re.compile(rb"(\scount\s*=\s*)(\"[^\"]*\"|'[^']*')")
+
+
+class _SheetSplit:
+    """The pieces of a streamed sheet part: its root start tag, how long the
+    head (everything through the end of <sheetData>) is and its digest, and
+    the tail after it."""
+
+    def __init__(self) -> None:
+        self.root_tag = b""
+        self.qname = b""
+        self.head_len = 0
+        self.head_digest = ""
+        self.tail = b""
+
+
+def _split_sheet(src, emit=None) -> _SheetSplit:
+    """Stream a sheet part from ``src``; pass the head to ``emit`` (when
+    given) as it goes, and return the split. Raises ValueError when the part
+    is not a worksheet this can find its way through."""
+    import hashlib
+
+    out = _SheetSplit()
+    digest = hashlib.sha256()
+    buf = bytearray()
+    eof = False
+
+    def more() -> bool:
+        nonlocal eof
+        chunk = src.read(_SPLICE_CHUNK)
+        if chunk:
+            buf.extend(chunk)
+            return True
+        eof = True
+        return False
+
+    def flush(n: int) -> None:
+        if n <= 0:
+            return
+        piece = bytes(buf[:n])
+        digest.update(piece)
+        out.head_len += n
+        if emit is not None:
+            emit(piece)
+        del buf[:n]
+
+    # The root start tag (after an optional BOM, the XML declaration and any
+    # comments or processing instructions).
+    while True:
+        pos = 3 if buf[:3] == b"\xef\xbb\xbf" else 0
+        while True:
+            m = _PROLOG_ITEM_RE.match(buf, pos)
+            if m is None or m.end() == pos:
+                break
+            pos = m.end()
+        root = _ROOT_TAG_RE.match(buf, pos)
+        if root is not None:
+            break
+        if eof or len(buf) > _SPLICE_MAX_PROLOG:
+            raise ValueError("the sheet part does not start with a worksheet element")
+        more()
+    out.root_tag = bytes(root.group("tag"))
+    out.qname = bytes(root.group("qname"))
+
+    # The end of <sheetData>, skipping comments, CDATA and PIs (the only
+    # places a '<' can appear that is not markup: text and attribute values
+    # cannot hold a literal '<').
+    pos = root.end()
+    closer: Optional[bytes] = None
+    end = -1
+    while True:
+        keep_from = -1          # where to cut when more data is needed
+        if closer is not None:
+            i = buf.find(closer, pos)
+            if i >= 0:
+                pos = i + len(closer)
+                closer = None
+                continue
+            keep_from = max(pos, len(buf) - len(closer) + 1)
+        else:
+            hit = buf.find(b"sheetData", pos)
+            bang = buf.find(b"<!", pos, hit if hit >= 0 else len(buf))
+            quest = buf.find(b"<?", pos, hit if hit >= 0 else len(buf))
+            special = min((x for x in (bang, quest) if x >= 0), default=-1)
+            if special >= 0:
+                opener = next((o for o in _OPENERS if buf.startswith(o[0], special)), None)
+                if opener is not None:
+                    closer = opener[1]
+                    pos = special + len(opener[0])
+                    continue
+                if len(buf) - special >= len(b"<![CDATA[") or eof:
+                    raise ValueError("unexpected markup in the sheet data")
+                keep_from = special  # a comment/CDATA opener cut at the chunk edge
+            elif hit >= 0:
+                lt = buf.rfind(b"<", max(0, hit - _SPLICE_KEEP), hit)
+                m = _SHEETDATA_TAG_RE.match(buf, lt) if lt >= pos else None
+                if m is not None and (m.group("close") or m.group("self")):
+                    end = m.end()
+                    break
+                if m is not None:
+                    pos = m.end()              # the start tag: keep going
+                    continue
+                if lt >= pos and buf.find(b">", hit) < 0 and not eof:
+                    keep_from = lt             # the tag is cut at the chunk edge
+                else:
+                    pos = hit + len(b"sheetData")  # the word in text, not a tag
+                    continue
+            else:
+                keep_from = max(pos, len(buf) - _SPLICE_KEEP)
+        if eof:
+            raise ValueError("the sheet part has no end of <sheetData>")
+        keep_from = min(keep_from, len(buf))
+        flush(keep_from)
+        pos = max(0, pos - keep_from)
+        more()
+    flush(end)
+    rest = src.read()
+    out.tail = bytes(buf) + rest
+    out.head_digest = digest.hexdigest()
+    return out
+
+
+def _root_nsmap(split: _SheetSplit) -> Dict[Optional[str], str]:
+    root = parse_xml(split.root_tag + b"</" + split.qname + b">")
+    if root.tag != f"{{{NS_MAIN}}}worksheet":
+        raise ValueError("the sheet part's root is not a SpreadsheetML worksheet")
+    return dict(root.nsmap)
+
+
+@dataclass
+class _TailChild:
+    prefix: bytes
+    local: bytes
+    start: int                    # offset of its start tag
+    start_end: int                # offset just past its start tag
+    end: int                      # offset of its end tag (== start_end when self-closing)
+    selfclosing: bool
+    children: int = 0
+
+
+def _tail_children(tail: bytes) -> Tuple[List[_TailChild], int]:
+    """The worksheet's direct children in ``tail`` (which starts inside the
+    worksheet, just after </sheetData>) and the offset of its end tag."""
+    children: List[_TailChild] = []
+    depth = 1
+    current: Optional[_TailChild] = None
+    for m in _TAIL_TOKEN_RE.finditer(tail):
+        local = m.group("local")
+        if local is None:
+            continue  # comment / CDATA / PI
+        if m.group("close"):
+            depth -= 1
+            if depth == 0:
+                if local != b"worksheet":
+                    raise ValueError("unbalanced sheet tail")
+                return children, m.start()
+            if depth == 1 and current is not None:
+                current.end = m.start()
+                children.append(current)
+                current = None
+            continue
+        selfclosing = bool(m.group("self"))
+        if depth == 1:
+            child = _TailChild(m.group("prefix"), local, m.start(), m.end(), m.end(), selfclosing)
+            if selfclosing:
+                children.append(child)
+            else:
+                current = child
+        elif depth == 2 and current is not None:
+            current.children += 1
+        if not selfclosing:
+            depth += 1
+    raise ValueError("the sheet tail does not close the worksheet")
+
+
+def _free_prefix(nsmap: Dict[Optional[str], str], want: str) -> str:
+    if want not in nsmap:
+        return want
+    n = 1
+    while f"{want}{n}" in nsmap:
+        n += 1
+    return f"{want}{n}"
+
+
+def _add_table_parts(split: _SheetSplit, rids: List[str]) -> bytes:
+    """The sheet tail with a <tablePart> for each of ``rids`` added (to the
+    existing <tableParts>, or a new one before the worksheet's <extLst> or its
+    end tag), checked by re-reading it before it is returned."""
+    nsmap = _root_nsmap(split)
+    main = (split.qname.split(b":")[0] + b":") if b":" in split.qname else b""
+    r_prefix = next((p for p, uri in nsmap.items() if uri == NS_R and p), None)
+    r_decl = b""
+    if r_prefix is None:
+        r_prefix = _free_prefix(nsmap, "r")
+        r_decl = b' xmlns:%s="%s"' % (r_prefix.encode(), NS_R.encode())
+    rp = r_prefix.encode()
+    tail = split.tail
+    children, root_end = _tail_children(tail)
+    existing = next((c for c in children if c.local == b"tableParts"), None)
+    if existing is None:
+        parts = b"".join(b'<%stablePart %s:id="%s"/>' % (main, rp, rid.encode()) for rid in rids)
+        insert = b'<%stableParts count="%d"%s>%s</%stableParts>' % (main, len(rids), r_decl, parts, main)
+        ext = next((c for c in children if c.local == b"extLst"), None)
+        at = ext.start if ext is not None else root_end
+        new_tail = tail[:at] + insert + tail[at:]
+    else:
+        count = existing.children + len(rids)
+        prefix = existing.prefix
+        parts = b"".join(b'<%stablePart %s:id="%s"%s/>' % (prefix, rp, rid.encode(), r_decl) for rid in rids)
+        start_tag = tail[existing.start:existing.start_end]
+        if existing.selfclosing:
+            start_tag = start_tag[: start_tag.rfind(b"/")] + b">"
+        if _COUNT_ATTR_RE.search(start_tag):
+            start_tag = _COUNT_ATTR_RE.sub(lambda m: m.group(1) + b'"%d"' % count, start_tag, count=1)
+        else:
+            start_tag = start_tag[:-1].rstrip() + b' count="%d">' % count
+        if existing.selfclosing:
+            new_tail = (tail[:existing.start] + start_tag + parts + b"</%stableParts>" % prefix
+                        + tail[existing.start_end:])
+        else:
+            new_tail = (tail[:existing.start] + start_tag + tail[existing.start_end:existing.end]
+                        + parts + tail[existing.end:])
+    problem = _tail_problem(split.root_tag, new_tail, rids)
+    if problem:
+        raise ValueError(problem)
+    return new_tail
+
+
+def _tail_problem(root_tag: bytes, tail: bytes, rids: List[str]) -> Optional[str]:
+    """Why ``tail`` (after the root start tag) is not a well-formed end of a
+    worksheet whose <tableParts> lists every one of ``rids`` with a matching
+    count and sits last before an optional <extLst>, or None."""
+    import io
+
+    tp_tag = f"{{{NS_MAIN}}}tableParts"
+    part_tag = f"{{{NS_MAIN}}}tablePart"
+    ext_tag = f"{{{NS_MAIN}}}extLst"
+    rid_attr = f"{{{NS_R}}}id"
+    found: Optional[Tuple[int, List[str]]] = None
+    after: List[str] = []
+    try:
+        depth = 0
+        for event, el in etree.iterparse(io.BytesIO(root_tag + tail), events=("start", "end"),
+                                         resolve_entities=False, no_network=True):
+            if event == "start":
+                depth += 1
+                continue
+            depth -= 1
+            if depth != 1:
+                continue
+            if found is not None:
+                after.append(el.tag)
+            if el.tag == tp_tag:
+                if found is not None:
+                    return "two <tableParts> elements"
+                raw_count = (el.get("count") or "").strip()
+                found = (
+                    int(raw_count) if raw_count.isdigit() else -1,
+                    [p.get(rid_attr) or "" for p in el if p.tag == part_tag],
+                )
+            el.clear()
+    except etree.XMLSyntaxError as exc:
+        return f"the sheet no longer parses after adding its table: {exc}"
+    if found is None:
+        return "the sheet has no <tableParts> after adding its table"
+    count, listed = found
+    if any(rid not in listed for rid in rids):
+        return "the sheet's <tableParts> does not list the new table"
+    if count != len(listed):
+        return "the sheet's <tableParts> count does not match its entries"
+    if any(tag != ext_tag for tag in after):
+        return "<tableParts> is not the last element of the sheet"
+    return None
+
+
+def _plan_parts(
+    source: Path, edits: _Edits, scan: WorkbookScan
+) -> Tuple[Dict[str, bytes], List[Tuple[str, bytes]], Dict[str, List[str]]]:
     replacements: Dict[str, bytes] = {}
     additions: List[Tuple[str, bytes]] = []
+    # sheet part (lower-cased zip name) -> relationship ids of the tables to
+    # list in its <tableParts>; applied while the zip is rewritten.
+    splices: Dict[str, List[str]] = {}
     with zipfile.ZipFile(str(source)) as zf:
         pkg = Package(zf)
 
@@ -448,23 +766,15 @@ def _plan_parts(source: Path, edits: _Edits, scan: WorkbookScan) -> Tuple[Dict[s
         for te in edits.tables:
             by_sheet.setdefault(te.sheet.part, []).append(te)
         for sheet_part, tes in by_sheet.items():
-            sheet_root = parse_xml(current(sheet_part) or b"")
+            real_sheet = pkg.name(sheet_part)
+            if real_sheet is None:
+                raise ValueError(f"sheet part {sheet_part} is missing")
             rels_part = rels_part_for(sheet_part)
             rels_data = current(rels_part)
             rels = parse_xml(rels_data) if rels_data else etree.Element(f"{{{NS_PKG_REL}}}Relationships", nsmap={None: NS_PKG_REL})
-            table_parts = sheet_root.find(f"{{{NS_MAIN}}}tableParts")
-            if table_parts is None:
-                # SubElement (not Element) so the new node reuses the sheet's
-                # own prefix for the main namespace; declare r: only if the
-                # sheet does not already. <tableParts> must be the last child
-                # before <extLst> (CT_Worksheet sequence).
-                need_r = NS_R not in (sheet_root.nsmap or {}).values()
-                table_parts = etree.SubElement(
-                    sheet_root, f"{{{NS_MAIN}}}tableParts", nsmap={"r": NS_R} if need_r else None
-                )
-                ext = sheet_root.find(f"{{{NS_MAIN}}}extLst")
-                if ext is not None:
-                    ext.addprevious(table_parts)
+            # The sheet part itself is NOT parsed here: its <tableParts> is
+            # spliced in while the zip is rewritten (see _split_sheet).
+            rids = splices.setdefault(real_sheet.lower(), [])
             for te in tes:
                 n = 1
                 while f"xl/tables/table{n}.xml" in used_parts:
@@ -485,14 +795,12 @@ def _plan_parts(source: Path, edits: _Edits, scan: WorkbookScan) -> Tuple[Dict[s
                 rel.set("Id", rid)
                 rel.set("Type", REL_TABLE)
                 rel.set("Target", posixpath.relpath(te.part, posixpath.dirname(sheet_part)))
-                tp = etree.SubElement(table_parts, f"{{{NS_MAIN}}}tablePart")
-                tp.set(f"{{{NS_R}}}id", rid)
-            table_parts.set("count", str(sum(1 for el in table_parts if el.tag == f"{{{NS_MAIN}}}tablePart")))
-            put(sheet_part, _xml_bytes(sheet_root))
+                te.rid = rid
+                rids.append(rid)
             put(rels_part, _xml_bytes(rels))
 
         put("[Content_Types].xml", _xml_bytes(content_types))
-    return replacements, additions
+    return replacements, additions, splices
 
 
 def _unique_rid(rels: etree._Element) -> str:
@@ -525,20 +833,42 @@ def _table_xml(te: _TableEdit) -> bytes:
     return _xml_bytes(t)
 
 
-def _rewrite_zip(source: Path, dest: Path, replacements: Dict[str, bytes], additions: List[Tuple[str, bytes]]) -> None:
+def _rewrite_zip(
+    source: Path,
+    dest: Path,
+    replacements: Dict[str, bytes],
+    additions: List[Tuple[str, bytes]],
+    splices: Optional[Dict[str, List[str]]] = None,
+) -> None:
+    """Copy ``source`` to ``dest`` member by member, streamed (a copied part
+    is never held whole in memory), with ``replacements`` swapped in,
+    ``splices`` applied to their sheet parts, and ``additions`` appended."""
+    splices = splices or {}
     now = datetime.now().timetuple()[:6]
     with zipfile.ZipFile(str(source)) as zin, zipfile.ZipFile(str(dest), "w", zipfile.ZIP_DEFLATED) as zout:
         for info in zin.infolist():
-            data = replacements.get(info.filename.lower())
-            if data is None:
-                data = zin.read(info)
+            key = info.filename.lower()
             # Some producers write zero (pre-1980) timestamps, which zipfile
             # refuses to write back; the date carries no meaning in OOXML.
             stamp = info.date_time if info.date_time[0] >= 1980 else (1980, 1, 1, 0, 0, 0)
             zi = zipfile.ZipInfo(info.filename, date_time=stamp)
             zi.compress_type = zipfile.ZIP_DEFLATED if not info.is_dir() else zipfile.ZIP_STORED
             zi.external_attr = info.external_attr
-            zout.writestr(zi, data)
+            data = replacements.get(key)
+            if data is not None:
+                zout.writestr(zi, data)
+            elif key in splices:
+                with zin.open(info) as src, zout.open(zi, "w") as dst:
+                    split = _split_sheet(src, dst.write)
+                    new_tail = _add_table_parts(split, splices[key])
+                    if split.head_len + len(split.tail) != info.file_size:
+                        raise ValueError(f"streaming {info.filename} lost bytes")
+                    dst.write(new_tail)
+            elif info.is_dir():
+                zout.writestr(zi, b"")
+            else:
+                with zin.open(info) as src, zout.open(zi, "w") as dst:
+                    shutil.copyfileobj(src, dst, _SPLICE_CHUNK)
         for name, data in additions:
             zi = zipfile.ZipInfo(name, date_time=now)
             zi.compress_type = zipfile.ZIP_DEFLATED
@@ -600,30 +930,14 @@ def _verify(path: Path, edits: _Edits, source: Optional[Path] = None) -> List[st
     except Exception as exc:
         return [f"not a readable zip: {exc}"]
 
-    # 1. Our own scanner reads every edit back.
+    # 1. Our own scanner's readers read every edit back from the parts it
+    # touched. (Every other part was streamed through unchanged, and the zip
+    # test above checked each one against its CRC. Re-scanning the whole
+    # workbook here used to hold a second copy of every sheet's window.)
     try:
-        rescan = scan_workbook(path)
+        problems.extend(_read_back_problems(path, edits, source))
     except Exception as exc:
-        return [f"rescan failed: {exc}"]
-    if edits.title is not None and rescan.title != edits.title:
-        problems.append("title did not persist")
-    if edits.language is not None and rescan.language != edits.language:
-        problems.append("language did not persist")
-    by_drawing: Dict[str, Dict[int, Any]] = {}
-    for sheet in rescan.sheets:
-        if sheet.drawing_part:
-            by_drawing[sheet.drawing_part.lower()] = {d.index: d for d in sheet.drawings}
-    for ae in edits.alts:
-        obj = by_drawing.get(ae.drawing_part.lower(), {}).get(ae.index)
-        if obj is None or (obj.descr or None) != (ae.descr or None):
-            problems.append(f"alt text did not persist on {ae.node_id}")
-    for te in edits.tables:
-        sheet = next((s for s in rescan.sheets if s.part == te.sheet.part), None)
-        blk = None
-        if sheet is not None:
-            blk = next((b for b in sheet.blocks if b.table is not None and b.table.display_name == te.name), None)
-        if blk is None or blk.state != "declared" or blk.ref != te.block.ref:
-            problems.append(f"table {te.name} did not persist as a declared header row")
+        return [f"reading the edits back failed: {exc}"]
     if problems:
         return problems
 
@@ -664,6 +978,85 @@ def _verify(path: Path, edits: _Edits, source: Optional[Path] = None) -> List[st
         except Exception:
             pass
     return problems
+
+
+def _read_back_problems(path: Path, edits: _Edits, source: Optional[Path]) -> List[str]:
+    from app.parsers.xlsx_parser import (
+        REL_OFFICE_DOCUMENT,
+        _core_properties,
+        _read_drawing,
+        _read_table,
+        parse_range,
+    )
+
+    problems: List[str] = []
+    with zipfile.ZipFile(str(path)) as zf:
+        pkg = Package(zf)
+        root_rels = pkg.rels("")
+        if not any(r.type == REL_OFFICE_DOCUMENT for r in root_rels.values()):
+            problems.append("the package no longer points at its workbook")
+        if edits.title is not None or edits.language is not None:
+            core_part = next((r.target for r in root_rels.values() if r.type == REL_CORE and not r.external), None)
+            title, language = _core_properties(pkg, core_part)
+            if edits.title is not None and title != edits.title:
+                problems.append("title did not persist")
+            if edits.language is not None and language != edits.language:
+                problems.append("language did not persist")
+        drawings: Dict[str, Dict[int, Any]] = {}
+        for ae in edits.alts:
+            key = ae.drawing_part.lower()
+            if key not in drawings:
+                drawings[key] = {d.index: d for d in _read_drawing(pkg, ae.drawing_part)}
+            obj = drawings[key].get(ae.index)
+            if obj is None or (obj.descr or None) != (ae.descr or None):
+                problems.append(f"alt text did not persist on {ae.node_id}")
+        if edits.tables:
+            ct_root = parse_xml(pkg.read("[Content_Types].xml"))
+            overrides = {
+                (el.get("PartName") or "").lower(): el.get("ContentType")
+                for el in ct_root if el.tag == f"{{{NS_CT}}}Override"
+            }
+            by_sheet: Dict[str, List[_TableEdit]] = {}
+            for te in edits.tables:
+                by_sheet.setdefault(te.sheet.part, []).append(te)
+            for sheet_part, tes in by_sheet.items():
+                split = _checked_split(pkg, source, sheet_part)
+                problem = split if isinstance(split, str) else _tail_problem(
+                    split.root_tag, split.tail, [te.rid for te in tes]
+                )
+                if problem:
+                    problems.append(f"sheet {tes[0].sheet.name!r}: {problem}")
+            for te in edits.tables:
+                rel = pkg.rels(te.sheet.part).get(te.rid)
+                tdef = None
+                if rel is not None and not rel.external and rel.type == REL_TABLE and rel.target.lower() == te.part.lower():
+                    tdef = _read_table(pkg, te.part, te.rid)
+                if (
+                    tdef is None
+                    or tdef.header_rows < 1
+                    or tdef.ref != parse_range(te.block.ref)
+                    or tdef.display_name != te.name
+                    or tdef.columns != te.columns
+                ):
+                    problems.append(f"table {te.name} did not persist as a declared header row")
+                elif overrides.get("/" + te.part.lower()) != CT_TABLE:
+                    problems.append(f"table {te.name} has no content type")
+    return problems
+
+
+def _checked_split(pkg: Package, source: Optional[Path], sheet_part: str):
+    """The output sheet part's split, after proving everything up to the end
+    of its <sheetData> is byte-identical to the source's; or a problem."""
+    with pkg.open(sheet_part) as fh:
+        out = _split_sheet(fh)
+    if source is not None:
+        with zipfile.ZipFile(str(source)) as zs:
+            src_pkg = Package(zs)
+            with src_pkg.open(sheet_part) as fh:
+                orig = _split_sheet(fh)
+        if (orig.head_len, orig.head_digest, orig.root_tag) != (out.head_len, out.head_digest, out.root_tag):
+            return f"the cells of sheet part {sheet_part} changed while adding its table"
+    return out
 
 
 def _openpyxl_opens(path: Path) -> bool:
