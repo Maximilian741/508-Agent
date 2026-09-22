@@ -263,9 +263,11 @@ async def analyze(
     every deterministic fix into the in-memory tree (legacy behavior).
 
     Anonymous callers (no credential) get the same findings with a smaller
-    upload cap and a strict per-IP budget (RateLimitMiddleware); nothing is
-    executed (``execute`` is ignored), persisted or audited for them, and no
-    AI client is constructed — see ``smoke_anonymous_scan``.
+    upload cap and a strict per-IP budget (RateLimitMiddleware); ``execute``
+    is ignored, nothing is persisted or audited for them, and the only
+    executors that run are the offline ones on a throwaway copy (the fix
+    prediction) — no paid AI client is ever constructed. See
+    ``smoke_anonymous_scan`` and ``smoke_fix_promise``.
     """
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
@@ -281,8 +283,8 @@ async def analyze(
 
     anonymous = user_id is None
     if anonymous:
-        # The account-free scan never runs an executor (so it can never reach
-        # an inference client, paid or not) and takes smaller files.
+        # The account-free scan never executes into the response tree and
+        # takes smaller files.
         execute = False
         _enforce_anonymous_upload_cap(upload_result.size, tmp_path, settings)
     # Thumbnails / form-field locations read the source again after parsing;
@@ -1118,6 +1120,9 @@ async def remediate(
     # Locations are read from the tree AS FOUND (and the untouched upload in
     # the job folder), before any executor rewrites the text they point at.
     locations = await run_in_threadpool(build_locations, tree, violations, result.format, source_path)
+    # The same promise /analyze made (so the two responses agree per finding);
+    # the file here is already saved under the customer's own name.
+    predicted_fixes = await run_in_threadpool(_predict_auto_fixable, tree, violations, result.format)
     # This endpoint APPLIES the fixes the user explicitly approved (approved_ids),
     # so the user's approval IS the human review — use an apply policy that allows
     # every recommended action to run. The default RemediationPolicy() is the
@@ -1532,6 +1537,7 @@ async def remediate(
             result.format,
             executions=executions,
             approved_ids=approved_ids if persisted_fixes > 0 else set(),
+            predicted=predicted_fixes,
         )
     except Exception:
         logger.warning("remediate: could not build the violations list", exc_info=True)
@@ -2208,12 +2214,15 @@ def _violations_for_response(
     *,
     executions=None,
     approved_ids=None,
+    predicted: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """The contract's violation objects, as JSON-ready dicts (remediate).
 
     ``fixed`` is True only for an APPROVED finding with a SUCCESS execution
     (already reconciled against the writer) of one of its own flag's actions
     on its own node — the same executions the charge gate counted.
+    ``autoFixable`` is the same promise /analyze made (``predicted`` from
+    :func:`_predict_auto_fixable`; None = the format capability).
     """
     from app.models.accessibility import FLAG_DEFINITIONS, REMEDIATION_ACTIONS_BY_FLAG
 
@@ -2247,7 +2256,8 @@ def _violations_for_response(
             },
             evidence=v.evidence if isinstance(v.evidence, dict) else {},
             recommendedActions=actions,
-            autoFixable=_auto_fixable(v.rule_id, source_format),
+            autoFixable=_auto_fixable(v.rule_id, source_format)
+            and (predicted is None or v.violation_id in predicted),
             location=_location_model(locations.get(v.violation_id)),
             fixed=bool(fixed),
         )

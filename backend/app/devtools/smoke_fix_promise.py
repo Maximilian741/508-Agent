@@ -224,6 +224,8 @@ def main() -> int:
         rb = rr.json() if rr.status_code == 200 else {}
         fixed = {v["id"] for v in rb.get("violations") or [] if v.get("fixed")}
         by_id = {v["id"]: v["ruleId"] for v in vs}
+        remediate_promised = {v["id"] for v in rb.get("violations") or [] if v.get("autoFixable")}
+        check(f"{fmt}: remediate repeats analyze's autoFixable, finding for finding", remediate_promised == promised, (remediate_promised, promised))
         check(
             f"{fmt}: promise == outcome (promised {len(promised)}, fixed {len(fixed)})",
             promised == fixed,
