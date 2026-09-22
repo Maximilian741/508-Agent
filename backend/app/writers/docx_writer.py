@@ -76,6 +76,8 @@ from app.parsers.docx_parser import (
     DocxStyleResolver,
     _derive_sdt_label,
     _docx_default_lang,
+    core_title_and_language,
+    has_core_properties,
     _docx_theme_colors,
     _paragraph_caption_text,
     _run_color_hex,
@@ -392,9 +394,27 @@ def _apply_document_metadata(
     applied: List[Dict[str, Any]],
     skipped: List[Dict[str, Any]],
 ) -> None:
-    """Sync ``DocumentNode`` metadata (language, title) onto core properties."""
+    """Sync ``DocumentNode`` metadata (language, title) onto core properties.
 
-    core = doc.core_properties
+    Each is written only when it CHANGED from what the source states, and the
+    core-properties part is only touched then: python-docx creates a missing
+    part pre-filled with title "Word Document" / author "python-docx", which
+    used to land in the customer's file (and an unchanged title was
+    re-"applied" on every run, inflating the applied list)."""
+
+    core_existed = has_core_properties(doc)
+    source_title, source_dc_language = core_title_and_language(doc)
+    core_state: Dict[str, Any] = {}
+
+    def _core():
+        if "core" not in core_state:
+            core = doc.core_properties
+            if not core_existed:
+                # Freshly created by python-docx: drop its invented values.
+                core.title = ""
+                core.last_modified_by = ""
+            core_state["core"] = core
+        return core_state["core"]
 
     language = _xml_safe((root.metadata.language or "").strip()).strip()
     # Write the language only when it CHANGED from what the source already
@@ -404,12 +424,12 @@ def _apply_document_metadata(
     # approve-nothing download came back altered. SET_DOCUMENT_LANGUAGE only
     # runs when the source declares none, so a real fix always differs.
     try:
-        source_language = (getattr(core, "language", None) or "").strip() or (_docx_default_lang(doc) or "")
+        source_language = source_dc_language or (_docx_default_lang(doc) or "")
     except Exception:  # pragma: no cover - defensive
         source_language = ""
     if language and language != source_language.strip():
         try:
-            core.language = language
+            _core().language = language
             applied.append(
                 {
                     "kind": "document_language",
@@ -438,9 +458,9 @@ def _apply_document_metadata(
 
     title = (root.metadata.properties.get("title") if root.metadata.properties else None) or ""
     title = _xml_safe(str(title).strip()).strip()
-    if title:
+    if title and title != source_title:
         try:
-            core.title = title
+            _core().title = title
             applied.append(
                 {
                     "kind": "document_title",

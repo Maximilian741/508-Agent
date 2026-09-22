@@ -59,7 +59,7 @@ except Exception:  # pragma: no cover - never let the AI module break parsing
 class DOCXParser:
     def parse(self, file_path: str) -> Dict[str, object]:
         doc = Document(file_path)
-        core = doc.core_properties
+        core_title, core_language = core_title_and_language(doc)
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
         generic_link_labels = {
@@ -157,8 +157,8 @@ class DOCXParser:
                 )
         return {
             "documentType": "docx",
-            "title": (core.title or "").strip(),
-            "language": (getattr(core, "language", None) or "").strip(),
+            "title": core_title,
+            "language": core_language,
             "headings": headings,
             "emptyHeadingSections": empty_heading_sections,
             "headingJumps": skipped_jumps,
@@ -207,10 +207,7 @@ class DOCXParser:
         reg = register or _no_register
         theme_colors = _docx_theme_colors(file_path)
         styles = DocxStyleResolver(doc)
-        core = doc.core_properties
-
-        title = (core.title or "").strip()
-        language = (getattr(core, "language", None) or "").strip()
+        title, language = core_title_and_language(doc)
         if not language:
             # dc:language is rarely set, but Word writes the document language
             # into styles.xml docDefaults <w:lang w:val="en-US"/> on save — and
@@ -1997,6 +1994,36 @@ def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[Tuple[str
             hops += 1
         prev = prev.getprevious()
     return None
+
+
+def has_core_properties(doc) -> bool:
+    """Whether the package really carries ``docProps/core.xml``.
+
+    python-docx's ``doc.core_properties`` CREATES the part when it is
+    missing, pre-filled with title "Word Document" and author
+    "python-docx". Some generators omit the part; reading through that
+    property invented a title the source does not have (so the missing-title
+    finding never fired) and the writer then saved the invention into the
+    customer's file on runs where nobody approved a title.
+    """
+    from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+
+    try:
+        doc.part.package.part_related_by(_RT.CORE_PROPERTIES)
+    except KeyError:
+        return False
+    except Exception:  # pragma: no cover - defensive: assume present
+        return True
+    return True
+
+
+def core_title_and_language(doc) -> Tuple[str, str]:
+    """``(dc:title, dc:language)`` as the file states them — empty when the
+    core-properties part is absent (never python-docx's invented defaults)."""
+    if not has_core_properties(doc):
+        return "", ""
+    core = doc.core_properties
+    return (core.title or "").strip(), (getattr(core, "language", None) or "").strip()
 
 
 def _docx_default_lang(doc) -> Optional[str]:

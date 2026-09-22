@@ -589,6 +589,57 @@ def main() -> int:
               and any(a.get("kind") == "table_header_row" for a in wr["applied"])
               and Document(str(out)) is not None, str(wr))
 
+    # ===== 11. No docProps/core.xml: no invented title ========================
+    # python-docx CREATES a missing core-properties part pre-filled with title
+    # "Word Document" and author "python-docx". Reading through it hid the
+    # missing-title finding and the writer saved the invention into the file.
+    d = Document()
+    d.add_heading("Quarterly report", 1)
+    d.add_paragraph("Body text that is long enough to be read as ordinary prose here.")
+    full = tmp / "with_core.docx"
+    d.save(str(full))
+    src = tmp / "no_core.docx"
+    with zipfile.ZipFile(full) as zin, zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in zin.namelist():
+            data = zin.read(n)
+            if n == "docProps/core.xml":
+                continue
+            if n == "_rels/.rels":
+                root_rels = etree.fromstring(data)
+                for rel in list(root_rels):
+                    if (rel.get("Type") or "").endswith("/core-properties"):
+                        root_rels.remove(rel)
+                data = etree.tostring(root_rels, xml_declaration=True, encoding="UTF-8", standalone=True)
+            zout.writestr(n, data)
+    res = parse_to_tree(str(src))
+    run_analyzers(res.tree)
+    check("no core part: no invented title; DOCUMENT_TITLE_MISSING fires",
+          not (res.tree.root.metadata.properties or {}).get("title") and "DOCUMENT_TITLE_MISSING" in _codes(res.tree),
+          str(((res.tree.root.metadata.properties or {}).get("title"), _codes(res.tree))))
+    out = tmp / "no_core_untouched.docx"
+    wr = write_remediated_docx(src, res.tree, out)
+    with zipfile.ZipFile(out) as z:
+        has_core = "docProps/core.xml" in z.namelist()
+    check("no core part, nothing approved: nothing applied and no core part invented in the output",
+          wr["applied"] == [] and not has_core, str((wr["applied"], has_core)))
+    res.tree.root.metadata.properties["title"] = "Quarterly Report 2026"   # SET_DOCUMENT_TITLE's effect
+    out = tmp / "no_core_titled.docx"
+    wr = write_remediated_docx(src, res.tree, out)
+    with zipfile.ZipFile(out) as z:
+        core_xml = z.read("docProps/core.xml") if "docProps/core.xml" in z.namelist() else b""
+    check("no core part, title approved: the approved title is written, python-docx's defaults are not",
+          b"Quarterly Report 2026" in core_xml and b"Word Document" not in core_xml and b"python-docx" not in core_xml
+          and [a.get("kind") for a in wr["applied"]] == ["document_title"], core_xml.decode("utf-8", "replace")[:400])
+    # An unchanged title is not re-"applied" on every run.
+    d = Document()
+    d.core_properties.title = "Already titled"
+    d.add_paragraph("Body text that is long enough to be read as ordinary prose here.")
+    src = tmp / "titled.docx"
+    d.save(str(src))
+    res = parse_to_tree(str(src))
+    wr = write_remediated_docx(src, res.tree, tmp / "titled_out.docx")
+    check("an unchanged title is not reported as applied", wr["applied"] == [], str(wr["applied"]))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 
