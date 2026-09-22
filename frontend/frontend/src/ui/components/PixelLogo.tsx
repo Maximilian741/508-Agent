@@ -1,11 +1,11 @@
 /**
- * PixelLogo - chunky 8-bit-style brand mark.
+ * PixelLogo - the 508 Agent brand mark: "508" set in a chunky 3x5 pixel face.
  *
- * Renders "508" as a 3x5 pixel grid per glyph using small SVG rects on web
- * and View blocks on native. Each "pixel" can be a fixed size; the whole
- * logo scales with the size prop. Uses the accent color for the lit pixels
- * and a darker tint for the unlit grid behind them so the mark feels like a
- * tiny LCD readout, similar to the Claude Code boot mark.
+ * This is the ONE piece of pixel art in the product, on purpose: everything
+ * else is clean type and line icons, so the mark reads as a logo. Rendered as
+ * crisp SVG rects on web and View blocks on native; `size` is the edge of one
+ * pixel in CSS px. Always shown next to the word "Agent" (AppNav), and always
+ * decorative there: the lockup's link carries the name "508 Agent".
  */
 import React from "react";
 import { Platform, View } from "react-native";
@@ -63,7 +63,7 @@ const ROWS = BITMAP.length;    // 5
 
 export function PixelLogo({
   size = 3,
-  color = "#F59E4A",
+  color = "#5EEAD4",
   dimColor = "rgba(255, 255, 255, 0.06)",
   showGrid = true,
 }: PixelLogoProps) {
@@ -82,6 +82,8 @@ export function PixelLogo({
           viewBox={"0 0 " + COLS + " " + ROWS}
           shapeRendering="crispEdges"
           xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+          focusable="false"
         >
           {showGrid
             ? BITMAP.flatMap((row, r) =>

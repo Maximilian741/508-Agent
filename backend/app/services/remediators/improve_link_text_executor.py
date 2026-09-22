@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app.ai.semantic_inference import SemanticInferenceClient
+from app.ai.offline_rules import vet_link_text
+from app.ai.semantic_inference import SemanticInferenceClient, refusal_reason
 from app.analyzers.link_analyzer import (
     NON_DESCRIPTIVE_LINK_TEXT,
     _looks_like_url,
@@ -40,9 +41,12 @@ class ImproveLinkTextExecutor(RemediationExecutor):
     """Replace generic anchor text with a descriptive label.
 
     Uses :class:`SemanticInferenceClient` to derive a phrase from the link
-    target.  Falls back to a deterministic rewrite (``Visit {host}``) when no
-    AI provider is configured.  The executor refuses to rewrite link text that
-    is already descriptive.
+    target. Without an AI provider the only source of words is the address
+    itself ("/docs/benefits-guide.pdf" -> "Benefits guide (PDF)"); anchors,
+    email/phone links, home pages and code-like slugs are refused and left for
+    a person. Every suggestion, from any provider, passes
+    :func:`app.ai.offline_rules.vet_link_text`. The executor never rewrites
+    link text that is already descriptive.
     """
 
     supported_actions = [ActionCode.IMPROVE_LINK_TEXT]
@@ -80,14 +84,29 @@ class ImproveLinkTextExecutor(RemediationExecutor):
                 f"Link text already descriptive: {original!r}.",
             )
 
-        result = self._client.suggest_link_text(text=original, target=target.target or "")
+        link_target = (target.target or "").strip()
+        # Without an AI provider this is app.ai.offline_rules.link_text_from_target:
+        # a link whose address carries no words (an anchor, an email, a phone
+        # number, a home page, "f1040") comes back empty with the reason.
+        result = self._client.suggest_link_text(text=original, target=link_target)
         suggestion = (result.text or "").strip()
-        if not suggestion or _is_non_descriptive(suggestion):
-            return _result(
+        if not suggestion:
+            return _refused(
                 action_code,
                 plan,
-                ExecutionStatus.SKIPPED,
-                "Provider did not return a descriptive suggestion; queued for manual review.",
+                refusal_reason(result) or "We could not produce a better name for this link.",
+            )
+        # Final gate for ANY provider. "Read more about click here", "Read more
+        # about #section-2", "Read more about hr@example.com" and "Visit
+        # example.com" all used to be written into customers' files and
+        # charged; none of them tells a screen-reader user more than the
+        # original did.
+        problem = vet_link_text(suggestion, original, link_target)
+        if problem:
+            return _refused(
+                action_code,
+                plan,
+                f"We did not rename this link because {problem}. A person needs to write what it links to.",
             )
 
         before = original or "(empty)"
@@ -104,6 +123,18 @@ class ImproveLinkTextExecutor(RemediationExecutor):
             ExecutionStatus.SUCCESS,
             f"Rewrote link text {before!r} → {suggestion!r} via {result.provider} ({result.confidence:.2f}).",
         )
+
+
+def _refused(action_code, plan, reason: str) -> ExecutionResult:
+    reason = (reason or "").strip()
+    if reason and not reason.endswith((".", "!", "?")):
+        reason += "."
+    return _result(
+        action_code,
+        plan,
+        ExecutionStatus.SKIPPED,
+        f"{reason} Left for you to name; nothing was written and you were not charged for it.".strip(),
+    )
 
 
 def _find_link(tree: AccessibilityTree, node_id: str) -> Optional[LinkNode]:

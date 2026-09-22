@@ -49,8 +49,12 @@ def _build_docx(path: Path) -> None:
     # there is none. "Filler paragraph." (two words) was below the bar, so the
     # approved alt fix honestly skipped and — correctly — nothing was charged,
     # which broke this smoke's "a real fix charges" assertion.
+    # Since then the rule is stricter: only a caption written FOR the picture
+    # (Word's Caption style) may become its alt without an AI — the sentence
+    # above it is ordinary page text. So the picture carries a real caption.
     doc.add_paragraph("The chart below shows quarterly revenue by region for the year.")
     doc.add_paragraph().add_run().add_picture(io.BytesIO(_valid_png()))
+    doc.add_paragraph("Figure 1: Quarterly revenue by region", style="Caption")
     doc.save(str(path))
 
 

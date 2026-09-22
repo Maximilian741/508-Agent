@@ -45,6 +45,8 @@ interface AppState {
     backendHealthMessage: string | null;
     /** Upload cap the backend advertises on /healthz, in MB. null until probed. */
     maxUploadMb: number | null;
+    /** The smaller cap for a check without an account (/healthz). null until probed. */
+    anonMaxUploadMb: number | null;
     themeMode: "system" | "light" | "dark";
     mockMode: boolean;
     selectedDocument: DocumentPayload | null;
@@ -254,7 +256,7 @@ function storeAutoFixPolicy(value: "conservative" | "balanced" | "aggressive") {
 
 async function probeBackend(
     baseUrl: string,
-): Promise<{ ok: boolean; message?: string; resolvedUrl?: string; maxUploadMb?: number }> {
+): Promise<{ ok: boolean; message?: string; resolvedUrl?: string; maxUploadMb?: number; anonMaxUploadMb?: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
     try {
@@ -264,13 +266,15 @@ async function probeBackend(
             // The backend advertises its upload cap here so the UI can state
             // it up front rather than letting the user find out via a 413.
             let maxUploadMb: number | undefined;
+            let anonMaxUploadMb: number | undefined;
             try {
                 const body = await response.json();
                 if (typeof body?.maxUploadMb === "number") maxUploadMb = body.maxUploadMb;
+                if (typeof body?.anonymousMaxUploadMb === "number") anonMaxUploadMb = body.anonymousMaxUploadMb;
             } catch {
                 /* older backends return no body worth reading */
             }
-            return { ok: true, resolvedUrl: baseUrl, maxUploadMb };
+            return { ok: true, resolvedUrl: baseUrl, maxUploadMb, anonMaxUploadMb };
         }
         return { ok: false, message: "Backend responded but health check failed." };
     } catch (error) {
@@ -310,6 +314,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     backendHealth: "unknown",
     backendHealthMessage: null,
     maxUploadMb: null,
+    anonMaxUploadMb: null,
     themeMode: "system",
     mockMode: false,
     selectedDocument: null,
@@ -368,6 +373,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         backendHealthMessage: null,
                         backendUrlWarning: null,
                         maxUploadMb: fallback.maxUploadMb ?? null,
+                        anonMaxUploadMb: fallback.anonMaxUploadMb ?? null,
                     });
                     return;
                 }
@@ -378,6 +384,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             backendHealthMessage: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             backendUrlWarning: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             maxUploadMb: primary.ok ? primary.maxUploadMb ?? null : null,
+            anonMaxUploadMb: primary.ok ? primary.anonMaxUploadMb ?? null : null,
         });
     },
     setBackendUrlInfo: (url, source, warning) =>
@@ -406,6 +413,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                         backendHealthMessage: null,
                         backendUrlWarning: null,
                         maxUploadMb: fallback.maxUploadMb ?? null,
+                        anonMaxUploadMb: fallback.anonMaxUploadMb ?? null,
                     });
                     return;
                 }
@@ -416,6 +424,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             backendHealthMessage: primary.ok ? null : primary.message ?? "Backend is unreachable.",
             backendUrlWarning: primary.ok ? null : info.warning ?? primary.message ?? "Backend is unreachable.",
             maxUploadMb: primary.ok ? primary.maxUploadMb ?? null : null,
+            anonMaxUploadMb: primary.ok ? primary.anonMaxUploadMb ?? null : null,
         });
     },
     setMockMode: (value) => set({ mockMode: value }),

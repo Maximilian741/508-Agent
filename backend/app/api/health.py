@@ -28,12 +28,19 @@ async def health() -> dict:
 
 @router.get("/healthz")
 async def healthz() -> dict:
-    """Liveness probe. Also advertises the operator-set upload limit so the
-    UI can state it up front instead of letting a user discover it via a 413
-    after waiting through a whole upload."""
+    """Liveness probe. Also advertises the operator-set upload limits (with
+    an account, and the smaller one for a signed-out scan) so the UI can state
+    them up front instead of letting a user discover one via a 413 after
+    waiting through a whole upload."""
+    from app.api.pipeline import _anonymous_upload_cap_bytes
     from app.config import get_settings
 
-    return {"ok": True, "maxUploadMb": int(get_settings().max_upload_mb)}
+    settings = get_settings()
+    return {
+        "ok": True,
+        "maxUploadMb": int(settings.max_upload_mb),
+        "anonymousMaxUploadMb": max(1, _anonymous_upload_cap_bytes(settings) // (1024 * 1024)),
+    }
 
 
 @router.get("/readyz")

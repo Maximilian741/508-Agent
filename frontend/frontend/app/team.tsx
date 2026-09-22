@@ -191,7 +191,7 @@ export default function TeamScreen() {
             <Card>
               <View style={styles.spread}>
                 <View style={{ flex: 1 }}>
-                  <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{team.name}</Text>
+                  <Text style={[theme.typography.stat, { color: theme.colors.text }]}>{team.name}</Text>
                   <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4 }}>
                     {team.seatsUsed} of {team.seatLimit} seats used · you are {team.role === "admin" ? "an admin" : "a member"}.
                   </Text>
@@ -301,7 +301,7 @@ export default function TeamScreen() {
           </>
         ) : canCreate ? (
           <Card>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>Create your team</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.text }]}>Create your team</Text>
             <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 6, marginBottom: 12, lineHeight: 20 }}>
               Your subscription includes multiple seats. Name your team, then invite teammates. Everyone shares your
               monthly credits and gets free certificates.
@@ -320,7 +320,7 @@ export default function TeamScreen() {
           </Card>
         ) : (
           <Card>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>Team plans</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.text }]}>Team plans</Text>
             <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 6, marginBottom: 12, lineHeight: 20 }}>
               Team seats come with a Team or Business subscription. Subscribe to share one pool of credits and free
               certificates across up to 10 teammates.

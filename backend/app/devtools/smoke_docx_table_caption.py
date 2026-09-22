@@ -6,9 +6,12 @@ styled "Caption" adjacent to the table. This pins the new auto-fix end to end
 AND the honesty invariant:
 
   detect   -> caption-less data table flagged TABLE_CAPTION_MISSING
-  execute  -> GenerateTableCaptionExecutor derives a caption from the table's
-              own headers/rows (heuristic provider here — deterministic/offline)
-              and stores it in metadata.properties['caption']
+  execute  -> GenerateTableCaptionExecutor asks the AI provider for a caption
+              grounded in the table's own headers/rows (a deterministic fake
+              provider here — no network) and stores it in
+              metadata.properties['caption']. With NO AI provider the offline
+              heuristic abstains ("Table: Region, Q1, Q2" is not a caption) and
+              nothing is written, counted or charged — pinned as Case A0.
   write    -> docx_writer inserts a Caption-styled <w:p> above the <w:tbl>
   honesty  -> GENERATE_TABLE_CAPTION persists for docx; re-parsing the OUTPUT
               reads the Caption paragraph back and TABLE_CAPTION_MISSING clears;
@@ -25,7 +28,7 @@ import os
 import sys
 import tempfile
 
-# Deterministic, offline AI: derive the caption from headers, no network.
+# No network, ever: the "AI" below is a local fake.
 os.environ["SEMANTIC_PROVIDER"] = "heuristic"
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp(prefix='508_smoke_dcap_')}/s.db")
 
@@ -45,6 +48,26 @@ from app.services.remediators.registry import execute_plans  # noqa: E402
 from app.writers.docx_writer import write_remediated_docx  # noqa: E402
 
 FLAG = "TABLE_CAPTION_MISSING"
+
+import app.ai.semantic_inference as _si  # noqa: E402
+
+_REAL_BUILD = _si.build_default_provider
+_SEEN_HEADERS: list = []
+
+
+class _GroundedCaptionProvider(_si.HeuristicProvider):
+    """Stands in for a real AI provider: answers a caption and records what it
+    was grounded in (the table's own header cells)."""
+
+    name = "fake-ai"
+
+    def table_caption(self, payload):
+        _SEEN_HEADERS.append(list(payload.get("headers") or []))
+        return _si.InferenceResult(text="Quarterly sales by region", confidence=0.8, provider=self.name)
+
+
+def _use_ai(on: bool) -> None:
+    _si.build_default_provider = (lambda *a, **k: _GroundedCaptionProvider()) if on else _REAL_BUILD
 
 
 def _bold_header(cell, text):
@@ -140,9 +163,29 @@ def main() -> int:
     check("honesty matrix: NOT credited for pptx (no writer support)",
           not _action_persists("GENERATE_TABLE_CAPTION", "pptx"))
 
-    # ---------------------------------------------------------------- Case A
+    # ------------------------------------------ Case A0: no AI -> no caption
     src = tmp / "report.docx"
     _build_uncaptioned(src)
+    _use_ai(False)
+    r0 = parse_to_tree(str(src))
+    run_analyzers(r0.tree)
+    e0 = execute_plans(r0.tree, plan_remediations(r0.tree, policy))
+    cap0 = [e for e in e0 if e.action_code.value == "GENERATE_TABLE_CAPTION"]
+    check("A0: without AI the caption is refused, not made up from the headers",
+          len(cap0) == 1 and cap0[0].status.value == "skipped" and not _first_table_caption(r0.tree),
+          str([(e.status.value, e.notes) for e in cap0]))
+    check("A0: ...with a plain reason", bool(cap0) and "not charged" in (cap0[0].notes or ""), str(cap0[:1]))
+    o0 = tmp / "report.noai.docx"
+    w0 = write_remediated_docx(src, r0.tree, o0)
+    check("A0: writer inserts no caption paragraph",
+          not any(a.get("action") == "GENERATE_TABLE_CAPTION" for a in w0["applied"]), str(w0["applied"]))
+    check("A0: nothing counted for it", _count_persisted_fixes(cap0, w0["applied"], "docx") == 0)
+    r0b = parse_to_tree(str(o0))
+    run_analyzers(r0b.tree)
+    check("A0: the finding stays open for a person", _flag_count(r0b.tree, FLAG) == 1)
+
+    # ---------------------------------------------------------------- Case A
+    _use_ai(True)
     res = parse_to_tree(str(src))
     run_analyzers(res.tree)
     check("caption-less data table flagged TABLE_CAPTION_MISSING", _flag_count(res.tree, FLAG) == 1,
@@ -154,8 +197,9 @@ def main() -> int:
     check("GENERATE_TABLE_CAPTION executed", len(ok) == 1,
           str([(e.action_code.value, e.status.value, e.notes) for e in execs]))
     gen_caption = _first_table_caption(res.tree)
-    check("caption grounded in the table's headers",
-          bool(gen_caption) and any(h in gen_caption for h in ("Region", "Q1", "Q2")), str(gen_caption))
+    check("caption grounded in the table's headers (the provider was given them)",
+          gen_caption == "Quarterly sales by region" and bool(_SEEN_HEADERS)
+          and _SEEN_HEADERS[-1] == ["Region", "Q1", "Q2"], f"{gen_caption!r} {_SEEN_HEADERS}")
 
     out = tmp / "report.fixed.docx"
     result = write_remediated_docx(src, res.tree, out)

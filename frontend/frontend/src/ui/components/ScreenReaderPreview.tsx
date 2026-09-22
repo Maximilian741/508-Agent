@@ -93,7 +93,7 @@ export const SR_EXAMPLES: SrExample[] = [
 
 function VisualMock({ example }: { example: SrExample }) {
   const theme = useTheme();
-  const faint = theme.colors.bg === "#150E08" ? "#4a4038" : "#c9c2b8";
+  const faint = theme.isDark ? "#3A4354" : "#C3CBD6";
 
   if (example.visual === "image") {
     return (

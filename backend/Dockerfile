@@ -41,6 +41,27 @@ RUN apt-get update \
  && groupadd --system --gid 1001 app \
  && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
 
+# OPTIONAL LibreOffice, for legacy and OpenDocument uploads (.doc .rtf .odt
+# .xls .ods .ppt .odp), which app/intake/office.py converts to .docx / .xlsx /
+# .pptx with `soffice --headless` in a throwaway sandbox. OFF by default:
+# the headless Writer/Calc/Impress packages plus metric-compatible fonts add
+# roughly 450-600 MB to the image (vs ~450 MB without) and each conversion
+# holds ~200 MB of RAM while it runs. Without it those uploads are refused
+# with a sentence telling the customer how to save the modern format
+# themselves; every other format is unaffected. Turn it on with:
+#   docker build --build-arg INSTALL_LIBREOFFICE=true -f backend/Dockerfile .
+# fonts-liberation keeps converted layouts close to the original (Arial,
+# Times New Roman and Courier New metrics).
+ARG INSTALL_LIBREOFFICE=false
+RUN if [ "$INSTALL_LIBREOFFICE" = "true" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+           libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
+           fonts-liberation fonts-dejavu-core \
+      && rm -rf /var/lib/apt/lists/* \
+      && soffice --version; \
+    fi
+
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app

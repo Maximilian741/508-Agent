@@ -18,7 +18,12 @@ import { useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 
-import { confirmEmailVerification, refreshAccount, requestEmailVerification } from "../src/domain/account";
+import {
+  confirmEmailVerification,
+  grantStarterCredits,
+  refreshAccount,
+  requestEmailVerification,
+} from "../src/domain/account";
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Hero } from "../src/ui/components/Hero";
@@ -51,9 +56,12 @@ export default function VerifyEmailScreen() {
         await confirmEmailVerification(token);
         if (cancelled) return;
         setState("verified");
-        // Picks up emailVerifiedAt (and any credits it unlocks) for a session
-        // that is already signed in here. Harmless when signed out.
-        refreshAccount().catch(() => undefined);
+        // Claim the starter credits it unlocks and pick up emailVerifiedAt for
+        // a session already signed in here. Harmless when signed out (the
+        // fixer tab, if any, claims them itself when it sees the change).
+        grantStarterCredits()
+          .then(() => refreshAccount())
+          .catch(() => undefined);
       } catch (e: any) {
         if (cancelled) return;
         const msg: string = e?.message || "Could not verify this email address.";
@@ -98,10 +106,10 @@ export default function VerifyEmailScreen() {
           <View style={{ gap: 12 }}>
             <InlineNotice
               tone="success"
-              title="Email verified"
-              message="Thanks — your address is confirmed. Any free credits that were waiting on it are now available."
+              title="Email confirmed"
+              message="Thanks — your address is confirmed and your free credits are unlocked. If you were fixing a file in another tab, go back to it: it carries on by itself. You can close this tab."
             />
-            <Button title="Go to my dashboard" href="/" />
+            <Button title="Fix a file" href="/" />
           </View>
         ) : (
           <View style={{ gap: 12 }}>

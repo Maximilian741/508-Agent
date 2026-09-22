@@ -130,7 +130,11 @@ def main() -> int:
     check("/Lang set", _g(root, "/Lang") is not None)
     meta = _g(root, "/Metadata")
     xmp = meta.get_data() if meta is not None else b""
-    check("XMP carries dc:title + pdfuaid", b"Quarterly Accessibility Report" in xmp and b"pdfuaid:part" in xmp)
+    check("XMP carries dc:title", b"Quarterly Accessibility Report" in xmp)
+    # pdfuaid:part is a CONFORMANCE claim. This fixture draws text in a
+    # non-embedded base-14 font (PDF/UA-1 7.21.4.1 requires embedding), so the
+    # claim must be withheld — it used to be written unconditionally.
+    check("XMP does NOT claim PDF/UA for a file that cannot conform", b"pdfuaid:part" not in xmp)
 
     if st is not None:
         kids = _g(st, "/K")

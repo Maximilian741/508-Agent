@@ -87,7 +87,12 @@ def main() -> int:  # noqa: PLR0915
     )
     d.add_heading("Background", level=1)
     d.add_heading("Detailed Findings", level=3)  # heading JUMP 1 -> 3
-    d.add_picture(str(png))  # image with no alt text
+    d.add_picture(str(png))  # image with no alt text...
+    # ...but with Word's own Caption under it: text written FOR the picture,
+    # the one thing the offline (no-AI) path may turn into alt text. Without
+    # it the picture is honestly left for a person (see the PPTX deck below
+    # and smoke_semantic_refusals).
+    d.add_paragraph("Figure 1: Regional operations spend, FY2026", style="Caption")
     d.add_paragraph("Key priorities for next quarter:")
     d.add_paragraph("- expand the access audit programme")  # typed fake list
     d.add_paragraph("- replace legacy intake forms")
@@ -104,9 +109,11 @@ def main() -> int:  # noqa: PLR0915
     lr = OxmlElement("w:r"); lt = OxmlElement("w:t"); lt.text = "click here"
     lr.append(lt); hl.append(lr); para._p.append(hl)
     t = d.add_table(rows=3, cols=3)  # data grid, row 0 NOT header-marked
-    for i in range(3):
+    # Row 0 is a real row of column names that just isn't marked. (A row of
+    # NUMBERS is data and is never promoted — smoke_semantic_refusals.)
+    for i, row in enumerate((("Region", "Q1", "Q2"), ("North", "10", "11"), ("South", "20", "21"))):
         for j in range(3):
-            t.cell(i, j).text = f"{i*10+j}"
+            t.cell(i, j).text = row[j]
     report = tmp / "report.docx"
     d.save(str(report))
 
@@ -151,9 +158,9 @@ def main() -> int:  # noqa: PLR0915
     s3 = prs.slides.add_slide(prs.slide_layouts[6])  # untitled
     gw = s3.shapes.add_table(3, 2, Inches(1), Inches(1), Inches(6), Inches(2))
     gw.table.first_row = False  # data grid, band off -> missing headers
-    for i in range(3):
+    for i, row in enumerate((("Programme", "Budget"), ("Outreach", "120"), ("Training", "95"))):
         for j in range(2):
-            gw.table.cell(i, j).text = f"{i}-{j}"
+            gw.table.cell(i, j).text = row[j]
     deck = tmp / "deck.pptx"
     prs.save(str(deck))
 
@@ -173,7 +180,7 @@ def main() -> int:  # noqa: PLR0915
     # shown in slide 2." — a location, not a description — and this smoke
     # asserted that overclaim. Now the executor refuses to write a placeholder
     # and the image honestly stays flagged. (The DOCX picture above DOES get
-    # fixed: it has nearby text, so the heuristic derives a real alt from it.)
+    # fixed: Word's Caption under it was written for it.)
     check("pptx deck: caption-less image is left HONESTLY unfixed (no placeholder written)",
           "MISSING_ALT_TEXT" in post)
 

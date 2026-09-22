@@ -11,8 +11,8 @@ import {
   unlockedCount,
 } from "../src/domain/achievements";
 import { Card } from "../src/ui/components/Card";
-import { PixelIcon, PixelGlyph } from "../src/ui/components/PixelIcon";
-import { PixelProgress } from "../src/ui/components/PixelProgress";
+import { Icon, IconName } from "../src/ui/components/Icon";
+import { ProgressBar } from "../src/ui/components/ProgressBar";
 import { Chip } from "../src/ui/components/Chip";
 import { Confetti } from "../src/ui/components/Confetti";
 import { EmptyState } from "../src/ui/components/EmptyState";
@@ -20,14 +20,14 @@ import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
 import { useTheme } from "../src/ui/useTheme";
 
-function pickGlyph(id: string): PixelGlyph {
+function pickGlyph(id: string): IconName {
   const k = id.toLowerCase();
-  if (k.includes("first")) return "spark";
-  if (k.includes("ten") || k.includes("audits")) return "doc";
+  if (k.includes("first")) return "flag";
+  if (k.includes("ten") || k.includes("audits")) return "file-text";
   if (k.includes("score") || k.includes("ninety")) return "star";
-  if (k.includes("share")) return "bolt";
-  if (k.includes("streak")) return "heart";
-  return "trophy";
+  if (k.includes("share")) return "share-2";
+  if (k.includes("streak")) return "activity";
+  return "award";
 }
 
 export default function AchievementsScreen() {
@@ -58,7 +58,7 @@ export default function AchievementsScreen() {
           Most unlock the first time you do something. Hit them all and you get the full board.
         </Text>
         <View style={{ marginTop: 12 }}>
-          <PixelProgress value={pct / 100} cells={20} cellSize={12} />
+          <ProgressBar value={pct / 100} accessibilityLabel="Achievements unlocked" />
         </View>
         <Text
           style={[
@@ -87,14 +87,13 @@ export default function AchievementsScreen() {
               style={[
                 styles.tile,
                 {
-                  borderRadius: theme.radius.none,
-                  borderColor: locked ? theme.colors.border : theme.colors.accent,
+                  borderRadius: theme.radius.lg,
+                  borderColor: locked ? theme.colors.glassBorder : theme.colors.accent,
                   backgroundColor: locked ? theme.colors.surface2 : theme.colors.surface,
-                  opacity: locked ? 0.7 : 1,
                 },
               ]}
             >
-              <PixelIcon name={pickGlyph(a.id)} size={4} color={locked ? theme.colors.textMuted : theme.colors.accent} />
+              <Icon name={locked ? "lock" : pickGlyph(a.id)} size={22} color={locked ? theme.colors.textMuted : theme.colors.accent} />
               <Text
                 style={[
                   theme.typography.h2,

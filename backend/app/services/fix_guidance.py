@@ -50,8 +50,9 @@ _GUIDANCE: Dict[str, Dict[str, str]] = {
         "note": (
             "Describe what the image conveys in context. If it is purely "
             "decorative, use alt=\"\" so screen readers skip it. We don't guess "
-            "alt text for a live page — upload the document and our vision AI "
-            "will draft it for you to review."
+            "alt text for a live page. If you upload the document instead, we "
+            "draft alt text where we can (for example from a picture's own "
+            "caption) and list the rest for you to describe."
         ),
     },
     "ALT_TEXT_NOT_DESCRIPTIVE": {

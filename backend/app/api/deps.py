@@ -10,6 +10,9 @@ route that needs a caller identity depends on one of the helpers below.
 - ``require_admin``    -> the ``UserRow`` if the caller is an admin, else 403.
 - ``optional_user``    -> the ``UserRow`` or ``None`` (never raises); for routes
                           that adapt their response to anonymous callers.
+- ``optional_user_id_or_api_key`` -> a user id, or ``None`` when NO credential
+                          was sent (the account-free scan); a credential that
+                          fails is still a 401.
 
 Every path rejects a revoked session: the token's ``ver`` must equal the user's
 current ``token_version``. That needs the user row, so it costs one primary-key
@@ -196,6 +199,52 @@ def require_user_id_or_api_key(
     if uid:
         return uid
     raise HTTPException(status_code=401, detail="authentication_required")
+
+
+def credentials_presented(authorization: Optional[str], x_api_key: Optional[str]) -> bool:
+    """Did the caller send ANY credential (a bearer token or an API key)?"""
+    return bool(_bearer_token(authorization)) or bool((x_api_key or "").strip())
+
+
+def optional_user_id_or_api_key(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Optional[str]:
+    """Like :func:`require_user_id_or_api_key`, but ``None`` for a caller who
+    presented NO credential at all — the account-free scan.
+
+    A caller who DID present a credential that fails (expired or revoked
+    session, unknown or revoked key) still gets the 401, never a silent
+    downgrade to anonymous: their scan would quietly stop being saved, and a
+    client with a stale token needs to hear that it is signed out.
+    """
+    if not credentials_presented(authorization, x_api_key):
+        return None
+    return require_user_id_or_api_key(request, authorization, x_api_key)
+
+
+def api_key_owner_id(presented: Optional[str]) -> Optional[str]:
+    """Read-only owner lookup for a presented API key (no ``last_used_at`` stamp).
+
+    For the rate limiter, which must know WHOSE budget a request spends
+    before the route runs, without writing a row per request. Same rules as
+    :func:`_api_key_user_id`: prefixed, not revoked, owner still exists.
+    """
+    key = (presented or "").strip()
+    if not key.startswith(API_KEY_PREFIX):
+        return None
+    try:
+        digest = hash_api_key(key)
+        with session_scope() as session:
+            return session.execute(
+                select(ApiKeyRow.user_id)
+                .join(UserRow, UserRow.id == ApiKeyRow.user_id)
+                .where(ApiKeyRow.key_hash == digest)
+                .where(ApiKeyRow.revoked_at.is_(None))
+            ).scalar_one_or_none()
+    except Exception:
+        return None
 
 
 def optional_user(

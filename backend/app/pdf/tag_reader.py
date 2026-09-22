@@ -64,12 +64,44 @@ def _mcid_content(reader: PdfReader, page_index: int) -> Dict[int, Dict[str, Any
 
     from pypdf.generic import ContentStream  # local import keeps module light
 
+    from app.pdf.text_decode import FontDecoder, FontState, operand_bytes, show_strings
+
     out: Dict[int, Dict[str, Any]] = {}
     try:
         page = reader.pages[page_index]
         ops = ContentStream(page.get_contents(), reader).operations
     except Exception:
         return out
+    try:
+        decoder: Optional[FontDecoder] = FontDecoder(page)
+    except Exception:
+        decoder = None
+    font_state = FontState()
+
+    def text_of(operands: Any, op: bytes) -> str:
+        """Decoded text of one show op. Composite-font text goes through the
+        font's ToUnicode map; text we cannot decode contributes NOTHING — a
+        heading must never read back as the Python repr of glyph bytes
+        ("b'\\x00:\\x00L...'"), which is what ``str(ByteStringObject)`` gave."""
+        parts: List[str] = []
+        for s in show_strings(operands, op):
+            if decoder is not None and decoder.is_composite(font_state.font):
+                t = decoder.decode(font_state.font, operand_bytes(s))
+                if t:
+                    parts.append(t)
+                continue
+            # Simple fonts: the FONT's encoding (WinAnsi 0x95 is a bullet),
+            # as extract_text reads it — pypdf's own str() of the operand is
+            # PDFDocEncoding, which turns bullets and curly quotes into other
+            # characters.
+            t = decoder.decode_unicode(font_state.font, operand_bytes(s)) if decoder is not None else None
+            if t:
+                parts.append(t)
+            elif isinstance(s, str):
+                parts.append(str(s))
+            else:
+                parts.append(operand_bytes(s).decode("latin-1", "ignore"))
+        return "".join(parts)
 
     stack: List[Optional[int]] = []
 
@@ -81,11 +113,14 @@ def _mcid_content(reader: PdfReader, page_index: int) -> Dict[int, Dict[str, Any
 
     def bucket(mcid: int) -> Dict[str, Any]:
         if mcid not in out:
-            out[mcid] = {"text": "", "xobjects": set()}
+            # "order": where the MCID first paints in the content stream, so a
+            # caller can rebuild an element's text in STREAM order.
+            out[mcid] = {"text": "", "xobjects": set(), "order": len(out)}
         return out[mcid]
 
     for operands, op in ops:
         try:
+            font_state.feed(operands, op)
             if op == b"BDC":
                 mcid = None
                 if len(operands) >= 2:
@@ -101,16 +136,10 @@ def _mcid_content(reader: PdfReader, page_index: int) -> Dict[int, Dict[str, Any
             elif op == b"EMC":
                 if stack:
                     stack.pop()
-            elif op in (b"Tj", b"'", b'"'):
+            elif op in (b"Tj", b"'", b'"', b"TJ"):
                 m = current()
                 if m is not None and operands:
-                    bucket(m)["text"] += str(operands[0] if op != b'"' else operands[2]) + " "
-            elif op == b"TJ":
-                m = current()
-                if m is not None and operands and isinstance(operands[0], (list, ArrayObject)):
-                    bucket(m)["text"] += "".join(
-                        str(x) for x in operands[0] if not isinstance(x, (int, float))
-                    ) + " "
+                    bucket(m)["text"] += text_of(operands, op) + " "
             elif op == b"Do":
                 m = current()
                 if m is not None and operands:
@@ -167,6 +196,49 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
                         pass
         return got
 
+    def first_page(elem: Any, depth: int = 0) -> Optional[int]:
+        """Page of an element's first descendant that says which page it is on.
+
+        Containers (/Table, /L) routinely carry no /Pg of their own — the
+        cells and items do. Without this a table on page 2 was attributed to
+        page 1 (``None`` coerced to 0 by the parser)."""
+        if depth > 12:
+            return None
+        el = _resolve(elem)
+        if not isinstance(el, DictionaryObject):
+            return None
+        pg = _page_index_for(el.get("/Pg"), page_ids)
+        if pg is not None:
+            return pg
+        k = _resolve(el.get("/K"))
+        kids = k if isinstance(k, (list, ArrayObject)) else ([k] if k is not None else [])
+        for kid in kids[:8]:
+            kr = _resolve(kid)
+            if isinstance(kr, DictionaryObject):
+                got = first_page(kr, depth + 1)
+                if got is not None:
+                    return got
+        return None
+
+    def all_mcids(elem: Any, page_ctx: Optional[int], depth: int = 0) -> List[Tuple[int, int]]:
+        """Every (page, mcid) under ``elem`` (cells of a table, items of a
+        list), bounded like :func:`walk`. Used only to LOCATE the element."""
+        if depth > 16:
+            return []
+        el = _resolve(elem)
+        if not isinstance(el, DictionaryObject):
+            return []
+        pg = _page_index_for(el.get("/Pg"), page_ids)
+        page = pg if pg is not None else page_ctx
+        got = kid_mcids(el, page)
+        k = _resolve(el.get("/K"))
+        kids = k if isinstance(k, (list, ArrayObject)) else ([k] if k is not None else [])
+        for kid in kids[:2000]:
+            kr = _resolve(kid)
+            if isinstance(kr, DictionaryObject) and "/MCID" not in kr and str(kr.get("/Type") or "") != "/OBJR":
+                got.extend(all_mcids(kr, page, depth + 1))
+        return got
+
     truncated = {"hit": False, "max_depth": 0}
 
     def walk(elem: Any, page_ctx: Optional[int], depth: int = 0) -> None:
@@ -187,6 +259,8 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
             return
         s = _norm_s(el.get("/S"), role_map)
         pg = _page_index_for(el.get("/Pg"), page_ids)
+        if pg is None and s in ("Table", "L"):
+            pg = first_page(el)
         page = pg if pg is not None else page_ctx
 
         if s in _HEADING_TAGS:
@@ -207,7 +281,7 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
                 if isinstance(lr, DictionaryObject) and "/MCID" not in lr and str(lr.get("/Type") or "") != "/OBJR":
                     kid_names.append(_norm_s(lr.get("/S"), role_map))
             if kid_names:
-                lists.append({"page": page, "kids": kid_names})
+                lists.append({"page": page, "kids": kid_names, "_mcids": all_mcids(el, page)})
         elif s == "Table":
             rows: List[List[str]] = []
             k = _resolve(el.get("/K"))
@@ -230,7 +304,7 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
                 if cells:
                     rows.append(cells)
             if rows:
-                tables.append({"page": page, "rows": rows})
+                tables.append({"page": page, "rows": rows, "_mcids": all_mcids(el, page)})
 
         # Recurse into structural kids (skip MCIDs/OBJRs).
         k = _resolve(el.get("/K"))
@@ -264,9 +338,31 @@ def read_struct_info(reader: PdfReader) -> Optional[Dict[str, Any]]:
     for f in figures:
         if f["alt"]:
             needed_pages.update(p for p, _m in f["mcids"])
+    for container in tables + lists:
+        if container.get("page") is not None and container.get("_mcids"):
+            needed_pages.add(container["page"])
     mc_by_page: Dict[int, Dict[int, Dict[str, Any]]] = {
         p: _mcid_content(reader, p) for p in needed_pages
     }
+
+    # A table's / list's text in CONTENT-STREAM order (its own page only).
+    # The parser matches this as ONE contiguous run against the page's
+    # positioned words to say where the element is — a whole table's text is
+    # specific enough that a match is the element, and no match means no
+    # location rather than a guessed one.
+    for container in tables + lists:
+        mcids = container.pop("_mcids", None) or []
+        pg = container.get("page")
+        if pg is None:
+            continue
+        content = mc_by_page.get(pg, {})
+        spans = sorted(
+            {m for p, m in mcids if p == pg and m in content},
+            key=lambda m: content[m].get("order", 0),
+        )
+        text = " ".join((content[m].get("text") or "").strip() for m in spans).strip()
+        if text:
+            container["text"] = text
 
     headings_out: List[Dict[str, Any]] = []
     for h in headings:

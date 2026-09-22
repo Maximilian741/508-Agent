@@ -79,8 +79,11 @@ class TagPdfStructureExecutor(RemediationExecutor):
             status=ExecutionStatus.SUCCESS,
             notes=(
                 "Structure tree will be reconstructed in the remediated file: "
-                "headings (by font size), lists, tables (text-geometry + ruling "
-                "lines), figures with alt, and header/footer artifacts — plus "
-                "MarkInfo, ParentTree and XMP metadata."
+                "headings (by font size and bold section heads), lists, tables "
+                "(text-geometry + ruling lines), every image as a figure (with "
+                "its description where it has one) or as decoration, links named "
+                "by their visible text, form fields next to their labels, and "
+                "header/footer artifacts — plus MarkInfo, ParentTree and XMP "
+                "metadata."
             ),
         )

@@ -11,38 +11,18 @@ interface ScreenProps {
   title?: string;
 }
 
-const FOCUS_STYLE_ID = "508-focus-style";
-
-function _injectFocusStyles() {
-  if (Platform.OS !== "web") return;
-  if (typeof document === "undefined") return;
-  if (document.getElementById(FOCUS_STYLE_ID)) return;
-  const style = document.createElement("style");
-  style.id = FOCUS_STYLE_ID;
-  // Warm ember focus ring (driven by --ui-focus, set per active theme below) —
-  // not a generic blue. 2px / 2px offset is WCAG-critical and kept exactly.
-  style.innerHTML = `
-    :focus-visible { outline: 2px solid var(--ui-focus, #C2410C) !important; outline-offset: 2px !important; border-radius: 4px; }
-    :focus:not(:focus-visible) { outline: none !important; }
-    [role="button"]:focus-visible, button:focus-visible { outline: 2px solid var(--ui-focus, #C2410C) !important; outline-offset: 2px !important; }
-  `;
-  document.head.appendChild(style);
-}
+/** Page content column. Wide enough for side-by-side panels, narrow enough to read. */
+export const CONTENT_MAX_WIDTH = 1180;
 
 export function Screen({ children, scroll = false, contentStyle, title }: ScreenProps) {
   const theme = useTheme();
   const styles = createStyles(theme);
 
   useEffect(() => {
-    _injectFocusStyles();
-    if (Platform.OS === "web" && typeof document !== "undefined") {
-      // Keep the focus ring in sync with the active theme's accent.
-      document.documentElement.style.setProperty("--ui-focus", theme.colors.accent);
-    }
     if (Platform.OS === "web" && title && typeof document !== "undefined") {
       document.title = `${title} · 508 Agent`;
     }
-  }, [title, theme.colors.accent]);
+  }, [title]);
 
   if (scroll) {
     return (
@@ -79,17 +59,26 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
   StyleSheet.create({
     safe: {
       flex: 1,
-      backgroundColor: theme.colors.bg,
+      // On web the root layout paints the page gradient; stay transparent so
+      // it shows through. Native has no gradient, so paint the solid bg.
+      backgroundColor: Platform.OS === "web" ? "transparent" : theme.colors.bg,
     },
     content: {
       flex: 1,
+      width: "100%",
+      maxWidth: CONTENT_MAX_WIDTH,
+      alignSelf: "center",
       paddingHorizontal: theme.spacing.xl,
-      paddingVertical: theme.spacing.lg,
-      gap: theme.spacing.md,
+      paddingVertical: theme.spacing.xxl,
+      gap: theme.spacing.xl,
     },
     scrollContent: {
+      width: "100%",
+      maxWidth: CONTENT_MAX_WIDTH,
+      alignSelf: "center",
       paddingHorizontal: theme.spacing.xl,
-      paddingVertical: theme.spacing.lg,
-      gap: theme.spacing.md,
+      paddingTop: theme.spacing.xxl,
+      paddingBottom: theme.spacing.huge,
+      gap: theme.spacing.xl,
     },
   });

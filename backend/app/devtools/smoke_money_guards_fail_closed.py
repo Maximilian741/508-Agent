@@ -151,6 +151,9 @@ def main() -> int:
     # --- 2. the farm, end to end, with the verification gate ON ---------------
     _reload_settings("production")
     os.environ["SMTP_HOST"] = "smtp.example.invalid"
+    # Sign-up (and request-verify-email) mail the link when SMTP is set; the
+    # token is read from the DB below, so the send itself must not dial out.
+    auth_mod.send_email = lambda **kw: True
     client = TestClient(app, headers={"X-Forwarded-For": "10.66.0.1"})
 
     def onboard(email: str) -> dict:

@@ -30,6 +30,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 # the heuristic detector could not identify, and which used to be tagged
 # lang="en" at confidence 0.25 anyway. Asserting SET_DOCUMENT_LANGUAGE on
 # that was asserting the guess. With a real sentence the detection is honest.
+# Likewise the chart carries a real <figcaption>: without an AI key that is
+# the only text the alt fix may use (the paragraph above a picture is not its
+# description — smoke_semantic_refusals).
 HTML = """<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
@@ -37,7 +40,7 @@ HTML = """<!DOCTYPE html>
 <h1>Quarterly Report</h1>
 <p>This report presents the results of the quarter and the outlook for the rest of the year.</p>
 <h3>Revenue</h3>
-<img src="chart.png">
+<figure><img src="chart.png"><figcaption>Figure 1: Revenue by quarter, 2026</figcaption></figure>
 <p><a href="/full">click here</a></p>
 </body>
 </html>

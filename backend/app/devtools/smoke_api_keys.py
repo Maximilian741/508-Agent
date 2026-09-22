@@ -112,8 +112,10 @@ def main() -> int:
     # --- bogus / missing keys -> 401 -----------------------------------------
     r = client.post("/pipeline/analyze", files={"file": ("d.docx", docx, DOCX_MIME)}, headers={"X-API-Key": "ak_live_bogus"})
     check("bogus key -> 401", r.status_code == 401, f"got {r.status_code}")
+    # No credential at all is the account-free scan now (read-only, nothing
+    # saved, no AI — pinned by smoke_anonymous_scan); a BAD key is still 401.
     r = client.post("/pipeline/analyze", files={"file": ("d.docx", docx, DOCX_MIME)})
-    check("no auth -> 401", r.status_code == 401, f"got {r.status_code}")
+    check("no credential -> the anonymous scan (200)", r.status_code == 200, f"got {r.status_code}")
 
     # --- revoke, then the key is rejected ------------------------------------
     r = client.post(f"/api-keys/{key_id}/revoke", headers=jwt_auth)

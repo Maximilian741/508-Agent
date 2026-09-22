@@ -37,8 +37,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.deps import require_user_id, require_user_id_or_api_key
+from app.api.deps import optional_user_id_or_api_key, require_user_id, require_user_id_or_api_key
+from app.api.errors import ApiError, CodedErrorRoute
 from app.config import get_settings
+from app.intake import IntakeInfo, IntakeResult, effective_format, prepare_upload, upload_suffix
+from app.intake import cleanup as _intake_cleanup
 from app.security.signing import sign_file_url, verify_file_signature
 from app.security.uploads import stream_to_tempfile
 from app.security.url_fetch import (
@@ -59,6 +62,7 @@ from app.models.accessibility import (
 from app.parsers import parse_to_tree
 from app.persistence import audit_log as _audit
 from app.persistence.db import get_repo
+from app.services.finding_location import build_locations
 from app.services.fix_guidance import guidance_for
 from app.services.remediation_engine import RemediationEngine
 from app.services.scan_fixes import derive_scan_fixes
@@ -80,7 +84,9 @@ from app.api.credits import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/pipeline")
+# CodedErrorRoute: every error body also carries a stable ``code`` and a
+# plain-English ``message`` (``detail`` is unchanged). See app/api/errors.py.
+router = APIRouter(prefix="/pipeline", route_class=CodedErrorRoute)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +111,33 @@ class PipelineSummary(BaseModel):
     nodeCount: int = 0
     imageCount: int = 0
     tableCount: int = 0
+    # The one-glance plan (/pipeline/analyze): how many findings there are,
+    # how many a remediation of THIS format can fix by itself (autoFixable,
+    # see _auto_fixable), how many need a person, and what a remediation of
+    # this format costs in credits (charged only if a fix reaches the file).
+    total: Optional[int] = None
+    autoFixable: Optional[int] = None
+    needsYou: Optional[int] = None
+    cost: Optional[int] = None
+
+
+class PipelineLocation(BaseModel):
+    """Where a finding is (see app/services/finding_location.py for the rules).
+
+    ``bbox`` is PDF user space (points, origin bottom-left) and is only set
+    with the ``pageSize`` it is relative to (``kind == "pdf-region"``).
+    ``highlight`` is always a literal substring of ``snippet``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = "document"  # "pdf-region" | "image" | "text" | "table" | "document"
+    page: Optional[int] = None
+    bbox: Optional[List[float]] = None
+    pageSize: Optional[List[float]] = None
+    snippet: Optional[str] = None
+    highlight: Optional[str] = None
+    thumbnail: Optional[str] = None
 
 
 class PipelineFix(BaseModel):
@@ -142,6 +175,21 @@ class PipelineViolation(BaseModel):
     # Only populated by the URL/site scan (a live page we can't remediate).
     # Defaults to None so /analyze and every existing caller is unaffected.
     fix: Optional[PipelineFix] = None
+    # True when a recommended action for this flag persists into THIS
+    # format's output and is not FLAG_FOR_MANUAL_REVIEW — i.e. approving it
+    # can change the file — AND, on /analyze when no paid AI provider is
+    # configured, the offline executors actually make that fix in a dry run
+    # (see _predict_auto_fixable): a fix they'd refuse, or would only draft
+    # for a person to review, is not promised. With a paid provider it stays
+    # the format capability (predicting would mean paying); a refused fix is
+    # then reported, and not charged. A caption (_NEEDS_AUTHORED_WORDS) is
+    # never promised.
+    autoFixable: bool = False
+    location: Optional[PipelineLocation] = None
+    # /pipeline/remediate only: did an APPROVED fix for this finding reach the
+    # delivered bytes? (Reconciled executions; False for everything when the
+    # original file was returned unchanged.) None on /analyze.
+    fixed: Optional[bool] = None
 
 
 class PipelineExecutionResult(BaseModel):
@@ -192,6 +240,9 @@ class PipelineResponse(BaseModel):
     aiProvider: str
     # Only set by the URL scan, and only on a re-scan of the same URL.
     changes: Optional[ScanChangeReport] = None
+    # Only set when the upload was converted before analysis (an image to a
+    # PDF, a .doc to a .docx): what we did, and what it means for the fix.
+    intake: Optional[IntakeInfo] = None
 
 
 # ---------------------------------------------------------------------------
@@ -205,9 +256,11 @@ async def analyze(
     file: UploadFile = File(...),
     execute: bool = False,
     # Free, read-only scanning — accepts a session JWT (UI) OR a developer API
-    # key. Remediation (which spends credits) stays JWT-only on purpose, so an
-    # API key can never trigger billing.
-    user_id: str = Depends(require_user_id_or_api_key),
+    # key, OR NO credential at all (the account-free scan: ``user_id`` is None).
+    # A credential that is presented but fails is still a 401. Remediation
+    # (which spends credits) stays JWT-only on purpose, so an API key can never
+    # trigger billing.
+    user_id: Optional[str] = Depends(optional_user_id_or_api_key),
 ) -> PipelineResponse:
     """Analyze a document and return findings.
 
@@ -215,10 +268,16 @@ async def analyze(
     response describes what *could* be auto-applied if the caller approved
     each finding.  Pass ``execute=true`` to also run the executors and bake
     every deterministic fix into the in-memory tree (legacy behavior).
+
+    Anonymous callers (no credential) get the same findings with a smaller
+    upload cap and a strict per-IP budget (RateLimitMiddleware); ``execute``
+    is ignored, nothing is persisted or audited for them, and the only
+    executors that run are the offline ones on a throwaway copy (the fix
+    prediction) — no paid AI client is ever constructed. See
+    ``smoke_anonymous_scan`` and ``smoke_fix_promise``.
     """
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
+    # Any accepted type (see app/intake): a friendly 400 names what we take.
+    suffix = upload_suffix(file.filename)
 
     settings = get_settings()
     upload_result = await stream_to_tempfile(
@@ -228,15 +287,33 @@ async def analyze(
     )
     tmp_path = upload_result.path
 
+    anonymous = user_id is None
+    if anonymous:
+        # The account-free scan never executes into the response tree and
+        # takes smaller files.
+        execute = False
+        _enforce_anonymous_upload_cap(upload_result.size, tmp_path, settings)
+    # Thumbnails / form-field locations read the source again after parsing;
+    # the upload itself is deleted as soon as the parser is done with it.
+    location_src = _keep_for_locations(tmp_path, suffix)
+
     # Parsing + analysis are CPU-bound (and remediation can make blocking AI
     # calls). Run them in the threadpool so two concurrent large documents
     # don't freeze the event loop — including /healthz — for everyone else.
+    # Intake converts images / legacy formats first; its errors are already
+    # sentences (415 "save it as .docx", 413 "too large", ...).
+    intake: Optional[IntakeResult] = None
     try:
-        result = await run_in_threadpool(parse_to_tree, str(tmp_path))
+        intake = await run_in_threadpool(prepare_upload, tmp_path, suffix)
+        result = await run_in_threadpool(parse_to_tree, str(intake.path))
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("pipeline parse failed: %s", exc)
-        raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.")
+        _discard(location_src)
+        raise await run_in_threadpool(_parse_failure, exc, tmp_path, suffix)
     finally:
+        _intake_cleanup(intake)
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
@@ -250,8 +327,27 @@ async def analyze(
     # execute=true billed the paid provider per link and per language guess.
     from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
 
-    engine = RemediationEngine(dispatcher=RemediationDispatcher(get_offline_executors()))
-    violations = await run_in_threadpool(engine.detect_violations, tree)
+    # Anonymous: ?execute is ignored, so this engine gets no executors. The
+    # only executors an anonymous scan ever runs are the OFFLINE ones (pinned
+    # to the heuristic provider), on a throwaway copy, in
+    # _predict_auto_fixable — no paid client is ever built for it.
+    engine = RemediationEngine(
+        dispatcher=RemediationDispatcher([] if anonymous else get_offline_executors())
+    )
+    try:
+        violations = await run_in_threadpool(engine.detect_violations, tree)
+        # WHERE each finding is, read from the tree AS FOUND — before
+        # ?execute=true below can rewrite the very text we'd point at.
+        locations = await run_in_threadpool(
+            build_locations, tree, violations, result.format, location_src
+        )
+    finally:
+        _discard(location_src)
+    # What a remediation WOULD fix (offline executors on a copy; None when a
+    # paid provider is configured) — also before ?execute=true mutates the tree.
+    predicted_fixes = await run_in_threadpool(
+        _predict_auto_fixable, tree, violations, result.format, file.filename or "document"
+    )
     actions = engine.plan_actions(violations)
     executions = (await run_in_threadpool(engine.execute, tree)) if execute else []
 
@@ -289,8 +385,12 @@ async def analyze(
                 },
                 evidence=v.evidence,
                 recommendedActions=[a.action_code.value for a in REMEDIATION_ACTIONS_BY_FLAG.get(flag_code, [])],
+                autoFixable=_auto_fixable(v.rule_id, result.format)
+                and (predicted_fixes is None or v.violation_id in predicted_fixes),
+                location=_location_model(locations.get(v.violation_id)),
             )
         )
+    _attach_plan_summary(summary, api_violations, result.format)
 
     api_executions = []
     for e in executions:
@@ -325,16 +425,26 @@ async def analyze(
     # no bytes produced, no credit spent, nothing delivered. /remediate
     # overwrites this row with the fixes that actually reached the file, so a
     # certificate can only ever describe bytes that were written.
+    #
+    # The account-free scan persists NOTHING: no score row, no audit row.
+    if anonymous:
+        logger.info(
+            "anonymous analyze: format=%s violations=%d autoFixable=%s",
+            result.format, len(api_violations), summary.autoFixable,
+        )
+        return PipelineResponse(
+            summary=summary,
+            violations=api_violations,
+            executions=[],
+            score=score,
+            aiProvider=_configured_provider_name(),
+        )
     _persist_analysis_result(user_id, summary, _build_scan_score(violations), file.filename)
 
-    # Provider name for transparency / UI badge.
-    provider_name = "heuristic"
-    try:
-        from app.ai.semantic_inference import build_default_provider
-
-        provider_name = build_default_provider().name
-    except Exception:
-        pass
+    # Provider name for transparency / UI badge — read from config, the same
+    # way the account-free scan does: a free scan has no reason to construct a
+    # paid provider client just to learn its name.
+    provider_name = _configured_provider_name()
 
     # Audit log: record the analyze.  Doc id only — never filename.
     try:
@@ -366,7 +476,18 @@ async def analyze(
         executions=api_executions,
         score=score,
         aiProvider=provider_name,
+        intake=intake.info() if intake is not None else None,
     )
+
+
+# The sentence for a file that passed the signature check but that no parser
+# could read. Not "you were not charged": /analyze never charges, and
+# /remediate says so itself.
+_PARSE_FAILED_DETAIL = (
+    "We couldn't read this document. It may be damaged, password-protected, or saved in a "
+    "variant we don't support. Open it, save it again as PDF, Word (.docx), PowerPoint (.pptx) "
+    "or Excel (.xlsx), and upload that copy."
+)
 
 
 class AnalyzeUrlRequest(BaseModel):
@@ -429,6 +550,11 @@ async def analyze_url(
         page_table_count = _count_nodes_of(tree, TableNode)
         # Fingerprints must describe the page AS SCANNED, not as remediated.
         scan_fingerprints = await run_in_threadpool(fingerprint_violations, violations, tree)
+        # Same for WHERE each finding is (no thumbnails: a live page's images
+        # are remote, and we never fetch them).
+        url_locations = await run_in_threadpool(
+            lambda: build_locations(tree, violations, result.format, tmp_path, thumbnails=False)
+        )
 
         # "Fix it yourself": run our real remediation engine against a throwaway
         # copy so each finding can carry the exact diff it produced. Analyze-only
@@ -477,6 +603,7 @@ async def analyze_url(
                 # ...but we DO hand over exactly what to change: a real diff from
                 # our engine when it produced one, else static guidance.
                 fix=_fix_for_violation(v, fixes_by_node),
+                location=_location_model(url_locations.get(v.violation_id)),
             )
         )
     score = _build_scan_score(violations)
@@ -950,9 +1077,7 @@ async def remediate(
     set of items they want queued for manual review.
     """
 
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
+    suffix = upload_suffix(file.filename)
 
     try:
         approved_ids = set(json.loads(approved_violations) if approved_violations else [])
@@ -966,7 +1091,10 @@ async def remediate(
     # Affordability check ONLY (no spend yet). The real debit happens after
     # the remediated file is successfully written, so a parse/write failure
     # never charges the user. A broke user still gets a fast 402 here.
-    fmt = suffix.lstrip(".")
+    # Priced, gated and written as the EFFECTIVE format: a .doc is fixed and
+    # delivered as a .docx, an image as a PDF, and .htm is html (keyed on
+    # "htm", the persisted-fix gate found nothing and every fix was discarded).
+    fmt = effective_format(suffix)
     _precheck_credits(user_id=user_id, doc_format=fmt)
 
     settings = get_settings()
@@ -1004,18 +1132,36 @@ async def remediate(
     # CPU-bound parse/analyze/remediate runs in the threadpool (see analyze).
     # On ANY failure here the job dir is removed and NO credit is charged.
     try:
+        intake = await run_in_threadpool(prepare_upload, source_path, suffix)
+    except HTTPException:
+        _cleanup_job_dir(job_dir)
+        raise
+    except Exception as exc:
+        logger.exception("remediate intake failed: %s", exc)
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(status_code=422, detail=_PARSE_FAILED_DETAIL + " You were not charged.")
+    source_path = intake.path
+    try:
         result = await run_in_threadpool(parse_to_tree, str(source_path))
+    except HTTPException:
+        # Already a sentence (e.g. the XLSX parser's 503 "busy, not charged").
+        _cleanup_job_dir(job_dir)
+        raise
     except Exception as exc:
         logger.exception("remediate parse failed: %s", exc)
+        failure = await run_in_threadpool(_parse_failure, exc, source_path, suffix)
         _cleanup_job_dir(job_dir)
-        raise HTTPException(
-            status_code=422,
-            detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.",
-        )
+        raise failure
 
     tree = result.tree
     engine = RemediationEngine()
     violations = await run_in_threadpool(engine.detect_violations, tree)
+    # Locations are read from the tree AS FOUND (and the untouched upload in
+    # the job folder), before any executor rewrites the text they point at.
+    locations = await run_in_threadpool(build_locations, tree, violations, result.format, source_path)
+    # The same promise /analyze made (so the two responses agree per finding);
+    # the file here is already saved under the customer's own name.
+    predicted_fixes = await run_in_threadpool(_predict_auto_fixable, tree, violations, result.format)
     # This endpoint APPLIES the fixes the user explicitly approved (approved_ids),
     # so the user's approval IS the human review — use an apply policy that allows
     # every recommended action to run. The default RemediationPolicy() is the
@@ -1136,12 +1282,16 @@ async def remediate(
 
     # Write the remediated artifact via the format-specific writer (CPU-bound —
     # PDF tagging re-serializes content streams — so threadpool it too).
-    output_name = _suffix_filename(safe_name, "-remediated")
+    # Named after the file we WRITE: a converted .doc comes back as .docx.
+    output_name = _suffix_filename(source_path.name, "-remediated")
     output_path = job_dir / output_name
     try:
         write_result = await run_in_threadpool(
             write_remediated, source_path, tree, output_path, source_format=result.format
         )
+    except HTTPException:
+        _cleanup_job_dir(job_dir)
+        raise
     except Exception as exc:
         logger.exception("remediate write failed: %s", exc)
         _cleanup_job_dir(job_dir)
@@ -1258,6 +1408,19 @@ async def remediate(
                         "headings, lists and tables were NOT identified. The document is tagged and "
                         "valid, but those pages need a source-application pass for full structure."
                     )
+        # Same reconciliation for the other things the tagger deliberately
+        # left undone (pdf_writer words them; see app/pdf/ua_tagger.py).
+        _undone = [
+            str(s.get("reason", "")).split(": ", 1)[1]
+            for s in (_skipped or [])
+            if isinstance(s, dict)
+            and str(s.get("reason", "")).startswith(("pdfua_reading_order_declined:", "pdfua_figures_without_alt:"))
+            and ": " in str(s.get("reason", ""))
+        ]
+        if _undone:
+            for _e in executions:
+                if _e.action_code == ActionCode.TAG_PDF_STRUCTURE and _e.status == ExecutionStatus.SUCCESS:
+                    _e.notes = f"{_e.notes.rstrip('.')}. NOTE: " + "; ".join(_undone) + "."
     except Exception:
         pass
 
@@ -1269,6 +1432,14 @@ async def remediate(
     # status="success" "Rewrote link text X -> Y" rows on a PDF whose delivered
     # bytes were identical to the upload.
     _reconcile_executions(executions, _applied, fmt)
+    # An image upload is only worth delivering (and charging for) when the
+    # fix made the picture readable — OCR text or a real description. A title
+    # on a PDF wrapper around an unreadable scan is not clearly better than
+    # the image, so it is withheld like any other non-fix.
+    from app.intake import withhold_hollow_image_fix
+
+    if persisted_fixes and withhold_hollow_image_fix(intake, executions):
+        persisted_fixes = 0
 
     # Not charged must mean not changed. With no persisted fix the run is free,
     # so it may deliver nothing: writers re-serialize and re-assert metadata
@@ -1276,6 +1447,17 @@ async def remediate(
     # — approved_violations=[] returned the 5-credit tagged PDF, uncharged and
     # byte-identical to the paid run. Hand back the uploaded bytes instead.
     if persisted_fixes == 0:
+        if intake.converted:
+            # Not charged, not changed — and not converted either: a free
+            # .doc -> .docx or image -> PDF conversion is a deliverable in its
+            # own right. The customer gets back the bytes they uploaded.
+            try:
+                output_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            output_name = _suffix_filename(intake.original_path.name, "-remediated")
+            output_path = job_dir / output_name
+            source_path = intake.original_path
         try:
             shutil.copyfile(str(source_path), str(output_path))
         except Exception as exc:
@@ -1382,6 +1564,10 @@ async def remediate(
         "writer": write_result,
         "manualReviewItemsCreated": manual_items_created,
         "charged": charged,
+        # Set when the upload was converted (image -> PDF, .doc -> .docx):
+        # what we did, and that a run with no persisted fix hands back the
+        # original bytes, not a free conversion.
+        "intake": intake.info().model_dump() if intake.converted else None,
     }
 
     # Drop a side-by-side metadata file so subsequent /pipeline/files calls
@@ -1419,7 +1605,23 @@ async def remediate(
     except Exception:
         pass
 
-    return response_meta
+    # The findings, with autoFixable / location / fixed (shared API contract).
+    # Response only — deliberately NOT in meta.json: thumbnails are data URIs
+    # and the manifest is re-read on every download and listing.
+    response = dict(response_meta)
+    try:
+        response["violations"] = _violations_for_response(
+            violations,
+            locations,
+            result.format,
+            executions=executions,
+            approved_ids=approved_ids if persisted_fixes > 0 else set(),
+            predicted=predicted_fixes,
+        )
+    except Exception:
+        logger.warning("remediate: could not build the violations list", exc_info=True)
+        response["violations"] = []
+    return response
 
 
 def _collect_deferred_charge(job_id: str, meta_path: Path, meta: Dict[str, Any]) -> None:
@@ -1830,6 +2032,385 @@ async def download_remediated_file(
     )
 
 
+# ---------------------------------------------------------------------------
+# The plan, the location and the account-free scan (shared API contract)
+# ---------------------------------------------------------------------------
+
+# Anonymous uploads are capped lower than signed-in ones: it is free CPU with
+# no account behind it. Overridable, never above the global cap.
+_ANON_UPLOAD_MB_DEFAULT = 10
+# Only these formats have a source-side location/thumbnail lookup.
+_LOCATION_SOURCE_SUFFIXES = {".pdf", ".docx", ".pptx", ".html", ".htm"}
+
+
+def _anonymous_upload_cap_bytes(settings) -> int:
+    import os as _os
+
+    try:
+        mb = int(str(_os.environ.get("ANON_SCAN_MAX_MB", "")).strip() or _ANON_UPLOAD_MB_DEFAULT)
+    except (TypeError, ValueError):
+        mb = _ANON_UPLOAD_MB_DEFAULT
+    mb = max(1, mb)
+    return min(mb * 1024 * 1024, settings.max_upload_bytes)
+
+
+def _enforce_anonymous_upload_cap(size: int, tmp_path: Path, settings) -> None:
+    cap = _anonymous_upload_cap_bytes(settings)
+    if size <= cap:
+        return
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    cap_mb = max(1, cap // (1024 * 1024))
+    full_mb = max(1, settings.max_upload_bytes // (1024 * 1024))
+    raise ApiError(
+        413,
+        "too_large",
+        (
+            f"Without an account you can check files up to {cap_mb} MB. "
+            f"Create a free account to check files up to {full_mb} MB."
+        ),
+    )
+
+
+def _keep_for_locations(tmp_path: Path, suffix: str) -> Optional[Path]:
+    """A private copy of the upload for the location pass, or None.
+
+    The parse step deletes the upload the moment it is done; thumbnails and
+    form-field locations need to read the same bytes once more. A hard link
+    costs nothing; a copy is the fallback. Always paired with ``_discard``.
+    """
+    if suffix not in _LOCATION_SOURCE_SUFFIXES:
+        return None
+    import os as _os
+    import tempfile as _tempfile
+
+    try:
+        fd, name = _tempfile.mkstemp(prefix="508loc_", suffix=suffix)
+        _os.close(fd)
+        keep = Path(name)
+        keep.unlink(missing_ok=True)
+        try:
+            _os.link(str(tmp_path), str(keep))
+        except Exception:
+            shutil.copyfile(str(tmp_path), str(keep))
+        return keep
+    except Exception:
+        logger.debug("could not keep a copy for locations", exc_info=True)
+        return None
+
+
+def _discard(path: Optional[Path]) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _pdf_is_password_protected(exc: Exception, path: Path) -> bool:
+    """True when the PDF cannot be opened without a password we don't have.
+
+    An owner-password-only PDF (empty user password) opens fine, so it is
+    NOT this case — its failure, if any, is something else.
+    """
+    try:
+        from pypdf.errors import FileNotDecryptedError
+
+        if isinstance(exc, FileNotDecryptedError):
+            return True
+    except Exception:
+        pass
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path))
+        if not reader.is_encrypted:
+            return False
+        try:
+            return int(reader.decrypt("")) == 0  # PasswordType.NOT_DECRYPTED
+        except Exception:
+            return True
+    except Exception:
+        return "not been decrypted" in str(exc).lower()
+
+
+def _parse_failure(exc: Exception, path: Path, suffix: str) -> HTTPException:
+    """The 422 for a document we could not open — with the reason when known.
+
+    ``detail`` keeps the legacy sentence except for the new password case;
+    ``code``/``message`` (added by CodedErrorRoute) say what happened.
+    """
+    legacy = "Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file."
+    # A parser that knows WHY it failed carries a user_message (the PDF
+    # parser says a file is password-protected rather than corrupt). Prefer
+    # its sentence; the stable code stays the same either way.
+    user_message = getattr(exc, "user_message", None)
+    if suffix == ".pdf":
+        from app.api.errors import MESSAGES
+
+        if _pdf_is_password_protected(exc, path):
+            return ApiError(422, "password_protected", user_message or MESSAGES["password_protected"])
+        if user_message:
+            return ApiError(422, "invalid_pdf", user_message)
+        return ApiError(422, "invalid_pdf", MESSAGES["invalid_pdf"], detail=legacy)
+    if user_message:
+        return HTTPException(status_code=422, detail=user_message)
+    return HTTPException(status_code=422, detail=legacy)
+
+
+def _remediation_cost(source_format: str) -> int:
+    fmt = (source_format or "").lstrip(".").lower()
+    return int(DOC_FORMAT_COSTS.get(fmt) or 5)
+
+
+# Flags that stay with a person BY DESIGN, whatever an executor can draft: the
+# fix is words only the author knows (what a table is FOR is its caption; a
+# caption made of its first row says nothing new). A drafted suggestion can
+# still be approved on the review screen, but it is never promised as
+# automatic — so the one-step flow, which applies exactly the autoFixable
+# findings without asking, never applies or charges one.
+_NEEDS_AUTHORED_WORDS = frozenset({"TABLE_CAPTION_MISSING"})
+
+
+def _review_markers(node: Any) -> frozenset:
+    """The ``<kind>_pending_review`` markers set (truthy) on a node.
+
+    Executors that can only DRAFT a fix (the offline alt text "Image
+    docx-img-1 — <the paragraph before it>", a caption repeating a table's
+    first row, a link label guessed from the host at confidence 0.45) still
+    SUCCEED, and say so here. A fix its own author wants a person to check is
+    not one we apply without asking.
+    """
+    props = getattr(getattr(node, "metadata", None), "properties", None) or {}
+    try:
+        return frozenset(k for k, v in props.items() if str(k).endswith("_pending_review") and bool(v))
+    except Exception:  # pragma: no cover - a malformed properties dict
+        return frozenset()
+
+
+def _watch_for_drafts(executors: List[Any], nodes: Dict[str, Any], drafted: set) -> List[Any]:
+    """Record ``(node id, action code)`` for every execution that leaves a NEW
+    review marker on its target — per execution, because one node can carry
+    a clean fix and a draft at once (a table's headers and its caption).
+
+    Wraps each (per-job, freshly built) executor instance's ``execute``.
+    """
+    for executor in executors:
+        inner = executor.execute
+
+        def execute(plan, tree=None, _inner=inner):
+            node = nodes.get(plan.target_node_id)
+            before = _review_markers(node)
+            result = _inner(plan, tree=tree)
+            if _review_markers(node) - before:
+                drafted.add((plan.target_node_id, getattr(result.action_code, "value", result.action_code)))
+            return result
+
+        executor.execute = execute
+    return executors
+
+
+def _auto_fixable(rule_id: str, source_format: str) -> bool:
+    """Contract: a recommended action for this flag persists into this
+    format's output (``_PERSISTED_ACTIONS``) and is not FLAG_FOR_MANUAL_REVIEW,
+    and the flag is not one a person must write (``_NEEDS_AUTHORED_WORDS``).
+
+    The same set the charge gate credits, so the "we can fix N" promise can
+    never name a fix the writer is unable to put in the file. (A capability,
+    not a guarantee: an executor may still refuse a fix it cannot make well,
+    in which case it is reported, and not charged.)
+    """
+    from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG
+
+    if rule_id in _NEEDS_AUTHORED_WORDS:
+        return False
+    try:
+        flag = AccessibilityFlagCode(rule_id)
+    except ValueError:
+        return False
+    for action in REMEDIATION_ACTIONS_BY_FLAG.get(flag, []):
+        code = action.action_code.value
+        if code != ActionCode.FLAG_FOR_MANUAL_REVIEW.value and _action_persists(code, source_format):
+            return True
+    return False
+
+
+def _predict_auto_fixable(tree, violations, source_format: str, filename: Optional[str] = None) -> Optional[set]:
+    """Which findings a remediation WOULD fix — or None when that can't be
+    known without spending money.
+
+    When no paid AI provider is configured, /remediate runs exactly the
+    offline executors (the heuristic provider), and they are deterministic —
+    so run them now, on a throwaway copy of the tree, with the same apply
+    policy and the same plan selection /remediate uses. A finding is
+    predicted fixable only if one of its own flag's actions SUCCEEDS on its
+    own node and persists into this format. An executor that refuses a fix it
+    can't make well (a placeholder alt text, a language guess it isn't sure
+    of) therefore makes the promise smaller BEFORE the customer clicks,
+    instead of after they've been shown "we can fix N" and handed fewer. So
+    does one that makes the fix but marks it for review (``_review_markers``:
+    heuristic alt text, a guessed link label): the one-step flow applies the
+    promised fixes without asking anyone, so a draft is counted in needsYou.
+
+    With a paid provider configured the real run may do better than the
+    heuristic (a vision model describes the picture), and predicting that
+    would mean calling it — so return None and let the format capability
+    stand. Never raises; any failure also means None.
+
+    ``filename`` is the name the customer uploaded: /remediate parses the
+    file saved under that name, and the title executor may humanize it, while
+    /analyze parsed a random temp name.
+    """
+    if _configured_provider_name() != "heuristic":
+        return None
+    try:
+        from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG
+        from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
+
+        copy = tree.model_copy(deep=True)
+        root_props = copy.root.metadata.properties
+        if filename and isinstance(root_props, dict) and "filename" in root_props:
+            root_props["filename"] = Path(filename).name
+        policy = RemediationPolicy(allow_ai_actions=True, require_human_review_for_all=False)
+        plans = plan_remediations(copy, policy)
+        selected = []
+        for v in violations:
+            for plan in plans:
+                if plan.target_node_id == v.location.node_id and plan.flag.code.value == v.rule_id:
+                    if any(_action_persists(a.action_code.value, source_format) for a in plan.actions):
+                        selected.append(plan)
+                    break
+        if not selected:
+            return set()
+        nodes = {node.id: node for node in iter_reading_order(copy.root)}
+        drafted: set = set()
+        executors = _watch_for_drafts(get_offline_executors(), nodes, drafted)
+        executions = execute_plans(copy, selected, dispatcher=RemediationDispatcher(executors))
+        made = {
+            (e.target_node_id, e.action_code.value)
+            for e in executions
+            if getattr(e.status, "value", e.status) == "success"
+            and _action_persists(e.action_code.value, source_format)
+            # A draft its own executor wants a person to check is "needs you".
+            and (e.target_node_id, e.action_code.value) not in drafted
+        }
+        predicted = set()
+        for v in violations:
+            try:
+                flag = AccessibilityFlagCode(v.rule_id)
+            except ValueError:
+                continue
+            codes = [a.action_code.value for a in REMEDIATION_ACTIONS_BY_FLAG.get(flag, [])]
+            if any((v.location.node_id, code) in made for code in codes):
+                predicted.add(v.violation_id)
+        return predicted
+    except Exception:
+        logger.warning("analyze: fix prediction failed; falling back to format capability", exc_info=True)
+        return None
+
+
+def _location_model(raw: Optional[Dict[str, Any]]) -> PipelineLocation:
+    if not raw:
+        return PipelineLocation()
+    try:
+        return PipelineLocation(**raw)
+    except Exception:  # a malformed location must never break a scan
+        return PipelineLocation()
+
+
+def _attach_plan_summary(summary: PipelineSummary, violations: List[PipelineViolation], source_format: str) -> None:
+    total = len(violations)
+    fixable = sum(1 for v in violations if v.autoFixable)
+    summary.total = total
+    summary.autoFixable = fixable
+    summary.needsYou = total - fixable
+    # What fixing costs: the format's price, charged only if a fix reaches
+    # the file — so when nothing is auto-fixable there is nothing to pay for.
+    summary.cost = _remediation_cost(source_format) if fixable else 0
+
+
+def _configured_provider_name() -> str:
+    """The provider name build_default_provider() WOULD pick, without building
+    one. For the account-free scan, which must not construct any AI client."""
+    import os as _os
+
+    forced = (_os.getenv("SEMANTIC_PROVIDER") or "").strip().lower()
+    anthropic_key = bool((_os.getenv("ANTHROPIC_API_KEY") or "").strip())
+    openai_key = bool((_os.getenv("OPENAI_API_KEY") or "").strip())
+    if forced == "heuristic":
+        return "heuristic"
+    if forced == "claude":
+        return "claude" if anthropic_key else "heuristic"
+    if forced == "openai":
+        return "openai" if openai_key else "heuristic"
+    if anthropic_key:
+        return "claude"
+    if openai_key:
+        return "openai"
+    return "heuristic"
+
+
+def _violations_for_response(
+    violations,
+    locations: Dict[str, Dict[str, Any]],
+    source_format: str,
+    *,
+    executions=None,
+    approved_ids=None,
+    predicted: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """The contract's violation objects, as JSON-ready dicts (remediate).
+
+    ``fixed`` is True only for an APPROVED finding with a SUCCESS execution
+    (already reconciled against the writer) of one of its own flag's actions
+    on its own node — the same executions the charge gate counted.
+    ``autoFixable`` is the same promise /analyze made (``predicted`` from
+    :func:`_predict_auto_fixable`; None = the format capability).
+    """
+    from app.models.accessibility import FLAG_DEFINITIONS, REMEDIATION_ACTIONS_BY_FLAG
+
+    succeeded = set()
+    for e in executions or []:
+        if getattr(e.status, "value", e.status) == "success":
+            succeeded.add((e.target_node_id, e.action_code.value))
+    approved = set(approved_ids or [])
+    out: List[Dict[str, Any]] = []
+    for v in violations:
+        try:
+            flag_code = AccessibilityFlagCode(v.rule_id)
+        except ValueError:
+            continue
+        definition = FLAG_DEFINITIONS[flag_code]
+        actions = [a.action_code.value for a in REMEDIATION_ACTIONS_BY_FLAG.get(flag_code, [])]
+        fixed = v.violation_id in approved and any(
+            (v.location.node_id, code) in succeeded for code in actions
+        )
+        model = PipelineViolation(
+            id=v.violation_id,
+            ruleId=v.rule_id,
+            severity=v.severity,
+            description=v.description,
+            nodeId=v.location.node_id,
+            page=v.evidence.get("page") if isinstance(v.evidence, dict) else None,
+            standards={
+                "wcag_2_1": list(definition.standards.wcag_2_1),
+                "section_508": list(definition.standards.section_508),
+                "pdf_ua": list(definition.standards.pdf_ua),
+            },
+            evidence=v.evidence if isinstance(v.evidence, dict) else {},
+            recommendedActions=actions,
+            autoFixable=_auto_fixable(v.rule_id, source_format)
+            and (predicted is None or v.violation_id in predicted),
+            location=_location_model(locations.get(v.violation_id)),
+            fixed=bool(fixed),
+        )
+        out.append(model.model_dump(mode="json"))
+    return out
+
+
 def _suffix_filename(filename: str, suffix: str) -> str:
     p = Path(filename)
     return f"{p.stem}{suffix}{p.suffix}"
@@ -1843,6 +2424,8 @@ def _media_type_for(name: str) -> str:
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     if lower.endswith(".pptx"):
         return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    if lower.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if lower.endswith((".html", ".htm")):
         return "text/html; charset=utf-8"
     return "application/octet-stream"
@@ -1983,6 +2566,21 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "SET_INPUT_AUTOCOMPLETE",
         "FIX_POSITIVE_TABINDEX",
     },
+    # xlsx_writer edits the workbook's parts in place (never an openpyxl
+    # round trip, which would wipe existing alt text) and confirms every edit
+    # by re-reading the saved file; each action below is counted only when
+    # its applied entry is present (XLSX is in _WRITER_CONFIRMED_FORMATS).
+    # Verified by smoke_xlsx_pipeline.
+    "xlsx": {
+        "SET_DOCUMENT_TITLE",          # dc:title in docProps/core.xml
+        "SET_DOCUMENT_LANGUAGE",       # dc:language in docProps/core.xml
+        "GENERATE_ALT_TEXT",           # descr on the picture/chart's cNvPr
+        "REMOVE_DECORATIVE_ALT_TEXT",  # descr removed from a decorative object
+        # A plain range whose first row is unambiguously headings becomes an
+        # Excel table with that row as its header row. Only offered for
+        # blocks the parser judged "candidate"; unclear ones are manual.
+        "ADD_TABLE_HEADERS",
+    },
 }
 
 
@@ -2010,12 +2608,28 @@ def _action_persists(action_code: str, source_format: str) -> bool:
 #     words, the writer adds no overlay and records ocr_no_recognizable_pages,
 #     and the output is the unreadable scan it started as. Only the writer's
 #     applied entry proves a text layer reached the bytes.
+#   - SET_SLIDE_TITLE (PPTX only): the executor picks the text; the writer can
+#     still refuse (an empty title box that draws the slide's design) or fail
+#     to place a title. Only its applied entry proves the slide got one.
 _WRITER_CONFIRMED_ACTIONS = {
     "FIX_CONTRAST",
     "GENERATE_TABLE_CAPTION",
     "TAG_PDF_STRUCTURE",
     "ADD_OCR_TEXT_LAYER",
+    # DOCX-only; the writer tags each heading promotion it placed (style
+    # created if missing, applied, look kept) with action=PROMOTE_HEADING.
+    "PROMOTE_HEADING",
+    "SET_SLIDE_TITLE",
 }
+
+# Formats whose writer appends to ``applied`` ONLY for an edit that is in the
+# saved file, for EVERY action it supports (it has no re-assertion path), so
+# the applied list is authoritative for all of them.
+_WRITER_CONFIRMED_FORMATS = {"xlsx"}
+
+
+def _writer_confirms(action_code: str, source_format: str) -> bool:
+    return action_code in _WRITER_CONFIRMED_ACTIONS or (source_format or "").lower() in _WRITER_CONFIRMED_FORMATS
 
 
 # The honest note to put on a success the file doesn't actually carry, per
@@ -2029,6 +2643,12 @@ _UNCONFIRMED_NOTES = {
         "OCR recognized no text on any page of this scan, so no text layer was "
         "added and the document is still image-only. This fix was not applied "
         "and you were not charged for it."
+    ),
+    "SET_SLIDE_TITLE": (
+        "We could not give this slide a title without changing how it looks, so "
+        "it was left as it was. Add the title in PowerPoint: type it into the "
+        "slide's title box (Home > Layout gives a slide one). This fix was not "
+        "applied and you were not charged for it."
     ),
 }
 
@@ -2076,7 +2696,7 @@ def _reconcile_executions(executions, applied, source_format: str) -> None:
             e.status = ExecutionStatus.SKIPPED
             e.notes = f"{(e.notes or '').rstrip()} [{_not_persisted_note(source_format)}]".strip()
             continue
-        if code in _WRITER_CONFIRMED_ACTIONS and e.target_node_id not in applied_by_action.get(code, set()):
+        if _writer_confirms(code, source_format) and e.target_node_id not in applied_by_action.get(code, set()):
             e.status = ExecutionStatus.SKIPPED
             e.notes = _unconfirmed_note(code)
 
@@ -2110,7 +2730,7 @@ def _count_persisted_fixes(executions, applied, source_format: str, skipped=None
         code = e.action_code.value
         if not _action_persists(code, source_format):
             continue
-        if code in _WRITER_CONFIRMED_ACTIONS and e.target_node_id not in applied_by_action.get(code, set()):
+        if _writer_confirms(code, source_format) and e.target_node_id not in applied_by_action.get(code, set()):
             continue
         count += 1
     return count

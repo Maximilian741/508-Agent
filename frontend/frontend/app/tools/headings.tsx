@@ -42,7 +42,7 @@ export default function HeadingOutlineChecker() {
       />
 
       <Card>
-        <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+        <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 6 }]}>
           YOUR HTML OR MARKDOWN
         </Text>
         <TextInput

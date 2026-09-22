@@ -63,7 +63,10 @@ def _build(path: Path) -> None:
     p = d.add_paragraph("For instructions, see ")
     # a real w:hyperlink with generic text
     part = d.part
-    r_id = part.relate_to("https://example.gov/instructions",
+    # The address carries real words, so the offline rules can name the link
+    # from it ("Grant application instructions"); a one-word slug like
+    # "/instructions" is refused as not clearly better than "click here".
+    r_id = part.relate_to("https://example.gov/grant-application-instructions",
                           "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
                           is_external=True)
     link = p._p.makeelement(f"{_W}hyperlink", {f"{{http://schemas.openxmlformats.org/officeDocument/2006/relationships}}id": r_id})

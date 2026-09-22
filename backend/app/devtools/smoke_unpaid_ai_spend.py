@@ -110,11 +110,15 @@ def _link_pdf(count: int = 12) -> bytes:
     return out
 
 
-def _alt_html() -> bytes:
-    """HTML with images missing alt: GENERATE_ALT_TEXT, which DOES persist."""
+def _link_html() -> bytes:
+    """HTML with 'click here' links: IMPROVE_LINK_TEXT, which DOES persist.
+
+    (It used to be images with nearby text. Without pixels to look at, alt
+    text now comes from the author's caption with no provider call at all, so
+    alt is no longer the paid-and-persisting example.)"""
     parts = ["<!doctype html><html><head><title>T</title></head><body lang='en'><h1>Budget</h1>"]
     for i in range(3):
-        parts.append(f"<p>Figure {i}: revenue for region {i}.</p><img src='chart{i}.png'>")
+        parts.append(f"<p>Region {i}: <a href='https://example.com/reports/region-{i}.pdf'>click here</a></p>")
     parts.append("</body></html>")
     return "".join(parts).encode("utf-8")
 
@@ -201,15 +205,15 @@ def main() -> int:
     check("and still cost the user nothing", balance() == before, (before, balance()))
 
     # --- 4. a PERSISTING AI action on the same account still runs -------------
-    html = _alt_html()
+    html = _link_html()
     analyzed = client.post(
         "/pipeline/analyze", headers=hdr,
         files={"file": ("page.html", html, "text/html")},
     )
     assert analyzed.status_code == 200, analyzed.text
-    alt_ids = [v["id"] for v in analyzed.json()["violations"] if v["ruleId"] == "MISSING_ALT_TEXT"]
-    check("the HTML really does flag missing alt text (sanity)", len(alt_ids) >= 2, len(alt_ids))
-    check("GENERATE_ALT_TEXT genuinely persists into HTML (sanity)", _action_persists("GENERATE_ALT_TEXT", "html"))
+    alt_ids = [v["id"] for v in analyzed.json()["violations"] if v["ruleId"] == "LINK_TEXT_NON_DESCRIPTIVE"]
+    check("the HTML really does flag generic link text (sanity)", len(alt_ids) >= 2, len(alt_ids))
+    check("IMPROVE_LINK_TEXT genuinely persists into HTML (sanity)", _action_persists("IMPROVE_LINK_TEXT", "html"))
 
     before = balance()
     _CALLS.clear()

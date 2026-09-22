@@ -256,6 +256,40 @@ export interface PipelineSummary {
     nodeCount: number;
     imageCount: number;
     tableCount: number;
+    /**
+     * The one-glance plan (/pipeline/analyze, shared contract): findings,
+     * how many a fix of THIS format makes by itself, how many need a person,
+     * and what fixing costs in credits (0 when nothing is auto-fixable).
+     * Absent on an older backend — see src/domain/fixPlan.ts for the fallback.
+     */
+    total?: number | null;
+    autoFixable?: number | null;
+    needsYou?: number | null;
+    cost?: number | null;
+}
+
+/**
+ * WHERE a finding is (shared contract). `bbox` is PDF user space (points,
+ * origin bottom-left) relative to `pageSize`; `highlight` is always a literal
+ * substring of `snippet`; `thumbnail` is a small data: URI (images only).
+ */
+export interface PipelineLocation {
+    kind: "pdf-region" | "image" | "text" | "table" | "document" | string;
+    page?: number | null;
+    bbox?: [number, number, number, number] | number[] | null;
+    pageSize?: [number, number] | number[] | null;
+    snippet?: string | null;
+    highlight?: string | null;
+    thumbnail?: string | null;
+}
+
+/** What the backend did to an upload before checking it (image -> PDF, .doc -> .docx). */
+export interface PipelineIntake {
+    originalFormat: string;
+    convertedTo: string;
+    converter: string;
+    note: string;
+    ocrAvailable?: boolean | null;
 }
 
 /**
@@ -285,6 +319,12 @@ export interface PipelineViolation {
     recommendedActions: string[];
     /** Only set by the URL/site scan. */
     fix?: PipelineFix | null;
+    /** Shared contract: approving this finding can change THIS file (see fixPlan.ts). */
+    autoFixable?: boolean;
+    /** Shared contract: where the finding is. */
+    location?: PipelineLocation | null;
+    /** /pipeline/remediate only: an approved fix for it reached the delivered bytes. */
+    fixed?: boolean | null;
 }
 
 export interface PipelineExecutionResult {
@@ -348,6 +388,8 @@ export interface PipelineResponse {
     score: PipelineScore;
     aiProvider: string;
     changes?: ScanChangeReport | null;
+    /** Set only when the upload was converted before checking. */
+    intake?: PipelineIntake | null;
 }
 
 export interface SitePageResult {
@@ -393,6 +435,17 @@ export interface PipelineRemediateResult {
         skipped: Array<{ target_id: string; reason: string }>;
     };
     manualReviewItemsCreated: number;
+    /**
+     * The honest counters (backend pipeline.py): fixes that reached the output
+     * bytes, and whether this run spent credits. Report THESE, never
+     * writer.applied.length (it includes re-assertions of what was there).
+     */
+    persistedFixes?: number;
+    charged?: boolean;
+    chargePending?: boolean;
+    /** Shared contract: the findings, each with `fixed` / `location`. */
+    violations?: PipelineViolation[];
+    intake?: PipelineIntake | null;
 }
 
 export interface ApiClient {
@@ -663,7 +716,13 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         const response = await fetch(`${baseUrl}/pipeline/jobs`, { headers: authHeaders() });
         if (!response.ok) throw await _monitorErr(response, "Could not load your recent remediations");
         const body = (await response.json()) as { jobs?: PipelineJob[] };
-        return Array.isArray(body?.jobs) ? body.jobs : [];
+        const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+        // Signed URLs come back relative to the API; on a deploy where the API
+        // is its own origin a relative href would hit the web app and 404.
+        for (const j of jobs) {
+            if (j.downloadUrl && !/^https?:\/\//.test(j.downloadUrl)) j.downloadUrl = `${baseUrl}${j.downloadUrl}`;
+        }
+        return jobs;
     };
 
     const createMonitor = async (url: string, frequency: string, notifyEmail: string): Promise<Monitor> => {

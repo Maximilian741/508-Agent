@@ -162,7 +162,7 @@ def main() -> int:
     check("numbers-only PDF: language executor SKIPS (refuses to guess)",
           lang is not None and lang.status == ExecutionStatus.SKIPPED, getattr(lang, "notes", None))
     check("numbers-only PDF: NO language written", not tree.root.metadata.language, repr(tree.root.metadata.language))
-    check("...and the note tells the user to set it manually", lang is not None and "manually" in (lang.notes or "").lower(), getattr(lang, "notes", None))
+    check("...and the note tells the user to set it themselves", lang is not None and "left for you to set" in (lang.notes or "").lower(), getattr(lang, "notes", None))
 
     # ---- title: page-1 largest line becomes the title ----------------------
     titled = tmp / "9f3a2c.pdf"  # filename stem is junk, so it cannot rescue the title

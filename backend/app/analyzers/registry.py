@@ -37,6 +37,7 @@ from app.analyzers.table_analyzer import TableMissingHeadersAnalyzer
 from app.analyzers.table_caption_analyzer import TableCaptionMissingAnalyzer
 from app.analyzers.table_complexity_analyzer import TableComplexityAnalyzer
 from app.analyzers.nested_table_analyzer import NestedTableAnalyzer
+from app.analyzers.xlsx_analyzer import DataRangeHeadersUnclearAnalyzer, SheetNameDefaultAnalyzer
 from app.models.accessibility import AccessibilityTree
 
 
@@ -81,6 +82,10 @@ def get_default_analyzers() -> List[Analyzer]:
         SlideTitleAnalyzer(),
         ScannedDocumentAnalyzer(),
         UntaggedPdfAnalyzer(),
+        # XLSX-only: default tab names, and data blocks whose header row
+        # cannot be identified (reported instead of TABLE_MISSING_HEADERS).
+        SheetNameDefaultAnalyzer(),
+        DataRangeHeadersUnclearAnalyzer(),
         # Last, so it is attached to the root AFTER any other document-level
         # flags; the frontend sorts document-level errors first regardless.
         AnalysisTruncatedAnalyzer(),

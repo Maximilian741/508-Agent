@@ -14,11 +14,12 @@ import base64
 import re
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 from lxml import etree
 
 from app.parsers.document_id import derive_document_id
@@ -58,7 +59,8 @@ except Exception:  # pragma: no cover - never let the AI module break parsing
 class DOCXParser:
     def parse(self, file_path: str) -> Dict[str, object]:
         doc = Document(file_path)
-        core = doc.core_properties
+        ensure_styles_part(doc)
+        core_title, core_language = core_title_and_language(doc)
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
         generic_link_labels = {
@@ -139,7 +141,7 @@ class DOCXParser:
             if not _rows:
                 tables_missing_headers.append(table_index)
                 continue
-            header_cells = _rows[0].cells
+            header_cells = row_cells(_rows[0])
             header_text = [(cell.text or "").strip() for cell in header_cells]
             if not any(header_text):
                 tables_missing_headers.append(table_index)
@@ -156,8 +158,8 @@ class DOCXParser:
                 )
         return {
             "documentType": "docx",
-            "title": (core.title or "").strip(),
-            "language": (getattr(core, "language", None) or "").strip(),
+            "title": core_title,
+            "language": core_language,
             "headings": headings,
             "emptyHeadingSections": empty_heading_sections,
             "headingJumps": skipped_jumps,
@@ -181,14 +183,33 @@ class DOCXParser:
         lists, and hyperlinks.  Reading order in DOCX flows linearly so the
         children of the synthetic root section preserve the source ordering.
         """
+        return self.parse_document(Document(file_path), file_path)
+
+    def parse_document(
+        self,
+        doc,
+        file_path: str,
+        register: Optional[Callable[[str, Any], None]] = None,
+    ) -> ParserResult:
+        """Build the tree from an already-open python-docx ``Document``.
+
+        ``register(node_id, element)`` — when given — is called for every node
+        id this walk mints, with the live python-docx/lxml object that id
+        names (a Paragraph, a ``<wp:docPr>``, a link element, a ``(row, cell)``
+        pair, a Table …). The docx writer opens the copy it is about to edit,
+        runs THIS walk over it with a register callback, and edits exactly the
+        objects it was handed. Parser and writer therefore cannot disagree
+        about which element ``docx-img-7`` is: there is one walk, not a walk
+        and a hand-maintained mirror of it. (Six mirrors had drifted: alt text
+        for an image after a picture in a heading landed on the NEXT picture.)
+        """
 
         path = Path(file_path)
-        doc = Document(file_path)
+        reg = register or _no_register
+        ensure_styles_part(doc)  # before ANY style read — see its docstring
         theme_colors = _docx_theme_colors(file_path)
-        core = doc.core_properties
-
-        title = (core.title or "").strip()
-        language = (getattr(core, "language", None) or "").strip()
+        styles = DocxStyleResolver(doc)
+        title, language = core_title_and_language(doc)
         if not language:
             # dc:language is rarely set, but Word writes the document language
             # into styles.xml docDefaults <w:lang w:val="en-US"/> on save — and
@@ -229,11 +250,18 @@ class DOCXParser:
         )
         root.children.append(body_section)
         ids = _IdCounter()
+        ids.bookmarks = _bookmark_names(doc)
+        # Where each finding sits, as Word last paginated the file (None when
+        # the file does not say — see _rendered_page_map).
+        ids.pages = _rendered_page_map(doc.element.body, file_path)
+        # What each line of text is really drawn on (contrast is measured
+        # against it, or not at all when it cannot be known).
+        bgs = _Backgrounds(doc, styles, theme_colors, ids.pages)
 
         # Pre-load embedded images so we can attach bytes to the matching
         # <w:drawing> nodes encountered while iterating paragraphs.
-        image_blobs = _collect_image_blobs(doc)
-        rid_counter = 0
+        image_blobs = _collect_image_blobs(doc.part)
+        body_partname = _partname(doc.part)
 
         # Paragraph + heading walker (preserves order; lists handled as groups).
         list_collector: List[ListItemNode] = []
@@ -241,10 +269,36 @@ class DOCXParser:
 
         para_style_cache: Dict[Any, str] = {}
         for paragraph in iter_body_paragraphs(doc):
+            p_el = paragraph._p  # noqa: SLF001
             style_name = paragraph_style_name(paragraph, para_style_cache)
-            text = (paragraph.text or "").strip()
+            text = paragraph_text(p_el).strip()
+            # A Heading-styled paragraph is a heading even when it is numbered
+            # (w:numPr on the paragraph: "1.2 Scope" with Word's own
+            # numbering). It used to be swallowed as a list item, which broke
+            # the outline and invented heading-level jumps.
+            # A paragraph is also a heading when its OUTLINE LEVEL says so —
+            # a template's own "Agency Heading 1" (based on Heading 1) or a
+            # direct "Outline level: Level 2". Word's navigation pane, screen
+            # readers and PDF export all treat it as one; reading only the
+            # style NAME reported such documents as having no headings.
+            heading_level = _heading_level_from_style(style_name) or _outline_heading_level(p_el, styles)
 
-            if _is_list_paragraph(paragraph):
+            # Links and pictures belong to EVERY kind of paragraph — a
+            # "click here" in a bullet, a logo set in the title line. They
+            # used to be read only from plain paragraphs, and the writer's
+            # image index (which counted every paragraph) then disagreed with
+            # the parser from the first such picture onward.
+            link_nodes = _link_nodes_from_p(
+                p_el, doc.part, ids, reg=reg, context_text=text,
+                extra_props={"docx_story": "body", "docx_part": body_partname},
+            )
+            image_nodes = _image_nodes_from_p(
+                p_el, image_blobs, ids, "docx-img", reg,
+                story="body", partname=body_partname,
+                context_fn=lambda _p=paragraph, _t=text: _image_context_for_paragraph(_p, _t),
+            )
+
+            if not heading_level and _is_list_paragraph(paragraph):
                 marker = _detect_list_marker(paragraph)
                 if list_marker is None:
                     list_marker = marker
@@ -252,12 +306,15 @@ class DOCXParser:
                     body_section.children.append(_finalize_list(ids, list_collector, list_marker))
                     list_collector = []
                     list_marker = marker
+                li_id = ids("docx-li")
+                reg(li_id, paragraph)
                 list_collector.append(
                     ListItemNode(
-                        id=ids("docx-li"),
+                        id=li_id,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "•"),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
-                        children=[],
+                        metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el),
+                                              properties=_text_color_props(paragraph, theme_colors, bgs)),
+                        children=[*link_nodes, *image_nodes],
                         accessibility_flags=[],
                     )
                 )
@@ -268,42 +325,37 @@ class DOCXParser:
                 list_collector = []
                 list_marker = None
 
-            heading_level = _heading_level_from_style(style_name)
             if heading_level:
+                h_id = ids("docx-h")
+                reg(h_id, paragraph)
+                h_props = dict(_text_color_props(paragraph, theme_colors, bgs) or {})
+                h_props["heading_visual"] = _heading_visual(p_el, styles, text)
                 body_section.children.append(
                     HeadingNode(
-                        id=ids("docx-h"),
+                        id=h_id,
                         level=heading_level,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "Heading"),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
-                        children=[],
+                        metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el), properties=h_props),
+                        children=[*link_nodes, *image_nodes],
                         accessibility_flags=[],
                     )
                 )
                 continue
 
             # Hyperlink runs first.
-            link_nodes = _hyperlink_nodes_in_paragraph(paragraph, ids)
             for link in link_nodes:
                 body_section.children.append(link)
 
-            # Inline images. Hand each one nearby human text so the heuristic
-            # alt provider can derive a REAL description (the executor now
-            # refuses to write the "Image docx-img-N shown in document."
-            # placeholder). Word's own Caption-styled paragraph after the
-            # picture is best; else the paragraph's own text; else the nearest
-            # preceding paragraph with real words.
-            for image in _inline_images_in_paragraph(paragraph, image_blobs, ids):
-                cap = _image_context_for_paragraph(paragraph, text)
-                if cap:
-                    if image.metadata.properties is None:
-                        image.metadata.properties = {}
-                    image.metadata.properties["caption"] = cap
+            # Inline images, built once above by _image_nodes_from_p. Each
+            # carries its caption AND where that caption came from
+            # (caption_source); the alt executor decides which sources it may
+            # write as a description (app.ai.offline_rules.alt_from_caption).
+            for image in image_nodes:
                 body_section.children.append(image)
 
             if text and not link_nodes:
-                para_props = _text_color_props(paragraph, theme_colors)
-                is_fake_heading = _looks_like_fake_heading(paragraph, style_name, text)
+                para_props = _text_color_props(paragraph, theme_colors, bgs)
+                is_fake_heading = _looks_like_fake_heading(paragraph, style_name, text, styles)
                 if is_fake_heading:
                     # Visually a heading (Title/Subtitle style, or short
                     # all-bold large text) but NOT a real Heading style —
@@ -311,6 +363,10 @@ class DOCXParser:
                     # TextStyledAsHeadingAnalyzer.
                     para_props = dict(para_props or {})
                     para_props["looks_like_heading"] = True
+                    # What it LOOKS like (effective size / weight / numbering),
+                    # so PROMOTE_HEADING can place it in the document's own
+                    # outline instead of defaulting to a sibling H1.
+                    para_props["heading_visual"] = _heading_visual(p_el, styles, text)
                 # A line that looks like a heading is NOT also a fake-list item.
                 # A big/bold numbered section header ("1. Introduction") is a
                 # heading, not a bullet — tagging it both ways lets two fixes
@@ -325,11 +381,13 @@ class DOCXParser:
                     para_props["fake_list_char"] = char
                     if ordinal is not None:
                         para_props["fake_list_ordinal"] = ordinal
+                p_id = ids("docx-p")
+                reg(p_id, paragraph)
                 body_section.children.append(
                     ParagraphNode(
-                        id=ids("docx-p"),
+                        id=p_id,
                         content=NodeContent(kind=ContentKind.TEXT, text=text),
-                        metadata=NodeMetadata(source_format="docx", properties=para_props),
+                        metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el), properties=para_props),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -344,17 +402,15 @@ class DOCXParser:
         # Text boxes: w:txbxContent is invisible to doc.paragraphs, so
         # sidebar/callout content (very common in government documents) would
         # otherwise never be analyzed. Paragraphs mint a distinct docx-tbp /
-        # docx-tblink id space so the body's docx-p / docx-link counters (and
-        # the writer's id-alignment) are untouched. Links here ARE remediable
-        # — the writer indexes docx-tblink ids through the same shared walk.
+        # docx-tblink id space so the body's docx-p / docx-link counters are
+        # untouched. Links here ARE remediable (registered like any other).
         for tb_p in _iter_text_box_paragraphs(doc.element.body):
+            tb_text = paragraph_text(tb_p).strip()
             tb_links = _link_nodes_from_p(
-                tb_p, doc.part, ids, prefix="docx-tblink", extra_props={"in_text_box": True}
+                tb_p, doc.part, ids, prefix="docx-tblink", reg=reg, context_text=tb_text,
+                extra_props={"in_text_box": True, "docx_story": "text_box", "docx_part": body_partname},
             )
             body_section.children.extend(tb_links)
-            tb_text = "".join(
-                (t.text or "") for t in tb_p.iterfind(f".//{_DOCX_NS}t")
-            ).strip()
             if tb_text and not tb_links:
                 body_section.children.append(
                     ParagraphNode(
@@ -362,6 +418,7 @@ class DOCXParser:
                         content=NodeContent(kind=ContentKind.TEXT, text=tb_text),
                         metadata=NodeMetadata(
                             source_format="docx",
+                            page=ids.page_of(tb_p),
                             properties={"in_text_box": True},
                         ),
                         children=[],
@@ -374,14 +431,15 @@ class DOCXParser:
         # (docx-fnp / docx-fnlink); link targets resolve against the NOTE
         # part's own relationships.
         for note_part, note_root in _iter_note_parts(doc):
+            reg(_NOTE_PARTS_KEY, (note_part, note_root))
             for n_p in _note_paragraphs(note_root):
+                fn_text = paragraph_text(n_p).strip()
                 fn_links = _link_nodes_from_p(
-                    n_p, note_part, ids, prefix="docx-fnlink", extra_props={"in_footnote": True}
+                    n_p, note_part, ids, prefix="docx-fnlink", reg=reg, context_text=fn_text,
+                    extra_props={"in_footnote": True, "docx_story": "footnote",
+                                 "docx_part": _partname(note_part)},
                 )
                 body_section.children.extend(fn_links)
-                fn_text = "".join(
-                    (t.text or "") for t in n_p.iterfind(f".//{_DOCX_NS}t")
-                ).strip()
                 if fn_text and not fn_links:
                     body_section.children.append(
                         ParagraphNode(
@@ -397,15 +455,27 @@ class DOCXParser:
                     )
 
         # Tables (linearly after paragraphs is acceptable for the v1 flow).
-        for table in iter_body_tables(doc):
-            body_section.children.append(_table_to_node(table, ids))
+        top_tables = list(iter_body_tables(doc))
+        for table in top_tables:
+            body_section.children.append(
+                _table_to_node(table, ids, image_blobs, reg, body_partname)
+            )
+
+        # Page headers and footers: separate parts (word/header1.xml …) that
+        # doc.paragraphs never opens. The agency logo in the letterhead — on
+        # every printed page — got no finding and no alt, a grey footer was
+        # never measured, and a re-scan called the file clean. Their own id
+        # space (docx-hfimg / docx-hflink / docx-hfp) keeps body ids stable.
+        furniture = _header_footer_section(doc, ids, reg, theme_colors, bgs)
+        if furniture is not None:
+            root.children.append(furniture)
 
         # Ensure unique ids.
         raw_metadata = {
             "filename": path.name,
             "title": title,
             "language": language,
-            "table_count": len(list(iter_body_tables(doc))),
+            "table_count": len(top_tables),
         }
         return ParserResult(
             document_id=derive_document_id(path),
@@ -520,11 +590,12 @@ def _run_color_hex(run, theme_colors: Dict[str, str]) -> Optional[str]:
         return None
 
 
-def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-    """Per-run text colours (for contrast analysis): explicit sRGB *and* resolved
-    theme colours. Auto/inherited/unknown colours are skipped, never guessed."""
+def _colored_runs(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Tuple[Any, Dict[str, Any]]]:
+    """``[(run, {"c", "sz", "b"})]`` for each visible run whose text colour is
+    known: explicit sRGB *and* resolved theme colours. Auto/inherited/unknown
+    colours are skipped, never guessed."""
     theme_colors = theme_colors or {}
-    out: List[Dict[str, Any]] = []
+    out: List[Tuple[Any, Dict[str, Any]]] = []
     for run in getattr(paragraph, "runs", []) or []:
         if not (run.text or "").strip():
             continue
@@ -537,33 +608,419 @@ def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = Non
                 size_pt = float(run.font.size.pt)
         except Exception:
             size_pt = None
-        out.append({"c": hex6, "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
+        out.append((run, {"c": hex6, "sz": size_pt,
+                          "b": bool(run.font.bold) if run.font.bold is not None else False}))
     return out
 
 
-def _paragraph_bg(paragraph) -> Optional[str]:
-    """Explicit paragraph shading fill (``w:shd@w:fill``) if a real colour."""
-    try:
-        shd = paragraph._p.find(f"{_DOCX_NS}pPr/{_DOCX_NS}shd")
-        if shd is not None:
-            fill = shd.get(f"{_DOCX_NS}fill")
-            if fill and fill.lower() not in ("auto",):
-                return fill
-    except Exception:
-        pass
-    return None
+def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Per-run text colours (for contrast analysis) — see :func:`_colored_runs`."""
+    return [c for _run, c in _colored_runs(paragraph, theme_colors)]
 
 
-def _text_color_props(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Build the ``metadata.properties`` carrying contrast inputs (or empty)."""
-    colors = _explicit_run_colors(paragraph, theme_colors)
-    if not colors:
+def _text_color_props(
+    paragraph,
+    theme_colors: Optional[Dict[str, str]] = None,
+    bgs: Optional["_Backgrounds"] = None,
+    story_root=None,
+) -> Dict[str, Any]:
+    """Build the ``metadata.properties`` carrying contrast inputs (or empty).
+
+    The colours are only worth anything against the background the text is
+    REALLY drawn on. ``bgs`` resolves it (paragraph / cell / table / text-box
+    shading, the page colour, shapes behind the text); when it cannot be
+    known, no colours are emitted at all, so the text is left unflagged
+    instead of being measured — and "fixed" — against an assumed white.
+    Without ``bgs`` nothing is emitted either: there is no caller that may
+    assume white any more.
+    """
+    colored = _colored_runs(paragraph, theme_colors)
+    if not colored or bgs is None:
         return {}
-    props: Dict[str, Any] = {"explicit_text_colors": colors}
-    bg = _paragraph_bg(paragraph)
-    if bg:
+    p_el = paragraph._p  # noqa: SLF001
+    bg = bgs.paragraph(p_el, story_root)
+    if bg is None:
+        return {}
+    # A run with its own highlight or shading sits on THAT colour, not the
+    # paragraph's. It is left out of the measurement — and, because the
+    # writer recolours by colour value, a paragraph where such a run shares a
+    # colour with a measured one is not measured at all (a recolour would
+    # reach the highlighted run too).
+    sid = bgs.styles.paragraph_style_id(p_el) if bgs.styles is not None else None
+    kept: List[Dict[str, Any]] = []
+    left_out: set = set()
+    for run, c in colored:
+        own = bgs.run(run._r, sid)  # noqa: SLF001
+        if own is _NO_SHADING or own == bg:
+            kept.append(c)
+        else:
+            left_out.add(c["c"].upper())
+    if not kept or any(c["c"].upper() in left_out for c in kept):
+        return {}
+    props: Dict[str, Any] = {"explicit_text_colors": kept}
+    if bg != _WHITE:
         props["bg_color"] = bg
     return props
+
+
+# ----- the background text is drawn on ----------------------------------------
+
+_WHITE = "FFFFFF"
+# Sentinels for one layer of the stack: nothing painted here (look further
+# out), or something painted that we cannot name (stop: unknown).
+_NO_SHADING = object()
+_UNKNOWN = object()
+_HEX6_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
+_WPS_NS = "{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}"
+_WPG_NS = "{http://schemas.microsoft.com/office/word/2010/wordprocessingGroup}"
+_VML_NS = "{urn:schemas-microsoft-com:vml}"
+_O_NS = "{urn:schemas-microsoft-com:office:office}"
+_VML_SHAPE_TAGS = tuple(
+    f"{_VML_NS}{t}" for t in ("shape", "rect", "roundrect", "oval", "polyline", "arc", "line",
+                               "curve", "image", "group")
+)
+_Z_BEHIND_RE = re.compile(r"z-index\s*:\s*-")
+# ST_HighlightColor -> RGB (the fixed palette Word paints highlights with).
+_HIGHLIGHT_RGB = {
+    "black": "000000", "blue": "0000FF", "cyan": "00FFFF", "green": "00FF00",
+    "magenta": "FF00FF", "red": "FF0000", "yellow": "FFFF00", "white": "FFFFFF",
+    "darkBlue": "000080", "darkCyan": "008080", "darkGreen": "008000",
+    "darkMagenta": "800080", "darkRed": "800000", "darkYellow": "808000",
+    "darkGray": "808080", "lightGray": "C0C0C0",
+}
+# DrawingML a:schemeClr -> clrScheme name (Word's default colour mapping).
+_SCHEME_CLR_MAP = {
+    "bg1": "lt1", "tx1": "dk1", "bg2": "lt2", "tx2": "dk2",
+    "lt1": "lt1", "dk1": "dk1", "lt2": "lt2", "dk2": "dk2",
+    "accent1": "accent1", "accent2": "accent2", "accent3": "accent3",
+    "accent4": "accent4", "accent5": "accent5", "accent6": "accent6",
+    "hlink": "hlink", "folHlink": "folHlink",
+}
+
+
+def _hex6(value: Optional[str]) -> Optional[str]:
+    v = (value or "").strip().lstrip("#")
+    return v.upper() if _HEX6_RE.match(v) else None
+
+
+def _theme_or_hex(el, attr: str, theme_attr: str, tint_attr: str, shade_attr: str,
+                  theme_colors: Dict[str, str]):
+    """A WordprocessingML colour (``w:fill`` / ``w:color`` and their theme
+    twins) as hex, ``"auto"``, or None when neither is readable. A theme
+    colour wins (Word re-renders it from the theme); the plain attribute is
+    Word's cached copy of it and the fallback."""
+    tc = el.get(qn(theme_attr))
+    if tc:
+        base = theme_colors.get(_THEME_COLOR_MAP.get(tc, tc)) if theme_colors else None
+        if base:
+            return _apply_tint_shade(base, el.get(qn(tint_attr)), el.get(qn(shade_attr)))
+    raw = (el.get(qn(attr)) or "").strip()
+    if raw.lower() == "auto":
+        return "auto"
+    return _hex6(raw)
+
+
+def _shd_layer(shd, theme_colors: Dict[str, str]):
+    """What one ``w:shd`` paints: a hex colour, ``_NO_SHADING`` or ``_UNKNOWN``.
+
+    ``clear`` paints the fill; ``solid`` paints the pattern colour; any other
+    pattern (``pct50``, stripes …) is a mix a reader sees as neither colour,
+    so it is unknown rather than guessed."""
+    if shd is None:
+        return _NO_SHADING
+    val = (shd.get(qn("w:val")) or "clear").strip()
+    if val == "nil":
+        return _NO_SHADING
+    if val == "clear":
+        fill = _theme_or_hex(shd, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", theme_colors)
+        if fill not in (None, "auto"):
+            return fill
+        # No colour we can name: nothing painted only when nothing claims to
+        # be (no fill, or "auto", and no theme fill we failed to resolve).
+        raw = (shd.get(qn("w:fill")) or "").strip().lower()
+        if raw in ("", "auto") and not shd.get(qn("w:themeFill")):
+            return _NO_SHADING
+        return _UNKNOWN
+    if val == "solid":
+        color = _theme_or_hex(shd, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", theme_colors)
+        return color if color not in (None, "auto") else _UNKNOWN
+    return _UNKNOWN
+
+
+def _drawingml_fill(sppr, theme_colors: Dict[str, str]):
+    """A DrawingML shape's own fill from ``spPr``: a hex colour only for a
+    plain, fully-opaque solid fill; ``_UNKNOWN`` for everything else — no
+    fill (see-through, and what is behind a floating box is not known), a
+    gradient / picture / pattern, a colour with modifiers (alpha, lumMod …)
+    or a fill left to the theme's shape style."""
+    if sppr is None:
+        return _UNKNOWN
+    a = _DRAWINGML_NS
+    solid = sppr.find(f"{a}solidFill")
+    if solid is None:
+        return _UNKNOWN
+    clr = next(iter(solid), None)
+    if clr is None or len(clr):  # modifiers change the colour: don't guess
+        return _UNKNOWN
+    tag = etree.QName(clr).localname
+    if tag == "srgbClr":
+        return _hex6(clr.get("val")) or _UNKNOWN
+    if tag == "schemeClr":
+        name = _SCHEME_CLR_MAP.get(clr.get("val") or "")
+        base = theme_colors.get(name) if (name and theme_colors) else None
+        return _hex6(base) or _UNKNOWN
+    return _UNKNOWN
+
+
+def _vml_fill(shape):
+    """A legacy VML shape's fill: only an explicit ``#RRGGBB`` solid fill is
+    known; no fill, a named/system colour or a fill effect is unknown."""
+    if (shape.get("filled") or "t").strip().lower() in ("f", "false"):
+        return _UNKNOWN
+    fill_el = shape.find(f"{_VML_NS}fill")
+    if fill_el is not None and ((fill_el.get("type") or "solid") != "solid" or fill_el.get("opacity")):
+        return _UNKNOWN
+    raw = (shape.get("fillcolor") or "").strip().split(" ")[0]
+    if raw.lower() == "white":
+        return _WHITE
+    if raw.lower() == "black":
+        return "000000"
+    v = raw.lstrip("#")
+    if len(v) == 3 and re.match(r"^[0-9A-Fa-f]{3}$", v):
+        v = "".join(ch * 2 for ch in v)
+    return _hex6(v) or _UNKNOWN
+
+
+def _behind_text_shapes(root_el) -> List[Any]:
+    """Pictures and shapes drawn BEHIND the text of a story (DrawingML
+    ``behindDoc`` anchors, VML shapes with a negative z-index), skipping the
+    mc:Fallback duplicates and Word's page watermark (drawn in the middle of
+    the page, not behind the letterhead)."""
+    out: List[Any] = []
+    for anchor in root_el.iter(_WP_ANCHOR):
+        if _inside(anchor, root_el, (_MC_FALLBACK,)):
+            continue
+        if (anchor.get("behindDoc") or "").strip().lower() in ("1", "true", "on"):
+            out.append(anchor)
+    for shape in root_el.iter(*_VML_SHAPE_TAGS):
+        if _inside(shape, root_el, (_MC_FALLBACK,)):
+            continue
+        if not _Z_BEHIND_RE.search(shape.get("style") or ""):
+            continue
+        if _is_word_watermark(shape):
+            continue
+        out.append(shape)
+    return out
+
+
+def _is_word_watermark(shape) -> bool:
+    """Word's own page watermark (Design > Watermark): a pale WordArt text
+    ("DRAFT") or a washed-out picture, centred on the page. Only those two
+    exact shapes are excused — a dark picture watermark without washout, or
+    any other shape that merely carries the name, still counts as behind."""
+    ident = shape.get("id") or ""
+    if ident.startswith("PowerPlusWaterMarkObject"):
+        return shape.find(f"{_VML_NS}textpath") is not None
+    if ident.startswith("WordPictureWatermark"):
+        img = shape.find(f"{_VML_NS}imagedata")
+        return img is not None and bool(img.get("gain")) and bool(img.get("blacklevel"))
+    return False
+
+
+class _Backgrounds:
+    """The colour a paragraph's text is really drawn on, as Word stacks it:
+    run highlight / shading > paragraph shading (direct or style) > table
+    cell shading > table-style shading > row / table shading > an enclosing
+    text box's fill > the page colour. Anything painted that cannot be named
+    — a pattern, a picture or shape behind the text, a page fill effect, a
+    see-through text box — makes the answer unknown (``None``) and the
+    paragraph is not measured: never assume white."""
+
+    def __init__(self, doc, styles: Optional["DocxStyleResolver"], theme_colors: Dict[str, str],
+                 pages: Optional[Dict[Any, int]] = None) -> None:
+        self.styles = styles
+        self.theme = theme_colors or {}
+        self.page = self._page_colour(doc)
+        body = doc.element.body
+        self.body = body
+        self._pages = pages
+        behind = _behind_text_shapes(body)
+        # None -> no body shape behind the text; a set -> the pages they sit on;
+        # _UNKNOWN -> behind something, but on a page the file does not say.
+        self._body_behind: Any = None
+        if behind:
+            anchor_pages = {pages.get(el) for el in behind} if pages else {None}
+            self._body_behind = _UNKNOWN if None in anchor_pages else anchor_pages
+        # A printed header/footer's drawing behind the text (a letterhead
+        # banner, full-page "stationery") is positioned on the page, not in
+        # the header band: it may lie behind any line of any page.
+        self._story_behind: Dict[int, bool] = {}
+        self._furniture_behind = False
+        try:
+            for _kind, part, _variant in iter_header_footer_parts(doc):
+                root_el = part.element
+                has = bool(_behind_text_shapes(root_el))
+                self._story_behind[id(root_el)] = has
+                self._furniture_behind = self._furniture_behind or has
+        except Exception:  # pragma: no cover - a broken header never kills the parse
+            self._furniture_behind = True
+        self._tbl_style_shaded: Dict[Optional[str], bool] = {}
+        self._default_tbl_style = self._default_style_id("table")
+
+    # -- the page ---------------------------------------------------------
+    def _page_colour(self, doc):
+        """White unless ``w:background`` paints the page. A painted page is
+        unknown: Word shows it only with a view setting, never prints it, and
+        a fill effect is a picture."""
+        try:
+            bg = doc.element.find(qn("w:background"))
+        except Exception:  # pragma: no cover - defensive
+            return _UNKNOWN
+        if bg is None:
+            return _WHITE
+        if len(bg):
+            return _UNKNOWN
+        colour = _theme_or_hex(bg, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", self.theme)
+        if colour in (None, "auto", _WHITE):
+            return _WHITE
+        return _UNKNOWN
+
+    def _default_style_id(self, kind: str) -> Optional[str]:
+        if self.styles is None:
+            return None
+        for sid, st in getattr(self.styles, "_styles", {}).items():
+            if st.get(qn("w:type")) == kind and (st.get(qn("w:default")) or "").lower() in ("1", "true", "on"):
+                return sid
+        return None
+
+    # -- one run ------------------------------------------------------------
+    def run(self, r_el, p_style_id: Optional[str]):
+        """A run's OWN background (highlight over run shading), or
+        ``_NO_SHADING`` when it shows the paragraph's."""
+        rpr = r_el.find(qn("w:rPr"))
+        hl = rpr.find(qn("w:highlight")) if rpr is not None else None
+        if hl is not None:
+            val = (hl.get(qn("w:val")) or "").strip()
+            if val and val != "none":
+                return _HIGHLIGHT_RGB.get(val, _UNKNOWN)
+        if self.styles is not None:
+            shd = self.styles.run_element(r_el, p_style_id, qn("w:shd"))
+        else:
+            shd = rpr.find(qn("w:shd")) if rpr is not None else None
+        return _shd_layer(shd, self.theme)
+
+    # -- one paragraph ------------------------------------------------------
+    def paragraph(self, p_el, story_root=None) -> Optional[str]:
+        """The paragraph's background as ``RRGGBB``, or None when unknown."""
+        root = story_root if story_root is not None else self.body
+        sid = self.styles.paragraph_style_id(p_el) if self.styles is not None else None
+        if self.styles is not None:
+            shd = self.styles.paragraph_element(p_el, sid, qn("w:shd"))
+        else:
+            ppr = p_el.find(qn("w:pPr"))
+            shd = ppr.find(qn("w:shd")) if ppr is not None else None
+        layer = _shd_layer(shd, self.theme)
+        if layer is not _NO_SHADING:
+            return None if layer is _UNKNOWN else layer
+
+        last_tr = None
+        anc = p_el.getparent()
+        while anc is not None and anc is not root:
+            tag = anc.tag
+            if tag == qn("w:tc"):
+                tcpr = anc.find(qn("w:tcPr"))
+                layer = _shd_layer(tcpr.find(qn("w:shd")) if tcpr is not None else None, self.theme)
+            elif tag == qn("w:tr"):
+                last_tr = anc
+                layer = _NO_SHADING
+            elif tag == _W_TBL:
+                layer = self._table_layer(anc, last_tr)
+                last_tr = None
+            elif tag == _W_TXBX:
+                # A text box paints its own fill and floats: what is behind a
+                # see-through one is not known, so its fill is the answer.
+                layer = self._text_box_fill(anc)
+                return None if layer is _UNKNOWN else layer
+            else:
+                layer = _NO_SHADING
+            if layer is _UNKNOWN:
+                return None
+            if layer is not _NO_SHADING:
+                return layer
+            anc = anc.getparent()
+
+        # Nothing in the text's own containers paints it: it shows whatever
+        # lies behind the story — shapes behind the text, then the page.
+        if self._behind(p_el, root):
+            return None
+        return None if self.page is _UNKNOWN else self.page
+
+    def _table_layer(self, tbl, tr):
+        tblpr = tbl.find(qn("w:tblPr"))
+        # A table style's shading is conditional (header row, banding, first
+        # column …) on tblLook and position: any shading in it is unknown.
+        ts = tblpr.find(qn("w:tblStyle")) if tblpr is not None else None
+        sid = ts.get(qn("w:val")) if ts is not None else self._default_tbl_style
+        if self._table_style_shaded(sid):
+            return _UNKNOWN
+        if tr is not None:
+            ex = tr.find(f"{qn('w:tblPrEx')}/{qn('w:shd')}")
+            layer = _shd_layer(ex, self.theme)
+            if layer is not _NO_SHADING:
+                return layer
+        return _shd_layer(tblpr.find(qn("w:shd")) if tblpr is not None else None, self.theme)
+
+    def _table_style_shaded(self, sid: Optional[str]) -> bool:
+        if sid in self._tbl_style_shaded:
+            return self._tbl_style_shaded[sid]
+        shaded = False
+        if self.styles is not None and sid:
+            for st in self.styles.chain(sid):
+                for shd in st.iter(qn("w:shd")):
+                    if _shd_layer(shd, self.theme) is not _NO_SHADING:
+                        shaded = True
+                        break
+                if shaded:
+                    break
+        self._tbl_style_shaded[sid] = shaded
+        return shaded
+
+    def _text_box_fill(self, txbx):
+        anc = txbx.getparent()
+        while anc is not None:
+            if anc.tag == f"{_WPS_NS}wsp":
+                return _drawingml_fill(anc.find(f"{_WPS_NS}spPr"), self.theme)
+            if anc.tag in _VML_SHAPE_TAGS:
+                return _vml_fill(anc)
+            if anc.tag in (_W_P, _W_TBL):  # left the drawing without finding its shape
+                return _UNKNOWN
+            anc = anc.getparent()
+        return _UNKNOWN
+
+    def _behind(self, p_el, root) -> bool:
+        """True when a picture or shape may lie behind this paragraph. Where
+        a drawing sits on the page is not worth guessing: a header/footer
+        drawing, or a body drawing on a page the file does not name, counts
+        as behind every line it could reach."""
+        if self._furniture_behind:
+            return True
+        if root is not self.body:
+            key = id(root)
+            if key not in self._story_behind:
+                self._story_behind[key] = bool(_behind_text_shapes(root))
+            # A body drawing (a cover page's full-bleed panel) may reach the
+            # header band of its page.
+            return self._story_behind[key] or self._body_behind is not None
+        if self._body_behind is None:
+            return False
+        if self._body_behind is _UNKNOWN or not self._pages:
+            return True
+        start = self._pages.get(p_el)
+        if start is None:
+            return True
+        # The paragraph covers its start page and every page it runs onto.
+        spans = sum(1 for m in p_el.iter(_W_LRPB) if not _inside(m, p_el, (_W_TXBX, _MC_FALLBACK)))
+        return any(start <= pg <= start + spans for pg in self._body_behind)
 
 
 def _text_excluding_controls(el) -> str:
@@ -723,11 +1180,687 @@ _REL_IMAGE_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relation
 class _IdCounter:
     def __init__(self) -> None:
         self._counts: Dict[str, int] = {}
+        # Walk-wide context the id counter already travels with: the
+        # document's bookmark names, for resolving internal links. None ->
+        # unknown (then any internal link is taken as valid, never guessed
+        # broken).
+        self.bookmarks: Optional[set] = None
+        # {body element: page Word last laid it out on} — see
+        # _rendered_page_map. None -> pages unknown (never guessed).
+        self.pages: Optional[Dict[Any, int]] = None
+
+    def page_of(self, el) -> Optional[int]:
+        return self.pages.get(el) if self.pages else None
 
     def __call__(self, prefix: str) -> str:
         i = self._counts.get(prefix, 0) + 1
         self._counts[prefix] = i
         return f"{prefix}-{i}"
+
+
+def _no_register(_node_id: str, _obj: Any) -> None:
+    return None
+
+
+_W_LRPB = qn("w:lastRenderedPageBreak")
+_APP_PAGES_RE = re.compile(rb"<(?:\w+:)?Pages>\s*(\d+)\s*</(?:\w+:)?Pages>")
+
+
+def _rendered_page_map(body_el, file_path: str) -> Optional[Dict[Any, int]]:
+    """``{element: page}`` for the body's paragraphs, tables, rows, cells,
+    pictures and links — the page each STARTS on as Word last laid the
+    document out — or None when that is not known.
+
+    Word writes ``<w:lastRenderedPageBreak/>`` where every page began when it
+    last saved the file, and the page count into docProps/app.xml. A DOCX has
+    no pages of its own, so this is the only honest source: the map is used
+    only when there is at least one marker AND the markers agree with Word's
+    own count (markers + 1 == Pages). A file python-docx or another tool
+    wrote carries a template's "Pages 1" and no markers, and gets no page
+    numbers — never "page 1" for everything in a 500-page manual.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as z:
+            app_xml = z.read("docProps/app.xml") if "docProps/app.xml" in z.namelist() else b""
+    except Exception:
+        return None
+    m = _APP_PAGES_RE.search(app_xml or b"")
+    if not m:
+        return None
+    word_pages = int(m.group(1))
+    # Text boxes and the legacy Fallback copy are not in the page flow.
+    markers = [
+        el for el in body_el.iter(_W_LRPB) if not _inside(el, body_el, (_W_TXBX, _MC_FALLBACK))
+    ]
+    if not markers or len(markers) + 1 != word_pages:
+        return None
+    counted = set(markers)
+    tags = {_W_P, _W_TBL, qn("w:tr"), qn("w:tc"), _WP_INLINE, _WP_ANCHOR, _V_SHAPE,
+            qn("w:hyperlink"), qn("w:fldSimple")}
+    out: Dict[Any, int] = {}
+    page = 1
+    for el in body_el.iter(_W_LRPB, *tags):
+        if el.tag == _W_LRPB:
+            if el in counted:
+                page += 1
+        else:
+            out[el] = page
+    return out
+
+
+# Registry key under which the walk reports each (note_part, parsed_root) pair
+# — the writer must re-serialize a note part it edited, and only the walk
+# knows which parsed root it handed out.
+_NOTE_PARTS_KEY = "__docx_note_parts__"
+
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+_W_T = qn("w:t")
+_W_TAB = qn("w:tab")
+_W_BR = qn("w:br")
+_W_CR = qn("w:cr")
+_W_R = qn("w:r")
+_W_P = qn("w:p")
+_W_TBL = qn("w:tbl")
+_W_TXBX = qn("w:txbxContent")
+# Subtrees whose w:t is NOT visible paragraph text: tracked deletions and
+# moved-away text, text boxes (walked on their own), property blocks, and the
+# legacy VML copy of a drawing Word keeps in mc:Fallback (a duplicate of the
+# mc:Choice content it actually renders).
+_TEXT_SKIP = {
+    qn("w:del"), qn("w:moveFrom"), _W_TXBX, qn("w:pPr"), qn("w:rPr"),
+    qn("w:sdtPr"), qn("w:instrText"), qn("w:delText"), _MC_FALLBACK,
+}
+
+
+def paragraph_text(p_el) -> str:
+    """The text a reader sees in ``<w:p>`` — what Word renders, not what
+    python-docx's ``paragraph.text`` happens to read.
+
+    ``paragraph.text`` joins only direct ``w:r`` / ``w:hyperlink`` children,
+    so a tracked insertion (``w:ins``), an inline content control
+    (``w:sdt``), a smart tag or a HYPERLINK field vanished: "work up to
+    <ins>three</ins> days" read as "work up to  days", and a paragraph that is
+    one tracked insertion read as empty and was never analyzed. Tracked
+    DELETIONS stay out (they are not in the document a reader gets).
+
+    Shared by the parser and the writer's id pairing — both decide which
+    paragraphs mint a ``docx-p`` id from this text.
+    """
+    parts: List[str] = []
+
+    def walk(node) -> None:
+        for child in node:
+            tag = child.tag
+            if tag == _W_T:
+                if child.text:
+                    parts.append(child.text)
+            elif tag == _W_TAB:
+                parts.append("\t")
+            elif tag in (_W_BR, _W_CR):
+                parts.append("\n")
+            elif tag in _TEXT_SKIP or not isinstance(tag, str):
+                continue
+            else:
+                walk(child)
+
+    try:
+        walk(p_el)
+    except Exception:  # pragma: no cover - never let text extraction kill a parse
+        return ""
+    return "".join(parts)
+
+
+def _partname(part) -> str:
+    try:
+        return str(part.partname)
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
+def _snippet_around(text: str, needle: str, width: int = 200) -> Optional[str]:
+    """``text`` cut to <= ``width`` chars and still containing ``needle`` —
+    the surrounding sentence a UI shows with the offending words highlighted."""
+    t = " ".join((text or "").split())
+    if not t:
+        return None
+    if len(t) <= width:
+        return t
+    n = " ".join((needle or "").split())
+    i = t.find(n) if n else -1
+    if i < 0:
+        return t[: width - 1].rstrip() + "…"
+    start = max(0, i - (width - len(n)) // 2)
+    end = min(len(t), start + width)
+    start = max(0, end - width)
+    out = t[start:end].strip()
+    if start > 0:
+        out = "…" + out[1:]
+    if end < len(t):
+        out = out[:-1] + "…"
+    return out
+
+
+# ----- pictures --------------------------------------------------------------
+
+_WP_INLINE = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline"
+_WP_ANCHOR = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}anchor"
+_WP_DOCPR = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}docPr"
+_A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+_R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+_R_LINK = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link"
+
+
+def _inside(el, stop, tags) -> bool:
+    """True when an ancestor of ``el`` strictly below ``stop`` has a tag in ``tags``."""
+    anc = el.getparent()
+    while anc is not None and anc is not stop:
+        if anc.tag in tags:
+            return True
+        anc = anc.getparent()
+    return False
+
+
+_V_SHAPE = "{urn:schemas-microsoft-com:vml}shape"
+_V_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
+_R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+_O_RELID = "{urn:schemas-microsoft-com:office:office}relid"
+_W_OBJECT = qn("w:object")
+
+
+def _vml_picture_rid(shape) -> Optional[str]:
+    """The image rId of a legacy VML picture (``<w:pict><v:shape><v:imagedata
+    r:id=…>``), or None for anything that is not one: other VML shapes,
+    the preview image of an embedded OLE object (``w:object``), and
+    watermarks (decorative page background Word draws in the header)."""
+    if "watermark" in (shape.get("id") or "").lower():
+        return None
+    imd = shape.find(_V_IMAGEDATA)
+    if imd is None:
+        return None
+    return imd.get(_R_ID) or imd.get(_O_RELID) or None
+
+
+def iter_paragraph_drawings(p_el) -> Iterator[Tuple[Any, str, Any]]:
+    """``(wrapper, rId, alt_holder)`` for every picture drawn inside ``<w:p>``.
+
+    One entry per ``wp:inline`` / ``wp:anchor`` that shows an image, in
+    document order, with THAT drawing's own ``<wp:docPr>`` (where Word keeps
+    its alt text). A picture inside a text box anchored in this paragraph is
+    its own entry with its own docPr — the text box's anchor no longer also
+    claims the picture's blip and gets the alt written onto the text box.
+    Drawings in ``mc:Fallback`` (the legacy duplicate) are skipped.
+
+    Legacy VML pictures (``w:pict/v:shape`` with ``v:imagedata`` — what a
+    document still in Word 97-2003 compatibility mode keeps its pictures as)
+    are entries too, with the ``v:shape`` itself as the alt holder (its
+    ``alt`` attribute is the picture's alternative text). They used to be
+    invisible: a converted agency template's pictures got no finding at all.
+    """
+    wrappers = (_WP_INLINE, _WP_ANCHOR)
+    for wrapper in p_el.iter(_WP_INLINE, _WP_ANCHOR, _V_SHAPE):
+        if _inside(wrapper, p_el, (_MC_FALLBACK,)):
+            continue
+        if wrapper.tag == _V_SHAPE:
+            if _inside(wrapper, p_el, (_W_OBJECT,)):
+                continue
+            vml_rid = _vml_picture_rid(wrapper)
+            if vml_rid:
+                yield wrapper, vml_rid, wrapper
+            continue
+        blip = None
+        for cand in wrapper.iter(_A_BLIP):
+            if not _inside(cand, wrapper, wrappers):
+                blip = cand
+                break
+        if blip is None:
+            continue
+        rid = blip.get(_R_EMBED) or blip.get(_R_LINK)
+        if not rid:
+            continue
+        doc_pr = wrapper.find(_WP_DOCPR)
+        if doc_pr is None:
+            continue
+        yield wrapper, rid, doc_pr
+
+
+def _image_nodes_from_p(
+    p_el,
+    blobs: Dict[str, Tuple[Optional[str], Optional[str]]],
+    ids: "_IdCounter",
+    prefix: str,
+    reg: Callable[[str, Any], None],
+    *,
+    story: str,
+    partname: str,
+    context_fn: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
+    extra_props: Optional[Dict[str, Any]] = None,
+) -> List[ImageNode]:
+    """ImageNodes for the pictures in ``p_el`` (see ``iter_paragraph_drawings``).
+
+    ``context_fn`` returns ``(text, caption_source)`` — the source says what
+    the words are (``"caption_style"`` / ``"figure_label"`` for a real
+    caption, ``"nearby_text"`` / ``"preceding_text"`` for words that only sit
+    near the picture; see ``app.ai.offline_rules.alt_from_caption``) —
+    evaluated only when the paragraph actually has a picture.
+    """
+    out: List[ImageNode] = []
+    context: Optional[Tuple[str, str]] = None
+    context_done = False
+    for wrapper, rid, doc_pr in iter_paragraph_drawings(p_el):
+        page = ids.page_of(wrapper)
+        vml = doc_pr.tag == _V_SHAPE
+        if vml:
+            # VML keeps the description in v:shape@alt. (v:imagedata@o:title
+            # is usually the original FILE name — never read as alt.)
+            alt_text = (doc_pr.get("alt") or "").strip()
+            is_decorative = False
+        else:
+            alt_text = (doc_pr.get("descr") or doc_pr.get("title") or "").strip()
+            is_decorative = (doc_pr.get("hidden") or "").lower() in {"1", "true"}
+        b64, mime = blobs.get(rid, (None, None))
+        properties: Dict[str, Any] = {"image_rid": rid, "docx_story": story, "docx_part": partname}
+        if vml:
+            properties["vml_picture"] = True
+        if extra_props:
+            properties.update(extra_props)
+        if b64:
+            properties["image_b64"] = b64
+            properties["image_mime"] = mime or "image/png"
+        if not context_done:
+            context = context_fn() if context_fn else None
+            context_done = True
+        if context:
+            text, source = context
+            properties["caption"] = text
+            properties["caption_source"] = source
+            properties["snippet"] = _snippet_around(text, "")
+        node_id = ids(prefix)
+        reg(node_id, doc_pr)
+        if is_decorative and alt_text:
+            out.append(
+                ImageNode.model_construct(
+                    id=node_id,
+                    node_type=ImageNode.type_value(),
+                    content=NodeContent(kind=ContentKind.NONE),
+                    metadata=NodeMetadata(source_format="docx", page=page, properties=properties),
+                    children=[],
+                    accessibility_flags=[],
+                    is_decorative=True,
+                    alt_text=alt_text,
+                )
+            )
+        else:
+            out.append(
+                ImageNode(
+                    id=node_id,
+                    content=NodeContent(kind=ContentKind.NONE),
+                    metadata=NodeMetadata(source_format="docx", page=page, properties=properties),
+                    children=[],
+                    accessibility_flags=[],
+                    is_decorative=is_decorative,
+                    alt_text=alt_text or None,
+                )
+            )
+    return out
+
+
+# ----- effective formatting (style chain) ---------------------------------------
+
+
+def _toggle_on(el) -> bool:
+    """Value of an OOXML on/off element (w:b, w:i …): absent -> False,
+    present with no val / true / 1 / on -> True."""
+    if el is None:
+        return False
+    val = (el.get(qn("w:val")) or "").strip().lower()
+    return val not in ("0", "false", "off", "none")
+
+
+class DocxStyleResolver:
+    """Effective paragraph/run formatting, resolved the way Word does it:
+    direct formatting -> character style chain -> paragraph style chain ->
+    ``docDefaults``. Read straight from ``styles.xml`` (no python-docx
+    ``paragraph.style``, which costs a full styles scan per call).
+
+    Used by the parser to measure how prominent a heading-looking line is,
+    and by the writer to keep a promoted line looking exactly as it did.
+    """
+
+    MAX_CHAIN = 25
+
+    def __init__(self, doc) -> None:
+        self._doc = doc
+        self.reload()
+
+    def reload(self) -> None:
+        styles_el = self._doc.styles.element
+        self._styles: Dict[str, Any] = {}
+        self.default_paragraph_style_id: Optional[str] = None
+        for st in styles_el.iterfind(qn("w:style")):
+            sid = st.get(qn("w:styleId"))
+            if not sid:
+                continue
+            self._styles.setdefault(sid, st)
+            if (
+                self.default_paragraph_style_id is None
+                and st.get(qn("w:type")) == "paragraph"
+                and (st.get(qn("w:default")) or "").lower() in ("1", "true", "on")
+            ):
+                self.default_paragraph_style_id = sid
+        dd = styles_el.find(qn("w:docDefaults"))
+        self._dd_rpr = dd.find(f"{qn('w:rPrDefault')}/{qn('w:rPr')}") if dd is not None else None
+        self._dd_ppr = dd.find(f"{qn('w:pPrDefault')}/{qn('w:pPr')}") if dd is not None else None
+        self._chain_cache: Dict[Optional[str], List[Any]] = {}
+
+    def style_element(self, style_id: Optional[str]):
+        return self._styles.get(style_id) if style_id else None
+
+    def chain(self, style_id: Optional[str]) -> List[Any]:
+        if style_id in self._chain_cache:
+            return self._chain_cache[style_id]
+        out: List[Any] = []
+        seen = set()
+        sid = style_id
+        while sid and sid in self._styles and sid not in seen and len(out) < self.MAX_CHAIN:
+            seen.add(sid)
+            st = self._styles[sid]
+            out.append(st)
+            based = st.find(qn("w:basedOn"))
+            sid = based.get(qn("w:val")) if based is not None else None
+        self._chain_cache[style_id] = out
+        return out
+
+    def paragraph_style_id(self, p_el) -> Optional[str]:
+        """The paragraph's style id; an unknown or missing id falls back to
+        the default paragraph style, as Word renders it."""
+        pPr = p_el.find(qn("w:pPr"))
+        ps = pPr.find(qn("w:pStyle")) if pPr is not None else None
+        sid = ps.get(qn("w:val")) if ps is not None else None
+        if not sid or sid not in self._styles:
+            sid = self.default_paragraph_style_id
+        return sid
+
+    def run_element(self, r_el, p_style_id: Optional[str], tag: str):
+        """The ``rPr/{tag}`` element that decides this run's formatting."""
+        rpr = r_el.find(qn("w:rPr"))
+        if rpr is not None:
+            el = rpr.find(tag)
+            if el is not None:
+                return el
+            rs = rpr.find(qn("w:rStyle"))
+            if rs is not None:
+                for st in self.chain(rs.get(qn("w:val"))):
+                    el = st.find(f"{qn('w:rPr')}/{tag}")
+                    if el is not None:
+                        return el
+        return self.style_run_element(p_style_id, tag)
+
+    def style_run_element(self, p_style_id: Optional[str], tag: str):
+        for st in self.chain(p_style_id):
+            el = st.find(f"{qn('w:rPr')}/{tag}")
+            if el is not None:
+                return el
+        if self._dd_rpr is not None:
+            return self._dd_rpr.find(tag)
+        return None
+
+    def paragraph_element(self, p_el, p_style_id: Optional[str], tag: str, direct: bool = True):
+        """The ``pPr/{tag}`` element that decides this paragraph's formatting."""
+        if direct:
+            pPr = p_el.find(qn("w:pPr"))
+            if pPr is not None:
+                el = pPr.find(tag)
+                if el is not None:
+                    return el
+        for st in self.chain(p_style_id):
+            el = st.find(f"{qn('w:pPr')}/{tag}")
+            if el is not None:
+                return el
+        if self._dd_ppr is not None:
+            return self._dd_ppr.find(tag)
+        return None
+
+    def run_size_pt(self, r_el, p_style_id: Optional[str]) -> float:
+        el = self.run_element(r_el, p_style_id, qn("w:sz"))
+        try:
+            return int(el.get(qn("w:val"))) / 2.0 if el is not None else 10.0
+        except (TypeError, ValueError):
+            return 10.0  # Word's size when nothing in the hierarchy sets one
+
+    def run_bold(self, r_el, p_style_id: Optional[str]) -> bool:
+        return _toggle_on(self.run_element(r_el, p_style_id, qn("w:b")))
+
+
+def visible_runs(p_el) -> List[Any]:
+    """The ``w:r`` elements whose text a reader sees in this paragraph (same
+    exclusions as :func:`paragraph_text`)."""
+    out: List[Any] = []
+
+    def walk(node) -> None:
+        for child in node:
+            tag = child.tag
+            if tag == _W_R:
+                if paragraph_text(child).strip():
+                    out.append(child)
+            elif tag in _TEXT_SKIP or not isinstance(tag, str):
+                continue
+            else:
+                walk(child)
+
+    walk(p_el)
+    return out
+
+
+_OUTLINE_KEYWORD_RE = re.compile(r"^(part|book|volume|chapter|unit|module)\b", re.IGNORECASE)
+_OUTLINE_KEYWORD_RANK = {"part": 3, "book": 3, "volume": 3, "chapter": 2, "unit": 2, "module": 2}
+_OUTLINE_NUMBER_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3})*)(?:[.)]|\s)")
+
+
+def _heading_visual(p_el, styles: "DocxStyleResolver", text: str) -> Dict[str, Any]:
+    """How prominent a heading (real or fake) LOOKS: effective size (largest
+    visible run), whether every visible run is bold, and any outline cue in
+    the text ("Part 3", "2.1"). PROMOTE_HEADING places a fake heading in the
+    document's own outline from these — it never guesses a level."""
+    sid = styles.paragraph_style_id(p_el)
+    runs = visible_runs(p_el)
+    size: Optional[float] = None
+    bold = bool(runs)
+    for r in runs:
+        s = styles.run_size_pt(r, sid)
+        size = s if size is None else max(size, s)
+        if not styles.run_bold(r, sid):
+            bold = False
+    t = (text or "").strip()
+    kw = _OUTLINE_KEYWORD_RE.match(t)
+    num = _OUTLINE_NUMBER_RE.match(t)
+    return {
+        "size_pt": size,
+        "bold": bold,
+        "keyword_rank": _OUTLINE_KEYWORD_RANK.get(kw.group(1).lower(), 0) if kw else 0,
+        "number_depth": len(num.group(1).split(".")) if num else 0,
+    }
+
+
+# ----- page headers / footers --------------------------------------------------
+
+
+def iter_header_footer_parts(doc) -> List[Tuple[str, Any, str]]:
+    """``[("header"|"footer", part, variant)]`` — variant is the reference's
+    ``w:type`` ("default", "first" or "even") — for every header/footer part
+    Word actually PRINTS, in section order, each part ONCE (sections that
+    "link to previous" share a part and must not be audited twice).
+
+    Printed means: the default variant always; the first-page variant only
+    in a section with "Different first page" (``w:titlePg``); the even-page
+    variant only when the document has "Different odd & even pages"
+    (``w:evenAndOddHeaders`` in settings). Word keeps the part and its
+    reference when either option is switched OFF, so a template that once
+    had a first-page letterhead still carries it — auditing that part
+    reported (and charged to fix) a logo no reader ever meets. A section
+    with no reference of a variant inherits the previous section's, as Word
+    does. Unreferenced parts are ignored, like Word ignores them.
+
+    The parser and the writer both walk headers through this one function,
+    so the ``docx-hf*`` ids they mint cannot disagree.
+    """
+    out: List[Tuple[str, Any, str]] = []
+    seen: set = set()
+    hdr, ftr = qn("w:headerReference"), qn("w:footerReference")
+    rid_attr = qn("r:id")
+    try:
+        related = doc.part.related_parts
+        sect_prs = [
+            sp for sp in doc.element.body.iter(qn("w:sectPr"))
+            # A tracked change to section properties keeps the OLD sectPr
+            # inside w:sectPrChange; it is history, not a section.
+            if sp.getparent() is None or sp.getparent().tag != qn("w:sectPrChange")
+        ]
+    except Exception:  # pragma: no cover - defensive
+        return out
+    even_on = False
+    try:
+        # Read the settings part only if it exists — ``doc.settings`` would
+        # CREATE one, and the writer runs this walk on the copy it saves.
+        from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+
+        settings_el = doc.part.part_related_by(_RT.SETTINGS).element
+        even_on = _toggle_on(settings_el.find(qn("w:evenAndOddHeaders")))
+    except Exception:  # no settings part: Word's default (off)
+        even_on = False
+    effective: Dict[Tuple[str, str], Any] = {}
+    for sp in sect_prs:
+        own: List[Tuple[str, str]] = []
+        for ref in sp:
+            if ref.tag == hdr:
+                kind = "header"
+            elif ref.tag == ftr:
+                kind = "footer"
+            else:
+                continue
+            variant = ref.get(qn("w:type")) or "default"
+            part = related.get(ref.get(rid_attr)) if hasattr(related, "get") else None
+            if part is None or getattr(part, "element", None) is None:
+                continue
+            effective[(kind, variant)] = part
+            own.append((kind, variant))
+        printed = {"default"}
+        if _toggle_on(sp.find(qn("w:titlePg"))):
+            printed.add("first")
+        if even_on:
+            printed.add("even")
+        # This section's own references first (document order), then what it
+        # inherits — a fixed order both walks reproduce.
+        inherited = [
+            (k, v) for k in ("header", "footer") for v in ("default", "first", "even")
+            if (k, v) not in own
+        ]
+        for kind, variant in own + inherited:
+            if variant not in printed:
+                continue
+            part = effective.get((kind, variant))
+            if part is None:
+                continue
+            key = _partname(part) or id(part)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((kind, part, variant))
+    return out
+
+
+def iter_story_paragraphs(root_el) -> List[Any]:
+    """Every ``<w:p>`` in a header/footer story, in document order — body
+    paragraphs AND table-cell paragraphs (a letterhead is usually a layout
+    table: logo | agency name) — except paragraphs inside text boxes (their
+    anchor paragraph owns their pictures) and mc:Fallback duplicates."""
+    return [
+        p for p in root_el.iter(_W_P)
+        if not _inside(p, root_el, (_W_TXBX, _MC_FALLBACK))
+    ]
+
+
+class _StoryParent:
+    """Minimal parent for a python-docx Paragraph living in a header/footer
+    part: ``Paragraph.part`` must resolve to THAT part."""
+
+    def __init__(self, part) -> None:
+        self.part = part
+
+
+def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors, bgs: Optional["_Backgrounds"] = None) -> Optional[SectionNode]:
+    section = SectionNode(
+        id="docx-page-furniture",
+        content=NodeContent(kind=ContentKind.TEXT, text="Page headers and footers"),
+        metadata=NodeMetadata(source_format="docx", properties={"page_furniture": True}),
+        children=[],
+        accessibility_flags=[],
+    )
+    for kind, part, variant in iter_header_footer_parts(doc):
+        try:
+            root_el = part.element
+            blobs = _collect_image_blobs(part)
+            partname = _partname(part)
+            paragraphs = iter_story_paragraphs(root_el)
+            story_text = " ".join(
+                t for t in (" ".join(paragraph_text(p).split()) for p in paragraphs) if t
+            )
+        except Exception:  # pragma: no cover - a broken header never kills the parse
+            continue
+        parent = _StoryParent(part)
+        for p_el in paragraphs:
+            text = paragraph_text(p_el).strip()
+            base = {"docx_story": kind, "docx_part": partname, "page_furniture": kind,
+                    "docx_story_variant": variant}
+            links = _link_nodes_from_p(
+                p_el, part, ids, prefix="docx-hflink", reg=reg, context_text=text, extra_props=base,
+            )
+            section.children.extend(links)
+            ctx = " ".join(text.split()) or story_text
+            section.children.extend(
+                _image_nodes_from_p(
+                    p_el, blobs, ids, "docx-hfimg", reg, story=kind, partname=partname,
+                    # Letterhead words beside a logo: shown as its location
+                    # snippet, never written as its description.
+                    context_fn=(lambda _c=ctx: (_c[:200], "nearby_text") if _c else None),
+                    extra_props={"page_furniture": kind, "docx_story_variant": variant},
+                )
+            )
+            if text and not links:
+                section.children.append(_story_paragraph_node(p_el, parent, text, base, ids, reg, theme_colors, bgs, root_el))
+            # Text boxes anchored here (a footer's "Privacy: click here"
+            # callout, a letterhead address block). Their pictures already
+            # belong to this anchor paragraph; their words and links do not,
+            # and were never read. Fallback copies are skipped as in the body.
+            for tb_p in _iter_text_box_paragraphs(p_el):
+                tb_text = paragraph_text(tb_p).strip()
+                tb_base = dict(base, in_text_box=True)
+                tb_links = _link_nodes_from_p(
+                    tb_p, part, ids, prefix="docx-hflink", reg=reg, context_text=tb_text, extra_props=tb_base,
+                )
+                section.children.extend(tb_links)
+                if tb_text and not tb_links:
+                    section.children.append(
+                        _story_paragraph_node(tb_p, parent, tb_text, tb_base, ids, reg, theme_colors, bgs, root_el)
+                    )
+    return section if section.children else None
+
+
+def _story_paragraph_node(p_el, parent, text: str, base: Dict[str, Any], ids, reg, theme_colors,
+                          bgs: Optional["_Backgrounds"] = None, story_root=None) -> ParagraphNode:
+    """A header/footer line as a ParagraphNode (with its contrast inputs),
+    registered so the writer can recolour exactly this paragraph."""
+    para = Paragraph(p_el, parent)
+    props = dict(_text_color_props(para, theme_colors, bgs, story_root) or {})
+    props.update(base)
+    hf_id = ids("docx-hfp")
+    reg(hf_id, para)
+    return ParagraphNode(
+        id=hf_id,
+        content=NodeContent(kind=ContentKind.TEXT, text=text),
+        metadata=NodeMetadata(source_format="docx", properties=props),
+        children=[],
+        accessibility_flags=[],
+    )
 
 
 def _iter_sdt_aware(parent_el, want_tag: str):
@@ -791,6 +1924,27 @@ def iter_table_rows(table):
         yield _Row(tr, table)
 
 
+def row_cells(row) -> List[Any]:
+    """``row.cells``, or — when python-docx's grid arithmetic cannot place
+    the row — one cell per ``<w:tc>`` in the row (SDT-descended).
+
+    ``row.cells`` resolves merges against the grid and RAISES on shapes Word
+    itself opens without complaint: a vertical-merge continuation in the
+    first row ("no tr above topmost tr"), or one sitting under a cell that
+    spans a different number of grid columns ("no tc element at
+    grid_offset=1"). Converters and years of editing produce both, and one
+    such table made the whole document fail to parse — "Failed to parse
+    document" for a file Word opens. The fallback reads every cell once, in
+    order; the parser and the writer both call this, so ids agree.
+    """
+    try:
+        return list(row.cells)
+    except Exception:
+        from docx.table import _Cell
+
+        return [_Cell(tc, row) for tc in _iter_sdt_aware(row._tr, qn("w:tc"))]  # noqa: SLF001
+
+
 def paragraph_style_name(paragraph, cache: Dict[Any, str]) -> str:
     """``paragraph.style.name`` without python-docx's per-paragraph cost.
 
@@ -826,6 +1980,22 @@ def paragraph_style_name(paragraph, cache: Dict[Any, str]) -> str:
     return name
 
 
+def _outline_heading_level(p_el, styles: "DocxStyleResolver") -> int:
+    """Heading level from the paragraph's effective ``w:outlineLvl`` (direct,
+    else its style chain): 0-8 are heading levels 1-9 (capped at 6 like the
+    style-name rule), 9 is body text. 0 when it is not a heading."""
+    try:
+        el = styles.paragraph_element(p_el, styles.paragraph_style_id(p_el), qn("w:outlineLvl"))
+        if el is None:
+            return 0
+        val = int(el.get(qn("w:val")))
+    except (TypeError, ValueError):
+        return 0
+    if 0 <= val <= 8:
+        return min(6, val + 1)
+    return 0
+
+
 def _heading_level_from_style(style: str) -> int:
     if not style:
         return 0
@@ -841,10 +2011,23 @@ def _heading_level_from_style(style: str) -> int:
 
 
 def _is_list_paragraph(paragraph) -> bool:
-    pPr = paragraph._p.find(f"{_DOCX_NS}pPr")
+    return is_list_p(paragraph._p)  # noqa: SLF001
+
+
+def is_list_p(p_el) -> bool:
+    """True when ``<w:p>`` carries its own Word list numbering. ``numId 0`` is
+    Word's explicit "no numbering" (it switches off a style's numbering), so
+    it is NOT a list item."""
+    pPr = p_el.find(f"{_DOCX_NS}pPr")
     if pPr is None:
         return False
-    return pPr.find(f"{_DOCX_NS}numPr") is not None
+    numPr = pPr.find(f"{_DOCX_NS}numPr")
+    if numPr is None:
+        return False
+    num_id = numPr.find(f"{_DOCX_NS}numId")
+    if num_id is not None and (num_id.get(f"{_DOCX_NS}val") or "").strip() == "0":
+        return False
+    return True
 
 
 def _detect_list_marker(paragraph) -> str:
@@ -864,17 +2047,22 @@ def _finalize_list(ids: _IdCounter, items: List[ListItemNode], marker: Optional[
         ordered=bool(marker and marker.startswith("num")),
         marker=marker,
         content=NodeContent(kind=ContentKind.NONE),
-        metadata=NodeMetadata(source_format="docx"),
+        metadata=NodeMetadata(source_format="docx", page=items[0].metadata.page if items else None),
         children=list(items),
         accessibility_flags=[],
     )
 
 
-def _collect_image_blobs(doc) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-    """Return ``{rId: (base64, mime)}`` for embedded images."""
+def _collect_image_blobs(part) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+    """Return ``{rId: (base64, mime)}`` for the images ``part`` embeds (the
+    document part, or a header/footer part — each has its own rIds)."""
 
     blobs: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-    for rel_id, rel in doc.part.rels.items():
+    if not _WANT_IMAGE_BYTES:
+        # Nothing reads the bytes without a vision provider; only the mime
+        # would be recorded, and that is recoverable from the rId.
+        return blobs
+    for rel_id, rel in part.rels.items():
         try:
             if "image" not in str(rel.reltype):
                 continue
@@ -897,6 +2085,20 @@ def _collect_image_blobs(doc) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
 
 
 _FLD_HYPERLINK_RE = re.compile(r"HYPERLINK\s+(?:\"([^\"]+)\"|(\S+))")
+# HYPERLINK \l "bookmark" — the \l switch names a location in this document.
+_FLD_LOCAL_RE = re.compile(r"\\l\s+(?:\"([^\"]+)\"|(\S+))")
+
+
+def _bookmark_names(doc) -> set:
+    """Every bookmark name in the main document (what w:anchor links target)."""
+    try:
+        return {
+            bm.get(qn("w:name"))
+            for bm in doc.element.body.iter(qn("w:bookmarkStart"))
+            if bm.get(qn("w:name"))
+        }
+    except Exception:  # pragma: no cover - defensive
+        return set()
 
 
 def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
@@ -916,14 +2118,9 @@ def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
         # double-count it and desync both id spaces. (When ``p`` itself lives
         # inside a text box, the ancestor walk stops at ``p`` before reaching
         # the txbxContent above it, so text-box paragraphs still match.)
-        anc = el.getparent()
-        nested_in_tb = False
-        while anc is not None and anc is not p:
-            if anc.tag == f"{_DOCX_NS}txbxContent":
-                nested_in_tb = True
-                break
-            anc = anc.getparent()
-        if nested_in_tb:
+        # (mc:Fallback is the legacy duplicate of content Word renders from
+        # mc:Choice — counting it would report every such link twice.)
+        if _inside(el, p, (_W_TXBX, _MC_FALLBACK)):
             continue
         text = "".join(
             (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
@@ -939,10 +2136,24 @@ def _link_elements_in_paragraph(p) -> List[Tuple[str, Any]]:
     return out
 
 
-def _link_nodes_from_p(p_el, part, ids: _IdCounter, prefix: str = "docx-link", extra_props: Optional[Dict[str, Any]] = None) -> List[LinkNode]:
-    """Build LinkNodes from a raw ``<w:p>`` element (body, cell or text box)."""
+def _link_nodes_from_p(
+    p_el,
+    part,
+    ids: _IdCounter,
+    prefix: str = "docx-link",
+    extra_props: Optional[Dict[str, Any]] = None,
+    reg: Optional[Callable[[str, Any], None]] = None,
+    context_text: Optional[str] = None,
+) -> List[LinkNode]:
+    """Build LinkNodes from a raw ``<w:p>`` element (body, cell, text box,
+    note or header/footer). ``context_text`` (the paragraph's own text)
+    becomes each link's ``snippet`` — the sentence around "click here"."""
     nodes: List[LinkNode] = []
-    for kind, el in _link_elements_in_paragraph(p_el):
+    reg = reg or _no_register
+    links = _link_elements_in_paragraph(p_el)
+    if links and context_text is None:
+        context_text = paragraph_text(p_el)
+    for kind, el in links:
         text = "".join(
             (t.text or "") for t in el.iterfind(f".//{_DOCX_NS}t")
         ).strip()
@@ -951,18 +2162,46 @@ def _link_nodes_from_p(p_el, part, ids: _IdCounter, prefix: str = "docx-link", e
             target = ""
             if rid and rid in part.rels:
                 target = str(part.rels[rid].target_ref or "")
+            anchor = (el.get(f"{_DOCX_NS}anchor") or "").strip()
         else:
-            m = _FLD_HYPERLINK_RE.search(el.get(f"{_DOCX_NS}instr") or "")
+            instr = el.get(f"{_DOCX_NS}instr") or ""
+            m_local = _FLD_LOCAL_RE.search(instr)
+            instr_wo_local = _FLD_LOCAL_RE.sub(" ", instr)
+            m = _FLD_HYPERLINK_RE.search(instr_wo_local)
             target = (m.group(1) or m.group(2)) if m else ""
+            if target.startswith("\\"):
+                target = ""  # a field switch, not a destination
+            anchor = ((m_local.group(1) or m_local.group(2)) if m_local else "").strip()
+        # An internal link — every Word TOC entry and cross-reference is a
+        # w:hyperlink with w:anchor="_Toc…" and NO r:id — used to come out
+        # with target None, so LINK_TARGET_BROKEN fired on every line of every
+        # table of contents. It points at a bookmark: valid when that bookmark
+        # exists, genuinely broken when it does not.
+        if anchor:
+            if target:
+                if "#" not in target:
+                    target = f"{target}#{anchor}"
+            elif ids.bookmarks is None or anchor in ids.bookmarks or anchor.lower() == "_top":
+                target = f"#{anchor}"
         props: Dict[str, Any] = {"link_kind": kind}
         if extra_props:
             props.update(extra_props)
+        snippet = _snippet_around(context_text or "", text)
+        if snippet:
+            props["snippet"] = snippet
+            # The exact words to highlight inside the snippet (whitespace
+            # normalised the same way the snippet is).
+            highlight = " ".join(text.split())
+            if highlight and highlight in snippet:
+                props["highlight"] = highlight
+        node_id = ids(prefix)
+        reg(node_id, el)
         nodes.append(
             LinkNode(
-                id=ids(prefix),
+                id=node_id,
                 target=target or None,
                 content=NodeContent(kind=ContentKind.TEXT, text=text),
-                metadata=NodeMetadata(source_format="docx", properties=props),
+                metadata=NodeMetadata(source_format="docx", page=ids.page_of(el), properties=props),
                 children=[],
                 accessibility_flags=[],
             )
@@ -977,10 +2216,16 @@ def _hyperlink_nodes_in_paragraph(paragraph, ids: _IdCounter) -> List[LinkNode]:
 def _iter_text_box_paragraphs(body_el) -> List[Any]:
     """All ``<w:p>`` elements living inside text boxes (``w:txbxContent``),
     in document order. Text boxes are invisible to ``doc.paragraphs`` —
-    sidebars and callouts would otherwise never be analyzed. Shared with the
-    docx writer so text-box link ids (``docx-tblink-N``) mint identically."""
+    sidebars and callouts would otherwise never be analyzed.
+
+    A modern text box is stored twice: the DrawingML copy Word renders
+    (mc:Choice) and a VML copy for old readers (mc:Fallback). Walking both
+    reported every sidebar link and line twice, so the Fallback copy is
+    skipped."""
     out: List[Any] = []
-    for tx in body_el.iter(f"{_DOCX_NS}txbxContent"):
+    for tx in body_el.iter(_W_TXBX):
+        if _inside(tx, body_el, (_MC_FALLBACK,)):
+            continue
         out.extend(tx.iterfind(f"{_DOCX_NS}p"))
     return out
 
@@ -1003,6 +2248,13 @@ def _iter_note_parts(doc) -> List[Tuple[Any, Any]]:
             part = doc.part.part_related_by(rt)
         except KeyError:
             continue
+        # A part python-docx loaded as XML already has a live element (and
+        # serializes it on save); a plain blob part is parsed here and the
+        # writer writes the root back into its blob.
+        live = getattr(part, "element", None)
+        if live is not None and isinstance(getattr(live, "tag", None), str):
+            out.append((part, live))
+            continue
         try:
             root = etree.fromstring(part.blob)
         except Exception:
@@ -1019,67 +2271,6 @@ def _note_paragraphs(root) -> List[Any]:
             continue
         out.extend(note.iterfind(f".//{_DOCX_NS}p"))
     return out
-
-
-def _inline_images_in_paragraph(
-    paragraph, blobs: Dict[str, Tuple[Optional[str], Optional[str]]], ids: _IdCounter
-) -> List[ImageNode]:
-    images: List[ImageNode] = []
-    for drawing in paragraph._p.iterfind(f".//{_DRAWING_NS}*"):
-        # We look for a:blip references, regardless of whether the drawing is
-        # inline or anchored.  python-docx exposes the ElementTree directly.
-        # NOTE: lxml elements with no children are falsy, so `a or b` silently
-        # discards a found-but-childless <a:blip>.  Use explicit `is None`.
-        blip = drawing.find(f".//{_DRAWINGML_NS}blip")
-        if blip is None:
-            blip = drawing.find(f".//{_PIC_NS}blip")
-        if blip is None:
-            continue
-        rid = blip.get(f"{_REL_IMAGE_NS}embed") or blip.get(f"{_REL_IMAGE_NS}link")
-        if not rid:
-            continue
-        alt = drawing.find(f".//{_DRAWING_NS}docPr")
-        if alt is None:
-            alt = drawing.find(f".//{_DRAWINGML_NS}docPr")
-        alt_text = ""
-        is_decorative = False
-        if alt is not None:
-            alt_text = (alt.get("descr") or alt.get("title") or "").strip()
-            decorative_attr = alt.get("hidden") or ""
-            if decorative_attr.lower() in {"1", "true"}:
-                is_decorative = True
-        b64, mime = blobs.get(rid, (None, None))
-        properties: Dict[str, Any] = {"image_rid": rid}
-        if b64:
-            properties["image_b64"] = b64
-            properties["image_mime"] = mime or "image/png"
-        node_id = ids("docx-img")
-        if is_decorative and alt_text:
-            images.append(
-                ImageNode.model_construct(
-                    id=node_id,
-                    node_type=ImageNode.type_value(),
-                    content=NodeContent(kind=ContentKind.NONE),
-                    metadata=NodeMetadata(source_format="docx", properties=properties),
-                    children=[],
-                    accessibility_flags=[],
-                    is_decorative=True,
-                    alt_text=alt_text,
-                )
-            )
-        else:
-            images.append(
-                ImageNode(
-                    id=node_id,
-                    content=NodeContent(kind=ContentKind.NONE),
-                    metadata=NodeMetadata(source_format="docx", properties=properties),
-                    children=[],
-                    accessibility_flags=[],
-                    is_decorative=is_decorative,
-                    alt_text=alt_text or None,
-                )
-            )
-    return images
 
 
 # ----- Fake-list detection ----------------------------------------------------
@@ -1175,7 +2366,43 @@ def _group_fake_list_runs(body_children: List[Any]) -> None:
     flush()
 
 
-def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
+# "2.1 Data Sources", "4.3.2 Retention Periods": a multi-level section
+# number, then a capitalised word.
+_NUMBERED_SUBHEADING_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){1,3}\.?\s+(\S)")
+
+
+def _looks_like_numbered_subheading(p_el, styles: "DocxStyleResolver", style_name: str, t: str) -> bool:
+    """A body-size, all-bold line that opens with a multi-level section
+    number ("2.1 Data Sources") — the everyday report's subsection heading,
+    typed in bold at text size. The 14pt rule never saw it, so a report whose
+    sections were promoted kept its subsections as plain text.
+
+    Precision guards: the number must have at least two levels (a bold
+    "1. Submit the form" is a list step, not a heading), the word after it
+    must start with a capital letter, every visible run must be bold after
+    styles are applied, the line must not be smaller than body text, and
+    table-of-contents lines are never headings.
+    """
+    if style_name.strip().lower().startswith("toc"):
+        return False
+    m = _NUMBERED_SUBHEADING_RE.match(t)
+    if not m or not m.group(1).isupper():
+        return False
+    sid = styles.paragraph_style_id(p_el)
+    runs = visible_runs(p_el)
+    if not runs or not all(styles.run_bold(r, sid) for r in runs):
+        return False
+    body_el = styles.style_run_element(styles.default_paragraph_style_id, qn("w:sz"))
+    try:
+        body_pt = int(body_el.get(qn("w:val"))) / 2.0 if body_el is not None else 10.0
+    except (TypeError, ValueError):
+        body_pt = 10.0
+    return max(styles.run_size_pt(r, sid) for r in runs) >= body_pt
+
+
+def _looks_like_fake_heading(
+    paragraph, style_name: str, text: str, styles: Optional["DocxStyleResolver"] = None
+) -> bool:
     """True when a plain paragraph is visually presented as a heading.
 
     The classic title-page failure: 24pt bold text typed as a normal paragraph
@@ -1188,6 +2415,8 @@ def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
       >= 14pt on some run. Ordinary bold emphasis inside body text fails the
       size requirement; bold labels fail nothing else often enough that the
       size requirement is what keeps precision high.
+    * Or it is a bold, body-size numbered subsection line ("2.1 Data
+      Sources") — see :func:`_looks_like_numbered_subheading`.
     """
     sn = (style_name or "").strip().lower()
     if sn in ("title", "subtitle"):
@@ -1198,6 +2427,8 @@ def _looks_like_fake_heading(paragraph, style_name: str, text: str) -> bool:
         return False
     if t.endswith((".", "!", "?", ";", ":", ",")):
         return False
+    if styles is not None and _looks_like_numbered_subheading(paragraph._p, styles, style_name or "", t):  # noqa: SLF001
+        return True
 
     saw_text_run = False
     max_size_pt = 0.0
@@ -1236,39 +2467,160 @@ def _docx_row_is_header(row) -> bool:
         th = trPr.find(qn("w:tblHeader"))
         if th is not None and th.get(qn("w:val")) not in ("0", "false", "off"):
             return True
-    populated = [c for c in row.cells if (c.text or "").strip()]
+    populated = [c for c in row_cells(row) if (c.text or "").strip()]
     return bool(populated) and all(_cell_text_is_bold(c) for c in populated)
 
 
-def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[str]:
-    """Nearby human text describing a picture in ``paragraph``, or None.
+_FIGURE_LABEL_RE = re.compile(
+    r"^(figure|fig\.?|chart|graph|photo|photograph|image|map|exhibit|diagram|illustration|plate)"
+    r"\s*[0-9IVXivx]+[a-z]?\s*[.:)\-–—]?\s+\S",
+    re.IGNORECASE,
+)
+# A Caption-styled "Table 2: ..." right after a picture is the NEXT table's
+# caption, not the picture's: never hand it to the alt executor.
+_TABLE_LABEL_RE = re.compile(
+    r"^(table|tbl\.?)\s*[0-9IVXivx]+[a-z]?\s*[.:)\-–—]?(\s|$)",
+    re.IGNORECASE,
+)
 
-    1. The NEXT paragraph if it is Word's Caption style (that is how Word
-       itself associates a caption with a picture).
-    2. The picture paragraph's own text (an inline image in a sentence).
-    3. The nearest PRECEDING paragraph with at least three words (a lead-in
-       such as "Figure 2 shows quarterly revenue by region:").
-    Only ever text a human wrote near the image — never a filename.
+
+def _is_figure_label(text: str) -> bool:
+    return bool(_FIGURE_LABEL_RE.match(" ".join((text or "").split())))
+
+
+def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[Tuple[str, str]]:
+    """The context hook _image_nodes_from_p calls; see
+    :func:`_image_caption_and_source_for_paragraph`."""
+    return _image_caption_and_source_for_paragraph(paragraph, own_text)
+
+
+def _image_caption_and_source_for_paragraph(paragraph, own_text: str) -> Optional[Tuple[str, str]]:
+    """``(text, caption_source)`` for a picture in ``paragraph``, or None.
+
+    Sources, strongest first. The alt executor decides which it may write as a
+    description (app.ai.offline_rules.alt_from_caption):
+
+    - ``caption_style``: Word's Caption-styled paragraph right after the
+      picture, or right before it when that is not the previous picture's
+      caption ([pic1][Figure 1][pic2]: "Figure 1" is pic1's). Written FOR it.
+    - ``own_paragraph``: the picture's own paragraph opening with a numbered
+      figure label ("Figure 3: Org chart"); that paragraph IS the caption.
+    - ``adjacent_label``: a plain paragraph right next to the picture that
+      opens with a figure label (a common Word layout without Caption style).
+    - ``own_paragraph`` / ``preceding_text`` WITHOUT a label: merely near the
+      picture (a form label, a list item, the next body paragraph); recorded
+      as context, never written as a description.
+
+    Never a filename.
     """
     p_el = paragraph._p  # noqa: SLF001
     nxt = p_el.getnext()
-    if nxt is not None and nxt.tag == qn("w:p"):
-        cap = _paragraph_caption_text(nxt)
-        if cap:
-            return cap[:200]
+    prv = p_el.getprevious()
+    prv_ok = prv is not None and prv.tag == _W_P and not (
+        prv.getprevious() is not None and prv.getprevious().tag == _W_P
+        and next(iter_paragraph_drawings(prv.getprevious()), None) is not None
+    )
+    # A neighbour that holds its OWN picture is that picture's caption, never
+    # ours: [Figure 3: ... + pic1]["As Figure 3 shows ..." + pic2] must not
+    # hand pic1's caption to pic2.
+    candidates = [
+        sib for sib in (nxt, prv if prv_ok else None)
+        if sib is not None and sib.tag == _W_P and next(iter_paragraph_drawings(sib), None) is None
+    ]
+    for sib in candidates:
+        cap = " ".join((_paragraph_caption_text(sib) or "").split())
+        if cap and not _TABLE_LABEL_RE.match(cap):
+            return cap[:200], "caption_style"
     own = " ".join((own_text or "").split())
+    if own and _is_figure_label(own):
+        return own[:200], "own_paragraph"
+    for sib in candidates:
+        txt = " ".join(paragraph_text(sib).split())
+        if _is_figure_label(txt):
+            return txt[:200], "adjacent_label"
     if len(own.split()) >= 3:
-        return own[:200]
-    prev = p_el.getprevious()
+        return own[:200], "own_paragraph"
+    prev = prv
     hops = 0
     while prev is not None and hops < 4:
-        if prev.tag == qn("w:p"):
-            txt = " ".join("".join(t.text or "" for t in prev.iter(qn("w:t"))).split())
+        if prev.tag == _W_P:
+            txt = " ".join(paragraph_text(prev).split())
             if len(txt.split()) >= 3:
-                return txt[:200]
+                return txt[:200], "preceding_text"
             hops += 1
         prev = prev.getprevious()
     return None
+
+def ensure_styles_part(doc) -> None:
+    """Give a DOCX that has NO ``word/styles.xml`` an EMPTY one, before
+    anything reads a style.
+
+    python-docx creates a missing styles part the first time anything touches
+    ``doc.styles`` or ``paragraph.style`` — its template's, with document
+    defaults (Calibri 11pt, spacing) and styles of its own. The writer runs
+    the parser's walk on the copy it saves, so every remediation of such a
+    file — even one approving nothing — silently restyled the whole document
+    (Word renders a file without styles with its built-in defaults, which
+    an empty styles part leaves exactly as they were). The parser reads the
+    same empty part, so what it measures is what Word shows.
+    """
+    from docx.opc.constants import CONTENT_TYPE as _CT
+    from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+    from docx.opc.packuri import PackURI
+    from docx.oxml import parse_xml
+    from docx.parts.styles import StylesPart
+
+    try:
+        doc.part.part_related_by(_RT.STYLES)
+        return
+    except KeyError:
+        pass
+    except Exception:  # pragma: no cover - defensive: leave python-docx to it
+        return
+    package = doc.part.package
+    taken = {str(p.partname) for p in package.iter_parts()}
+    name = "/word/styles.xml"
+    n = 1
+    while name in taken:
+        n += 1
+        name = f"/word/styles{n}.xml"
+    part = StylesPart(
+        PackURI(name),
+        _CT.WML_STYLES,
+        parse_xml('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'),
+        package,
+    )
+    doc.part.relate_to(part, _RT.STYLES)
+
+
+def has_core_properties(doc) -> bool:
+    """Whether the package really carries ``docProps/core.xml``.
+
+    python-docx's ``doc.core_properties`` CREATES the part when it is
+    missing, pre-filled with title "Word Document" and author
+    "python-docx". Some generators omit the part; reading through that
+    property invented a title the source does not have (so the missing-title
+    finding never fired) and the writer then saved the invention into the
+    customer's file on runs where nobody approved a title.
+    """
+    from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+
+    try:
+        doc.part.package.part_related_by(_RT.CORE_PROPERTIES)
+    except KeyError:
+        return False
+    except Exception:  # pragma: no cover - defensive: assume present
+        return True
+    return True
+
+
+def core_title_and_language(doc) -> Tuple[str, str]:
+    """``(dc:title, dc:language)`` as the file states them — empty when the
+    core-properties part is absent (never python-docx's invented defaults)."""
+    if not has_core_properties(doc):
+        return "", ""
+    core = doc.core_properties
+    return (core.title or "").strip(), (getattr(core, "language", None) or "").strip()
 
 
 def _docx_default_lang(doc) -> Optional[str]:
@@ -1351,63 +2703,120 @@ def _docx_table_caption(table) -> Optional[str]:
     return nxt_cap
 
 
-def _table_to_node(table, ids: _IdCounter) -> TableNode:
+def _table_to_node(
+    table,
+    ids: _IdCounter,
+    blobs: Optional[Dict[str, Tuple[Optional[str], Optional[str]]]] = None,
+    reg: Optional[Callable[[str, Any], None]] = None,
+    partname: str = "",
+    nested: bool = False,
+) -> TableNode:
+    """TableNode for a Word table — its rows, cells, the links and pictures
+    in each cell, and any table NESTED in a cell (as a child of that cell,
+    minted in its own ``docx-n*`` id space so top-level ids never shift).
+
+    Nested tables used to be dropped entirely, so TABLE_NESTED could never
+    fire on a Word file and an inner data table's missing headers were never
+    reported. Pictures in cells (the logo cell of a form) were never read.
+    """
+    reg = reg or _no_register
+    blobs = blobs or {}
+    pfx = "docx-n" if nested else "docx-"
     # Decide once whether row 0 is a header. Word marks real headers with
     # w:tblHeader or styles them bold; if neither AND the table is a clear data
     # grid (>=3 rows, >=2 cols), type row 0 as DATA so TABLE_MISSING_HEADERS can
     # fire. Small/ambiguous tables keep the legacy header assumption to avoid
     # false positives on layout tables.
     all_rows = list(iter_table_rows(table))
-    n_cols = max((len(r.cells) for r in all_rows), default=0)
+    cells_by_row = [row_cells(r) for r in all_rows]
+    n_cols = max((len(c) for c in cells_by_row), default=0)
     looks_like_data_table = len(all_rows) >= 3 and n_cols >= 2
     first_is_header = _docx_row_is_header(all_rows[0]) if all_rows else False
     treat_row0_as_header = first_is_header or not looks_like_data_table
 
-    # Merged cells repeat the same underlying <w:tc> across the grid; links
-    # inside it must only be emitted once (the writer dedupes identically).
-    seen_tc_ids: set = set()
+    # Merged cells repeat the same underlying <w:tc> across the grid; what is
+    # inside it must only be emitted once. Keyed on the element itself (held
+    # in the set, so its proxy stays alive) — keying on id() of a proxy that
+    # was garbage-collected could match a DIFFERENT cell and silently drop
+    # its links.
+    seen_tcs: set = set()
 
     rows: List[TableRowNode] = []
-    for row_index, row in enumerate(iter_table_rows(table)):
+    first_row_text: List[str] = []
+    for row_index, row in enumerate(all_rows):
         cells: List[TableCellNode] = []
-        for cell in row.cells:
+        for cell in cells_by_row[row_index]:
             text = (cell.text or "").strip()
+            if row_index == 0:
+                first_row_text.append(" ".join(text.split()))
             is_header_cell = row_index == 0 and bool(text) and treat_row0_as_header
             cell_type = TableCellType.HEADER if is_header_cell else TableCellType.DATA
             cell_children: List[Any] = []
-            tc_key = id(cell._tc)
-            if tc_key not in seen_tc_ids:
-                seen_tc_ids.add(tc_key)
-                # Hyperlinks (incl. fldSimple fields) inside the cell get their
-                # own LinkNodes so link-text analysis/remediation reaches them.
+            tc = cell._tc  # noqa: SLF001
+            if tc not in seen_tcs:
+                seen_tcs.add(tc)
+                # Hyperlinks (incl. fldSimple fields) and pictures inside the
+                # cell get their own nodes so analysis/remediation reaches them.
                 for cell_paragraph in cell.paragraphs:
-                    cell_children.extend(_hyperlink_nodes_in_paragraph(cell_paragraph, ids))
+                    cp_el = cell_paragraph._p  # noqa: SLF001
+                    cp_text = paragraph_text(cp_el)
+                    cell_children.extend(
+                        _link_nodes_from_p(
+                            cp_el, cell_paragraph.part, ids, reg=reg, context_text=cp_text,
+                            extra_props={"docx_story": "table", "docx_part": partname},
+                        )
+                    )
+                    cell_children.extend(
+                        _image_nodes_from_p(
+                            cp_el, blobs, ids, "docx-cimg", reg, story="table", partname=partname,
+                            context_fn=lambda _p=cell_paragraph, _t=cp_text: _image_context_for_paragraph(_p, _t),
+                        )
+                    )
+                for inner_el in _iter_sdt_aware(tc, _W_TBL):
+                    from docx.table import Table as _Table
+
+                    cell_children.append(
+                        _table_to_node(_Table(inner_el, cell), ids, blobs, reg, partname, nested=True)
+                    )
+            cell_id = ids(f"{pfx}cell")
+            reg(cell_id, (row, cell))
             cells.append(
                 TableCellNode(
-                    id=ids("docx-cell"),
+                    id=cell_id,
                     cell_type=cell_type,
                     header_scope=TableHeaderScope.COLUMN if cell_type == TableCellType.HEADER else TableHeaderScope.NONE,
                     content=NodeContent(kind=ContentKind.TEXT, text=text or " "),
-                    metadata=NodeMetadata(source_format="docx"),
+                    metadata=NodeMetadata(source_format="docx", page=ids.page_of(cell._tc)),  # noqa: SLF001
                     children=cell_children,
                     accessibility_flags=[],
                 )
             )
+        row_id = ids(f"{pfx}row")
+        reg(row_id, row)
         rows.append(
             TableRowNode(
-                id=ids("docx-row"),
+                id=row_id,
                 content=NodeContent(kind=ContentKind.NONE),
-                metadata=NodeMetadata(source_format="docx"),
+                metadata=NodeMetadata(source_format="docx", page=ids.page_of(row._tr)),  # noqa: SLF001
                 children=cells,
                 accessibility_flags=[],
             )
         )
     caption = _docx_table_caption(table)
-    table_props = {"caption": caption} if caption else {}
+    table_props: Dict[str, Any] = {"caption": caption} if caption else {}
+    if nested:
+        table_props["nested_table"] = True
+    # Location: the caption if the table has one, else its first row — the
+    # words a person scanning the document recognises the table by.
+    snippet = caption or " | ".join(t for t in first_row_text if t)
+    if snippet:
+        table_props["snippet"] = _snippet_around(snippet, "")
+    table_id = ids(f"{pfx}table")
+    reg(table_id, table)
     return TableNode(
-        id=ids("docx-table"),
+        id=table_id,
         content=NodeContent(kind=ContentKind.NONE),
-        metadata=NodeMetadata(source_format="docx", properties=table_props),
+        metadata=NodeMetadata(source_format="docx", page=ids.page_of(table._tbl), properties=table_props),  # noqa: SLF001
         children=rows,
         accessibility_flags=[],
     )

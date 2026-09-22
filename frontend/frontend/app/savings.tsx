@@ -83,7 +83,7 @@ export default function SavingsScreen() {
             Industry manual remediation typically runs $5–25 per page.
           </Text>
 
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 18 }]}>
+          <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginTop: 18 }]}>
             DOCUMENT TYPE
           </Text>
           <View style={styles.typeRow}>
@@ -117,7 +117,7 @@ export default function SavingsScreen() {
         <Card style={[stacked ? undefined : { flex: 1 }, { borderColor: theme.colors.accent, borderWidth: 2 }]}>
           {beneficial ? (
             <>
-              <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>YOU'D SAVE</Text>
+              <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted }]}>YOU'D SAVE</Text>
               <Text style={[theme.typography.display, { color: theme.colors.accent, marginTop: 2 }]}>
                 {money(result.saved)}
               </Text>

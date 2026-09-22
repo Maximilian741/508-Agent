@@ -81,6 +81,10 @@ def _build_synthetic_docx(path: Path) -> dict:
     # picture path). If this raises, the test should FAIL, not degrade.
     run = doc.add_paragraph().add_run()
     run.add_picture(io.BytesIO(_valid_png()))
+    # Word's own Caption under the picture: the text written FOR it, which is
+    # what the alt fix is built from when no AI can look at the pixels (the
+    # filler paragraph above is not a description and is never used).
+    doc.add_paragraph("Figure 1: Quarterly revenue by region", style="Caption")
 
     doc.save(str(path))
     return {"image_added": True}

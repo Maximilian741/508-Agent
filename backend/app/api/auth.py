@@ -21,12 +21,14 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import optional_user, require_user_id
+from app.api.errors import CodedErrorRoute
 from app.config import get_settings
 from app.db.models import (
     ApiKeyRow,
@@ -46,7 +48,9 @@ from app.security.sessions import mint_session
 from app.services.mailer import send_email
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/auth")
+# Error bodies also carry a stable ``code`` + a plain-English ``message``
+# (``detail`` unchanged) — see app/api/errors.py.
+router = APIRouter(prefix="/auth", route_class=CodedErrorRoute)
 
 # Brute-force protection keyed on the ACCOUNT rather than the source address.
 # The per-IP middleware is the other half, but it cannot tell a botnet from a
@@ -108,6 +112,13 @@ class SignInResponse(BaseModel):
 
     user: UserDTO
     token: str
+    # A NEW account on a deploy with SMTP configured is sent its verification
+    # link as part of sign-up; True only when that send actually succeeded.
+    verificationSent: bool = False
+    # The starter credits are locked behind a verified email on this deploy
+    # and this account hasn't verified yet — the UI should say "check your
+    # inbox", not "buy credits".
+    verificationRequired: bool = False
 
 
 
@@ -417,6 +428,7 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
 
     _throttled(_SIGN_IN_THROTTLE, email_norm)
 
+    verify_token: Optional[str] = None
     with session_scope() as session:
         row = session.execute(
             select(UserRow).where(UserRow.email == email_norm)
@@ -437,6 +449,12 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
             )
             session.add(row)
             session.flush()
+            # The starter credits wait on a verified email wherever a sender
+            # is wired up, and nothing used to send the link: a new account
+            # sat at 0 credits until its owner found a button on /account.
+            # Mint the link with the account; it is mailed after the commit.
+            if _smtp_configured():
+                verify_token = _issue_verify_token(session, row)
         else:
             if row.password_hash:
                 if not password or not _verify_password(password, row.password_hash):
@@ -462,7 +480,25 @@ async def sign_in(payload: SignInRequest, request: Request) -> SignInResponse:
     # restarts (assuming APP_SECRET is set), resists tampering, and dies when
     # the user's token_version is bumped.
     token = mint_session(dto.id, version=version)
-    return SignInResponse(user=dto, token=token)
+
+    # Mail the sign-up verification link. Off the event loop (SMTP can take
+    # seconds), and never fatal: the account exists either way, and the owner
+    # can ask again from the app. ``verificationSent`` reports the real outcome.
+    verification_sent = False
+    if verify_token:
+        try:
+            verification_sent = bool(
+                await run_in_threadpool(_send_verification_email, dto.email, verify_token)
+            )
+        except Exception:
+            logger.warning("sign-up verification email failed", exc_info=True)
+            verification_sent = False
+    return SignInResponse(
+        user=dto,
+        token=token,
+        verificationSent=verification_sent,
+        verificationRequired=bool(_starter_requires_verification() and not dto.emailVerifiedAt),
+    )
 
 
 @router.get("/me", response_model=UserDTO)
@@ -519,14 +555,11 @@ async def grant_starter(
     GRANT_KIND = "grant"
     GRANT_DESC = "starter_grant"
 
-    import os as _os
-
-    smtp_configured = bool((_os.environ.get("SMTP_HOST") or "").strip())
     # Fail CLOSED on the env label: only an explicit development box may skip
     # verification, and only while it has no mail sender at all. A production
     # (or staging, or prod-eu, ...) deploy that ships SMTP_HOST empty now
     # refuses the grant instead of handing 25 credits to any typed address.
-    require_verified = smtp_configured or not get_settings().is_dev
+    require_verified = _starter_requires_verification()
 
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
@@ -918,46 +951,78 @@ async def request_verify_email(
     """
     with session_scope() as session:
         row = get_current_user_row(session, account_id=user_id)
-        # Drop this user's stale VERIFICATION tokens (one outstanding link is
-        # plenty) — and nothing else. Password-reset tokens share this table
-        # under the "pr_" prefix, and an unscoped delete here deleted those
-        # too: a borrowed session could not take the account (that needs the
-        # password), but it could fire this always-200 endpoint after each of
-        # the owner's reset requests and shred the link before they clicked it,
-        # holding the account hostage forever. Reset IS the recovery path for
-        # someone who has forgotten their password, so there was no way out.
-        session.execute(
-            delete(EmailVerifyTokenRow).where(
-                EmailVerifyTokenRow.user_id == row.id,
-                EmailVerifyTokenRow.token.notlike(f"{_RESET_PREFIX}%"),
-            )
-        )
-        token = secrets.token_hex(16)  # 32 hex chars
-        session.add(
-            EmailVerifyTokenRow(
-                token=token,
-                user_id=row.id,
-                created_at=datetime.utcnow(),
-            )
-        )
+        token = _issue_verify_token(session, row)
         to_email = row.email
 
-    # PUBLIC_BASE_URL is the APP (frontend) origin, so the link must be a page
-    # route there — /auth/verify-email was an API path the web app never served,
-    # so every emailed link 404'd. /verify-email mirrors /reset-password?token=…
-    # and stays clear of /verify?cert=… (certificate verification). The page
-    # calls GET {API}/auth/verify-email?token=… below.
+    # Off the event loop: an SMTP round-trip can take seconds.
+    await run_in_threadpool(_send_verification_email, to_email, token)
+    return VerifyQueuedResponse(queued=True)
+
+
+def _smtp_configured() -> bool:
+    return bool((os.environ.get("SMTP_HOST") or "").strip())
+
+
+def _starter_requires_verification() -> bool:
+    """THE rule for whether starter credits wait on a verified email.
+
+    Only an explicit development box with no mail sender skips it (see
+    grant_starter for why this fails closed on the env label).
+    """
+    return _smtp_configured() or not get_settings().is_dev
+
+
+def _issue_verify_token(session, row: UserRow) -> str:
+    """Replace ``row``'s outstanding VERIFICATION link with a fresh one.
+
+    Drops this user's stale VERIFICATION tokens (one outstanding link is
+    plenty) — and nothing else. Password-reset tokens share this table under
+    the "pr_" prefix, and an unscoped delete here deleted those too: a
+    borrowed session could not take the account (that needs the password),
+    but it could fire the always-200 request endpoint after each of the
+    owner's reset requests and shred the link before they clicked it, holding
+    the account hostage forever. Reset IS the recovery path for someone who
+    has forgotten their password, so there was no way out.
+    """
+    session.execute(
+        delete(EmailVerifyTokenRow).where(
+            EmailVerifyTokenRow.user_id == row.id,
+            EmailVerifyTokenRow.token.notlike(f"{_RESET_PREFIX}%"),
+        )
+    )
+    token = secrets.token_hex(16)  # 32 hex chars
+    session.add(
+        EmailVerifyTokenRow(
+            token=token,
+            user_id=row.id,
+            created_at=datetime.utcnow(),
+        )
+    )
+    return token
+
+
+def _send_verification_email(to_email: str, token: str) -> bool:
+    """Mail the verification link. Returns whether the mailer accepted it.
+
+    PUBLIC_BASE_URL is the APP (frontend) origin, so the link must be a page
+    route there — /auth/verify-email was an API path the web app never served,
+    so every emailed link 404'd. /verify-email mirrors /reset-password?token=…
+    and stays clear of /verify?cert=… (certificate verification). The page
+    calls GET {API}/auth/verify-email?token=… below.
+    """
     base = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
     link = f"{base}/verify-email?token={token}" if base else f"/verify-email?token={token}"
-    send_email(
-        to=to_email,
-        subject="Verify your 508 Agent email",
-        body=(
-            "Confirm your email address by opening this link:\n\n"
-            f"{link}\n\nThis link expires in 24 hours."
-        ),
+    return bool(
+        send_email(
+            to=to_email,
+            subject="Verify your 508 Agent email",
+            body=(
+                "Confirm your email address by opening this link:\n\n"
+                f"{link}\n\nThis link expires in 24 hours. Once it's confirmed, "
+                "your free starter credits are unlocked."
+            ),
+        )
     )
-    return VerifyQueuedResponse(queued=True)
 
 
 @router.get("/verify-email", response_model=VerifyResultResponse)

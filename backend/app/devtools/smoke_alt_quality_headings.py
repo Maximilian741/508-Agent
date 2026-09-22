@@ -59,7 +59,9 @@ def _codes(tree: AccessibilityTree) -> set[str]:
 
 
 def _img_tree(alt: str, caption: str | None = None) -> AccessibilityTree:
-    props = {"caption": caption} if caption else {}
+    # A Word Caption-styled paragraph is text written FOR the picture; the
+    # DOCX parser records that as caption_source="caption_style".
+    props = {"caption": caption, "caption_source": "caption_style"} if caption else {}
     img = ImageNode(
         id="img-1",
         content=NodeContent(kind=ContentKind.NONE),
@@ -160,7 +162,7 @@ def main() -> int:
         check("no context: the filename alt is left as-is (still flagged, honestly)",
               bare_img.alt_text == "image1.png")
         check("no context: the note names the reason",
-              "placeholder" in (res_b.notes or "").lower())
+              "caption" in (res_b.notes or "").lower() and "not charged" in (res_b.notes or "").lower())
 
     # good alt must NEVER be overwritten (it carries no non-descriptive flag)
     t_good = _img_tree("A red car on a wet street at night")

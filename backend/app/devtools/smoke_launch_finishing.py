@@ -55,6 +55,12 @@ def main() -> int:
 
     # With SMTP configured and email unverified -> 403 verify_email_first.
     os.environ["SMTP_HOST"] = "smtp.example.com"
+    # Sign-up now mails the verification link when SMTP is configured; record
+    # it instead of letting smtplib dial smtp.example.com from a smoke.
+    import app.api.auth as _auth_mod
+
+    _real_send = _auth_mod.send_email
+    _auth_mod.send_email = lambda **kw: True
     try:
         r2 = client.post(
             "/auth/sign-in",
@@ -68,6 +74,7 @@ def main() -> int:
         )
     finally:
         os.environ.pop("SMTP_HOST", None)
+        _auth_mod.send_email = _real_send
 
     # --- 1. password reset --------------------------------------------------
     # Request: response identical whether or not the account exists.
@@ -162,13 +169,16 @@ def main() -> int:
     d = _Docx()
     d.core_properties.title = "Link Test"
     para = d.add_paragraph("See ")
+    # The address carries real words, so a name can be derived from it. (A
+    # one-word slug like "/report" is refused as not clearly better than the
+    # URL — see smoke_semantic_rules_catalog.)
     rid = d.part.relate_to(
-        "https://example.gov/report",
+        "https://example.gov/reports/annual-accessibility-report",
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
         is_external=True,
     )
     hl = _Ox("w:hyperlink"); hl.set(_qn("r:id"), rid)
-    run_el = _Ox("w:r"); t_el = _Ox("w:t"); t_el.text = "https://example.gov/report"
+    run_el = _Ox("w:r"); t_el = _Ox("w:t"); t_el.text = "https://example.gov/reports/annual-accessibility-report"
     run_el.append(t_el); hl.append(run_el); para._p.append(hl)
     p = tmpd / "bareurl.docx"
     d.save(str(p))

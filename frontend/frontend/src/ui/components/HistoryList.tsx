@@ -35,7 +35,7 @@ export function HistoryList({ entries, onSelect, onClear, emptyHint }: HistoryLi
           accessibilityLabel={`Open audit for ${entry.filename}`}
         >
           <View style={[styles.gradeDot, { backgroundColor: _gradeColor(entry.grade, theme) }]}>
-            <Text style={styles.gradeDotText}>{entry.grade}</Text>
+            <Text style={[styles.gradeDotText, { color: theme.colors.bg }]}>{entry.grade}</Text>
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[theme.typography.h2, { color: theme.colors.text, fontSize: 15 }]} numberOfLines={1}>

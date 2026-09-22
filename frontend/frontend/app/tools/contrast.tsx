@@ -143,7 +143,7 @@ export default function ContrastChecker() {
 
             {suggestions && (suggestions.foreground || suggestions.background) ? (
               <View style={styles.fixBlock}>
-                <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+                <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted }]}>
                   FAILS AA FOR NORMAL TEXT: ONE TAP TO FIX
                 </Text>
                 <View style={styles.fixRow}>

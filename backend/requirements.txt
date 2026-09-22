@@ -10,6 +10,13 @@ lxml==6.0.2
 # install to activate (OCR_ENABLED=true); harmless when the binary is absent.
 pytesseract==0.3.13
 python-pptx==1.0.2
+# XLSX: openpyxl REOPENS every remediated workbook to prove it still loads
+# (the parser/writer edit the OOXML parts directly — openpyxl's own save
+# would overwrite existing alt text). Pillow decodes uploaded images for the
+# image -> PDF intake; it was already installed via python-pptx, now pinned
+# because intake imports it directly.
+openpyxl==3.1.5
+Pillow==11.3.0
 SQLAlchemy==2.0.36
 boto3==1.35.66
 psycopg[binary]==3.2.3
