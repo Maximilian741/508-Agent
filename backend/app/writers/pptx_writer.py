@@ -756,6 +756,240 @@ def _shape_referenced_by_animation(slide, shape_id) -> bool:
     return any(el.get("spid") == sid for el in timing.iter(qn("p:spTgt")))
 
 
+# --- An empty title placeholder that DRAWS part of the slide ------------------
+#
+# An untitled slide can still carry its layout's EMPTY title placeholder, and
+# "empty" does not mean "invisible": a layout or master may give the title a
+# fill, an outline or an effect, so the empty box paints a coloured band the
+# author then typed the real title over in a text box (white 40pt on dark
+# blue). Deleting that placeholder, or moving it off the slide to hold the
+# title, takes the band with it — and the white title lands on white.
+#
+# So a placeholder that draws anything is kept exactly where it is (same shape
+# id, same z-order), drawing exactly what it drew, as an ordinary decorative
+# shape: its look is resolved through the layout/master chain and written onto
+# it, and only then is its <p:ph> removed. When that can't be done faithfully
+# — a picture fill or theme style that lives in the layout's part — the title
+# fix is refused and left for a person.
+
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_TITLE_PH_TYPES = ("title", "ctrTitle")
+_GEOM_TAGS = {qn("a:prstGeom"), qn("a:custGeom")}
+_EFFECT_TAGS = {qn("a:effectLst"), qn("a:effectDag")}
+_LN_FILL_TAGS = {qn(t) for t in ("a:noFill", "a:solidFill", "a:gradFill", "a:pattFill")}
+_LN_ATTRS = ("w", "cap", "cmpd", "algn")
+
+
+def _ph_of(sp):
+    return sp.find(f"{qn('p:nvSpPr')}/{qn('p:nvPr')}/{qn('p:ph')}")
+
+
+def _title_placeholder_chain(slide, sp) -> List[Any]:
+    """``sp``, then the layout and master title placeholders it inherits from."""
+    chain = [sp]
+    ph = _ph_of(sp)
+    ph_type = (ph.get("type") if ph is not None else None) or "title"
+
+    def _elements(placeholders) -> List[Any]:
+        out = []
+        try:
+            for p in placeholders:
+                el = p._element  # noqa: SLF001
+                if _ph_of(el) is not None:
+                    out.append(el)
+        except Exception:
+            return []
+        return out
+
+    def _of_type(elements, types):
+        return next((el for el in elements if (_ph_of(el).get("type") or "obj") in types), None)
+
+    try:
+        layout = slide.slide_layout
+        layout_els = _elements(layout.placeholders)
+    except Exception:
+        return chain
+    layout_sp = _of_type(layout_els, (ph_type,))
+    if layout_sp is None:
+        layout_sp = _of_type(layout_els, _TITLE_PH_TYPES)
+    if layout_sp is not None:
+        chain.append(layout_sp)
+    try:
+        master_sp = _of_type(_elements(layout.slide_master.placeholders), ("title",))
+    except Exception:
+        master_sp = None
+    if master_sp is not None:
+        chain.append(master_sp)
+    return chain
+
+
+def _first_in_chain(chain, tags) -> Tuple[Optional[int], Any]:
+    """(level, element) of the first spPr child with a tag in ``tags``."""
+    for level, el in enumerate(chain):
+        sp_pr = el.find(qn("p:spPr"))
+        if sp_pr is None:
+            continue
+        hit = next((c for c in sp_pr if c.tag in tags), None)
+        if hit is not None:
+            return level, hit
+    return None, None
+
+
+def _first_ln_fill(chain) -> Tuple[Optional[int], Any]:
+    for level, el in enumerate(chain):
+        ln = el.find(f"{qn('p:spPr')}/{qn('a:ln')}")
+        if ln is None:
+            continue
+        hit = next((c for c in ln if c.tag in _LN_FILL_TAGS), None)
+        if hit is not None:
+            return level, hit
+    return None, None
+
+
+def _placeholder_draws_something(chain) -> bool:
+    """True when this (text-less) placeholder paints or does anything on the
+    slide: a fill, an outline, an effect, 3-D, a theme style, a click action."""
+    if any(el.find(qn("p:style")) is not None for el in chain):
+        return True
+    _lvl, fill = _first_in_chain(chain, _FILL_TAGS)
+    if fill is not None and fill.tag != qn("a:noFill"):
+        return True
+    _lvl, ln_fill = _first_ln_fill(chain)
+    if ln_fill is not None and ln_fill.tag != qn("a:noFill"):
+        return True
+    _lvl, effect = _first_in_chain(chain, _EFFECT_TAGS)
+    if effect is not None and (effect.tag == qn("a:effectDag") or len(effect)):
+        return True
+    _lvl, sp3d = _first_in_chain(chain, {qn("a:sp3d")})
+    if sp3d is not None:
+        return True
+    c_nv_pr = chain[0].find(f"{qn('p:nvSpPr')}/{qn('p:cNvPr')}")
+    if c_nv_pr is not None and any(c.tag in (qn("a:hlinkClick"), qn("a:hlinkHover")) for c in c_nv_pr):
+        return True
+    return False
+
+
+def _has_part_reference(el) -> bool:
+    """True when ``el`` points at a relationship (r:embed, r:link, r:id...):
+    that id belongs to the part it came from and means nothing on the slide."""
+    prefix = "{" + _R_NS + "}"
+    return any(k.startswith(prefix) for node in el.iter() for k in node.attrib)
+
+
+class _CannotCarryOver(Exception):
+    pass
+
+
+def _resolved_sp_pr(chain):
+    """A self-contained spPr for ``chain[0]`` that draws exactly what the
+    placeholder chain draws, or raises :class:`_CannotCarryOver`."""
+    own = chain[0].find(qn("p:spPr"))
+    new = chain[0].makeelement(qn("p:spPr"), {})
+    if own is not None and own.get("bwMode") is not None:
+        new.set("bwMode", own.get("bwMode"))
+
+    def _take(tags):
+        level, hit = _first_in_chain(chain, tags)
+        if hit is None:
+            return None
+        if level and _has_part_reference(hit):
+            raise _CannotCarryOver("inherited look references the layout's own part")
+        return copy.deepcopy(hit)
+
+    xfrm = _take({qn("a:xfrm")})
+    if xfrm is None or xfrm.find(qn("a:off")) is None or xfrm.find(qn("a:ext")) is None:
+        raise _CannotCarryOver("no resolvable position")
+    new.append(xfrm)
+    geom = _take(_GEOM_TAGS)
+    if geom is None:
+        geom = new.makeelement(qn("a:prstGeom"), {"prst": "rect"})
+        etree.SubElement(geom, qn("a:avLst"))
+    new.append(geom)
+    fill = _take(_FILL_TAGS)
+    new.append(fill if fill is not None else new.makeelement(qn("a:noFill"), {}))
+
+    # The outline: the nearest a:ln, completed from the levels above it (the
+    # colour often lives on the master while the slide only sets a width).
+    ln = None
+    for level, el in enumerate(chain):
+        level_ln = el.find(f"{qn('p:spPr')}/{qn('a:ln')}")
+        if level_ln is None:
+            continue
+        if level and _has_part_reference(level_ln):
+            raise _CannotCarryOver("inherited outline references the layout's own part")
+        if ln is None:
+            ln = copy.deepcopy(level_ln)
+            continue
+        for attr in _LN_ATTRS:
+            if ln.get(attr) is None and level_ln.get(attr) is not None:
+                ln.set(attr, level_ln.get(attr))
+    if ln is None:
+        ln = new.makeelement(qn("a:ln"), {})
+    if not any(c.tag in _LN_FILL_TAGS for c in ln):
+        _lvl, ln_fill = _first_ln_fill(chain)
+        ln.insert(0, copy.deepcopy(ln_fill) if ln_fill is not None else ln.makeelement(qn("a:noFill"), {}))
+    new.append(ln)
+
+    effect = _take(_EFFECT_TAGS)
+    new.append(effect if effect is not None else new.makeelement(qn("a:effectLst"), {}))
+    for tag in ("a:scene3d", "a:sp3d"):
+        extra = _take({qn(tag)})
+        if extra is not None:
+            new.append(extra)
+    if own is not None:
+        own_ext = own.find(qn("a:extLst"))
+        if own_ext is not None:
+            new.append(copy.deepcopy(own_ext))
+    return new
+
+
+def _keep_drawing_title_placeholder(slide):
+    """Turn the slide's EMPTY title placeholder into a plain decorative shape
+    when it draws something, so giving the slide a title can't erase it.
+
+    Returns ``None`` when there is nothing to keep (no title placeholder, it
+    holds text, or it draws nothing), ``(element, original_copy)`` when it
+    was converted (the copy lets the caller undo it), or ``False`` when it
+    draws something that can't be carried over faithfully.
+    """
+    try:
+        existing = slide.shapes.title
+    except Exception:
+        existing = None
+    if existing is None:
+        return None
+    sp = existing._element  # noqa: SLF001
+    if sp.tag != qn("p:sp") or (existing.text or "").strip():
+        return None
+    chain = _title_placeholder_chain(slide, sp)
+    if not _placeholder_draws_something(chain):
+        return None
+    if any(el.find(qn("p:style")) is not None for el in chain[1:]):
+        return False  # a theme style on the layout: can't prove how it inherits
+    try:
+        new_sp_pr = _resolved_sp_pr(chain)
+    except _CannotCarryOver:
+        return False
+    original = copy.deepcopy(sp)
+    own = sp.find(qn("p:spPr"))
+    if own is not None:
+        sp.replace(own, new_sp_pr)
+    else:
+        sp.find(qn("p:nvSpPr")).addnext(new_sp_pr)
+    ph = _ph_of(sp)
+    ph.getparent().remove(ph)
+    # It is the slide's design, not content: nothing for a screen reader.
+    _mark_shape_decorative(_ElementShape(sp))
+    return sp, original
+
+
+class _ElementShape:
+    """The one attribute the shape helpers below read from a python-pptx shape."""
+
+    def __init__(self, element) -> None:
+        self._element = element
+
+
 def _promotable_title_box(slide, shape, title: str) -> bool:
     """True when ``shape`` is a plain top-level text box holding exactly ``title``."""
     try:
@@ -793,10 +1027,12 @@ def _promote_to_title(prs, slide, shape) -> Optional[str]:
         existing = None
     if existing is not None:
         # An EMPTY title placeholder (the slide was flagged untitled, so it has
-        # no text) renders nothing in a slideshow — but two title placeholders
-        # on one slide would be ambiguous. Drop it, unless an animation
-        # targets it, in which case the caller falls back to the off-slide
-        # title (which reuses this placeholder).
+        # no text) — and one that draws nothing: the caller already turned a
+        # placeholder with a fill/outline/effect into a plain shape (see
+        # _keep_drawing_title_placeholder), so this one renders nothing in a
+        # slideshow. Two title placeholders on one slide would be ambiguous:
+        # drop it, unless an animation targets it, in which case the caller
+        # falls back to the off-slide title (which reuses this placeholder).
         if (existing.text or "").strip():
             return None
         if _shape_referenced_by_animation(slide, existing.shape_id):
@@ -904,6 +1140,13 @@ def _apply_slide_title(
         skipped.append({"target_id": section.id, "reason": "no_title_text"})
         return
     source = text_by_node_id.get(props.get("set_slide_title_source") or "")
+    # An empty title placeholder that paints part of the design (a band the
+    # title text sits on) must stay on the slide; it can't become the title
+    # or be removed. Refused when its look can't be carried over faithfully.
+    kept = _keep_drawing_title_placeholder(slide)
+    if kept is False:
+        skipped.append({"target_id": section.id, "reason": "empty_title_box_draws_slide_design"})
+        return
     result = None
     if source is not None and _promotable_title_box(slide, source, title):
         try:
@@ -914,8 +1157,14 @@ def _apply_slide_title(
     if result is None:
         result = _off_slide_title(prs, slide, title)
     if result is None:
+        if kept:
+            element, original = kept
+            if element.getparent() is not None:
+                element.getparent().replace(element, original)
         skipped.append({"target_id": section.id, "reason": "could_not_create_title_placeholder"})
         return
+    if kept:
+        result += "; its empty title box stays on the slide as a plain shape"
     applied.append(
         {
             "kind": "slide_title",
