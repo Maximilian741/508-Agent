@@ -63,8 +63,11 @@ def _docx_with_shared_logo(path: Path) -> None:
     d = docx.Document()
     d.add_paragraph("Company report with a repeated logo, and a caption for context.")
     for i in range(4):
-        d.add_paragraph(f"Section {i} caption text near the logo")
+        d.add_paragraph(f"Section {i} text near the logo")
         d.add_picture(str(png), width=Inches(0.5))
+        # A Word Caption under each picture: text written FOR that instance,
+        # which is the only thing the offline alt path may turn into alt.
+        d.add_paragraph(f"Figure {i + 1}: Company logo in section {i}", style="Caption")
     d.save(str(path))
     # Give instances 0 and 2 a HUMAN-written alt; leave 1 and 3 blank.
     _set_descr(path, {0: "Company logo variant 0", 2: "Company logo variant 2"})

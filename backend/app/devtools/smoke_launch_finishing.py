@@ -169,13 +169,16 @@ def main() -> int:
     d = _Docx()
     d.core_properties.title = "Link Test"
     para = d.add_paragraph("See ")
+    # The address carries real words, so a name can be derived from it. (A
+    # one-word slug like "/report" is refused as not clearly better than the
+    # URL — see smoke_semantic_rules_catalog.)
     rid = d.part.relate_to(
-        "https://example.gov/report",
+        "https://example.gov/reports/annual-accessibility-report",
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
         is_external=True,
     )
     hl = _Ox("w:hyperlink"); hl.set(_qn("r:id"), rid)
-    run_el = _Ox("w:r"); t_el = _Ox("w:t"); t_el.text = "https://example.gov/report"
+    run_el = _Ox("w:r"); t_el = _Ox("w:t"); t_el.text = "https://example.gov/reports/annual-accessibility-report"
     run_el.append(t_el); hl.append(run_el); para._p.append(hl)
     p = tmpd / "bareurl.docx"
     d.save(str(p))

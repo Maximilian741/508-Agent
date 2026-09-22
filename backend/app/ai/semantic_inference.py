@@ -6,9 +6,10 @@ rewriting, document title/language guessing, etc.).
 
 It supports three deployment modes:
 
-* **Heuristic** (default): no network, no API key required. Returns reasonable,
-  context-derived outputs so the deterministic pipeline never blocks waiting on
-  an LLM.
+* **Heuristic** (default): no network, no API key required. Answers only from
+  words the document already carries for that purpose (a figure's caption, a
+  link address's words, the text's own function words) and otherwise ABSTAINS
+  with a reason, so nothing it cannot stand behind reaches a customer's file.
 * **Anthropic Claude**: enabled when ``ANTHROPIC_API_KEY`` is set in the
   environment.  Falls back to heuristic on any error.
 * **OpenAI**: enabled when ``OPENAI_API_KEY`` is set; same fallback semantics.
@@ -32,7 +33,6 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +81,11 @@ class SemanticInferenceProvider(ABC):
 # ---------------------------------------------------------------------------
 
 
-_LANGUAGE_PATTERNS = [
-    (re.compile(r"\b(the|and|of|to|in|is|for|with|on)\b", re.IGNORECASE), "en"),
-    (re.compile(r"\b(le|la|les|de|et|une|des|pour)\b", re.IGNORECASE), "fr"),
-    (re.compile(r"\b(el|la|los|de|y|para|una|que)\b", re.IGNORECASE), "es"),
-    (re.compile(r"\b(der|die|das|und|von|zu|ein|nicht)\b", re.IGNORECASE), "de"),
-    (re.compile(r"\b(il|la|le|di|e|per|un|una)\b", re.IGNORECASE), "it"),
-]
+# Latin-script language detection lives in app.ai.offline_rules
+# (detect_latin_language): distinctive function words only, a margin over the
+# runner-up, and ABSTAIN below it. The old five-pattern table here shared
+# "de"/"la" between French and Spanish and broke ties by dict order, which
+# wrote lang="fr" into Spanish pages and charged for it.
 
 
 # Unicode block -> BCP-47 tag, for scripts that identify a language on their
@@ -149,68 +147,93 @@ def _dominant_script_language(sample: str):
     return (code, share) if share >= 0.6 else None
 
 
-def _slugify(value: str) -> str:
-    cleaned = re.sub(r"\s+", " ", value or "").strip()
-    if not cleaned:
-        return ""
-    if len(cleaned) > 80:
-        cleaned = cleaned[:77].rstrip() + "…"
-    return cleaned
+def _abstain(provider: str, reason: str) -> InferenceResult:
+    """An honest "no answer": empty text, zero confidence, and the reason in
+    ``raw['refusal']`` so the executor can tell the customer why."""
+    return InferenceResult(text="", confidence=0.0, provider=provider, raw={"refusal": reason})
+
+
+def _clean_model_text(text: Any) -> str:
+    """A model's answer without the label/quotes it wrapped it in."""
+    from app.ai.offline_rules import clean_model_text
+
+    return clean_model_text(str(text or ""))
+
+
+# A bare language tag: "en", "pt-BR", "zh-Hant".
+_LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$", re.IGNORECASE)
+
+
+def _coerce_language_code(result: InferenceResult) -> InferenceResult:
+    """Keep a model's language answer only when it IS a language tag.
+
+    This used to take the first two-letter word of whatever came back, so a
+    chatty "It is English (en)." became "it" (Italian) and "The language is
+    en" became "is" — written as the document language and charged. An
+    answer that is not just a tag abstains instead.
+    """
+    if result.provider == "heuristic":
+        return result  # the offline detector already answers a tag or abstains
+    text = (result.text or "").strip().strip(".").strip()
+    if _LANGUAGE_TAG_RE.match(text):
+        return InferenceResult(text=text.lower(), confidence=result.confidence, provider=result.provider, raw=result.raw)
+    return _abstain(result.provider, "the automatic language answer was not a language code")
+
+
+def refusal_reason(result: Optional[InferenceResult]) -> Optional[str]:
+    """The plain-English reason a provider abstained, if it gave one."""
+    raw = getattr(result, "raw", None)
+    if isinstance(raw, dict):
+        reason = raw.get("refusal")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    return None
 
 
 class HeuristicProvider(SemanticInferenceProvider):
-    """Offline provider that derives outputs from local context."""
+    """Offline provider: writes only what the document itself already says.
+
+    It has no eyes and no world knowledge, so every method either derives its
+    answer from words a person already wrote for that exact purpose (a
+    figure's caption, the words in a link's address, the document's own
+    function words) or ABSTAINS with a reason. The rules and their catalog of
+    good and bad cases live in :mod:`app.ai.offline_rules`.
+    """
 
     name = "heuristic"
 
     def alt_text(self, payload: Dict[str, Any]) -> InferenceResult:
-        label = _slugify(str(payload.get("label") or "Image"))
-        location = str(payload.get("location") or "document")
-        # Prefer an explicit page or slide number; trust the caller's choice
-        # of key.  If only one is set, derive the location string from it; if
-        # both are set, the page wins (PDFs/DOCX), else the slide wins.
-        page = payload.get("page")
-        slide = payload.get("slide")
-        if page:
-            location = f"page {page}"
-        elif slide:
-            location = f"slide {slide}"
-        nearby_text = _slugify(str(payload.get("context") or payload.get("caption") or ""))
-        if nearby_text:
-            text = f"{label} — {nearby_text}"
-        else:
-            text = f"{label} shown in {location}."
-        return InferenceResult(text=text, confidence=0.4, provider=self.name)
+        from app.ai.offline_rules import alt_from_caption
+
+        # Only the parser's caption, with where it came from. The old version
+        # also took "context" (whatever text sat above the picture) and
+        # prefixed an internal node id, which is how "Image html-img-1 — Home
+        # About Contact Login" ended up in customers' files.
+        verdict = alt_from_caption(payload.get("caption"), payload.get("caption_source"))
+        if not verdict.ok:
+            return _abstain(self.name, verdict.reason)
+        return InferenceResult(text=verdict.text or "", confidence=0.6, provider=self.name)
 
     def link_text(self, payload: Dict[str, Any]) -> InferenceResult:
-        target = str(payload.get("target") or "").strip()
-        original = str(payload.get("text") or "").strip()
-        if target:
-            try:
-                parsed = urlparse(target)
-                host = parsed.netloc or parsed.path
-                host = re.sub(r"^www\.", "", host)
-                title = host.split("/")[0] if host else target
-                if title:
-                    fallback = f"Visit {title}" if not original else f"Read more about {title}"
-                    return InferenceResult(text=fallback, confidence=0.45, provider=self.name)
-            except Exception:
-                pass
-        if original:
-            return InferenceResult(
-                text=f"Read more about {original}", confidence=0.3, provider=self.name
-            )
-        return InferenceResult(text="Open linked resource", confidence=0.2, provider=self.name)
+        from app.ai.offline_rules import link_text_from_target
+
+        verdict = link_text_from_target(payload.get("text"), payload.get("target"))
+        if not verdict.ok:
+            return _abstain(self.name, verdict.reason)
+        return InferenceResult(text=verdict.text or "", confidence=0.55, provider=self.name)
 
     def document_title(self, payload: Dict[str, Any]) -> InferenceResult:
-        filename = str(payload.get("filename") or payload.get("doc_id") or "Document")
-        stem = re.sub(r"\.[^.]+$", "", filename)
-        cleaned = re.sub(r"[_\-]+", " ", stem).strip()
-        cleaned = re.sub(r"\s+", " ", cleaned).title() or "Untitled Document"
-        first_heading = str(payload.get("firstHeading") or "").strip()
-        if first_heading and 2 <= len(first_heading) <= 120:
-            return InferenceResult(text=first_heading, confidence=0.55, provider=self.name)
-        return InferenceResult(text=cleaned, confidence=0.35, provider=self.name)
+        from app.ai.offline_rules import title_from_filename, title_from_heading
+
+        first_heading = payload.get("firstHeading")
+        if first_heading:
+            verdict = title_from_heading(first_heading)
+            if verdict.ok:
+                return InferenceResult(text=verdict.text or "", confidence=0.55, provider=self.name)
+        verdict = title_from_filename(payload.get("filename"))
+        if verdict.ok:
+            return InferenceResult(text=verdict.text or "", confidence=0.45, provider=self.name)
+        return _abstain(self.name, verdict.reason)
 
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
         """Guess the language of ``sample``, or ABSTAIN (empty text).
@@ -240,24 +263,23 @@ class HeuristicProvider(SemanticInferenceProvider):
             # (e.g. English with a few CJK names) will not clear the bar.
             return InferenceResult(text=code, confidence=min(0.9, 0.5 + 0.4 * share), provider=self.name)
 
-        scores: Dict[str, int] = {}
-        for pattern, code in _LANGUAGE_PATTERNS:
-            scores[code] = scores.get(code, 0) + len(pattern.findall(sample))
-        if not any(scores.values()):
-            return InferenceResult(text="", confidence=0.0, provider=self.name)
-        best = max(scores.items(), key=lambda kv: kv[1])
-        confidence = min(0.85, 0.3 + 0.05 * best[1])
-        return InferenceResult(text=best[0], confidence=confidence, provider=self.name)
+        from app.ai.offline_rules import detect_latin_language
+
+        code, confidence, detail = detect_latin_language(sample)
+        if not code:
+            return _abstain(self.name, f"the text does not clearly read as one language ({detail})")
+        return InferenceResult(text=code, confidence=confidence, provider=self.name)
 
     def table_caption(self, payload: Dict[str, Any]) -> InferenceResult:
-        # Offline: derive a caption from the table's column headers, e.g.
-        # "Table: Region, Q1, Q2, Q3". Low confidence so it routes to review.
-        headers = [str(h).strip() for h in (payload.get("headers") or []) if str(h).strip()]
-        if headers:
-            joined = ", ".join(headers[:6])
-            text = _slugify(f"Table: {joined}")
-            return InferenceResult(text=text, confidence=0.4, provider=self.name)
-        return InferenceResult(text="Data table", confidence=0.2, provider=self.name)
+        # A caption says what a table is ABOUT, in the author's words. The
+        # column names are already announced by the header row, so a list of
+        # them ("Table: Region, Q1, Q2") is not a caption, and a first data
+        # row ("Table: 2023, 410, 12%") or "Data table" is worse. Abstain.
+        return _abstain(
+            self.name,
+            "A table caption has to say what the table is about in the author's words; "
+            "we don't make one up from the column names.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -318,12 +340,7 @@ class ClaudeProvider(SemanticInferenceProvider):
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
         prompt = _language_prompt(payload)
         result = self._respond(prompt, default_payload=payload, fallback=self.fallback.document_language)
-        # Coerce to ISO-639-1 short code when we can.
-        text = result.text.strip().lower()
-        match = re.search(r"\b([a-z]{2})\b", text)
-        if match:
-            return InferenceResult(text=match.group(1), confidence=result.confidence, provider=result.provider, raw=result.raw)
-        return result
+        return _coerce_language_code(result)
 
     # -- Internals -------------------------------------------------------
 
@@ -336,7 +353,7 @@ class ClaudeProvider(SemanticInferenceProvider):
     ) -> InferenceResult:
         try:
             text, raw = self._call_messages(prompt)
-            text = text.strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=0.75, provider=self.name, raw=raw)
@@ -356,7 +373,7 @@ class ClaudeProvider(SemanticInferenceProvider):
     ) -> InferenceResult:
         try:
             text, raw = self._call_messages_multimodal(prompt, image_b64, image_mime)
-            text = text.strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=confidence, provider=self.name, raw=raw)
@@ -482,10 +499,7 @@ class OpenAIProvider(SemanticInferenceProvider):
 
     def document_language(self, payload: Dict[str, Any]) -> InferenceResult:
         result = self._respond(_language_prompt(payload), payload, self.fallback.document_language)
-        match = re.search(r"\b([a-z]{2})\b", result.text.lower())
-        if match:
-            return InferenceResult(text=match.group(1), confidence=result.confidence, provider=result.provider, raw=result.raw)
-        return result
+        return _coerce_language_code(result)
 
     def _respond_multimodal(
         self,
@@ -537,7 +551,7 @@ class OpenAIProvider(SemanticInferenceProvider):
                 .get("message", {})
                 .get("content", "")
             )
-            text = str(text or "").strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=0.78, provider=self.name, raw=payload)
@@ -578,7 +592,7 @@ class OpenAIProvider(SemanticInferenceProvider):
                 .get("message", {})
                 .get("content", "")
             )
-            text = str(text or "").strip()
+            text = _clean_model_text(text)
             if not text:
                 raise RuntimeError("empty response")
             return InferenceResult(text=text, confidence=0.7, provider=self.name, raw=payload)
@@ -769,7 +783,7 @@ class SemanticInferenceClient:
     def _cache_key(kind: str, payload: Dict[str, Any]) -> Optional[str]:
         # We deliberately exclude the image bytes so we don't blow up the cache.
         bits: List[str] = [kind]
-        for key in ("label", "location", "page", "context", "caption", "text", "target", "filename", "firstHeading", "sample", "headers"):
+        for key in ("node_id", "label", "location", "page", "context", "caption", "caption_source", "text", "target", "filename", "firstHeading", "sample", "headers"):
             value = payload.get(key)
             if value is None:
                 continue

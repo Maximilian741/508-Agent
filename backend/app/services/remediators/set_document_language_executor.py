@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from app.ai.semantic_inference import SemanticInferenceClient
@@ -16,11 +17,13 @@ from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 
-# Below this the detector is guessing. The heuristic provider returns 0.45-0.55
-# for a clear Latin-language sample and 0.90 for a clear non-Latin script; the
-# AI providers report their own confidence. 0.4 keeps every clear case and
-# rejects the "found two English stop-words in a French document" case.
+# Below this the detector is guessing. The heuristic provider ABSTAINS (empty
+# text) unless the evidence is clear — see offline_rules.detect_latin_language,
+# which answers 0.6-0.85 when it answers at all — and 0.74-0.90 for a clear
+# non-Latin script; the AI providers report their own confidence.
 _MIN_LANGUAGE_CONFIDENCE = 0.4
+# Whatever a provider answers, only a language tag is ever written.
+_BCP47_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$")
 
 
 class SetDocumentLanguageExecutor(RemediationExecutor):
@@ -69,16 +72,15 @@ class SetDocumentLanguageExecutor(RemediationExecutor):
         # screen reader picks its pronunciation rules from it. Below the bar
         # the honest answer is "a human has to set this", so we SKIP and say
         # so; the document keeps its DOCUMENT_LANGUAGE_MISSING finding.
-        if not language or result.confidence < _MIN_LANGUAGE_CONFIDENCE:
-            shown = f"{language!r} at {result.confidence:.2f}" if language else "no guess"
+        if not language or result.confidence < _MIN_LANGUAGE_CONFIDENCE or not _BCP47_RE.match(language):
             return _result(
                 action_code,
                 plan,
                 ExecutionStatus.SKIPPED,
                 (
-                    f"Could not determine the document language confidently "
-                    f"({shown} via {result.provider}); refusing to write a guess. "
-                    "Set the language manually."
+                    "We couldn't tell for sure which language this document is written in, so we "
+                    "didn't guess (a wrong language makes screen readers mispronounce every word). "
+                    "Left for you to set; nothing was written and you were not charged for it."
                 ),
             )
         target.metadata.language = language

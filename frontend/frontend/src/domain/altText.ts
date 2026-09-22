@@ -9,10 +9,35 @@ import { getBackendUrlInfo } from "../config/backendUrl";
 import { loadToken } from "./account";
 
 export interface AltTextResult {
+  /** Empty when no honest description could be written; see `message`. */
   altText: string;
   provider: string;
   confidence: number;
   aiConfigured: boolean;
+  /** Plain-language reason shown when `altText` is empty. */
+  message?: string | null;
+}
+
+export interface AltTextAvailability {
+  available: boolean;
+  /** Plain-language reason when `available` is false. */
+  message?: string | null;
+}
+
+/**
+ * Whether the tool can describe pictures on this deployment (no sign-in
+ * needed). Resolves to null when the check itself fails, so the page falls
+ * back to letting the person try.
+ */
+export async function fetchAltTextAvailability(): Promise<AltTextAvailability | null> {
+  try {
+    const res = await fetch(`${getBackendUrlInfo().url}/tools/alt-text/availability`);
+    if (!res.ok) return null;
+    const body = (await res.json()) as AltTextAvailability;
+    return typeof body?.available === "boolean" ? body : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function generateAltTextForImage(file: File): Promise<AltTextResult> {

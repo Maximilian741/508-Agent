@@ -762,21 +762,30 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
 
 
 def _image_caption(el: Any) -> Optional[str]:
-    """Nearby human text that describes an <img>, or None.
+    """Nearby human text that describes an <img>, or None (see
+    :func:`_image_caption_and_source`)."""
+    found = _image_caption_and_source(el)
+    return found[0] if found else None
 
-    1. <figure><img><figcaption>…</figcaption></figure> — the HTML caption.
-    2. The <img>'s title attribute (a tooltip, but authored for humans).
+
+def _image_caption_and_source(el: Any) -> Optional[Tuple[str, str]]:
+    """``(text, caption_source)`` for an <img>, or None.
+
+    1. <figure><img><figcaption>…</figcaption></figure> — "figcaption".
+    2. The <img>'s title attribute (a tooltip, but authored for humans) —
+       "title".
     3. The nearest PRECEDING text-bearing sibling or ancestor's preceding
-       sibling (a lead-in like "Figure 2 shows quarterly revenue:").
-    Kept short and only ever text a human wrote for the image's neighbourhood
-    — never the filename, never boilerplate."""
+       sibling — "preceding_text". This is only text NEAR the image (often a
+       nav bar or a byline), so the alt executor never writes it as a
+       description; recording the source is what lets it tell the two apart.
+    Kept short — never the filename, never boilerplate."""
     parent = el.getparent()
     if parent is not None and _tag(parent) == "figure":
         for child in parent:
             if _tag(child) == "figcaption":
                 cap = " ".join((child.text_content() or "").split())
                 if cap:
-                    return cap[:200]
+                    return cap[:200], "figcaption"
     # figure may wrap the img in a link/span; look one level up too.
     if parent is not None:
         gp = parent.getparent()
@@ -785,10 +794,10 @@ def _image_caption(el: Any) -> Optional[str]:
                 if _tag(child) == "figcaption":
                     cap = " ".join((child.text_content() or "").split())
                     if cap:
-                        return cap[:200]
+                        return cap[:200], "figcaption"
     title = (el.get("title") or "").strip()
     if title:
-        return title[:200]
+        return title[:200], "title"
     # Nearest preceding text: walk previous siblings of the img, then of its
     # ancestors, up to a few hops, and take the first with real words.
     node = el
@@ -798,7 +807,7 @@ def _image_caption(el: Any) -> Optional[str]:
             if isinstance(prev.tag, str) and prev.tag.lower() not in ("script", "style", "template", "noscript"):
                 txt = " ".join((prev.text_content() or "").split())
                 if len(txt.split()) >= 3:
-                    return txt[:200]
+                    return txt[:200], "preceding_text"
             prev = prev.getprevious()
         node = node.getparent()
         if node is None or _tag(node) in ("body", "html"):
@@ -821,11 +830,11 @@ def _build_image(el: Any, ids: _Ids, roottree: Any) -> ImageNode:
     # executor now refuses to write. Prefer a <figcaption> sibling, then the
     # <img>'s own title attribute, then the nearest preceding block of text.
     if not is_decorative:
-        cap = _image_caption(el)
-        if cap:
+        found = _image_caption_and_source(el)
+        if found:
             if meta.properties is None:
                 meta.properties = {}
-            meta.properties["caption"] = cap
+            meta.properties["caption"], meta.properties["caption_source"] = found
 
     if is_decorative:
         return ImageNode(

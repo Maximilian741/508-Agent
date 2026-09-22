@@ -97,10 +97,13 @@ def main() -> int:
             failures += 1
 
     # ---- classifier ------------------------------------------------------
-    for s in ("Image page-1-img3 shown in page 1.", "Image slide-4-img1 shown in slide 4.", "Picture on slide 3"):
+    for s in ("Image page-1-img3 shown in page 1.", "Image slide-4-img1 shown in slide 4.", "Picture on slide 3",
+              # The old heuristic's "<node id> — <nearby text>" shape: an
+              # internal id no reader can use, then whatever text sat nearby.
+              "Image page-1-img3 — Quarterly revenue chart", "Uploaded image shown in image."):
         check(f"location-only placeholder is non-descriptive: {s!r}", is_nondescriptive_alt(s))
     for s in ("Red car", "Map of Europe", "Photo of the team on page 2 of the brochure",
-              "Image page-1-img3 — Quarterly revenue chart", "Graphic of sales by region"):
+              "Quarterly revenue chart", "Graphic of sales by region"):
         check(f"a real description is NOT flagged: {s!r}", not is_nondescriptive_alt(s))
 
     # ---- no caption -> refuse ---------------------------------------------
@@ -110,21 +113,30 @@ def main() -> int:
           res is not None and res.status == ExecutionStatus.SKIPPED,
           f"{getattr(res, 'status', None)} {getattr(res, 'notes', None)}")
     check("...the node's alt text is left EMPTY (stays in manual review)", not bare.alt_text, repr(bare.alt_text))
-    check("...and the note says why",
-          res is not None and "placeholder" in (res.notes or "").lower() and "manual review" in (res.notes or "").lower(),
+    check("...and the note says why, in plain words",
+          res is not None and "caption" in (res.notes or "").lower() and "not charged" in (res.notes or "").lower(),
           getattr(res, "notes", None))
 
     # ---- caption -> a real, caption-derived alt is fine --------------------
-    cap = _img("page-2-img1", 2, caption="Quarterly revenue by region")
+    # A PDF parser records no caption source, so only a caption that carries
+    # its own figure label counts as written FOR the picture.
+    cap = _img("page-2-img1", 2, caption="Figure 2: Quarterly revenue by region")
     res2 = _alt_results(_tree(cap)).get(cap.id)
     check("heuristic + caption: the engine SUCCEEDS with a caption-derived alt",
           res2 is not None and res2.status == ExecutionStatus.SUCCESS and bool(cap.alt_text),
           f"{getattr(res2, 'status', None)} {cap.alt_text!r}")
     check("...and that alt is not itself non-descriptive",
           cap.alt_text is not None and not is_nondescriptive_alt(cap.alt_text), repr(cap.alt_text))
+    check("...and it is the caption's words, without the label", cap.alt_text == "Quarterly revenue by region",
+          repr(cap.alt_text))
+    unlabeled = _img("page-3-img1", 3, caption="Quarterly revenue by region")
+    res3 = _alt_results(_tree(unlabeled)).get(unlabeled.id)
+    check("heuristic + unlabeled nearby text of unknown origin: refused, not guessed",
+          res3 is not None and res3.status == ExecutionStatus.SKIPPED and not unlabeled.alt_text,
+          f"{getattr(res3, 'status', None)} {unlabeled.alt_text!r}")
 
     # ---- whole-document: only real descriptions are credited ---------------
-    imgs = [_img(f"page-{i}-img1", i) for i in range(1, 6)] + [_img("page-6-img1", 6, caption="Org chart")]
+    imgs = [_img(f"page-{i}-img1", i) for i in range(1, 6)] + [_img("page-6-img1", 6, caption="Figure 6: Org chart")]
     results = _alt_results(_tree(*imgs))
     ok = sum(1 for r in results.values() if r.status == ExecutionStatus.SUCCESS)
     check("document with 5 caption-less + 1 captioned image credits exactly ONE alt fix", ok == 1,
