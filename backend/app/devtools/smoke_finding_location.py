@@ -839,7 +839,13 @@ def main() -> int:
     check("remediate: every finding keeps its location + autoFixable", all(set(v["location"]) == KEYS for v in rvs) and rvs)
     fixed = [v for v in rvs if v.get("fixed")]
     check("remediate: some approved fixes reached the file", len(fixed) >= 1 and rb.get("persistedFixes", 0) >= 1, rb.get("persistedFixes"))
-    check("remediate: nothing a writer can't persist is ever 'fixed'", all(v["autoFixable"] for v in fixed), [v["ruleId"] for v in fixed if not v["autoFixable"]])
+    # The format capability, not autoFixable: an approved DRAFT (heuristic alt
+    # text, a caption) is persisted and fixed, but never promised as automatic.
+    check(
+        "remediate: nothing a writer can't persist is ever 'fixed'",
+        all(expected_auto(v["ruleId"], "docx") for v in fixed),
+        [v["ruleId"] for v in fixed if not expected_auto(v["ruleId"], "docx")],
+    )
     check(
         "remediate: 'fixed' is exactly the approved findings with a success execution",
         all(isinstance(v.get("fixed"), bool) for v in rvs),

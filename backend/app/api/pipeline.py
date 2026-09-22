@@ -177,9 +177,11 @@ class PipelineViolation(BaseModel):
     # format's output and is not FLAG_FOR_MANUAL_REVIEW — i.e. approving it
     # can change the file — AND, on /analyze when no paid AI provider is
     # configured, the offline executors actually make that fix in a dry run
-    # (see _predict_auto_fixable): a fix they'd refuse is not promised. With a
-    # paid provider it stays the format capability (predicting would mean
-    # paying); a refused fix is then reported, and not charged.
+    # (see _predict_auto_fixable): a fix they'd refuse, or would only draft
+    # for a person to review, is not promised. With a paid provider it stays
+    # the format capability (predicting would mean paying); a refused fix is
+    # then reported, and not charged. A caption (_NEEDS_AUTHORED_WORDS) is
+    # never promised.
     autoFixable: bool = False
     location: Optional[PipelineLocation] = None
     # /pipeline/remediate only: did an APPROVED fix for this finding reach the
@@ -2079,9 +2081,57 @@ def _remediation_cost(source_format: str) -> int:
     return int(DOC_FORMAT_COSTS.get(fmt) or 5)
 
 
+# Flags that stay with a person BY DESIGN, whatever an executor can draft: the
+# fix is words only the author knows (what a table is FOR is its caption; a
+# caption made of its first row says nothing new). A drafted suggestion can
+# still be approved on the review screen, but it is never promised as
+# automatic — so the one-step flow, which applies exactly the autoFixable
+# findings without asking, never applies or charges one.
+_NEEDS_AUTHORED_WORDS = frozenset({"TABLE_CAPTION_MISSING"})
+
+
+def _review_markers(node: Any) -> frozenset:
+    """The ``<kind>_pending_review`` markers set (truthy) on a node.
+
+    Executors that can only DRAFT a fix (the offline alt text "Image
+    docx-img-1 — <the paragraph before it>", a caption repeating a table's
+    first row, a link label guessed from the host at confidence 0.45) still
+    SUCCEED, and say so here. A fix its own author wants a person to check is
+    not one we apply without asking.
+    """
+    props = getattr(getattr(node, "metadata", None), "properties", None) or {}
+    try:
+        return frozenset(k for k, v in props.items() if str(k).endswith("_pending_review") and bool(v))
+    except Exception:  # pragma: no cover - a malformed properties dict
+        return frozenset()
+
+
+def _watch_for_drafts(executors: List[Any], nodes: Dict[str, Any], drafted: set) -> List[Any]:
+    """Record ``(node id, action code)`` for every execution that leaves a NEW
+    review marker on its target — per execution, because one node can carry
+    a clean fix and a draft at once (a table's headers and its caption).
+
+    Wraps each (per-job, freshly built) executor instance's ``execute``.
+    """
+    for executor in executors:
+        inner = executor.execute
+
+        def execute(plan, tree=None, _inner=inner):
+            node = nodes.get(plan.target_node_id)
+            before = _review_markers(node)
+            result = _inner(plan, tree=tree)
+            if _review_markers(node) - before:
+                drafted.add((plan.target_node_id, getattr(result.action_code, "value", result.action_code)))
+            return result
+
+        executor.execute = execute
+    return executors
+
+
 def _auto_fixable(rule_id: str, source_format: str) -> bool:
     """Contract: a recommended action for this flag persists into this
-    format's output (``_PERSISTED_ACTIONS``) and is not FLAG_FOR_MANUAL_REVIEW.
+    format's output (``_PERSISTED_ACTIONS``) and is not FLAG_FOR_MANUAL_REVIEW,
+    and the flag is not one a person must write (``_NEEDS_AUTHORED_WORDS``).
 
     The same set the charge gate credits, so the "we can fix N" promise can
     never name a fix the writer is unable to put in the file. (A capability,
@@ -2090,6 +2140,8 @@ def _auto_fixable(rule_id: str, source_format: str) -> bool:
     """
     from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG
 
+    if rule_id in _NEEDS_AUTHORED_WORDS:
+        return False
     try:
         flag = AccessibilityFlagCode(rule_id)
     except ValueError:
@@ -2113,7 +2165,10 @@ def _predict_auto_fixable(tree, violations, source_format: str, filename: Option
     own node and persists into this format. An executor that refuses a fix it
     can't make well (a placeholder alt text, a language guess it isn't sure
     of) therefore makes the promise smaller BEFORE the customer clicks,
-    instead of after they've been shown "we can fix N" and handed fewer.
+    instead of after they've been shown "we can fix N" and handed fewer. So
+    does one that makes the fix but marks it for review (``_review_markers``:
+    heuristic alt text, a guessed link label): the one-step flow applies the
+    promised fixes without asking anyone, so a draft is counted in needsYou.
 
     With a paid provider configured the real run may do better than the
     heuristic (a vision model describes the picture), and predicting that
@@ -2145,11 +2200,17 @@ def _predict_auto_fixable(tree, violations, source_format: str, filename: Option
                     break
         if not selected:
             return set()
-        executions = execute_plans(copy, selected, dispatcher=RemediationDispatcher(get_offline_executors()))
+        nodes = {node.id: node for node in iter_reading_order(copy.root)}
+        drafted: set = set()
+        executors = _watch_for_drafts(get_offline_executors(), nodes, drafted)
+        executions = execute_plans(copy, selected, dispatcher=RemediationDispatcher(executors))
         made = {
             (e.target_node_id, e.action_code.value)
             for e in executions
-            if getattr(e.status, "value", e.status) == "success" and _action_persists(e.action_code.value, source_format)
+            if getattr(e.status, "value", e.status) == "success"
+            and _action_persists(e.action_code.value, source_format)
+            # A draft its own executor wants a person to check is "needs you".
+            and (e.target_node_id, e.action_code.value) not in drafted
         }
         predicted = set()
         for v in violations:
