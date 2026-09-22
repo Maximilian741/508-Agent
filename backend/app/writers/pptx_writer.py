@@ -698,6 +698,12 @@ def _freeze_run_props(r_pr, own_def, dflt_def) -> None:
     attrs = dict(_RUN_ATTR_DEFAULTS)
     if dflt_def is not None and dflt_def.get("kern") is not None:
         attrs["kern"] = dflt_def.get("kern")
+    # A hyperlink run takes its colour and underline from the theme's hlink
+    # styling, not from the text style chain; pinning tx1 / u="none" on it
+    # would turn a blue underlined link into plain black text.
+    is_link = r_pr.find(qn("a:hlinkClick")) is not None
+    if is_link:
+        attrs.pop("u", None)
     for attr, value in attrs.items():
         if r_pr.get(attr) is not None or (own_def is not None and own_def.get(attr) is not None):
             continue
@@ -709,7 +715,7 @@ def _freeze_run_props(r_pr, own_def, dflt_def) -> None:
             own_def is not None and any(c.tag in tags for c in own_def)
         )
 
-    if not _own_has(_FILL_TAGS):
+    if not is_link and not _own_has(_FILL_TAGS):
         src = next((c for c in dflt_def if c.tag in _FILL_TAGS), None) if dflt_def is not None else None
         if src is not None:
             _insert_ordered(r_pr, copy.deepcopy(src), _RPR_ORDER)
@@ -932,11 +938,14 @@ def _apply_document_metadata(
     # Read before anything is written: the parser takes the deck language from
     # core_properties.language, so equal means no language fix was applied.
     source_language = (getattr(core, "language", None) or "").strip()
+    source_title = (getattr(core, "title", None) or "").strip()
 
     title = ""
     if root.metadata.properties:
         title = (root.metadata.properties.get("title") or "").strip()
-    if title:
+    # Same rule as the language: the deck's own title, read back unchanged, is
+    # not a fix (it used to be reported as one on every deck that had a title).
+    if title and title != source_title:
         try:
             core.title = title
             applied.append(
@@ -1034,6 +1043,13 @@ def _apply_image(
         )
         return
 
+    cnv = _find_cnvpr(shape)
+    if cnv is not None and (cnv.get("descr") or "").strip() == alt_text and not _shape_marked_decorative(shape):
+        # The alt text the parser READ from this shape — nothing was approved
+        # for it, so nothing is written or reported. (Every picture that
+        # already had a descr, "image.png" included, used to come back as an
+        # applied "fix" on every run.)
+        return
     if not _set_descr(shape, alt_text):
         skipped.append({"target_id": image.id, "reason": "cNvPr_not_found"})
         return
@@ -1197,13 +1213,8 @@ def _apply_table_cell(
             return
 
     if tbl_pr.get("firstRow") in {"1", "true"}:
-        applied.append(
-            {
-                "kind": "table_first_row_header",
-                "target_id": cell.id,
-                "summary": "tblPr/@firstRow already 1",
-            }
-        )
+        # Already a header band in the source (or set by an earlier cell of
+        # this row): nothing written, so nothing reported as applied.
         return
 
     tbl_pr.set("firstRow", "1")
