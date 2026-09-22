@@ -249,6 +249,9 @@ class DOCXParser:
         root.children.append(body_section)
         ids = _IdCounter()
         ids.bookmarks = _bookmark_names(doc)
+        # Where each finding sits, as Word last paginated the file (None when
+        # the file does not say — see _rendered_page_map).
+        ids.pages = _rendered_page_map(doc.element.body, file_path)
 
         # Pre-load embedded images so we can attach bytes to the matching
         # <w:drawing> nodes encountered while iterating paragraphs.
@@ -304,7 +307,8 @@ class DOCXParser:
                     ListItemNode(
                         id=li_id,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "•"),
-                        metadata=NodeMetadata(source_format="docx", properties=_text_color_props(paragraph, theme_colors)),
+                        metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el),
+                                              properties=_text_color_props(paragraph, theme_colors)),
                         children=[*link_nodes, *image_nodes],
                         accessibility_flags=[],
                     )
@@ -326,7 +330,7 @@ class DOCXParser:
                         id=h_id,
                         level=heading_level,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "Heading"),
-                        metadata=NodeMetadata(source_format="docx", properties=h_props),
+                        metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el), properties=h_props),
                         children=[*link_nodes, *image_nodes],
                         accessibility_flags=[],
                     )
@@ -378,7 +382,7 @@ class DOCXParser:
                     ParagraphNode(
                         id=p_id,
                         content=NodeContent(kind=ContentKind.TEXT, text=text),
-                        metadata=NodeMetadata(source_format="docx", properties=para_props),
+                        metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el), properties=para_props),
                         children=[],
                         accessibility_flags=[],
                     )
@@ -409,6 +413,7 @@ class DOCXParser:
                         content=NodeContent(kind=ContentKind.TEXT, text=tb_text),
                         metadata=NodeMetadata(
                             source_format="docx",
+                            page=ids.page_of(tb_p),
                             properties={"in_text_box": True},
                         ),
                         children=[],
@@ -788,6 +793,12 @@ class _IdCounter:
         # unknown (then any internal link is taken as valid, never guessed
         # broken).
         self.bookmarks: Optional[set] = None
+        # {body element: page Word last laid it out on} — see
+        # _rendered_page_map. None -> pages unknown (never guessed).
+        self.pages: Optional[Dict[Any, int]] = None
+
+    def page_of(self, el) -> Optional[int]:
+        return self.pages.get(el) if self.pages else None
 
     def __call__(self, prefix: str) -> str:
         i = self._counts.get(prefix, 0) + 1
@@ -797,6 +808,52 @@ class _IdCounter:
 
 def _no_register(_node_id: str, _obj: Any) -> None:
     return None
+
+
+_W_LRPB = qn("w:lastRenderedPageBreak")
+_APP_PAGES_RE = re.compile(rb"<(?:\w+:)?Pages>\s*(\d+)\s*</(?:\w+:)?Pages>")
+
+
+def _rendered_page_map(body_el, file_path: str) -> Optional[Dict[Any, int]]:
+    """``{element: page}`` for the body's paragraphs, tables, rows, cells,
+    pictures and links — the page each STARTS on as Word last laid the
+    document out — or None when that is not known.
+
+    Word writes ``<w:lastRenderedPageBreak/>`` where every page began when it
+    last saved the file, and the page count into docProps/app.xml. A DOCX has
+    no pages of its own, so this is the only honest source: the map is used
+    only when there is at least one marker AND the markers agree with Word's
+    own count (markers + 1 == Pages). A file python-docx or another tool
+    wrote carries a template's "Pages 1" and no markers, and gets no page
+    numbers — never "page 1" for everything in a 500-page manual.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as z:
+            app_xml = z.read("docProps/app.xml") if "docProps/app.xml" in z.namelist() else b""
+    except Exception:
+        return None
+    m = _APP_PAGES_RE.search(app_xml or b"")
+    if not m:
+        return None
+    word_pages = int(m.group(1))
+    # Text boxes and the legacy Fallback copy are not in the page flow.
+    markers = [
+        el for el in body_el.iter(_W_LRPB) if not _inside(el, body_el, (_W_TXBX, _MC_FALLBACK))
+    ]
+    if not markers or len(markers) + 1 != word_pages:
+        return None
+    counted = set(markers)
+    tags = {_W_P, _W_TBL, qn("w:tr"), qn("w:tc"), _WP_INLINE, _WP_ANCHOR,
+            qn("w:hyperlink"), qn("w:fldSimple")}
+    out: Dict[Any, int] = {}
+    page = 1
+    for el in body_el.iter(_W_LRPB, *tags):
+        if el.tag == _W_LRPB:
+            if el in counted:
+                page += 1
+        else:
+            out[el] = page
+    return out
 
 
 # Registry key under which the walk reports each (note_part, parsed_root) pair
@@ -962,7 +1019,8 @@ def _image_nodes_from_p(
     out: List[ImageNode] = []
     context: Optional[Tuple[str, str]] = None
     context_done = False
-    for _wrapper, rid, doc_pr in iter_paragraph_drawings(p_el):
+    for wrapper, rid, doc_pr in iter_paragraph_drawings(p_el):
+        page = ids.page_of(wrapper)
         alt_text = (doc_pr.get("descr") or doc_pr.get("title") or "").strip()
         is_decorative = (doc_pr.get("hidden") or "").lower() in {"1", "true"}
         b64, mime = blobs.get(rid, (None, None))
@@ -987,7 +1045,7 @@ def _image_nodes_from_p(
                     id=node_id,
                     node_type=ImageNode.type_value(),
                     content=NodeContent(kind=ContentKind.NONE),
-                    metadata=NodeMetadata(source_format="docx", properties=properties),
+                    metadata=NodeMetadata(source_format="docx", page=page, properties=properties),
                     children=[],
                     accessibility_flags=[],
                     is_decorative=True,
@@ -999,7 +1057,7 @@ def _image_nodes_from_p(
                 ImageNode(
                     id=node_id,
                     content=NodeContent(kind=ContentKind.NONE),
-                    metadata=NodeMetadata(source_format="docx", properties=properties),
+                    metadata=NodeMetadata(source_format="docx", page=page, properties=properties),
                     children=[],
                     accessibility_flags=[],
                     is_decorative=is_decorative,
@@ -1549,7 +1607,7 @@ def _finalize_list(ids: _IdCounter, items: List[ListItemNode], marker: Optional[
         ordered=bool(marker and marker.startswith("num")),
         marker=marker,
         content=NodeContent(kind=ContentKind.NONE),
-        metadata=NodeMetadata(source_format="docx"),
+        metadata=NodeMetadata(source_format="docx", page=items[0].metadata.page if items else None),
         children=list(items),
         accessibility_flags=[],
     )
@@ -1703,7 +1761,7 @@ def _link_nodes_from_p(
                 id=node_id,
                 target=target or None,
                 content=NodeContent(kind=ContentKind.TEXT, text=text),
-                metadata=NodeMetadata(source_format="docx", properties=props),
+                metadata=NodeMetadata(source_format="docx", page=ids.page_of(el), properties=props),
                 children=[],
                 accessibility_flags=[],
             )
@@ -2229,7 +2287,7 @@ def _table_to_node(
                     cell_type=cell_type,
                     header_scope=TableHeaderScope.COLUMN if cell_type == TableCellType.HEADER else TableHeaderScope.NONE,
                     content=NodeContent(kind=ContentKind.TEXT, text=text or " "),
-                    metadata=NodeMetadata(source_format="docx"),
+                    metadata=NodeMetadata(source_format="docx", page=ids.page_of(cell._tc)),  # noqa: SLF001
                     children=cell_children,
                     accessibility_flags=[],
                 )
@@ -2240,7 +2298,7 @@ def _table_to_node(
             TableRowNode(
                 id=row_id,
                 content=NodeContent(kind=ContentKind.NONE),
-                metadata=NodeMetadata(source_format="docx"),
+                metadata=NodeMetadata(source_format="docx", page=ids.page_of(row._tr)),  # noqa: SLF001
                 children=cells,
                 accessibility_flags=[],
             )
@@ -2259,7 +2317,7 @@ def _table_to_node(
     return TableNode(
         id=table_id,
         content=NodeContent(kind=ContentKind.NONE),
-        metadata=NodeMetadata(source_format="docx", properties=table_props),
+        metadata=NodeMetadata(source_format="docx", page=ids.page_of(table._tbl), properties=table_props),  # noqa: SLF001
         children=rows,
         accessibility_flags=[],
     )

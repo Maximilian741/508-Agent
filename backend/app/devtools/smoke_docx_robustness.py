@@ -29,6 +29,11 @@ tracked changes, nested tables, text boxes, 500 pages) showed going wrong:
     repeating-section content control (it was appended after the last row)
   * irregular vertical merges Word opens (a continuation in the first row, or
     under a cell with a different grid span) no longer fail the whole parse
+  * no docProps/core.xml: no invented "Word Document" title, in the tree or
+    in the output; an unchanged title is not re-"applied"
+  * findings carry the PAGE Word last laid them out on (lastRenderedPageBreak
+    marks that agree with app.xml's page count) — and no page at all when
+    the file does not say
 
 Usage:
     python -m app.devtools.smoke_docx_robustness
@@ -76,6 +81,7 @@ from app.models.accessibility import (  # noqa: E402
 )
 from app.parsers import parse_to_tree  # noqa: E402
 from app.parsers.docx_parser import DOCXParser  # noqa: E402
+from app.services.remediation_engine import _collect_evidence  # noqa: E402
 from app.services.remediation_planner import RemediationPolicy, plan_remediations  # noqa: E402
 from app.services.remediators.registry import execute_plans  # noqa: E402
 from app.writers.docx_writer import write_remediated_docx  # noqa: E402
@@ -641,6 +647,81 @@ def main() -> int:
     res = parse_to_tree(str(src))
     wr = write_remediated_docx(src, res.tree, tmp / "titled_out.docx")
     check("an unchanged title is not reported as applied", wr["applied"] == [], str(wr["applied"]))
+
+    # ===== 12. Findings say which PAGE they are on (as Word last laid it out) ==
+    # A DOCX has no pages of its own, so every DOCX finding had page=None and
+    # the review screen said "no page available". Word writes a
+    # <w:lastRenderedPageBreak/> where each page began at its last save and
+    # the page count into docProps/app.xml; when the two agree the parser
+    # reports each node's page. When they do not (a file python-docx or
+    # another tool wrote: template "Pages 1", no markers) pages stay unknown.
+    def _lrpb_run():
+        r = OxmlElement("w:r")
+        r.append(OxmlElement("w:lastRenderedPageBreak"))
+        return r
+
+    def _set_app_pages(path: Path, n: int) -> None:
+        def fn(root):
+            for el in root.iter():
+                if etree.QName(el).localname == "Pages":
+                    el.text = str(n)
+        _rewrite_part(path, "docProps/app.xml", fn)
+
+    d = Document()
+    d.add_heading("Annual Report", 1)
+    d.add_paragraph("Page one text that is long enough to be read as ordinary prose.")
+    p2 = d.add_paragraph()
+    p2._p.append(_lrpb_run())                       # page 2 starts here
+    p2.add_run("Page two opens with this sentence, then a chart. ")
+    p2.add_run().add_picture(_png(12), width=Inches(1))
+    p3 = d.add_paragraph()
+    p3._p.append(_lrpb_run())                       # page 3 starts here
+    p3.add_run("Page three: see the figures ")
+    p3rid = d.part.relate_to("https://example.gov/figures",
+                             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                             is_external=True)
+    hl = OxmlElement("w:hyperlink"); hl.set(qn("r:id"), p3rid)
+    hr = OxmlElement("w:r"); ht = OxmlElement("w:t"); ht.text = "here"; hr.append(ht); hl.append(hr)
+    p3._p.append(hl)
+    t = d.add_table(rows=3, cols=2)
+    for r in range(3):
+        for c in range(2):
+            t.cell(r, c).text = f"v{r}{c}"
+    src = tmp / "paged.docx"
+    d.save(str(src))
+    _set_app_pages(src, 3)
+    res = parse_to_tree(str(src))
+    run_analyzers(res.tree)
+    by_type = {}
+    for n in iter_reading_order(res.tree.root):
+        by_type.setdefault(type(n).__name__, []).append(n)
+    pages = {
+        "heading": [n.metadata.page for n in by_type.get("HeadingNode", [])],
+        "image": [n.metadata.page for n in by_type.get("ImageNode", [])],
+        "link": [n.metadata.page for n in by_type.get("LinkNode", [])],
+        "table": [n.metadata.page for n in by_type.get("TableNode", [])],
+    }
+    check("pages: heading p1, picture p2, link p3, table p3",
+          pages == {"heading": [1], "image": [2], "link": [3], "table": [3]}, str(pages))
+    img = by_type["ImageNode"][0]
+    alt_flag = next(f for f in img.accessibility_flags if f.code.value == "MISSING_ALT_TEXT")
+    check("pages: the finding's evidence carries the page (what the review screen shows)",
+          _collect_evidence(img, alt_flag).get("page") == 2)
+    # Word's count disagrees with the markers (stale): no pages at all.
+    _set_app_pages(src, 7)
+    res = parse_to_tree(str(src))
+    check("pages: markers that disagree with Word's own page count -> pages unknown, never guessed",
+          all(n.metadata.page is None for n in iter_reading_order(res.tree.root)))
+    # A python-docx-made file: template "Pages 1" and no markers.
+    d = Document()
+    for i in range(40):
+        d.add_paragraph(f"Paragraph {i} of a long generated file that no word processor paginated.")
+    d.add_picture(_png(13), width=Inches(1))
+    src = tmp / "unpaged.docx"
+    d.save(str(src))
+    res = parse_to_tree(str(src))
+    check("pages: a generated file with no render marks gets NO page numbers (not 'page 1' for all)",
+          all(n.metadata.page is None for n in iter_reading_order(res.tree.root)))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
