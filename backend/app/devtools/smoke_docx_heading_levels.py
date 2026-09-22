@@ -14,7 +14,10 @@ re-parse of the OUTPUT:
   * level follows the document's own ladder: 20pt title -> H1, 14pt numbered
     sections under it -> H2; "Part N" (Heading 1) with same-size plain-numbered
     procedures under it -> the procedures are H2, the next Part is H1 again
-  * never skips a level: no HEADING_LEVEL_JUMP after promotion, ever
+  * never skips a level: no HEADING_LEVEL_JUMP after promotion, ever — and a
+    gap the source ALREADY has (H2 -> H4) does not drag a line that looks
+    like the H2 underneath it; when the look and the no-skip rule disagree
+    (a 20pt line between an H3 and an H4) the promotion is declined
   * a heading style missing from styles.xml is CREATED (with its outline
     level) so the promotion lands, and the writer confirms it
   * appearance is pinned: the promoted line keeps its size, weight, colour,
@@ -326,6 +329,65 @@ def main() -> int:
     check("pre-existing jump: promotion never goes deeper than previous+1", lv in (1, 2), str(outline))
     check("pre-existing jump: no MORE jumps than the source had",
           _flags(after.tree, JUMP) <= _flags(before.tree, JUMP), f"{_flags(before.tree, JUMP)} -> {_flags(after.tree, JUMP)}")
+
+    # ===== G2. A pre-existing gap does not drag a heading below its look ======
+    # "Eligibility" looks exactly like the Heading 2 before it. The heading
+    # after it is a Heading 4 (the author skipped H3). Forcing "no gap before
+    # the next heading" made it an H3 CHILD of the identical-looking H2; the
+    # gap was already there, so the look decides: H2, and no more jumps.
+    d = Document()
+    d.core_properties.title = "Look decides"
+    d.styles["Heading 1"].font.size = Pt(18)
+    d.styles["Heading 2"].font.size = Pt(14)
+    d.add_heading("Handbook", 1)
+    _body(d)
+    d.add_heading("Overview", 2)
+    _body(d)
+    _fake(d, "Eligibility", 14)   # exactly the Heading 2's look: 14pt bold
+    _body(d)
+    d.add_heading("Detail", 4)
+    _body(d)
+    src = tmp / "gap_look.docx"
+    d.save(str(src))
+    before = parse_to_tree(str(src))
+    run_analyzers(before.tree)
+    res, execs, wr, after = _fix_fake_headings(src, tmp / "gap_look_fixed.docx")
+    outline = _outline(after.tree)
+    check("pre-existing gap: a line that looks like the H2 above it is an H2 (sibling), not pushed to H3",
+          dict(outline).get("Eligibility") == 2, str((outline, [e.notes for e in execs])))
+    check("pre-existing gap: no more jumps than the source had",
+          _flags(after.tree, JUMP) <= _flags(before.tree, JUMP), f"{_flags(before.tree, JUMP)} -> {_flags(after.tree, JUMP)}")
+
+    # ===== G3. Look and no-skip rule disagree -> declined =====================
+    # A 20pt bold "Appendix" (larger than every heading: a top-level heading)
+    # sits between an H3 and an H4. As an H1 it would open a gap before the
+    # H4 that the source does not have; as an H3 it would misstate how it
+    # looks. Neither is clearly better than leaving it for a person.
+    d = Document()
+    d.core_properties.title = "Conflict"
+    d.add_heading("Guide", 1)
+    _body(d)
+    d.add_heading("Part A", 2)
+    _body(d)
+    d.add_heading("Step one", 3)
+    _body(d)
+    _fake(d, "Appendix", 20)
+    _body(d)
+    d.add_heading("Detail", 4)
+    _body(d)
+    src = tmp / "conflict.docx"
+    d.save(str(src))
+    before = parse_to_tree(str(src))
+    run_analyzers(before.tree)
+    res, execs, wr, after = _fix_fake_headings(src, tmp / "conflict_fixed.docx")
+    e = execs[0] if execs else None
+    check("conflict: declined (skipped), with a plain-English reason naming the next heading",
+          e is not None and e.status.value == "skipped" and "left for you" in (e.notes or "").lower()
+          and "Heading 4" in (e.notes or ""), str((e.status.value, e.notes)) if e else "")
+    check("conflict: nothing counted or charged", _count_persisted_fixes(execs, wr["applied"], "docx") == 0)
+    check("conflict: the line is untouched and no jump was added",
+          dict(_outline(after.tree)).get("Appendix") is None
+          and _flags(after.tree, JUMP) == _flags(before.tree, JUMP), str(_outline(after.tree)))
 
     # ===== H. A promotion the writer cannot place is not counted ==============
     d = Document()

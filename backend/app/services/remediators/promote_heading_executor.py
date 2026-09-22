@@ -31,15 +31,17 @@ numbering, "2.1" is deeper than "2").
    * nothing outranks it     -> Heading 1.
    Prominence: clearly bigger (>= 2pt) wins; otherwise a size difference and
    a weight difference must agree; then outline cues decide.
-3. Never skip a level: the level is capped at previous+1 and raised to at
-   least next-1 (the next heading after the target), so promotion never
-   creates a jump. If the headings around it ALREADY skip (H1 then H4), the
-   cap still holds and the pre-existing jump is not made worse.
+3. Never skip a level: the level is capped at previous+1, and it must not
+   open a NEW gap before the next heading (floor next-1). If the headings
+   around it ALREADY skip (H2 then H4), any level from the previous one down
+   keeps that gap exactly as it was, so the look decides — the floor is not
+   used to push a line that looks like an H2 underneath the H2 before it.
 
 When the look genuinely does not say (a line one point bigger than its
-neighbour heading but not bold, where the neighbour is bold), the executor
-DECLINES with a plain-English reason and the line stays in the manual queue —
-a guessed level is not clearly better than no level.
+neighbour heading but not bold, where the neighbour is bold), or when the
+look and the no-skip rule disagree (a 20pt line between an H3 and an H4),
+the executor DECLINES with a plain-English reason and the line stays in the
+manual queue — a guessed level is not clearly better than no level.
 
 The byte-level change is performed by ``docx_writer``, which reads the
 ``promote_to_heading_level`` property off the paragraph, makes sure the
@@ -266,22 +268,37 @@ def _choose_level(
         if level is None:
             level, reason = 1, "it is set larger than every heading above it."
 
-    # Never skip a level: at most one deeper than the heading before it, and
-    # no more than one shallower than the heading after it.
+    # Never skip a level: at most one deeper than the heading before it.
     hi = (prev_level + 1) if prev_level is not None else 6
-    lo = max(1, (next_level - 1)) if next_level is not None else 1
-    if lo <= hi:
-        if level > hi:
-            level, reason = hi, reason + f" Capped at Heading {hi} so no level is skipped."
-        elif level < lo:
+    if level > hi:
+        level, reason = hi, reason + f" Capped at Heading {hi} so no level is skipped."
+
+    # ...and never open a NEW gap before the heading after it. The floor is
+    # the next heading's level minus one — unless the headings around it
+    # ALREADY skip (Heading 2 straight to Heading 4): then any level from the
+    # previous one down keeps that gap exactly as it was, so the look decides.
+    # Forcing the floor there pushed a line that is visibly LARGER than the
+    # Heading 2 before it underneath that heading, a structure the page does
+    # not show.
+    if next_level is not None:
+        lo = max(1, next_level - 1)
+        if prev_level is not None:
+            lo = min(lo, prev_level)
+        if level < lo:
+            if look is not None and stack:
+                # The look places it higher in the outline than the heading
+                # after it allows: any level either skips one or contradicts
+                # how the line looks on the page. A person should choose.
+                return None, (
+                    f"it looks like a Heading {level}, but the heading right after it is "
+                    f"Heading {next_level}, so any level we chose would either skip a level "
+                    "or misstate how it looks. Choose a heading level for it in Word "
+                    "(Home > Styles)."
+                )
             level, reason = lo, reason + (
                 f" Set to Heading {lo} because the next heading is Heading {next_level}, "
                 "so no level is skipped."
             )
-    elif level > hi:
-        # The headings around it already skip a level; keep within reach of
-        # the one before it and do not make the existing gap worse.
-        level, reason = hi, reason + f" Capped at Heading {hi} so no level is skipped."
     return level, reason
 
 
