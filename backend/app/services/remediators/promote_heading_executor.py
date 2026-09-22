@@ -7,39 +7,50 @@ heading never find them. This is the single most common real-world failure:
 the title-page / section-header typed as big bold text.
 
 This executor turns that detect-only finding into a genuine auto-fix. It is
-deterministic (no AI): it marks the paragraph for promotion and picks a heading
-level that provably never *introduces* a new heading-level jump:
+deterministic (no AI). It used to make every fake heading a *sibling* of the
+heading before it, which in a manual of "Part N" (Heading 1) sections with 500
+bold 14pt "N. Procedure N" lines produced 526 Heading 1s and no Heading 2: a
+flat outline nobody can navigate by level. The level now comes from the
+document's own visual ladder.
 
-    level = previous_heading.level                if a heading precedes it
-          = max(1, next_heading.level - 1)         elif a heading follows it
-          = 1                                       otherwise (no headings)
+How the level is chosen
+-----------------------
+The parser records, for every real heading and every fake one, what it LOOKS
+like (``properties["heading_visual"]``: effective size, whether it is bold,
+and any outline cue in the text — "Part 3" / "Chapter 2" outrank plain
+numbering, "2.1" is deeper than "2").
 
-Why this is jump-safe:
-  * Sibling of the previous heading: inserting a heading at the same level as
-    its predecessor can never create a jump — the pair (prev, promoted) is a
-    same-level step, and the pair (promoted, next) was already (prev, next)
-    before, so no NEW jump appears.
-  * No previous but a following heading at level L: the promoted heading becomes
-    the document's first heading. Choosing ``max(1, L-1)`` guarantees the step
-    to the following heading is at most +1 (no jump), while still preferring the
-    shallowest level — a normal deck whose next heading is H1/H2 yields ``H1``.
-  * No headings at all: ``H1`` is the natural choice for a document's title.
+1. Rebuild the outline open at this point: every real heading before the
+   target plus every fake heading already promoted in this run, kept as a
+   stack of (look, level) — a heading closes everything at its level or
+   below.
+2. Walk that stack from the innermost heading outwards, comparing looks:
+   * less prominent than it  -> one level below it (a child);
+   * equally prominent       -> the same level (a sibling);
+   * more prominent          -> keep walking outwards;
+   * nothing outranks it     -> Heading 1.
+   Prominence: clearly bigger (>= 2pt) wins; otherwise a size difference and
+   a weight difference must agree; then outline cues decide.
+3. Never skip a level: the level is capped at previous+1 and raised to at
+   least next-1 (the next heading after the target), so promotion never
+   creates a jump. If the headings around it ALREADY skip (H1 then H4), the
+   cap still holds and the pre-existing jump is not made worse.
 
-(Compare ``normalize_heading_level_executor`` which uses ``previous + 1`` —
-that's *child*-of-previous, the right call when fixing an existing heading's
-level; for promoting fresh text, *sibling*-of-previous is safer, so the two
-deliberately differ.)
+When the look genuinely does not say (a line one point bigger than its
+neighbour heading but not bold, where the neighbour is bold), the executor
+DECLINES with a plain-English reason and the line stays in the manual queue —
+a guessed level is not clearly better than no level.
 
-The actual byte-level change is performed by ``docx_writer`` which reads the
-``promote_to_heading_level`` property off the paragraph and sets
-``w:pStyle = "Heading {level}"`` on the source ``<w:p>`` (re-using the same
-machinery that persists real headings). Re-analysis of the output then sees a
-real ``HeadingNode`` and the flag clears.
+The byte-level change is performed by ``docx_writer``, which reads the
+``promote_to_heading_level`` property off the paragraph, makes sure the
+``Heading N`` style exists, applies it, and keeps the paragraph looking
+exactly as it did. The writer confirms each promotion it placed; the pipeline
+counts only confirmed ones.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.accessibility import (
     AccessibilityFlagCode,
@@ -51,6 +62,13 @@ from app.models.accessibility import (
 )
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
+
+# Sizes within this many points read as "the same size" on the page.
+_SAME_SIZE_PT = 0.5
+# A difference this large decides prominence on its own, whatever the weight.
+_CLEARLY_BIGGER_PT = 2.0
+
+_AMBIGUOUS = "ambiguous"
 
 
 class PromoteHeadingExecutor(RemediationExecutor):
@@ -66,14 +84,15 @@ class PromoteHeadingExecutor(RemediationExecutor):
                 status=ExecutionStatus.SKIPPED,
                 notes="No accessibility tree provided; action not executed.",
             )
-        target, previous_heading, next_heading = _find_target_with_neighbors(tree, plan.target_node_id)
-        if target is None:
+        context = _outline_context(tree, plan.target_node_id)
+        if context is None:
             return ExecutionResult(
                 action_code=action_code,
                 target_node_id=plan.target_node_id,
                 status=ExecutionStatus.SKIPPED,
                 notes="Target node not found; no changes applied.",
             )
+        target, stack, next_level = context
         if not isinstance(target, ParagraphNode):
             return ExecutionResult(
                 action_code=action_code,
@@ -89,56 +108,181 @@ class PromoteHeadingExecutor(RemediationExecutor):
                 notes="Paragraph is not flagged as a styled-but-fake heading; no changes applied.",
             )
 
-        # Pick a hierarchy-safe level that never introduces a new jump (see the
-        # module docstring for the proof): sibling of the nearest preceding
-        # heading; else one shallower than the following heading; else H1.
-        if previous_heading is not None:
-            level = previous_heading.level
-        elif next_heading is not None:
-            level = max(1, next_heading.level - 1)
-        else:
-            level = 1
+        text = (target.content.text if target.content else "") or ""
+        snippet = text.strip()[:60]
+        decided = _choose_level(_visual_of(target), stack, next_level)
+        if decided[0] is None:
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=f"Left for you: {decided[1]} Text={snippet!r}.",
+            )
+        level, reason = decided
         level = max(1, min(6, int(level)))
 
         if target.metadata.properties is None:
             target.metadata.properties = {}
         target.metadata.properties["promote_to_heading_level"] = level
 
-        text = (target.content.text if target.content else "") or ""
-        snippet = text.strip()[:60]
         return ExecutionResult(
             action_code=action_code,
             target_node_id=plan.target_node_id,
             status=ExecutionStatus.SUCCESS,
-            notes=f"Promoted styled text to Heading {level}. Text={snippet!r}.",
+            notes=f"Promoted styled text to Heading {level} — {reason} Text={snippet!r}.",
         )
 
 
-def _find_target_with_neighbors(
+# ---------------------------------------------------------------------------
+# Outline reconstruction
+# ---------------------------------------------------------------------------
+
+_Entry = Tuple[Optional[Dict[str, Any]], int, str]  # (look, level, text)
+
+
+def _visual_of(node: Any) -> Optional[Dict[str, Any]]:
+    props = (node.metadata.properties if node.metadata else None) or {}
+    vis = props.get("heading_visual")
+    if not isinstance(vis, dict) or vis.get("size_pt") is None:
+        return None
+    return vis
+
+
+def _entry_level(node: Any) -> Optional[int]:
+    if isinstance(node, HeadingNode):
+        return int(node.level)
+    if isinstance(node, ParagraphNode):
+        lvl = (node.metadata.properties or {}).get("promote_to_heading_level")
+        if lvl:
+            try:
+                return int(lvl)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _outline_context(
     tree: AccessibilityTree, target_node_id: str
-) -> tuple[Optional[ParagraphNode], Optional[HeadingNode], Optional[HeadingNode]]:
-    """Return (target paragraph, nearest preceding heading, nearest following heading)."""
-    order = list(iter_reading_order(tree.root))
-    target_index: Optional[int] = None
-    target: Optional[ParagraphNode] = None
-    previous_heading: Optional[HeadingNode] = None
-    for i, node in enumerate(order):
-        if node.id == target_node_id:
-            if isinstance(node, ParagraphNode):
-                target, target_index = node, i
-            else:
-                return None, previous_heading, None
-            break
-        if isinstance(node, HeadingNode):
-            previous_heading = node
-    if target is None or target_index is None:
-        return None, previous_heading, None
-    next_heading: Optional[HeadingNode] = None
-    for node in order[target_index + 1:]:
-        if isinstance(node, HeadingNode):
-            next_heading = node
-            break
-    return target, previous_heading, next_heading
+) -> Optional[Tuple[Any, List[_Entry], Optional[int]]]:
+    """(target, open-outline stack before it, level of the next heading after it)."""
+    stack: List[_Entry] = []
+    target = None
+    next_level: Optional[int] = None
+    for node in iter_reading_order(tree.root):
+        if target is None:
+            if node.id == target_node_id:
+                target = node
+                continue
+            level = _entry_level(node)
+            if level is None:
+                continue
+            while stack and stack[-1][1] >= level:
+                stack.pop()
+            stack.append((_visual_of(node), level, ((node.content.text if node.content else "") or "").strip()))
+        else:
+            level = _entry_level(node)
+            if level is not None:
+                next_level = level
+                break
+    if target is None:
+        return None
+    return target, stack, next_level
+
+
+def _compare(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]):
+    """+1 if ``a`` looks more prominent than ``b``, -1 if less, 0 if the same,
+    ``_AMBIGUOUS`` when the signals disagree, None when either is unknown."""
+    if a is None or b is None:
+        return None
+    try:
+        ds = float(a.get("size_pt")) - float(b.get("size_pt"))
+    except (TypeError, ValueError):
+        return None
+    if abs(ds) >= _CLEARLY_BIGGER_PT:
+        return 1 if ds > 0 else -1
+    size_sign = 0 if abs(ds) < _SAME_SIZE_PT else (1 if ds > 0 else -1)
+    bold_sign = int(bool(a.get("bold"))) - int(bool(b.get("bold")))
+    if size_sign and bold_sign and size_sign != bold_sign:
+        return _AMBIGUOUS
+    if size_sign:
+        return size_sign
+    if bold_sign:
+        return bold_sign
+    # Same size and weight: outline cues in the text. "Part 3" / "Chapter 2"
+    # outrank a plain numbered line; "2.1" sits below "2".
+    ka, kb = int(a.get("keyword_rank") or 0), int(b.get("keyword_rank") or 0)
+    if ka != kb:
+        return 1 if ka > kb else -1
+    na, nb = int(a.get("number_depth") or 0), int(b.get("number_depth") or 0)
+    if na and nb and na != nb:
+        return 1 if na < nb else -1
+    return 0
+
+
+def _quote(text: str) -> str:
+    t = (text or "").strip()
+    return repr(t if len(t) <= 50 else t[:49] + "…")
+
+
+def _choose_level(
+    look: Optional[Dict[str, Any]], stack: List[_Entry], next_level: Optional[int]
+) -> Tuple[Optional[int], str]:
+    """(level, plain-English reason) — or (None, reason to leave it for a person)."""
+    prev_level = stack[-1][1] if stack else None
+
+    if look is None:
+        # No measurement of how it looks (not produced by the DOCX parser):
+        # the old jump-safe rule, sibling of the previous heading.
+        if prev_level is not None:
+            level, reason = prev_level, "placed alongside the heading before it."
+        else:
+            level, reason = 1, "it is the first heading in the document."
+    elif not stack:
+        level, reason = 1, "it is the first heading in the document."
+    else:
+        level = None
+        reason = ""
+        for s_look, s_level, s_text in reversed(stack):
+            cmp = _compare(look, s_look)
+            if cmp is None:
+                level, reason = s_level, f"placed alongside {_quote(s_text)} (Heading {s_level}) above it."
+                break
+            if cmp == _AMBIGUOUS:
+                return None, (
+                    f"it is set larger than {_quote(s_text)} (Heading {s_level}) but not in the same "
+                    "weight, so its level in the outline is unclear. Choose a heading level for it "
+                    "in Word (Home > Styles)."
+                )
+            if cmp < 0:
+                level = s_level + 1
+                reason = f"it is set smaller than {_quote(s_text)}, the Heading {s_level} above it."
+                if int(look.get("keyword_rank") or 0) < int((s_look or {}).get("keyword_rank") or 0):
+                    reason = f"it sits under {_quote(s_text)}, the Heading {s_level} above it."
+                break
+            if cmp == 0:
+                level = s_level
+                reason = f"it looks the same as {_quote(s_text)}, the Heading {s_level} above it."
+                break
+        if level is None:
+            level, reason = 1, "it is set larger than every heading above it."
+
+    # Never skip a level: at most one deeper than the heading before it, and
+    # no more than one shallower than the heading after it.
+    hi = (prev_level + 1) if prev_level is not None else 6
+    lo = max(1, (next_level - 1)) if next_level is not None else 1
+    if lo <= hi:
+        if level > hi:
+            level, reason = hi, reason + f" Capped at Heading {hi} so no level is skipped."
+        elif level < lo:
+            level, reason = lo, reason + (
+                f" Set to Heading {lo} because the next heading is Heading {next_level}, "
+                "so no level is skipped."
+            )
+    elif level > hi:
+        # The headings around it already skip a level; keep within reach of
+        # the one before it and do not make the existing gap worse.
+        level, reason = hi, reason + f" Capped at Heading {hi} so no level is skipped."
+    return level, reason
 
 
 def _has_fake_heading_flag(plan: RemediationPlan, target: ParagraphNode) -> bool:

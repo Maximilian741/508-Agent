@@ -2015,6 +2015,9 @@ _WRITER_CONFIRMED_ACTIONS = {
     "GENERATE_TABLE_CAPTION",
     "TAG_PDF_STRUCTURE",
     "ADD_OCR_TEXT_LAYER",
+    # DOCX-only; the writer tags each heading promotion it placed (style
+    # created if missing, applied, look kept) with action=PROMOTE_HEADING.
+    "PROMOTE_HEADING",
 }
 
 

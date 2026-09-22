@@ -11,13 +11,21 @@ Design notes
 
 * **Always copy first.**  The source ``.docx`` is duplicated to the output
   path *before* any mutation; the source file itself is never written to.
-* **Re-parse for id alignment.**  The parser uses a stateful ``_IdCounter``
-  to mint stable ids (``docx-h-1``, ``docx-img-2``, ...).  Because the
-  counter is deterministic, re-parsing the source produces the exact same
-  ids in the same structural order as the tree the caller hands us.  We
-  rely on that property: when looking up the source counterpart of a node
-  in the (mutated) tree, we walk the source's paragraphs and tables in
-  document order and assign them ids using the same counter — then match.
+* **One walk names every element.**  The parser mints deterministic ids
+  (``docx-h-1``, ``docx-img-2``, ...).  The writer runs the parser's OWN walk
+  (:meth:`DOCXParser.parse_document`) over the copy it edits, with a register
+  callback that hands back, for each id, the live object it names.  There is
+  no second walk to keep in step — hand-written mirrors of the parser drifted
+  (alt text landed on the next picture after an image in a heading) and never
+  covered headers, footers, bullets or table-cell pictures at all.
+* **Look is preserved.**  Giving a paragraph a Heading style must not change
+  how it looks: size, weight, colour, font, alignment, borders and spacing
+  the old style supplied are pinned onto the paragraph, and a heading style
+  that auto-numbers is switched off for it (numId 0) so no number is added
+  to the text.
+* **Never ship what we cannot open.**  After saving, every XML part must
+  parse and the package must load; otherwise the source bytes are restored
+  and a ``failed_to_save`` reason tells the pipeline not to charge.
 * **Defensive matching.**  If a tree node cannot be paired to anything in
   the source (rId no longer present, heading index drifted, etc.), we log
   it under ``skipped`` and keep going.  We never crash the writer for one
@@ -31,6 +39,7 @@ Design notes
 
 from __future__ import annotations
 
+import copy
 import logging
 import shutil
 from pathlib import Path
@@ -43,6 +52,8 @@ from docx.opc.packuri import PackURI
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.parts.numbering import NumberingPart
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph
 from lxml import etree as lxml_etree
 
 from app.models.accessibility import (
@@ -60,23 +71,16 @@ from app.models.accessibility import (
 from docx.shared import RGBColor
 
 from app.parsers.docx_parser import (
+    _NOTE_PARTS_KEY,
     DOCXParser,
-    _IdCounter,
+    DocxStyleResolver,
     _derive_sdt_label,
     _docx_default_lang,
     _docx_theme_colors,
-    _heading_level_from_style,
-    _iter_note_parts,
-    _iter_text_box_paragraphs,
-    _link_elements_in_paragraph,
-    _note_paragraphs,
     _paragraph_caption_text,
     _run_color_hex,
-    iter_body_paragraphs,
-    iter_body_tables,
-    iter_table_rows,
-    paragraph_style_name,
     strip_fake_list_prefix,
+    visible_runs,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,11 +139,18 @@ def write_remediated_docx(
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
 
-    # Step 2: re-parse the source to obtain a tree with the same id sequence.
-    # This gives us a "reference tree" we can walk in lock-step with the
-    # mutated tree to pair each node-id with its source counterpart.
+    doc = Document(str(output_path))
+
+    # Step 2: run the PARSER'S OWN walk over the copy we are about to edit,
+    # with a register callback. That yields (a) a reference tree with exactly
+    # the ids the caller's tree carries and (b) for every id, the live object
+    # in THIS document it names. There is no second, hand-maintained walk to
+    # drift out of step: the old per-kind mirrors did drift (a picture inside
+    # a heading shifted every later alt text onto the wrong picture; links in
+    # bullets and all header/footer content had no mirror at all).
+    registry = _Registry()
     try:
-        reference_result = DOCXParser().parse_to_tree(str(source_path))
+        reference_result = DOCXParser().parse_document(doc, str(output_path), register=registry)
         reference_tree = reference_result.tree
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Failed to re-parse source for id alignment: %s", exc)
@@ -148,20 +159,17 @@ def write_remediated_docx(
     mutated_index = _index_tree(tree)
     reference_index = _index_tree(reference_tree) if reference_tree is not None else {}
 
-    doc = Document(str(output_path))
-
-    # Step 3: build per-node-id lookups against the *source* document.  The
-    # iterators below assign the same ids as the parser would, which lets us
-    # pair tree-node-ids to lxml elements in the source XML.
-    paragraph_by_id = _index_paragraphs_by_parser_id(doc)
-    image_by_rid = _index_image_doc_pr_by_rid(doc)
-    image_by_id = _index_image_doc_pr_by_parser_id(doc)
-    table_rows_by_id = _index_table_rows_by_parser_id(doc)
-    table_cells_by_id = _index_table_cells_by_parser_id(doc)
-    tables_by_id = _index_tables_by_parser_id(doc)
-    hyperlink_by_id = _index_hyperlinks_by_parser_id(doc)
-    note_links, note_parts = _index_note_links(doc)
-    hyperlink_by_id.update(note_links)
+    elements = registry.by_id
+    paragraph_by_id = elements
+    image_by_rid: Dict[str, Any] = {}  # no rId fallback: the registry names every instance
+    image_by_id = elements
+    table_rows_by_id = elements
+    table_cells_by_id = elements
+    tables_by_id = elements
+    hyperlink_by_id = elements
+    note_parts = registry.note_parts
+    note_links = [k for k in elements if k.startswith("docx-fnlink-")]
+    styles = DocxStyleResolver(doc)
 
     # Step 4: walk the mutated tree and apply each supported mutation.  Order
     # is intentional — document-level metadata first, then per-node updates.
@@ -175,7 +183,8 @@ def write_remediated_docx(
         elif isinstance(node, LinkNode):
             _apply_link(node, hyperlink_by_id, applied, skipped)
         elif isinstance(node, HeadingNode):
-            _apply_heading(node, paragraph_by_id, applied, skipped)
+            _apply_heading(doc, styles, node, paragraph_by_id, applied, skipped,
+                           reference=reference_index.get(node.id))
         elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("promote_to_heading_level"):
             # A paragraph that only LOOKED like a heading (big/bold/Title text)
             # which the PROMOTE_HEADING executor approved — give it a real
@@ -183,7 +192,7 @@ def write_remediated_docx(
             # list-conversion: the parser makes these mutually exclusive (a
             # styled heading is never tagged as a fake list), but if both ever
             # co-occur, promotion must win — a heading is not a bullet.
-            _apply_promote_heading(node, paragraph_by_id, applied, skipped)
+            _apply_promote_heading(doc, styles, node, paragraph_by_id, applied, skipped)
         elif isinstance(node, ParagraphNode) and (node.metadata.properties or {}).get("convert_to_list"):
             # A typed fake-list paragraph the FIX_LIST_STRUCTURE executor
             # approved for conversion — give it real Word list semantics.
@@ -201,6 +210,7 @@ def write_remediated_docx(
                 table_cells_by_id,
                 applied,
                 skipped,
+                reference=reference_index.get(node.id),
             )
         elif isinstance(node, TableNode):
             # A header-less table may have had a SYNTHESIZED header row inserted
@@ -230,11 +240,14 @@ def write_remediated_docx(
         _apply_contrast(node, paragraph_by_id, color_map, _contrast_theme_colors, applied, skipped)
 
     # Footnote/endnote rewrites happened on trees parsed from the note
-    # parts' blobs — write them back so the changes reach the file.
+    # parts' blobs — write them back so the changes reach the file. (A note
+    # part python-docx loaded as XML serializes its live element on save.)
     if note_links and any(
         str(a.get("target_id", "")).startswith("docx-fnlink") for a in applied
     ):
         for note_part, note_root in note_parts:
+            if getattr(note_part, "element", None) is note_root:
+                continue
             try:
                 note_part._blob = lxml_etree.tostring(  # noqa: SLF001
                     note_root, xml_declaration=True, encoding="UTF-8", standalone=True
@@ -245,7 +258,61 @@ def write_remediated_docx(
     # Step 5: persist.
     doc.save(str(output_path))
 
+    # Step 6: never hand back a file we cannot open ourselves. Every XML part
+    # must parse and the package must load again; otherwise restore the
+    # original bytes and report a failed save — the pipeline then refuses the
+    # job and charges nothing, instead of delivering a file Word calls
+    # "unreadable content".
+    problem = _output_problem(output_path)
+    if problem:
+        logger.error("docx_writer: output failed validation (%s); restoring the source", problem)
+        try:
+            shutil.copyfile(source_path, output_path)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return {
+            "applied": [],
+            "skipped": skipped + [{"target_id": "document", "reason": f"failed_to_save: {problem}"}],
+        }
+
     return {"applied": applied, "skipped": skipped}
+
+
+class _Registry:
+    """Collects ``node_id -> live object`` from the parser's walk (see
+    :meth:`DOCXParser.parse_document`)."""
+
+    def __init__(self) -> None:
+        self.by_id: Dict[str, Any] = {}
+        self.note_parts: List[Tuple[Any, Any]] = []
+
+    def __call__(self, node_id: str, obj: Any) -> None:
+        if node_id == _NOTE_PARTS_KEY:
+            self.note_parts.append(obj)
+        else:
+            self.by_id[node_id] = obj
+
+
+def _output_problem(path: Path) -> Optional[str]:
+    """Why the written .docx must not be delivered, or None when it is sound:
+    the zip opens, every XML part parses, and python-docx loads it."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as z:
+            bad = z.testzip()
+            if bad:
+                return f"corrupt zip member {bad}"
+            for name in z.namelist():
+                if name.endswith((".xml", ".rels")):
+                    try:
+                        lxml_etree.fromstring(z.read(name))
+                    except Exception as exc:
+                        return f"{name} is not well-formed XML ({exc})"
+        Document(str(path))
+    except Exception as exc:
+        return f"output does not re-open ({exc})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -276,168 +343,6 @@ def _index_tree(tree: Optional[AccessibilityTree]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _index_paragraphs_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-h-N`` / ``docx-p-N`` ids to python-docx Paragraph objects.
-
-    This re-implements the *paragraph half* of ``parse_to_tree`` so the ids
-    line up with what the parser produced.  We do not need to be perfect —
-    only the heading and paragraph counters matter for the writer's lookups.
-    Lists and inline images are intentionally skipped here because the writer
-    does not currently mutate them.
-    """
-
-    ids = _IdCounter()
-    out: Dict[str, Any] = {}
-    style_cache: Dict[Any, str] = {}
-    for paragraph in iter_body_paragraphs(doc):
-        style_name = paragraph_style_name(paragraph, style_cache)
-        text = (paragraph.text or "").strip()
-
-        # The parser groups numbered/bulleted runs into list nodes; those do
-        # NOT consume an `docx-p` id.  Mirror that here.
-        pPr = paragraph._p.find(qn("w:pPr"))
-        is_list = pPr is not None and pPr.find(qn("w:numPr")) is not None
-        if is_list:
-            continue
-
-        heading_level = _heading_level_from_style(style_name)
-        if heading_level:
-            out[ids("docx-h")] = paragraph
-            continue
-
-        # The parser only mints a `docx-p` id when the paragraph has text and
-        # emitted no link nodes.  Use the parser's own link predicate (visible
-        # text required; HYPERLINK fldSimple counts; bare anchors don't) so
-        # the counter advances in lock-step.
-        if text and not _link_elements_in_paragraph(paragraph._p):
-            out[ids("docx-p")] = paragraph
-    return out
-
-
-def _index_image_doc_pr_by_rid(doc) -> Dict[str, Any]:
-    """Map image rIds to their corresponding ``<wp:docPr>`` lxml element.
-
-    Note an rId may appear multiple times in the body (the same image
-    inserted twice).  We keep the *first* occurrence — downstream lookups
-    match by ``image_rid`` which the parser also reads off the first hit.
-    Callers that need to update every visual instance should iterate the
-    document themselves.
-    """
-
-    out: Dict[str, Any] = {}
-    body = doc.element.body
-    for drawing in body.iter(f"{_DRAWING_NS}inline"):
-        _record_doc_pr(drawing, out)
-    for drawing in body.iter(f"{_DRAWING_NS}anchor"):
-        _record_doc_pr(drawing, out)
-    return out
-
-
-def _index_image_doc_pr_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-img-N`` ids to the ONE ``<wp:docPr>`` of that visual instance.
-
-    Mirrors :func:`app.parsers.docx_parser._inline_images_in_paragraph`
-    exactly — same paragraph walk (body paragraphs, in order), same
-    per-drawing iteration, same "has a blip with an rId" filter, same counter
-    — so the Nth image the parser saw is the Nth docPr here.
-
-    This exists because keying by rId is wrong: Word dedupes identical image
-    bytes to ONE rId, so a logo pasted four times is four <w:drawing>
-    instances sharing rId10, each with its OWN docPr and its own alt text.
-    The parser mints four nodes; writing one node's alt to every docPr that
-    shares its rId clobbered the other three — including alt a human author
-    had already written — and reported all four as fixed.
-    """
-    ids = _IdCounter()
-    out: Dict[str, Any] = {}
-    for paragraph in iter_body_paragraphs(doc):
-        for drawing in paragraph._p.iterfind(f".//{_DRAWING_NS}*"):  # noqa: SLF001
-            blip = drawing.find(f".//{_DRAWINGML_NS}blip")
-            if blip is None:
-                blip = drawing.find(f".//{_PIC_NS}blip")
-            if blip is None:
-                continue
-            rid = blip.get(f"{_REL_NS}embed") or blip.get(f"{_REL_NS}link")
-            if not rid:
-                continue
-            doc_pr = drawing.find(f".//{_DRAWING_NS}docPr")
-            if doc_pr is None:
-                doc_pr = drawing.find(f".//{_DRAWINGML_NS}docPr")
-            node_id = ids("docx-img")
-            if doc_pr is not None:
-                out[node_id] = doc_pr
-    return out
-
-
-def _record_doc_pr(drawing, out: Dict[str, Any]) -> None:
-    blip = drawing.find(f".//{_DRAWINGML_NS}blip")
-    if blip is None:
-        blip = drawing.find(f".//{_PIC_NS}blip")
-    if blip is None:
-        return
-    rid = blip.get(f"{_REL_NS}embed") or blip.get(f"{_REL_NS}link")
-    if not rid:
-        return
-    doc_pr = drawing.find(f".//{_DRAWING_NS}docPr")
-    if doc_pr is None:
-        doc_pr = drawing.find(f".//{_DRAWINGML_NS}docPr")
-    if doc_pr is None:
-        return
-    # Collect EVERY occurrence — the same image (rId) may be inserted multiple
-    # times, and each visual instance needs its own docPr updated.
-    out.setdefault(rid, []).append(doc_pr)
-
-
-def _index_table_rows_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-row-N`` ids to python-docx _Row objects."""
-
-    ids = _IdCounter()
-    out: Dict[str, Any] = {}
-    # The parser walks paragraphs first (which mint cell ids only inside
-    # tables) then iterates ``doc.tables`` to assign row/cell ids.  Mirror
-    # that order: we visit tables top-level, allocating cells then rows
-    # exactly like ``_table_to_node`` does.
-    for table in iter_body_tables(doc):
-        for row in iter_table_rows(table):
-            for _ in row.cells:
-                ids("docx-cell")
-            out[ids("docx-row")] = row
-        ids("docx-table")
-    return out
-
-
-def _index_table_cells_by_parser_id(doc) -> Dict[str, Tuple[Any, Any]]:
-    """Map ``docx-cell-N`` ids to ``(row, cell)`` tuples."""
-
-    ids = _IdCounter()
-    out: Dict[str, Tuple[Any, Any]] = {}
-    for table in iter_body_tables(doc):
-        for row in iter_table_rows(table):
-            for cell in row.cells:
-                out[ids("docx-cell")] = (row, cell)
-            ids("docx-row")
-        ids("docx-table")
-    return out
-
-
-def _index_tables_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-table-N`` ids to python-docx Table objects.
-
-    Mirrors the parser's id allocation order EXACTLY (cells, then row, per row;
-    then the table id) so a ``TableNode.id`` resolves to its source ``<w:tbl>``.
-    """
-
-    ids = _IdCounter()
-    out: Dict[str, Any] = {}
-    for table in iter_body_tables(doc):
-        for row in iter_table_rows(table):
-            for _ in row.cells:
-                ids("docx-cell")
-            ids("docx-row")
-        out[ids("docx-table")] = table
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Mutation appliers
 # ---------------------------------------------------------------------------
@@ -458,8 +363,10 @@ def _set_docx_default_lang(doc, language: str) -> None:
         styles_el.insert(0, doc_defaults)
     rpr_default = doc_defaults.find(qn("w:rPrDefault"))
     if rpr_default is None:
+        # CT_DocDefaults is a sequence: rPrDefault BEFORE pPrDefault. Appending
+        # after an existing pPrDefault is out of order — Word calls it damaged.
         rpr_default = OxmlElement("w:rPrDefault")
-        doc_defaults.append(rpr_default)
+        doc_defaults.insert(0, rpr_default)
     rpr = rpr_default.find(qn("w:rPr"))
     if rpr is None:
         rpr = OxmlElement("w:rPr")
@@ -467,7 +374,9 @@ def _set_docx_default_lang(doc, language: str) -> None:
     lang = rpr.find(qn("w:lang"))
     if lang is None:
         lang = OxmlElement("w:lang")
-        rpr.append(lang)
+        # w:lang has a fixed slot in CT_RPr (after sz/u/…, before
+        # eastAsianLayout/specVanish/oMath) — not simply the end.
+        _set_ordered_child(rpr, lang, _RPR_ORDER)
     existing = (lang.get(qn("w:val")) or "").strip()
     # Never DOWNGRADE: if the document already says "en-US" and we detected
     # "en", the existing tag is the same language and more specific — keep it.
@@ -642,20 +551,13 @@ def _apply_image(
             return  # untouched — leave the author's docPr exactly as it was
 
     doc_pr = image_by_id.get(image.id)
-    if doc_pr is None:
-        # Fall back to the rId index ONLY when there is exactly one instance —
-        # then the two keyings agree and there is nothing to clobber.
-        rid = (image.metadata.properties or {}).get("image_rid")
-        candidates = image_by_rid.get(rid) if rid else None
-        if isinstance(candidates, list) and len(candidates) == 1:
-            doc_pr = candidates[0]
-        else:
-            skipped.append({
-                "target_id": image.id,
-                "reason": "image_instance_not_found_in_source" if not candidates
-                          else f"image_rid_shared_by_{len(candidates)}_instances_and_node_unmatched",
-            })
-            return
+    if doc_pr is None or getattr(doc_pr, "tag", None) != f"{_DRAWING_NS}docPr":
+        # No rId fallback: an rId names the image BYTES, not the picture —
+        # it is shared by every copy of a pasted logo, and a header's rIds
+        # are a different namespace from the body's. The registry names every
+        # instance the parser saw; anything else is not ours to guess at.
+        skipped.append({"target_id": image.id, "reason": "image_instance_not_found_in_source"})
+        return
     rid = (image.metadata.properties or {}).get("image_rid") or "?"
 
     if image.is_decorative:
@@ -693,76 +595,6 @@ def _apply_image(
     )
 
 
-def _index_hyperlinks_by_parser_id(doc) -> Dict[str, Any]:
-    """Map ``docx-link-N`` ids to their link element (``<w:hyperlink>`` or a
-    HYPERLINK ``<w:fldSimple>``).
-
-    Mirrors the parser walk exactly via the shared
-    :func:`_link_elements_in_paragraph` helper: body paragraphs first
-    (heading-styled paragraphs emit no links, matching the parser's early
-    ``continue``), then table cells in grid order with merged cells deduped.
-    """
-    out: Dict[str, Any] = {}
-    n = 0
-
-    def take(p_element) -> None:
-        nonlocal n
-        for _kind, el in _link_elements_in_paragraph(p_element):
-            n += 1
-            out[f"docx-link-{n}"] = el
-
-    style_cache: Dict[Any, str] = {}
-    for para in iter_body_paragraphs(doc):
-        style_name = paragraph_style_name(para, style_cache)
-        if _heading_level_from_style(style_name):
-            continue  # parser's heading branch short-circuits before links
-        pPr = para._p.find(qn("w:pPr"))
-        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
-            continue  # list paragraphs likewise never reach link emission
-        take(para._p)
-
-    for table in iter_body_tables(doc):
-        seen_tc: set = set()
-        for row in iter_table_rows(table):
-            for cell in row.cells:
-                tc_key = id(cell._tc)
-                if tc_key in seen_tc:
-                    continue
-                seen_tc.add(tc_key)
-                for cell_para in cell.paragraphs:
-                    take(cell_para._p)
-
-    # Text-box links mint their own id space (docx-tblink-N) via the same
-    # shared walk the parser uses, so rewrites inside sidebars/callouts
-    # genuinely persist.
-    n_tb = 0
-    for tb_p in _iter_text_box_paragraphs(doc.element.body):
-        for _kind, el in _link_elements_in_paragraph(tb_p):
-            n_tb += 1
-            out[f"docx-tblink-{n_tb}"] = el
-    return out
-
-
-def _index_note_links(doc) -> Tuple[Dict[str, Any], List[Tuple[Any, Any]]]:
-    """``(link_map, [(part, root)])`` for footnote/endnote links.
-
-    Note parts load as plain blob Parts, so the writer parses each blob once,
-    rewrites the returned elements in place, and (when anything changed)
-    re-serializes the root back into ``part._blob`` before save — mirroring
-    the parser's ``_iter_note_parts`` walk so ``docx-fnlink-N`` ids align.
-    """
-    link_map: Dict[str, Any] = {}
-    parts: List[Tuple[Any, Any]] = []
-    n = 0
-    for part, root in _iter_note_parts(doc):
-        parts.append((part, root))
-        for p_el in _note_paragraphs(root):
-            for _kind, el in _link_elements_in_paragraph(p_el):
-                n += 1
-                link_map[f"docx-fnlink-{n}"] = el
-    return link_map, parts
-
-
 def _apply_link(
     link: LinkNode,
     hyperlink_by_id: Dict[str, Any],
@@ -775,7 +607,7 @@ def _apply_link(
     cleared. The link target and the first run's formatting are preserved.
     """
     hyperlink = hyperlink_by_id.get(link.id)
-    if hyperlink is None:
+    if getattr(hyperlink, "tag", None) not in (qn("w:hyperlink"), qn("w:fldSimple")):
         skipped.append({"target_id": link.id, "reason": "hyperlink_not_found_in_source"})
         return
     new_text = (link.content.text or "").strip() if link.content else ""
@@ -819,7 +651,7 @@ def _apply_contrast(
     alone, so a mixed-colour paragraph keeps the colours that were fine.
     """
     paragraph = paragraph_by_id.get(node.id)
-    if paragraph is None:
+    if not isinstance(paragraph, Paragraph):
         skipped.append({"target_id": node.id, "reason": "contrast_paragraph_not_resolved"})
         return
     norm_map = {_norm_hex(k): _norm_hex(v) for k, v in color_map.items() if v}
@@ -844,50 +676,328 @@ def _apply_contrast(
         skipped.append({"target_id": node.id, "reason": "contrast_no_matching_run"})
 
 
+# ---------------------------------------------------------------------------
+# Heading styles: make sure they exist, apply them, keep the look
+# ---------------------------------------------------------------------------
+
+# Schema order of CT_PPr / CT_RPr children (ECMA-376 §17.3.1.26 / §17.3.2.28).
+# Word rejects a file whose property children are out of order ("unreadable
+# content"), so every element we add goes into its slot.
+_PPR_ORDER = [
+    "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl", "numPr",
+    "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens", "kinsoku", "wordWrap",
+    "overflowPunct", "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+    "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents", "suppressOverlap", "jc",
+    "textDirection", "textAlignment", "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr",
+    "sectPr", "pPrChange",
+]
+_RPR_ORDER = [
+    "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline",
+    "shadow", "emboss", "imprint", "noProof", "snapToGrid", "vanish", "webHidden", "color", "spacing",
+    "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText",
+    "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath", "rPrChange",
+]
+# What a heading style may change that a reader SEES. Pagination hints
+# (keepNext/keepLines) and the outline level are what we want from it.
+_PIN_PPR = ("pBdr", "shd", "spacing", "ind", "contextualSpacing", "jc")
+_PIN_RPR = ("rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "color", "spacing",
+            "w", "kern", "position", "sz", "szCs", "u")
+_TOGGLES = {"b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "contextualSpacing"}
+_W_NS_URI = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _local(el) -> Optional[str]:
+    try:
+        q = lxml_etree.QName(el)
+    except Exception:
+        return None
+    return q.localname if q.namespace == _W_NS_URI else None
+
+
+def _set_ordered_child(parent, new_el, order: List[str]) -> None:
+    """Put ``new_el`` into ``parent`` replacing any same-named child, else in
+    its schema slot (before the first child that must follow it)."""
+    name = _local(new_el)
+    existing = parent.find(qn(f"w:{name}"))
+    if existing is not None:
+        parent.replace(existing, new_el)
+        return
+    later = set(order[order.index(name) + 1:]) if name in order else set()
+    for child in parent:
+        cname = _local(child)
+        if cname is None or cname in later:
+            child.addprevious(new_el)
+            return
+    parent.append(new_el)
+
+
+def _sig(el):
+    """Namespace-declaration-independent identity of a property element."""
+    return (el.tag, tuple(sorted(el.attrib.items())), tuple(_sig(c) for c in el if isinstance(c.tag, str)))
+
+
+def _same_el(a, b) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return _sig(a) == _sig(b)
+
+
+def _toggle_el(tag: str, on: bool):
+    el = OxmlElement(f"w:{tag}")
+    if not on:
+        el.set(qn("w:val"), "0")
+    return el
+
+
+def _neutral_el(tag: str, new_el, run_level: bool):
+    """The element that cancels what a new style adds where the old look had
+    nothing (Word's built-in defaults), or None when it cannot be cancelled."""
+    if new_el is None:
+        return None
+    el = OxmlElement(f"w:{tag}")
+    if run_level:
+        if tag == "color":
+            el.set(qn("w:val"), "auto")
+        elif tag in ("sz", "szCs"):
+            el.set(qn("w:val"), "20")  # 10pt: Word's size when nothing sets one
+        elif tag == "u":
+            el.set(qn("w:val"), "none")
+        elif tag in ("kern", "position", "spacing"):
+            el.set(qn("w:val"), "0")
+        elif tag == "w":
+            el.set(qn("w:val"), "100")
+        else:
+            return None  # rFonts: no neutral value to write
+        return el
+    if tag == "spacing":
+        el.set(qn("w:before"), "0")
+        el.set(qn("w:after"), "0")
+        el.set(qn("w:line"), "240")
+        el.set(qn("w:lineRule"), "auto")
+    elif tag == "ind":
+        el.set(qn("w:left"), "0")
+        el.set(qn("w:right"), "0")
+        el.set(qn("w:firstLine"), "0")
+    elif tag == "jc":
+        el.set(qn("w:val"), "left")
+    elif tag == "shd":
+        el.set(qn("w:val"), "clear")
+        el.set(qn("w:color"), "auto")
+        el.set(qn("w:fill"), "auto")
+    elif tag == "pBdr":
+        for side in new_el:
+            nm = _local(side)
+            if nm:
+                b = OxmlElement(f"w:{nm}")
+                b.set(qn("w:val"), "nil")
+                el.append(b)
+    else:
+        return None
+    return el
+
+
+def _ensure_heading_style(doc, styles: DocxStyleResolver, level: int) -> str:
+    """Style id of the paragraph style named ``heading {level}``, created when
+    the document does not define it.
+
+    Word writes only the styles a document uses into styles.xml, so a real
+    file that never used Heading 2 has no such style — and a ``w:pStyle``
+    naming a missing style is silently ignored by Word (the paragraph stays
+    body text). python-docx refused the assignment outright, the writer
+    skipped it, and the promotion was still counted. The created style is
+    the minimal built-in definition — outline level ``level-1`` (what makes
+    it a heading to Word, screen readers and PDF export), keep-with-next —
+    and adds no formatting of its own.
+    """
+    wanted = f"heading {level}"
+    styles_el = doc.styles.element
+    for st in styles_el.iterfind(qn("w:style")):
+        if st.get(qn("w:type")) != "paragraph":
+            continue
+        name = st.find(qn("w:name"))
+        if name is not None and (name.get(qn("w:val")) or "").strip().lower() == wanted:
+            return st.get(qn("w:styleId"))
+    taken = {st.get(qn("w:styleId")) for st in styles_el.iterfind(qn("w:style"))}
+    style_id = f"Heading{level}"
+    n = 1
+    while style_id in taken:
+        n += 1
+        style_id = f"Heading{level}x{n}"
+    style = OxmlElement("w:style")
+    style.set(qn("w:type"), "paragraph")
+    style.set(qn("w:styleId"), style_id)
+    name = OxmlElement("w:name")
+    name.set(qn("w:val"), wanted)
+    style.append(name)
+    base = styles.default_paragraph_style_id
+    if base:
+        based = OxmlElement("w:basedOn")
+        based.set(qn("w:val"), base)
+        style.append(based)
+        nxt = OxmlElement("w:next")
+        nxt.set(qn("w:val"), base)
+        style.append(nxt)
+    ui = OxmlElement("w:uiPriority")
+    ui.set(qn("w:val"), "9")
+    style.append(ui)
+    if level > 1:
+        style.append(OxmlElement("w:unhideWhenUsed"))
+    style.append(OxmlElement("w:qFormat"))
+    ppr = OxmlElement("w:pPr")
+    ppr.append(OxmlElement("w:keepNext"))
+    ppr.append(OxmlElement("w:keepLines"))
+    lvl = OxmlElement("w:outlineLvl")
+    lvl.set(qn("w:val"), str(level - 1))
+    ppr.append(lvl)
+    style.append(ppr)
+    styles_el.append(style)
+    styles.reload()
+    return style_id
+
+
+def _num_id_of(numpr) -> Optional[str]:
+    if numpr is None:
+        return None
+    el = numpr.find(qn("w:numId"))
+    return (el.get(qn("w:val")) or "").strip() if el is not None else None
+
+
+def _set_heading_style(doc, styles: DocxStyleResolver, paragraph, level: int) -> Tuple[str, int]:
+    """Give ``paragraph`` the ``Heading {level}`` style WITHOUT changing how
+    it looks. Returns ``(style_id, properties_pinned)``.
+
+    A heading style carries its own look (Heading 1: 14pt bold blue Calibri
+    Light, space before…). Switching a 26pt centred Title, or a black 14pt
+    bold line, to it visibly restyled the customer's document. So every
+    visible property the OLD style supplied and the new one would change is
+    written directly onto the paragraph/runs (or cancelled where the old look
+    had none), and a heading style that auto-numbers is switched off for this
+    paragraph (numId 0) — otherwise "2.1 Data Sources" would read
+    "1.1 2.1 Data Sources".
+    """
+    p_el = paragraph._p  # noqa: SLF001
+    old_sid = styles.paragraph_style_id(p_el)
+    new_sid = _ensure_heading_style(doc, styles, level)
+    if old_sid == new_sid:
+        return new_sid, 0
+
+    runs = visible_runs(p_el)
+    old_ppr = {t: styles.paragraph_element(p_el, old_sid, qn(f"w:{t}"), direct=False) for t in _PIN_PPR}
+    old_num = styles.paragraph_element(p_el, old_sid, qn("w:numPr"), direct=False)
+    old_rpr = [(r, {t: styles.run_element(r, old_sid, qn(f"w:{t}")) for t in _PIN_RPR}) for r in runs]
+    # Copies: the old values may live in a style element we must not alias.
+    old_ppr = {t: (copy.deepcopy(e) if e is not None else None) for t, e in old_ppr.items()}
+    old_rpr = [(r, {t: (copy.deepcopy(e) if e is not None else None) for t, e in d.items()}) for r, d in old_rpr]
+
+    pPr = p_el.get_or_add_pPr()
+    pPr.style = new_sid
+    # A direct outline level would override the style's (level 9 = body
+    # text), leaving it invisible to navigation. The style decides now.
+    direct_lvl = pPr.find(qn("w:outlineLvl"))
+    if direct_lvl is not None:
+        pPr.remove(direct_lvl)
+
+    pinned = 0
+    for tag, old_el in old_ppr.items():
+        if pPr.find(qn(f"w:{tag}")) is not None:
+            continue  # direct formatting already decides it, before and after
+        new_el = styles.paragraph_element(p_el, new_sid, qn(f"w:{tag}"), direct=False)
+        if tag in _TOGGLES:
+            if _toggle_on_el(old_el) == _toggle_on_el(new_el):
+                continue
+            pin = _toggle_el(tag, _toggle_on_el(old_el))
+        else:
+            if _same_el(old_el, new_el):
+                continue
+            pin = copy.deepcopy(old_el) if old_el is not None else _neutral_el(tag, new_el, run_level=False)
+        if pin is not None:
+            _set_ordered_child(pPr, pin, _PPR_ORDER)
+            pinned += 1
+
+    new_num = styles.paragraph_element(p_el, new_sid, qn("w:numPr"), direct=False)
+    if (
+        pPr.find(qn("w:numPr")) is None
+        and _num_id_of(new_num) not in (None, "", "0")
+        and _num_id_of(old_num) in (None, "", "0")
+    ):
+        numpr = OxmlElement("w:numPr")
+        nid = OxmlElement("w:numId")
+        nid.set(qn("w:val"), "0")
+        numpr.append(nid)
+        _set_ordered_child(pPr, numpr, _PPR_ORDER)
+        pinned += 1
+
+    for r, olds in old_rpr:
+        rPr = r.find(qn("w:rPr"))
+        for tag, old_el in olds.items():
+            if rPr is not None and rPr.find(qn(f"w:{tag}")) is not None:
+                continue
+            new_el = styles.run_element(r, new_sid, qn(f"w:{tag}"))
+            if tag in _TOGGLES:
+                if _toggle_on_el(old_el) == _toggle_on_el(new_el):
+                    continue
+                pin = _toggle_el(tag, _toggle_on_el(old_el))
+            else:
+                if _same_el(old_el, new_el):
+                    continue
+                pin = copy.deepcopy(old_el) if old_el is not None else _neutral_el(tag, new_el, run_level=True)
+            if pin is None:
+                continue
+            if rPr is None:
+                rPr = OxmlElement("w:rPr")
+                r.insert(0, rPr)
+            _set_ordered_child(rPr, pin, _RPR_ORDER)
+            pinned += 1
+    return new_sid, pinned
+
+
+def _toggle_on_el(el) -> bool:
+    if el is None:
+        return False
+    val = (el.get(qn("w:val")) or "").strip().lower()
+    return val not in ("0", "false", "off", "none")
+
+
 def _apply_heading(
+    doc,
+    styles: DocxStyleResolver,
     heading: HeadingNode,
     paragraph_by_id: Dict[str, Any],
     applied: List[Dict[str, Any]],
     skipped: List[Dict[str, Any]],
+    reference: Optional[HeadingNode] = None,
 ) -> None:
-    """Update a heading paragraph's style to ``Heading {level}``.
+    """Restyle a heading whose LEVEL changed (NORMALIZE_HEADING_LEVEL).
 
-    Edge case: headings nested inside table cells are not currently exposed
-    by the parser via ``docx-h-N`` ids, so they would not be paired here.
-    They will appear in ``skipped`` if a caller manufactures such a node.
+    Headings the pipeline did not change are left exactly as they are — the
+    writer is handed every heading in the tree, and re-asserting "Heading N"
+    on each one replaced authors' own heading styles ("Heading 2 Agency")
+    with the built-in one on runs where nobody approved a heading fix.
     """
-
+    if reference is not None and int(reference.level) == int(heading.level):
+        return
     paragraph = paragraph_by_id.get(heading.id)
-    if paragraph is None:
+    if not isinstance(paragraph, Paragraph):
         skipped.append({"target_id": heading.id, "reason": "paragraph_not_found_for_heading"})
         return
     level = max(1, min(6, int(heading.level)))
-    style_name = f"Heading {level}"
     try:
-        paragraph.style = paragraph.part.document.styles[style_name]
-    except KeyError:
-        # The document doesn't define that built-in style yet; assigning by
-        # name forces python-docx to look it up and create-if-needed.
-        try:
-            paragraph.style = style_name
-        except Exception as exc:
-            skipped.append(
-                {"target_id": heading.id, "reason": f"failed_to_set_style:{exc}"}
-            )
-            return
-    except Exception as exc:  # pragma: no cover
+        _sid, pinned = _set_heading_style(doc, styles, paragraph, level)
+    except Exception as exc:  # pragma: no cover - defensive
         skipped.append({"target_id": heading.id, "reason": f"failed_to_set_style:{exc}"})
         return
     applied.append(
         {
             "kind": "heading_level",
             "target_id": heading.id,
-            "summary": f"paragraph.style = {style_name!r}",
+            "summary": f"paragraph style = 'Heading {level}' (look kept: {pinned} properties pinned)",
         }
     )
 
 
 def _apply_promote_heading(
+    doc,
+    styles: DocxStyleResolver,
     paragraph_node: ParagraphNode,
     paragraph_by_id: Dict[str, Any],
     applied: List[Dict[str, Any]],
@@ -896,14 +1006,15 @@ def _apply_promote_heading(
     """Style a styled-but-fake-heading paragraph as a real ``Heading {level}``.
 
     The level was chosen by ``PromoteHeadingExecutor`` and stashed on the node
-    as ``promote_to_heading_level``. We re-use the same ``paragraph.style``
-    assignment ``_apply_heading`` uses for genuine headings, so a re-parse of
-    the output emits a real ``HeadingNode`` and the TEXT_STYLED_AS_HEADING flag
-    clears.
+    as ``promote_to_heading_level``. The style is created if the document
+    lacks it and the paragraph keeps its look; a re-parse of the output emits
+    a real ``HeadingNode`` and the TEXT_STYLED_AS_HEADING flag clears. The
+    applied entry carries ``action: PROMOTE_HEADING`` so the pipeline counts
+    exactly the promotions that reached the file.
     """
 
     paragraph = paragraph_by_id.get(paragraph_node.id)
-    if paragraph is None:
+    if not isinstance(paragraph, Paragraph):
         skipped.append({"target_id": paragraph_node.id, "reason": "paragraph_not_found_for_promotion"})
         return
     props = paragraph_node.metadata.properties or {}
@@ -911,23 +1022,17 @@ def _apply_promote_heading(
         level = max(1, min(6, int(props.get("promote_to_heading_level") or 1)))
     except (TypeError, ValueError):
         level = 1
-    style_name = f"Heading {level}"
     try:
-        paragraph.style = paragraph.part.document.styles[style_name]
-    except KeyError:
-        try:
-            paragraph.style = style_name
-        except Exception as exc:
-            skipped.append({"target_id": paragraph_node.id, "reason": f"failed_to_set_style:{exc}"})
-            return
+        _sid, pinned = _set_heading_style(doc, styles, paragraph, level)
     except Exception as exc:  # pragma: no cover - defensive
         skipped.append({"target_id": paragraph_node.id, "reason": f"failed_to_set_style:{exc}"})
         return
     applied.append(
         {
             "kind": "promote_heading",
+            "action": "PROMOTE_HEADING",
             "target_id": paragraph_node.id,
-            "summary": f"paragraph.style = {style_name!r} (promoted fake heading)",
+            "summary": f"paragraph style = 'Heading {level}' (promoted fake heading; look kept: {pinned} properties pinned)",
         }
     )
 
@@ -939,6 +1044,7 @@ def _apply_table_cell(
     table_cells_by_id: Dict[str, Tuple[Any, Any]],
     applied: List[Dict[str, Any]],
     skipped: List[Dict[str, Any]],
+    reference: Optional[TableCellNode] = None,
 ) -> None:
     """Promote a cell's row to a repeating header row when ``cell_type`` is HEADER.
 
@@ -946,50 +1052,46 @@ def _apply_table_cell(
     mark header cells is to set ``<w:trPr><w:tblHeader/></w:trPr>`` on the
     *row*.  We therefore skip data cells entirely and, for header cells,
     promote the row.  Repeated promotions on the same row are idempotent.
+
+    Only cells the pipeline CHANGED to headers are written: the parser types
+    a small table's first row as a header by default, and re-asserting that
+    on every save added tblHeader to layout tables nobody approved a fix for.
     """
 
     if cell.cell_type != TableCellType.HEADER:
         return  # nothing to do — we only promote rows for header cells
+    if reference is not None and reference.cell_type == TableCellType.HEADER:
+        return  # already a header in the source — nothing was approved here
 
     pair = table_cells_by_id.get(cell.id)
-    if pair is None:
+    if not (isinstance(pair, tuple) and len(pair) == 2):
         skipped.append({"target_id": cell.id, "reason": "cell_not_found_in_source"})
         return
     row, _docx_cell = pair
 
     tr = row._tr
-    trPr = tr.find(qn("w:trPr"))
-    if trPr is None:
-        # python-docx exposes a helper for this on _Tr; fall back to manual
-        # element creation if the helper is not present in this version.
-        get_or_add = getattr(tr, "get_or_add_trPr", None)
-        if callable(get_or_add):
-            trPr = get_or_add()
-        else:  # pragma: no cover - very old python-docx
-            from lxml import etree
-            trPr = etree.SubElement(tr, qn("w:trPr"))
-            tr.insert(0, trPr)
-
-    if trPr.find(qn("w:tblHeader")) is None:
-        from lxml import etree
-        etree.SubElement(trPr, qn("w:tblHeader"))
-        applied.append(
-            {
-                "kind": "table_header_row",
-                "target_id": cell.id,
-                "summary": "trPr/tblHeader added",
-            }
+    trPr = tr.get_or_add_trPr()
+    th = trPr.find(qn("w:tblHeader"))
+    if th is None:
+        th = OxmlElement("w:tblHeader")
+        # CT_TrPr: the row-property choices come first, then the tracked-
+        # change markers (w:ins / w:del / w:trPrChange) — appending after
+        # those is out of schema order and Word reports the file damaged.
+        tail = next(
+            (c for c in trPr if _local(c) in ("ins", "del", "trPrChange")), None
         )
+        if tail is not None:
+            tail.addprevious(th)
+        else:
+            trPr.append(th)
+        summary = "trPr/tblHeader added"
+    elif not _toggle_on_el(th):
+        th.attrib.pop(qn("w:val"), None)  # explicitly switched off -> on
+        summary = "trPr/tblHeader switched on"
     else:
-        # Already a header row — record as applied so callers can see the
-        # mutation was honored even if the XML was untouched.
-        applied.append(
-            {
-                "kind": "table_header_row",
-                "target_id": cell.id,
-                "summary": "trPr/tblHeader already present",
-            }
-        )
+        summary = "trPr/tblHeader already present"
+    applied.append({"kind": "table_header_row", "target_id": cell.id, "summary": summary})
+
 
 
 def _apply_synthetic_table_header(
@@ -1018,7 +1120,7 @@ def _apply_synthetic_table_header(
         return  # the executor promoted an existing row instead — nothing to insert
 
     docx_table = tables_by_id.get(table.id)
-    if docx_table is None:
+    if not isinstance(docx_table, DocxTable):
         skipped.append({"target_id": table.id, "reason": "table_not_found_in_source"})
         return
 
@@ -1127,7 +1229,7 @@ def _apply_table_caption(
         return  # caption was nothing but control characters
 
     docx_table = tables_by_id.get(table.id)
-    if docx_table is None:
+    if not isinstance(docx_table, DocxTable):
         skipped.append({"target_id": table.id, "reason": "table_not_found_in_source"})
         return
 
@@ -1279,8 +1381,11 @@ def _ensure_list_numbering(doc, kind: str) -> int:
 
     # Schema order: all w:abstractNum come before any w:num.
     first_num = numbering_el.find(qn("w:num"))
+    mac = numbering_el.find(qn("w:numIdMacAtCleanup"))
     if first_num is not None:
         first_num.addprevious(abstract)
+    elif mac is not None:
+        mac.addprevious(abstract)
     else:
         numbering_el.append(abstract)
 
@@ -1289,7 +1394,13 @@ def _ensure_list_numbering(doc, kind: str) -> int:
     ref = OxmlElement("w:abstractNumId")
     ref.set(qn("w:val"), str(abstract_id))
     num.append(ref)
-    numbering_el.append(num)
+    # CT_Numbering ends with an optional w:numIdMacAtCleanup (Word for Mac
+    # writes it); a w:num after it is out of schema order.
+    mac = numbering_el.find(qn("w:numIdMacAtCleanup"))
+    if mac is not None:
+        mac.addprevious(num)
+    else:
+        numbering_el.append(num)
 
     cache[kind] = num_id
     return num_id
@@ -1300,7 +1411,7 @@ def _apply_list_conversion(doc, node, paragraph_by_id, applied, skipped) -> None
     the literal typed marker ("- ", "1. ") from the run text."""
 
     paragraph = paragraph_by_id.get(node.id)
-    if paragraph is None:
+    if not isinstance(paragraph, Paragraph):
         skipped.append({
             "target_id": node.id,
             "reason": "paragraph not found in source for list conversion",
