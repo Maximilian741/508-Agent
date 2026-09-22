@@ -1038,6 +1038,10 @@ async def remediate(
     source_path = intake.path
     try:
         result = await run_in_threadpool(parse_to_tree, str(source_path))
+    except HTTPException:
+        # Already a sentence (e.g. the XLSX parser's 503 "busy, not charged").
+        _cleanup_job_dir(job_dir)
+        raise
     except Exception as exc:
         logger.exception("remediate parse failed: %s", exc)
         _cleanup_job_dir(job_dir)
@@ -1173,6 +1177,9 @@ async def remediate(
         write_result = await run_in_threadpool(
             write_remediated, source_path, tree, output_path, source_format=result.format
         )
+    except HTTPException:
+        _cleanup_job_dir(job_dir)
+        raise
     except Exception as exc:
         logger.exception("remediate write failed: %s", exc)
         _cleanup_job_dir(job_dir)
