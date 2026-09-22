@@ -172,6 +172,35 @@ def main() -> int:
         GenerateAltTextExecutor(client=_Spy()).execute(plans[0], res.tree)
     check("GENERATE_ALT_TEXT hands the caption to the provider", seen.get("caption") == CAPTION, repr(seen.get("caption")))
 
+    # No AI provider (the smoke env has no key): the offline heuristic has only
+    # the caption. It used to write "Image page-1-img2 — Figure 1. ..." (an
+    # internal id plus the caption the page reads out anyway) and charge for it.
+    pipe = K.Pipeline("figloc@example.com")
+    a = pipe.analyze("fig.pdf", data)
+    alt_ids = [v["id"] for v in a.json().get("violations", []) if v.get("ruleId") == "MISSING_ALT_TEXT"]
+    check("analyze reports the chart's missing alt", bool(alt_ids), str([v.get("ruleId") for v in a.json().get("violations", [])]))
+    b0 = pipe.balance()
+    rr = pipe.remediate("fig.pdf", data, ids=alt_ids)
+    body = rr.json() if rr.status_code == 200 else {}
+    check("approve only MISSING_ALT_TEXT: remediate succeeds", rr.status_code == 200, rr.text[:200])
+    check("...and nothing is charged (charged == 0 with no AI provider)", pipe.balance() == b0, f"{b0} -> {pipe.balance()}")
+    notes = [e.get("notes") or "" for e in body.get("executions", []) if e.get("actionCode") == "GENERATE_ALT_TEXT"]
+    check("...the chart is left for a person, with a plain reason",
+          any("printed caption" in n and "not charged" in n for n in notes), str(notes))
+    outb = pipe.download(body) if body else b""
+    alts = []
+    if outb:
+        ro = PdfReader(io.BytesIO(outb))
+        for pg in ro.pages:
+            xo = (pg.get("/Resources") or {}).get("/XObject") or {}
+            for k in xo:
+                alt = xo[k].get_object().get("/Alt")
+                if alt is not None:
+                    alts.append(str(alt))
+        alts += [str(e.get("/Alt")) for _d, _s, e in K.struct_elems(ro) if e.get("/Alt") is not None]
+    check("...no /Alt anywhere in the output carries an internal node id or the placeholder",
+          not any("page-1-img" in s or s.startswith("Image ") for s in alts), str(alts))
+
     # ---- 4. locations --------------------------------------------------------
     check("chart bbox = its CTM placement", cp.get("bbox") == [100.0, 500.0, 400.0, 650.0], str(cp.get("bbox")))
     check("chart page_size", cp.get("page_size") == [612.0, 792.0], str(cp.get("page_size")))

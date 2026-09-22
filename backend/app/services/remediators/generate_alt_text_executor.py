@@ -115,6 +115,23 @@ class GenerateAltTextExecutor(RemediationExecutor):
                 status=ExecutionStatus.SKIPPED,
                 notes="Semantic provider returned empty alt text; no changes applied.",
             )
+        # A PDF figure's printed "Figure N." caption is context for a provider
+        # that can SEE the picture. The offline heuristic cannot: its text was
+        # "Image page-1-img2 — Figure 1. …", the caption again behind an
+        # internal id, and the caption is read out right after the figure
+        # anyway. Not better than no alt: nothing written, nothing charged.
+        if result.provider == "heuristic" and properties.get("caption_source") == "figure_label":
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    "Only this picture's printed caption is known, and repeating it as the "
+                    "description adds nothing a screen reader does not already read. It needs "
+                    "a person (or an AI that can see it) to say what it shows. Left for manual "
+                    "review; nothing was written and you were not charged for it."
+                ),
+            )
         # Never write alt text that our OWN analyzer would flag as
         # non-descriptive. The heuristic provider — the fallback when no AI key
         # is configured, or when the per-job AI cost cap trips partway through
