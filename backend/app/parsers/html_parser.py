@@ -313,6 +313,28 @@ def _declares_color(el: Any) -> bool:
     return bool(raw and _COLOR_DECL_RE.search(raw))
 
 
+def _elements(root: Any) -> List[Any]:
+    """``root`` and every node under it, in document order, as a LIST.
+
+    Iterating lxml lazily lets each element proxy die as soon as the loop
+    moves on, and on every release lxml walks from that node UP to the nearest
+    node that still has a Python proxy to decide what it may free — in a deep
+    tree, all the way to the document. That made one pass over a 20,000-deep
+    page cost 1.3 s (O(depth^2)). Holding the proxies and dropping the list
+    at once (CPython releases list items last-first, so each node's parent is
+    still alive) keeps every release O(1).
+    """
+    return list(root.iter())
+
+
+def _ancestors(el: Any) -> List[Any]:
+    """``el``'s ancestors, OUTERMOST first — so releasing the list frees the
+    innermost first, while its parent is still held (see :func:`_elements`)."""
+    chain = list(el.iterancestors())
+    chain.reverse()
+    return chain
+
+
 def _has_conflicting_child_color(el: Any, resolved_color: str) -> bool:
     """True if any descendant re-declares the ``color`` property to something
     other than ``resolved_color`` (a different hex, or a value we can't resolve).
@@ -320,7 +342,7 @@ def _has_conflicting_child_color(el: Any, resolved_color: str) -> bool:
     Because we score a text block with a single colour, such an override means
     part of the visible text is actually a *different* colour than the one we'd
     record — so we must decline rather than risk a false "fails contrast"."""
-    for desc in el.iterdescendants():
+    for desc in _elements(el)[1:]:
         if not isinstance(desc.tag, str):
             continue
         if _tag(desc) in _SKIP_TAGS or _tag(desc) == "svg":
@@ -358,16 +380,66 @@ _PATH_DEPTH_BUDGET = 2_000_000
 
 class _PathBudget:
     """Stands in for the ElementTree in the builder: same ``getpath``, plus a
-    depth meter the builder charges as it descends."""
+    depth meter the builder charges as it descends.
+
+    ``getpath`` returns exactly what ``ElementTree.getpath`` does, but in
+    O(depth) with a per-parent step cache. libxml2 computes every step's
+    ``[n]`` by counting the element's same-name siblings, so a page with N
+    siblings cost O(N^2): 40,000 paragraphs spent 6.8 of 8.3 s in getpath and
+    200,000 took 400 s — a long data table or a big export stalled a worker.
+    """
 
     def __init__(self, roottree: Any, limit: int = _PATH_DEPTH_BUDGET) -> None:
         self._tree = roottree
         self._limit = limit
         self.spent = 0
         self.exhausted = False
+        self._steps: Dict[Any, str] = {}
+        self._indexed: set = set()
+
+    def _index_children(self, parent: Any) -> None:
+        """Record every element child's getpath() step: ``tag`` when it is
+        the only child with that name, else ``tag[n]`` (1-based among
+        same-name siblings) — libxml2's xmlGetNodePath rule."""
+        self._indexed.add(parent)
+        counts: Dict[str, int] = {}
+        for child in parent:
+            tag = child.tag
+            if isinstance(tag, str):
+                counts[tag] = counts.get(tag, 0) + 1
+        seen: Dict[str, int] = {}
+        for child in parent:
+            tag = child.tag
+            if not isinstance(tag, str) or tag.startswith("{"):
+                continue  # namespaced steps ("*[n]", "p:x[n]") are left to lxml
+            if counts[tag] > 1:
+                n = seen.get(tag, 0) + 1
+                seen[tag] = n
+                self._steps[child] = f"{tag}[{n}]"
+            else:
+                self._steps[child] = tag
 
     def getpath(self, el: Any) -> str:
-        return self._tree.getpath(el)
+        parts: List[str] = []
+        cur = el
+        while True:
+            parent = cur.getparent()
+            if parent is None:
+                tag = cur.tag
+                if not isinstance(tag, str) or tag.startswith("{"):
+                    return self._tree.getpath(el)
+                parts.append(tag)
+                break
+            step = self._steps.get(cur)
+            if step is None and parent not in self._indexed:
+                self._index_children(parent)
+                step = self._steps.get(cur)
+            if step is None:
+                return self._tree.getpath(el)
+            parts.append(step)
+            cur = parent
+        parts.reverse()
+        return "/" + "/".join(parts)
 
     def charge(self, dom_depth: Any) -> None:
         try:
@@ -1027,7 +1099,7 @@ def _visible_subtree_text(el: Any) -> str:
     skipped element but still inside the link) IS rendered, so it is kept.
     """
     parts = [el.text or ""]
-    for d in el.iter():
+    for d in _elements(el):
         if d is el or not isinstance(d.tag, str):
             continue
         if d.tag.rsplit("}", 1)[-1].lower() not in _NAME_SKIP_TAGS:
@@ -1082,7 +1154,7 @@ def _link_is_nameless(el: Any) -> bool:
         return False
     if el.get("hidden") is not None or _style_hides(el):
         return False
-    for anc in (el, *el.iterancestors()):
+    for anc in (el, *_ancestors(el)):
         if isinstance(anc.tag, str) and (anc.get("aria-hidden") or "").strip().lower() == "true":
             return False
     # aria-label / title: the attribute value IS the name.
@@ -1095,7 +1167,7 @@ def _link_is_nameless(el: Any) -> bool:
         return False
     if _visible_subtree_text(el):
         return False
-    for d in el.iter():
+    for d in _elements(el):
         if d is el or not isinstance(d.tag, str):
             continue
         if (d.get("aria-label") or "").strip():
@@ -1264,6 +1336,9 @@ def _figcaption_text(el: Any) -> Optional[str]:
     return None
 
 
+_CAPTION_SIBLING_LOOKBACK = 12
+
+
 def _image_caption(el: Any) -> Optional[str]:
     """Nearby human text that describes an <img>, or None.
 
@@ -1281,10 +1356,15 @@ def _image_caption(el: Any) -> Optional[str]:
         return title[:200]
     # Nearest preceding text: walk previous siblings of the img, then of its
     # ancestors, up to a few hops, and take the first with real words.
+    # Only the few siblings right before it: a lead-in is NEXT to its image,
+    # and walking every preceding sibling made each image O(page) — a long
+    # page of one-word lines and many images went quadratic.
     node = el
     for _hop in range(4):
         prev = node.getprevious()
-        while prev is not None:
+        looked = 0
+        while prev is not None and looked < _CAPTION_SIBLING_LOOKBACK:
+            looked += 1
             if isinstance(prev.tag, str) and prev.tag.lower() not in ("script", "style", "template", "noscript"):
                 txt = " ".join((prev.text_content() or "").split())
                 if len(txt.split()) >= 3:
@@ -1356,7 +1436,7 @@ def _svg_visible_text(svg: Any) -> str:
     <style>/<script> are source code — none of them count.
     """
     parts: List[str] = []
-    for d in svg.iter():
+    for d in _elements(svg):
         if not isinstance(d.tag, str):
             continue
         if _svg_local(d) in ("text", "tspan", "textpath"):
@@ -1410,7 +1490,7 @@ def _build_svg(el: Any, ids: _Ids, roottree: Any) -> Optional[ImageNode]:
         return None
     if el.get("hidden") is not None or _style_hides(el):
         return None
-    for anc in (el, *el.iterancestors()):
+    for anc in (el, *_ancestors(el)):
         if not isinstance(anc.tag, str):
             continue
         if (anc.get("aria-hidden") or "").strip().lower() == "true":
@@ -1772,7 +1852,7 @@ def iter_positive_tabindex(doc: Any):
     but restores natural order. ``tabindex="-1"`` (programmatic focus) and
     ``tabindex="0"`` are both fine and never yielded.
     """
-    for el in doc.iter():
+    for el in _elements(doc):
         if not isinstance(el.tag, str):
             continue
         raw = (el.get("tabindex") or "").strip()
@@ -1865,7 +1945,7 @@ def count_untitled_iframes(doc: Any) -> int:
                     or a.get("hidden") is not None
                     or _style_hides(a)
                 )
-                for a in el.iterancestors()
+                for a in _ancestors(el)
             ):
                 continue
             # A 0x0 / 1x1 frame is a tracking pixel or a hidden RPC channel, not

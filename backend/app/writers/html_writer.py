@@ -108,20 +108,27 @@ def write_remediated_html(
         # page; leave the copy untouched.
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
 
+    path_index = _PathIndex(doc)
+
     def resolve(xpath: Optional[str]) -> Optional[Any]:
+        # Locators are getpath() output; walk them against a per-parent child
+        # index (O(depth) each). doc.xpath() re-scans a parent's children for
+        # every positional step — O(N) per lookup on a page with N siblings,
+        # so O(N^2) for a long table — and libxml2's evaluator fails outright
+        # ("unknown error") on a long path ending in a positional predicate
+        # (a cell ~1000 wrappers deep), which silently skipped the fix.
+        # Every lookup happens on the PRISTINE DOM (phase 1), so the index
+        # never goes stale.
         if not xpath:
             return None
+        el = path_index.resolve(xpath)
+        if el is not None:
+            return el
         try:
             found = doc.xpath(xpath)
         except Exception:
             found = []
-        if len(found) == 1:
-            return found[0]
-        # libxml2's XPath evaluator fails ("unknown error") on a long path
-        # that ends in a positional predicate — a table cell ~1000 wrappers
-        # deep — so the fix was silently skipped. The locator is always
-        # getpath() output, which we can walk step by step ourselves.
-        return _walk_getpath(doc, xpath)
+        return found[0] if len(found) == 1 else None
 
     root = tree.root
     props = root.metadata.properties or {}
@@ -167,6 +174,7 @@ def write_remediated_html(
     if html_el is None:
         html_el = doc
     title_el = resolve(props.get("__title_xpath"))
+    path_index.release()  # every locator is resolved; nothing reads it again
 
     # ---- PHASE 2: mutate via the held references ----
     language = root.metadata.language
@@ -289,46 +297,65 @@ def write_remediated_html(
 _PATH_STEP_RE = re.compile(r"^([^\[\]/]+)(?:\[(\d+)\])?$")
 
 
-def _walk_getpath(doc: Any, xpath: str) -> Optional[Any]:
-    """Resolve an ``ElementTree.getpath()`` locator by walking children.
+class _PathIndex:
+    """Resolve ``ElementTree.getpath()`` locators with per-parent child lists.
 
-    getpath() emits absolute paths of plain steps — ``tag`` or ``tag[n]``,
-    where ``n`` is the 1-based position among same-tag siblings (``*[n]``
-    among all elements) — so this needs no XPath engine and has no depth
-    limit. Anything else is not ours: return None.
+    Each parent's element children are grouped by tag once, on first use, so
+    a step ``tag[n]`` is a list index. A step WITHOUT an index means the tag
+    was unique among its siblings when the path was made; if it is not unique
+    now, the locator is ambiguous and resolves to nothing (as ``doc.xpath``
+    returning several elements did).
     """
-    if not xpath or not xpath.startswith("/"):
-        return None
-    steps = xpath[1:].split("/")
-    cur = None
-    try:
-        for i, step in enumerate(steps):
+
+    def __init__(self, doc: Any) -> None:
+        self._root = doc.getroottree().getroot()
+        self._children: Dict[Any, Dict[str, List[Any]]] = {}
+
+    def _groups(self, parent: Any) -> Dict[str, List[Any]]:
+        groups = self._children.get(parent)
+        if groups is None:
+            groups = {"*": []}
+            for child in parent:
+                if isinstance(child.tag, str):
+                    groups.setdefault(child.tag, []).append(child)
+                    groups["*"].append(child)
+            self._children[parent] = groups
+        return groups
+
+    def release(self) -> None:
+        """Drop the cached element proxies INNERMOST first. Freed in the
+        dict's own (outermost-first) order, each release made lxml walk from
+        that node up to the document — O(depth^2): 2.3 s for one 30,000-deep
+        page. See html_parser._elements."""
+        while self._children:
+            self._children.popitem()
+
+    def resolve(self, xpath: str) -> Optional[Any]:
+        if not xpath.startswith("/"):
+            return None
+        steps = xpath[1:].split("/")
+        first = _PATH_STEP_RE.match(steps[0]) if steps else None
+        root = self._root
+        if first is None or root is None or first.group(1) not in ("*", root.tag) or (first.group(2) or "1") != "1":
+            return None
+        cur = root
+        for step in steps[1:]:
             m = _PATH_STEP_RE.match(step)
             if not m:
                 return None
-            tag, pos = m.group(1), int(m.group(2) or 1)
-            if i == 0:
-                root = doc.getroottree().getroot()
-                if pos != 1 or (tag != "*" and root.tag != tag):
-                    return None
-                cur = root
-                continue
-            n = 0
-            nxt = None
-            for child in cur:
-                if not isinstance(child.tag, str):
-                    continue
-                if tag == "*" or child.tag == tag:
-                    n += 1
-                    if n == pos:
-                        nxt = child
-                        break
-            if nxt is None:
+            members = self._groups(cur).get(m.group(1))
+            if not members:
                 return None
-            cur = nxt
-    except Exception:
-        return None
-    return cur
+            if m.group(2) is None:
+                if len(members) != 1:
+                    return None
+                cur = members[0]
+            else:
+                pos = int(m.group(2))
+                if pos < 1 or pos > len(members):
+                    return None
+                cur = members[pos - 1]
+        return cur
 
 
 _LIST_MARKER_TOKEN = re.compile(r"^(?:[-*•·]|\d{1,3}[.)])$")
@@ -350,7 +377,9 @@ def _visible_word_count(html_bytes: bytes) -> int:
         body = root.find("body")
         scope = body if body is not None else root
         total = 0
-        for el in scope.iter():
+        # A held list, not a lazy walk: see html_parser._elements (a lazy walk
+        # over a 20,000-deep page cost 1.3 s per count).
+        for el in list(scope.iter()):
             tag = el.tag if isinstance(el.tag, str) else ""
             if tag.lower() in ("script", "style", "template", "noscript"):
                 continue
