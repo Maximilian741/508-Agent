@@ -106,6 +106,32 @@ def _detect_image_mime(head: bytes) -> Optional[str]:
     return None
 
 
+class AltTextAvailability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    # Customer words for why not; never a provider or setting name.
+    message: Optional[str] = None
+
+
+@router.get("/alt-text/availability", response_model=AltTextAvailability)
+async def alt_text_availability() -> AltTextAvailability:
+    """Whether the image tool can describe pictures on this deployment.
+
+    Lets the page say so BEFORE someone signs in and uploads, instead of
+    promising "a ready-to-paste description in seconds" and then answering
+    every image with "not available". No auth: it discloses one boolean (no
+    provider name, no configuration), and makes no provider call.
+    """
+    from app.ai.semantic_inference import build_default_provider
+
+    try:
+        available = build_default_provider().name != "heuristic"
+    except Exception:
+        available = False
+    return AltTextAvailability(available=available, message=None if available else _NO_VISION_MESSAGE)
+
+
 @router.post("/alt-text", response_model=AltTextToolResponse)
 async def generate_alt_text(
     file: UploadFile,

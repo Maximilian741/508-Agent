@@ -6,11 +6,16 @@
  * ("no one wants to look at an image to write alt text"). Free for signed-in
  * users; the backend enforces auth + rate limits to bound vision-AI cost.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Image, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
-import { generateAltTextForImage, AltTextResult } from "../../src/domain/altText";
+import {
+  fetchAltTextAvailability,
+  generateAltTextForImage,
+  AltTextAvailability,
+  AltTextResult,
+} from "../../src/domain/altText";
 import { loadToken } from "../../src/domain/account";
 import { Button } from "../../src/ui/components/Button";
 import { Card } from "../../src/ui/components/Card";
@@ -34,6 +39,20 @@ export default function AltTextToolScreen() {
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [result, setResult] = useState<AltTextResult | null>(null);
   const [busy, setBusy] = useState(false);
+  // Say up front when nothing on this deployment can describe a picture,
+  // instead of promising a description and answering every upload with
+  // "not available". null = unknown (check failed or pending): let them try.
+  const [availability, setAvailability] = useState<AltTextAvailability | null>(null);
+  useEffect(() => {
+    let live = true;
+    fetchAltTextAvailability().then((a) => {
+      if (live) setAvailability(a);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const unavailable = availability?.available === false;
 
   const pickImage = () => {
     if (!isWeb || typeof document === "undefined") return;
@@ -101,7 +120,11 @@ export default function AltTextToolScreen() {
       <Hero
         eyebrow="FREE TOOL"
         title="AI alt-text generator"
-        subtitle="Drop in an image and get a ready-to-paste description in seconds. No document needed (free for signed-in users). For a whole file's images at once, use the audit flow instead."
+        subtitle={
+          unavailable
+            ? "Describes a single image as alt text you can paste. It isn't available right now; see below."
+            : "Drop in an image and get a ready-to-paste description in seconds. No document needed (free for signed-in users). For a whole file's images at once, use the audit flow instead."
+        }
       />
 
       {!isWeb ? (
@@ -109,6 +132,25 @@ export default function AltTextToolScreen() {
           <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
             This tool is available in the web app.
           </Text>
+        </Card>
+      ) : unavailable ? (
+        <Card>
+          <View>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
+              Image descriptions aren't available right now
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+              {availability?.message ||
+                "Automatic image descriptions aren't available right now. Write one sentence saying what the picture shows."}
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 6 }]}>
+              Checking a whole document still works: pictures with their own caption get alt text from it, and
+              the rest are listed for you to describe.
+            </Text>
+          </View>
+          <View style={{ flexDirection: "row", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+            <Button title="Check a document" href="/audit" />
+          </View>
         </Card>
       ) : !signedIn && !loadToken() ? (
         <Card>

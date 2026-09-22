@@ -471,6 +471,13 @@ def main() -> int:  # noqa: PLR0915
     msg = str(tool.get("message") or "")
     check("tools/alt-text: explains in customer words (no setting names)",
           bool(msg) and not any(w.lower() in msg.lower() for w in _ENV_WORDS), msg)
+    # The page can say so BEFORE anyone signs in and uploads (no auth needed).
+    av = client.get("/tools/alt-text/availability")
+    avj = av.json() if av.status_code == 200 else {}
+    check("tools/alt-text/availability: says unavailable, without sign-in",
+          av.status_code == 200 and avj.get("available") is False and bool(avj.get("message")), av.text[:200])
+    check("tools/alt-text/availability: no provider or setting names",
+          not any(w.lower() in av.text.lower() for w in _ENV_WORDS + ("heuristic", "claude", "openai")), av.text)
 
     # ---- 7. the same gates hold for an AI provider that answers with junk ---
     import app.ai.semantic_inference as si
@@ -530,6 +537,10 @@ def main() -> int:  # noqa: PLR0915
         check("good AI: tools/alt-text returns the model's description",
               rr.status_code == 200 and rr.json().get("altText") == "Bar chart of quarterly revenue by region"
               and rr.json().get("aiConfigured") is True, rr.text[:200])
+        av = client.get("/tools/alt-text/availability")
+        check("good AI: tools/alt-text/availability says available",
+              av.status_code == 200 and av.json().get("available") is True and av.json().get("message") is None,
+              av.text[:200])
     finally:
         si.build_default_provider = real_build
 
