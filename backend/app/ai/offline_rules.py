@@ -602,14 +602,28 @@ _GENERIC_HEADINGS = {
     "heading", "document", "draft", "memo", "memorandum", "page", "cover", "cover page",
 }
 _NUMBERED_SECTION_RE = re.compile(
-    r"^(?:chapter|section|part|appendix|article|unit|lesson|module|page|step|annex)\s+"
+    r"^(?!section\s+508\b)(?:chapter|section|part|appendix|article|unit|lesson|module|page|step|annex)\s+"
     r"(?:\d+|[ivxlc]+|[a-z])\.?$",
+    re.IGNORECASE,
+)
+# "Chapter 1: Getting started", "Topic 1 - Accessibility programme", "Part II.
+# Methods": the heading of ONE part, whatever follows the number.
+_NUMBERED_PART_PREFIX_RE = re.compile(
+    r"^(?!section\s+508\b)(?:chapter|section|part|appendix|article|unit|lesson|module|page|step|annex|topic|slide|week|day"
+    r"|session|phase|stage)\s+(?:\d+(?:\.\d+)*|[ivxlc]+|[a-z])\s*[:.)\-–—]\s*\S",
     re.IGNORECASE,
 )
 _PRINTED_FROM_RE = re.compile(r"^microsoft\s+(?:word|powerpoint|excel)\s*[-–]\s*", re.IGNORECASE)
 _FILENAME_NOISE = {
     "final", "draft", "copy", "rev", "version", "new", "old", "latest", "updated", "edit",
-    "edited", "fixed", "tmp", "temp", "backup", "bak", "of", "wa",
+    "edited", "fixed", "tmp", "temp", "backup", "bak", "wa",
+}
+_COPY_OF_RE = re.compile(r"^(?:copy\s+of\s+)+", re.IGNORECASE)
+_FORMAT_WORDS = {"html", "htm", "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "rtf", "odt"}
+_SMALL_TITLE_WORDS = {
+    "of", "the", "and", "or", "for", "to", "in", "on", "at", "by", "a", "an", "with",
+    "de", "la", "el", "los", "las", "y", "et", "du", "des", "le", "les", "und", "der", "die", "das",
+    "da", "do", "e", "di", "del", "van", "het", "en",
 }
 _FILENAME_JUNK_WORDS = {
     "img", "image", "dsc", "dscn", "dscf", "imgp", "pic", "photo", "scan", "scanned", "doc",
@@ -630,7 +644,7 @@ def title_from_heading(text: Optional[str]) -> Verdict:
     if not _real_words(t):
         return _refuse(f"the first heading ({t!r}) is a number or label, not a title")
     low = t.lower().strip(" .:!")
-    if low in _GENERIC_HEADINGS or _NUMBERED_SECTION_RE.match(low):
+    if low in _GENERIC_HEADINGS or _NUMBERED_SECTION_RE.match(low) or _NUMBERED_PART_PREFIX_RE.match(t):
         return _refuse(f"the first heading ({t!r}) names a section, not the document")
     return Verdict(t[:200], "from the first heading")
 
@@ -648,6 +662,8 @@ def title_from_filename(filename: Optional[str]) -> Verdict:
         return _refuse("there is no file name")
     if _WHATSAPP_RE.match(stem) or _DATE_STEM_RE.match(stem):
         return _refuse(f"the file name ({name!r}) is a camera, scanner or chat-app export name")
+    # "Copy of Copy of budget" -> "budget" ("of" elsewhere is part of the name).
+    stem = _COPY_OF_RE.sub("", stem)
     tokens = [tok for tok in re.split(r"[\s_\-.()\[\]]+", stem) if tok]
     kept = [
         tok for tok in tokens
@@ -660,7 +676,13 @@ def title_from_filename(filename: Optional[str]) -> Verdict:
         return _refuse(f"the file name ({name!r}) doesn't contain enough real words to be a title")
     if len(words) * 2 < len(kept):
         return _refuse(f"the file name ({name!r}) is mostly numbers and codes")
-    title = " ".join(tok[:1].upper() + tok[1:] for tok in kept)
+    # A format typed into the name ("html_deep_nesting", "report pdf") is not
+    # part of the title.
+    kept = [tok for tok in kept if tok.lower() not in _FORMAT_WORDS]
+    title = " ".join(
+        tok if (i and tok.lower() in _SMALL_TITLE_WORDS) else tok[:1].upper() + tok[1:]
+        for i, tok in enumerate(kept)
+    )
     return Verdict(title[:200], "from the file name")
 
 

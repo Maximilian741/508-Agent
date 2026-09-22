@@ -123,6 +123,24 @@ def main() -> int:
               r is not None and r.status.value == "skipped" and not (tree.root.metadata.properties or {}).get("title"),
               f"{getattr(r, 'notes', None)} {(tree.root.metadata.properties or {}).get('title')!r}")
 
+    # 5. A heading that names one numbered part is not the document's title.
+    tree = _doc(children=[HeadingNode(
+        id="h1", level=1, content=NodeContent(kind=ContentKind.TEXT, text="Topic 1: Accessibility programme"),
+        metadata=NodeMetadata(page=1, source_format="pdf"), children=[], accessibility_flags=[])])
+    r = _run(tree)
+    check("heading 'Topic 1: …': SKIPPED, says it names a section",
+          r is not None and r.status.value == "skipped" and "names a section" in (r.notes or ""),
+          getattr(r, "notes", None))
+
+    # 6. The best title only repeats the file name: refused, and the note
+    #    says THAT (it used to claim there was no usable file name at all).
+    tree = _doc(filename="Benefits Enrollment Guide.pdf")
+    r = _run(tree)
+    check("title == file name: SKIPPED with the accurate reason",
+          r is not None and r.status.value == "skipped" and "same as the file name" in (r.notes or "")
+          and not (tree.root.metadata.properties or {}).get("title"),
+          getattr(r, "notes", None))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

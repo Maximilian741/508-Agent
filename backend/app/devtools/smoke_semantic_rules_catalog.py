@@ -201,6 +201,11 @@ TITLES_FROM_FILENAME = [
     ("invoice-8812.pdf", None),
     ("Screenshot 2026-09-12 at 10.31.44.png.pdf", None),
     ("resume.pdf", None),
+    # A format typed into the name is not part of the title; "of" inside a
+    # name is kept (only a leading "Copy of" is noise).
+    ("html_deep_nesting.html", "Deep Nesting"),
+    ("Annual Report of the Board.docx", "Annual Report of the Board"),
+    ("report_pdf_final.pdf", None),
 ]
 TITLES_FROM_HEADING = [
     ("Annual Report 2025", "Annual Report 2025"),
@@ -211,6 +216,14 @@ TITLES_FROM_HEADING = [
     ("Contents", None),
     ("Chapter 1", None),
     ("\x00:\x00L\x00Q\x00W", None),
+    # The heading of one numbered part names that part, not the document.
+    ("Topic 1: Accessibility programme", None),
+    ("Chapter 3 - Methods", None),
+    ("Part II. Findings", None),
+    # ...but "Section 508" is a law, not a numbered section.
+    ("Section 508 Compliance Report", "Section 508 Compliance Report"),
+    ("Section 508: A Guide for Agencies", "Section 508: A Guide for Agencies"),
+    ("Section 508", "Section 508"),
 ]
 
 TABLE_CAPTIONS = [

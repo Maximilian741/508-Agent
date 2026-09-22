@@ -144,7 +144,17 @@ class SetDocumentTitleExecutor(RemediationExecutor):
         # overclaim the honesty invariant forbids. The document keeps its
         # DOCUMENT_TITLE_MISSING finding and a human names it.
         if not before_set and (not derived or is_placeholder_title(after_title, filename)):
-            reason = why_not or "there is no heading, title line or usable file name to name it from"
+            if derived:
+                # e.g. "Benefits Enrollment Guide.pdf": the best title is the
+                # file name itself, which is what viewers already show for an
+                # untitled document (and a re-scan would still call a title
+                # that repeats the file name a placeholder).
+                reason = (
+                    f"the best title we found ({derived!r}) is the same as the file name, which is "
+                    "what viewers already show when a document has no title"
+                )
+            else:
+                reason = why_not or "there is no heading, title line or usable file name to name it from"
             return ExecutionResult(
                 action_code=action_code,
                 target_node_id=plan.target_node_id,
