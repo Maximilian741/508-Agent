@@ -184,6 +184,71 @@ _FIGURE_LABEL_ONLY_RE = re.compile(
 )
 _ALT_MAX = 200
 
+# File names, stock-library ids and app default names. A WordPress-style
+# title attribute carries the upload's slug ("sunset-beach-2", "banner_final",
+# "team-photo-2023-web"), a stock id ("shutterstock_123456789",
+# "iStock-1162893421", "pexels-photo-3184291") or an app's default name
+# ("Untitled design (3)", "WhatsApp Image 2024-03-01 at 10.15.22"). Every one
+# of those used to be written as the picture's alt text and charged, and a
+# re-scan then counted the picture as fixed.
+_STOCK_OR_APP_NAME_RE = re.compile(
+    r"^(?:shutterstock|adobe[\s_-]*stock|istock(?:photo)?|getty[\s_-]*images?|pexels|unsplash|pixabay"
+    r"|depositphotos|dreamstime|bigstock(?:photo)?|123rf|freepik|stocksy|alamy"
+    r"|whats[\s_-]*app[\s_-]+(?:image|video|photo)|untitled[\s_-]+design|canva[\s_-]+design)\b",
+    re.IGNORECASE,
+)
+# A generic word run straight into a number: "Photo 2024-03-01", "IMG 2041",
+# "image (3)", "received_1234". Only when that is (nearly) all there is:
+# "Photo 12 shows the mayor opening the library" is a caption.
+_GENERIC_NUMBERED_RE = re.compile(
+    r"^(?:photo|image|img|pic|picture|pxl|mvimg|fb[\s_-]*img|received|snapchat|scan|screenshot"
+    r"|screen[\s_-]*shot|screen[\s_-]*recording)[\s_\-]*\(?\d",
+    re.IGNORECASE,
+)
+# Letters/digits joined by - _ . with no spaces: an upload's slug.
+_SLUG_RE = re.compile(r"^[^\W_]+(?:[-_.]+[^\W_]+)+$")
+# Letters run into digits with no spaces: "banner2", "photo001", "hero3b".
+_WORD_DIGITS_RE = re.compile(r"^[A-Za-z]+\d+[A-Za-z0-9]*$")
+# macOS/WhatsApp export stamp: "2024-03-01 at 10.15.22" (a file name cannot
+# hold ':' on a Mac, so the time is written with dots).
+_FILE_STAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:\s+at)?\s+\d{1,2}\.\d{2}\.\d{2}\b", re.IGNORECASE)
+_LONG_DIGIT_RUN_RE = re.compile(r"\d{5,}")
+
+
+def looks_like_file_name(text: Optional[str]) -> bool:
+    """True for a file name, upload slug, stock-photo id or app default name.
+
+    Not a description of anything, whatever field it was found in."""
+    t = _collapse(text)
+    if not t:
+        return False
+    if _STOCK_OR_APP_NAME_RE.match(t) or _FILE_STAMP_RE.search(t):
+        return True
+    if " " not in t and (_SLUG_RE.match(t) or _WORD_DIGITS_RE.match(t)):
+        return True
+    # An id with a word or two around it ("Photo 3184291", "Team 20230415").
+    few_words = len(_real_words(t)) < 4
+    if few_words and (_LONG_DIGIT_RUN_RE.search(t) or _GENERIC_NUMBERED_RE.match(t)):
+        return True
+    return False
+
+
+def _is_latin_text(text: str) -> bool:
+    letters = [ch for ch in text if ch.isalpha()]
+    return bool(letters) and all(ord(ch) < 0x250 for ch in letters)
+
+
+def _title_problem(desc: str) -> Optional[str]:
+    """Extra bar for an <img> title attribute: it is a tooltip, and CMSes fill
+    it from the upload's file name, so only a phrase of words passes."""
+    if _LONG_DIGIT_RUN_RE.search(desc):
+        return "its title is a file name or stock-photo number, not a description"
+    # Latin-script text with no space is one word or a slug; CJK and similar
+    # scripts are written without spaces, so they are not judged by that.
+    if _is_latin_text(desc) and (" " not in desc or len(_real_words(desc)) < 2):
+        return "its title is a single word or a file name, not a description"
+    return None
+
 
 def split_figure_label(text: str) -> Tuple[bool, str]:
     """``(had_label, description)`` — strip a leading "Figure N:" label."""
@@ -220,6 +285,8 @@ def _description_problem(desc: str) -> Optional[str]:
         return "the text near it could not be read reliably"
     if is_nondescriptive_alt(d):
         return "the text near it is a file name or placeholder, not a description"
+    if looks_like_file_name(d):
+        return "the text near it is a file name or stock-photo name, not a description"
     if _URLISH_RE.search(d) or _EMAIL_RE.search(d):
         return "the text near it is a web or email address, not a description"
     if is_byline_or_date(d):
@@ -274,6 +341,8 @@ def alt_from_caption(caption: Optional[str], source: Optional[str]) -> Verdict:
             "It needs a person to write one sentence saying what the picture shows."
         )
     problem = _description_problem(desc)
+    if not problem and src == "title":
+        problem = _title_problem(desc)
     if problem:
         return _refuse(
             f"We did not describe this picture because {problem}. "
@@ -347,7 +416,7 @@ def vet_alt_text(text: Optional[str], *, node_id: Optional[str] = None) -> Optio
         return "the description contained an internal id instead of words"
     if _NODE_ID_ALT_RE.match(t):
         return "the description was a label, not a description"
-    if is_nondescriptive_alt(t):
+    if is_nondescriptive_alt(t) or looks_like_file_name(t):
         return "the description was a file name or placeholder"
     if _URLISH_RE.search(t) or _EMAIL_RE.search(t):
         return "the description was a web or email address"

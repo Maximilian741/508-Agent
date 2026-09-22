@@ -203,6 +203,34 @@ CAPTIONS = [
     ("https://example.com/photos/IMG_2041.png", "figcaption", None),
     ("IMG_2041.png", "title", None),
     ("Click to enlarge", "title", None),
+    # A title attribute a CMS filled from the upload: slug, stock id, app
+    # default name. Each was written as alt, charged, and then re-scanned as
+    # fixed.
+    ("sunset-beach-2", "title", None),
+    ("hero-banner-v2", "title", None),
+    ("shutterstock_123456789", "title", None),
+    ("Untitled design (3)", "title", None),
+    ("banner_final", "title", None),
+    ("team-photo-2023-web", "title", None),
+    ("logo-color-rgb", "title", None),
+    ("AdobeStock_389201", "title", None),
+    ("iStock-1162893421", "title", None),
+    ("pexels-photo-3184291", "title", None),
+    ("WhatsApp Image 2024-03-01 at 10.15.22", "title", None),
+    ("Screen Shot 2024-05-12 at 10.32.11 AM", "title", None),
+    ("PXL_20240301_123456", "title", None),
+    ("Team 20230415", "title", None),
+    ("Sunset", "title", None),
+    # ...the same names in a figcaption are no description either.
+    ("shutterstock_123456789", "figcaption", None),
+    ("sunset-beach-2", "figcaption", None),
+    # A title that is a phrase of words is still used, in any script.
+    ("Mayor Jane Smith cuts the ribbon at the new library", "title", "Mayor Jane Smith cuts the ribbon at the new library"),
+    ("Map of Europe", "title", "Map of Europe"),
+    ("COVID-19 vaccination clinic at the town hall", "title", "COVID-19 vaccination clinic at the town hall"),
+    ("東京タワーの夜景", "title", "東京タワーの夜景"),
+    ("Photo 12 shows the mayor opening the library", "figcaption", "Photo 12 shows the mayor opening the library"),
+    ("Wi-Fi coverage map for the main campus", "figcaption", "Wi-Fi coverage map for the main campus"),
     ("Figure 3", "figcaption", None),
     ("", "figcaption", None),
     # A label with nothing after it is still only a label.
