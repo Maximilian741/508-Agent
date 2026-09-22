@@ -55,7 +55,9 @@ import base64
 import os
 import posixpath
 import re
+import threading
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
@@ -158,10 +160,44 @@ EVAL_BODY_ROWS = 25
 MAX_PARAGRAPHS_PER_SHEET = 40
 MAX_BLOCKS_PER_SHEET = 100
 MAX_SHARED_STRINGS = 2_000_000
-# The writer parses a whole sheet part with lxml to add a table to it; above
-# this size it refuses, so the parser does not offer the fix either.
+# Cells held in scan windows across the WHOLE workbook. Each one costs ~200
+# bytes while its sheet is being cut into blocks, so this is what bounds a
+# scan's memory and most of its time: a 10 MB export of four dense sheets
+# used to hold 4 million of them at once (860 MB) and 2.9 GB on remediate.
+# The budget is shared out between the worksheets still to be read (unused
+# share carries forward). A sheet whose share is spent keeps reading past its
+# window cheaply: a block that simply continues is still followed to its
+# end, and content nothing continues is disclosed as ANALYSIS_TRUNCATED.
+CELL_BUDGET = _env_int("XLSX_CELL_BUDGET", 1_000_000, 10_000, 20_000_000)
+# ...but every sheet's window covers at least this many rows while any budget
+# is left, so a header row is always judged on its full evidence
+# (EVAL_BODY_ROWS of data under it, plus a title line and a blank row).
+MIN_WINDOW_ROWS = 50
+# The writer streams a sheet part to add <tableParts> after its data; above
+# this size it refuses (bounded time), so the parser does not offer the fix.
 MAX_SHEET_XML_FOR_TABLE_FIX = 60 * 1024 * 1024
 MAX_IMAGE_BYTES_FOR_VISION = 4 * 1024 * 1024
+# Parsing or writing a big workbook holds up to one sheet's scan window plus
+# lxml's buffers; only this many run at once per process (like images and
+# LibreOffice), and a request that waits longer than the timeout gets a 503.
+_XLSX_SLOTS = threading.BoundedSemaphore(_env_int("XLSX_CONCURRENCY", 2, 1, 16))
+_XLSX_SLOT_WAIT_SECONDS = 60.0
+
+
+@contextmanager
+def xlsx_work_slot() -> Iterator[None]:
+    """Hold one of the process's XLSX work slots (see ``_XLSX_SLOTS``)."""
+    if not _XLSX_SLOTS.acquire(timeout=_XLSX_SLOT_WAIT_SECONDS):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=503,
+            detail="We're working on a lot of spreadsheets right now. Please try again in a minute. You were not charged.",
+        )
+    try:
+        yield
+    finally:
+        _XLSX_SLOTS.release()
 
 
 # ---------------------------------------------------------------------------
@@ -401,10 +437,16 @@ class SheetScan:
     protected: bool = False
     truncated: bool = False
     part_size: int = 0
+    # Whether the sheet holds any cell with content, in its window or beyond
+    # it. ``grid`` cannot say: once the sheet is judged it keeps only the few
+    # cells read afterwards (see _compact_grid).
+    has_cells: bool = False
+    window_rows: int = 0          # rows the scan window covered (cells kept per cell)
+    window_cells: int = 0         # cells the window held before compaction
 
     @property
     def is_empty(self) -> bool:
-        return not self.grid and not self.drawings and not self.tables
+        return not self.has_cells and not self.drawings and not self.tables
 
 
 @dataclass
@@ -919,7 +961,15 @@ def _cell_text(c: etree._Element, t: str, shared: List[str]) -> Tuple[str, bool]
     return raw, has_formula
 
 
-def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_flags: List[bool]) -> None:
+def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_flags: List[bool],
+                    cell_cap: int = SCAN_ROWS * SCAN_COLS) -> int:
+    """Scan one worksheet; return how many cells its window held.
+
+    The window is the first SCAN_ROWS rows, cut short at the end of the first
+    row (from MIN_WINDOW_ROWS on) where it holds ``cell_cap`` cells; with no
+    cap left at all there is no window and nothing on the sheet is read into
+    blocks (which the sheet's ``truncated`` flag then discloses).
+    """
     sheet.part_size = pkg.size(sheet.part)
     # Tables and pivots come from the sheet's relationships, which are known
     # before the (possibly huge) sheet XML is streamed.
@@ -954,6 +1004,10 @@ def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_fla
         _q(NS_MAIN, "sheetProtection"),
     )
     window_closed = False
+    window_rows = SCAN_ROWS if cell_cap > 0 else 0
+    stored = 0
+    seen_beyond = False
+    grid = sheet.grid
     open_blocks: List[DataBlock] = []
     last_row = 0
     with pkg.open(sheet.part) as fh:
@@ -981,8 +1035,9 @@ def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_fla
                         if rng:
                             sheet.array_ranges.append(rng)
                     t = c.get("t") or "n"
-                    if r > SCAN_ROWS or col > SCAN_COLS:
+                    if r > window_rows or col > SCAN_COLS:
                         # Outside the window: only "is anything here" matters.
+                        seen_beyond = True
                         if col > SCAN_COLS:
                             sheet.truncated = True
                         else:
@@ -1002,17 +1057,18 @@ def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_fla
                         "s": "text", "inlineStr": "text", "str": "text",
                         "b": "bool", "e": "error",
                     }.get(t, "number")
-                    sheet.grid[(r, col)] = CellInfo(
+                    grid[(r, col)] = CellInfo(
                         text=text,
                         kind=kind,
                         styled=bool(style_flags[s]) if 0 <= s < len(style_flags) else False,
                         formula=has_formula,
                     )
-                if r > SCAN_ROWS and occupied_cols:
+                    stored += 1
+                if r > window_rows and occupied_cols:
                     if not window_closed:
                         window_closed = True
                         sheet.blocks, sheet.notes = _segment(sheet, consumed)
-                        open_blocks = [b for b in sheet.blocks if b.r2 == SCAN_ROWS]
+                        open_blocks = [b for b in sheet.blocks if b.r2 == window_rows]
                         for b in open_blocks:
                             b.open_bottom = True
                     claimed: Set[int] = set()
@@ -1029,6 +1085,11 @@ def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_fla
                     # is content we did not analyze: disclose it.
                     if any(c not in claimed and not _is_consumed(r, c) for c in occupied_cols):
                         sheet.truncated = True
+                elif not window_closed and stored >= cell_cap and MIN_WINDOW_ROWS <= r < window_rows:
+                    # This sheet's share of the cell budget is spent: the
+                    # window ends with this row, and what follows is read the
+                    # cheap way (blocks followed, the rest disclosed).
+                    window_rows = r
                 el.clear()
                 while el.getprevious() is not None:
                     parent = el.getparent()
@@ -1048,6 +1109,9 @@ def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_fla
                     sheet.protected = True
     if not window_closed:
         sheet.blocks, sheet.notes = _segment(sheet, consumed)
+    sheet.window_rows = window_rows
+    sheet.window_cells = stored
+    sheet.has_cells = stored > 0 or seen_beyond
     # Existing Excel tables are declared blocks of their own.
     for tdef in sheet.tables:
         r1, c1, r2, c2 = tdef.ref
@@ -1070,6 +1134,36 @@ def _scan_worksheet(pkg: Package, sheet: SheetScan, shared: List[str], style_fla
         else:
             blk.state = "unclear"
             blk.reason = reason or blocker
+    _compact_grid(sheet)
+    return stored
+
+
+def _compact_grid(sheet: SheetScan) -> None:
+    """Drop the window's cells once the sheet is cut into blocks and judged,
+    keeping only the ones read afterwards: each block's sample rows (the
+    tree's TableNode), a candidate's whole header row (the writer's column
+    names), and the row under the sheet's first note (_title_candidate).
+
+    Without this every sheet's window (up to a million cells, ~200 MB) stayed
+    alive until the whole workbook was scanned.
+    """
+    grid = sheet.grid
+    keep: Dict[Tuple[int, int], CellInfo] = {}
+
+    def _copy_row(r: int, c1: int, c2: int) -> None:
+        for c in range(c1, c2 + 1):
+            info = grid.get((r, c))
+            if info is not None:
+                keep[(r, c)] = info
+
+    for blk in sheet.blocks:
+        sample_c2 = min(blk.c2, blk.c1 + SAMPLE_COLS - 1)
+        _copy_row(blk.r1, blk.c1, blk.c2 if blk.state == "candidate" else sample_c2)
+        for r in range(blk.r1 + 1, min(blk.r2, blk.r1 + SAMPLE_BODY_ROWS) + 1):
+            _copy_row(r, blk.c1, sample_c2)
+    if sheet.notes:
+        _copy_row(sheet.notes[0][0] + 1, 1, SCAN_COLS)
+    sheet.grid = keep
 
 
 def _blocker(sheet: SheetScan, blk: DataBlock) -> Optional[str]:
@@ -1228,6 +1322,7 @@ def scan_workbook(path: str | Path) -> WorkbookScan:
         sheets: List[SheetScan] = []
         hidden = 0
         sheets_el = wb_root.find(_q(NS_MAIN, "sheets"))
+        listed: List[Tuple[int, etree._Element, Rel, str]] = []
         for i, sh in enumerate(list(sheets_el) if sheets_el is not None else [], start=1):
             rel = wb_rels.get(sh.get(_q(NS_R, "id")) or "")
             if rel is None or rel.external or not pkg.has(rel.target):
@@ -1235,13 +1330,28 @@ def scan_workbook(path: str | Path) -> WorkbookScan:
             kind = "worksheet" if rel.type == REL_WORKSHEET else ("chartsheet" if rel.type == REL_CHARTSHEET else "")
             if not kind:
                 continue  # dialog / macro sheets carry no document content here
+            listed.append((i, sh, rel, kind))
+        # The cell budget is shared out between the visible worksheets still
+        # to be read; what one leaves unused carries forward to the next.
+        # Hidden sheets are not part of the tree (nothing is reported or
+        # fixed on them), so their cells are not read at all.
+        budget_left = CELL_BUDGET
+        worksheets_left = sum(
+            1 for (_i, sh, _rel, kind) in listed if kind == "worksheet" and (sh.get("state") or "visible") == "visible"
+        )
+        for i, sh, rel, kind in listed:
             state = sh.get("state") or "visible"
             scan = SheetScan(index=i, name=sh.get("name") or f"Sheet{i}", state=state, kind=kind, part=rel.target)
             scan.rels = pkg.rels(rel.target)
             if state != "visible":
                 hidden += 1
+                sheets.append(scan)
+                continue
             if kind == "worksheet":
-                _scan_worksheet(pkg, scan, shared, style_flags)
+                share = budget_left // max(1, worksheets_left)
+                cap = min(SCAN_ROWS * SCAN_COLS, max(1, share) if budget_left > 0 else 0)
+                budget_left = max(0, budget_left - _scan_worksheet(pkg, scan, shared, style_flags, cap))
+                worksheets_left -= 1
             else:
                 for r in scan.rels.values():
                     if r.type == REL_DRAWING and not r.external and pkg.has(r.target):
@@ -1467,8 +1577,9 @@ class XLSXParser:
 
     def parse_to_tree(self, file_path: str) -> ParserResult:
         path = Path(file_path)
-        scan = scan_workbook(path)
-        return build_tree(path, scan)
+        with xlsx_work_slot():
+            scan = scan_workbook(path)
+            return build_tree(path, scan)
 
 
 def build_tree(path: Path, scan: WorkbookScan) -> ParserResult:
@@ -1581,4 +1692,5 @@ __all__ = [
     "parse_xml",
     "rels_part_for",
     "resolve_target",
+    "xlsx_work_slot",
 ]
