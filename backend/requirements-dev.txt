@@ -1,2 +1,6 @@
 httpx==0.28.1
 pytest==8.3.4
+# The XLSX / office-intake smokes build their workbooks with XlsxWriter:
+# openpyxl's own writer stamps descr="Picture" on every image, so it cannot
+# produce the picture-without-alt fixtures those smokes need.
+XlsxWriter==3.2.9

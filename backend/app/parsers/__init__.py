@@ -17,8 +17,9 @@ from app.parsers.docx_parser import DOCXParser
 from app.parsers.html_parser import HTMLParser
 from app.parsers.pdf_parser import PDFParser
 from app.parsers.pptx_parser import PPTXParser
+from app.parsers.xlsx_parser import XLSXParser
 
-__all__ = ["PDFParser", "DOCXParser", "PPTXParser", "HTMLParser", "parse_to_tree"]
+__all__ = ["PDFParser", "DOCXParser", "PPTXParser", "XLSXParser", "HTMLParser", "parse_to_tree"]
 
 
 def _ext(path: str) -> str:
@@ -39,6 +40,8 @@ def parse_to_tree(file_path: str, *, source_format: str | None = None) -> Parser
         return DOCXParser().parse_to_tree(file_path)
     if fmt == "pptx":
         return PPTXParser().parse_to_tree(file_path)
+    if fmt == "xlsx":
+        return XLSXParser().parse_to_tree(file_path)
     if fmt in {"html", "htm"}:
         return HTMLParser().parse_to_tree(file_path)
     raise ValueError(f"Unsupported source format: {fmt!r}")

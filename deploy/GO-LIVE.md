@@ -121,6 +121,42 @@ You're live.
   sites linking to you — the free scanner pages are the thing people link to.
 - **OCR for scanned PDFs:** on the server, `apt-get install -y tesseract-ocr`
   and set `OCR_ENABLED=true` (the admin dashboard will show "OCR: Active").
+  This also decides what an uploaded **image** (.png .jpg .gif .bmp .tiff
+  .webp) is worth: images are turned into a PDF page and take the scanned
+  path. With OCR on, fixing one adds a real text layer (charged as a PDF).
+  With OCR off, the customer is told plainly that the picture's words stay
+  unreadable, and a run that could only add a title is not charged — they
+  get their original image back. A large image can take a few hundred MB of
+  RAM while it is converted, so at most 2 convert at once
+  (`IMAGE_CONVERT_CONCURRENCY` in `.env`; lower it to 1 on a 1 GB server).
+- **Excel workbooks (.xlsx):** checking or fixing one costs at most ~100-200
+  MB above the idle backend, whatever its size (a 10 MB export of four dense
+  sheets peaks at ~220 MB for the whole process), and at most 2 are worked
+  on at once (`XLSX_CONCURRENCY` in `.env`; a third waits up to a minute,
+  then is told the server is busy and not charged). `XLSX_CELL_BUDGET`
+  (default 1,000,000) caps how many cells one workbook's scan holds; a sheet
+  past its share is still followed to the end of its data, and anything left
+  unread is disclosed on the report, never passed off as checked.
+- **Legacy Office / OpenDocument uploads (.doc .xls .ppt .rtf .odt .ods
+  .odp):** these are converted to .docx/.xlsx/.pptx with LibreOffice, which
+  the image does NOT include by default because it costs ~450-600 MB of
+  image size and ~200 MB of RAM per conversion. To turn it on, rebuild the
+  backend with `docker compose build --build-arg INSTALL_LIBREOFFICE=true
+  backend && docker compose up -d backend` (or put
+  `args: { INSTALL_LIBREOFFICE: "true" }` under the backend's `build:` in
+  docker-compose.yml). Optional tuning in `.env`:
+  `OFFICE_CONVERT_TIMEOUT_SECONDS` (default 90), `OFFICE_CONVERT_CONCURRENCY`
+  (default 2 simultaneous conversions), `SOFFICE_PATH` (only if soffice is
+  not on PATH). Each conversion runs in its own throwaway directory and
+  LibreOffice profile with macros disabled and none of the app's secrets in
+  its environment; if you want belt-and-braces, also run the backend
+  container without outbound network access to your internal services.
+  Without LibreOffice those uploads get a clear "open it in Word/Excel/
+  PowerPoint, Save As .docx/.xlsx/.pptx, and upload that" message instead —
+  nothing breaks. Converted files are fixed, delivered and priced as the
+  modern format (.doc -> .docx at 3 credits, .xls -> .xlsx at 3, .ppt ->
+  .pptx at 4); if no fix persists, the customer gets their original file back
+  (the conversion alone is not given away free).
 - **Offsite storage:** set the `S3_*` / `AWS_*` vars to a Cloudflare R2 bucket.
 - **Updates:** `git pull && bash deploy/bootstrap.sh` re-deploys safely
   (your `.env` and database volume are preserved).
