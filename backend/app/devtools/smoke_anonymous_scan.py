@@ -18,7 +18,7 @@ summary plan), under guards that make the free path structurally cheap:
   3. A smaller upload cap (ANON_SCAN_MAX_MB) with a sentence that says how to
      get the full one; the same file is fine for a signed-in user.
   4. A strict per-IP budget (ANON_SCAN_PER_HOUR) answered with a coded 429
-     (``anonymous_scan_limit``) that points at a free account — while a signed-in
+     (``rate_limited``, ``scope: anonymous_scan``) that points at a free account — while a signed-in
      user on the same address is unaffected.
   5. Credentials that are PRESENTED but invalid are still 401, never a silent
      downgrade to anonymous; remediation still requires a session.
@@ -234,8 +234,9 @@ def main() -> int:
     r = burst.post("/pipeline/analyze", files={"file": ("b.html", page, "text/html")})
     b = r.json() if r.status_code == 429 else {}
     check(
-        "the 7th -> 429 anonymous_scan_limit (detail still 'rate_limited')",
-        r.status_code == 429 and b.get("code") == "anonymous_scan_limit" and b.get("detail") == "rate_limited",
+        "the 7th -> 429 code rate_limited, scope anonymous_scan (detail still 'rate_limited')",
+        r.status_code == 429 and b.get("code") == "rate_limited" and b.get("scope") == "anonymous_scan"
+        and b.get("detail") == "rate_limited",
         r.text[:200],
     )
     check(

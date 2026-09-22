@@ -270,11 +270,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _limited(retry_after: int, *, anonymous_scan: bool = False) -> JSONResponse:
+        # ``code`` is ALWAYS "rate_limited" (one stable code per condition, so a
+        # client needs a single branch); ``scope`` says which budget ran out,
+        # and ``message`` already tells the person what to do about it.
         return JSONResponse(
             status_code=429,
             content={
                 "detail": "rate_limited",
-                "code": "anonymous_scan_limit" if anonymous_scan else "rate_limited",
+                "code": "rate_limited",
+                "scope": "anonymous_scan" if anonymous_scan else "requests",
                 "message": _message_for(retry_after, anonymous_scan=anonymous_scan),
                 "retryAfter": int(retry_after),
             },
