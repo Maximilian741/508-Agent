@@ -129,6 +129,14 @@ You're live.
   get their original image back. A large image can take a few hundred MB of
   RAM while it is converted, so at most 2 convert at once
   (`IMAGE_CONVERT_CONCURRENCY` in `.env`; lower it to 1 on a 1 GB server).
+- **Excel workbooks (.xlsx):** checking or fixing one costs at most ~100-200
+  MB above the idle backend, whatever its size (a 10 MB export of four dense
+  sheets peaks at ~220 MB for the whole process), and at most 2 are worked
+  on at once (`XLSX_CONCURRENCY` in `.env`; a third waits up to a minute,
+  then is told the server is busy and not charged). `XLSX_CELL_BUDGET`
+  (default 1,000,000) caps how many cells one workbook's scan holds; a sheet
+  past its share is still followed to the end of its data, and anything left
+  unread is disclosed on the report, never passed off as checked.
 - **Legacy Office / OpenDocument uploads (.doc .xls .ppt .rtf .odt .ods
   .odp):** these are converted to .docx/.xlsx/.pptx with LibreOffice, which
   the image does NOT include by default because it costs ~450-600 MB of

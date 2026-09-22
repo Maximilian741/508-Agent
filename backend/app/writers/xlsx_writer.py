@@ -19,9 +19,16 @@ What gets written is decided by diffing the (executor-mutated) tree against
 a fresh parse of the source: an approved executor changes the tree, an
 unapproved finding leaves it as parsed, so only approved fixes reach bytes.
 
-Every entry in ``applied`` means the edit is in the saved file: the output
-is re-read with our own scanner AND reopened with openpyxl before it is
-accepted, and each edit is confirmed individually. The pipeline treats XLSX
+Memory stays bounded whatever the workbook's size: a sheet part is never
+parsed whole (``<tableParts>`` is spliced into its short tail while the part
+is streamed), every other part is stream-copied, and verification re-reads
+only the parts an edit touched.
+
+Every entry in ``applied`` means the edit is in the saved file: each edited
+part is read back with our own scanner's readers (a spliced sheet is proved
+byte-identical to the source through the end of its ``<sheetData>``), the
+output is reopened with openpyxl before it is accepted, and each edit is
+confirmed individually. The pipeline treats XLSX
 as writer-confirmed for every action (see ``_WRITER_CONFIRMED_FORMATS`` in
 app/api/pipeline.py), so an approved fix that is not in ``applied`` is
 neither counted nor charged. Should verification fail with the table
