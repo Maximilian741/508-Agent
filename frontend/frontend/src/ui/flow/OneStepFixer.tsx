@@ -58,13 +58,14 @@ import {
   whatToDo,
   whereLabel,
 } from "../../domain/fixPlan";
-import { clearPendingFile, loadPendingFile, savePendingFile } from "../../domain/pendingFile";
+import { clearPendingFile, loadPendingFile, PendingFile, savePendingFile } from "../../domain/pendingFile";
 import { useFileDrop } from "../../hooks/useFileDrop";
 import { useAppStore } from "../../store/useAppStore";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { InlineNotice } from "../components/InlineNotice";
+import { RecentRemediations } from "../components/RecentRemediations";
 import { Spinner } from "../components/Spinner";
 import { linkProps } from "../components/linkProps";
 import { useTheme } from "../useTheme";
@@ -114,6 +115,9 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
   const [signUpNotice, setSignUpNotice] = useState<string | null>(null);
   const [verificationSent, setVerificationSent] = useState(false);
   const [showAllManual, setShowAllManual] = useState(false);
+  const [lostConnection, setLostConnection] = useState(false);
+  // A file kept from an earlier visit (confirming email / paying), offered back.
+  const [pending, setPending] = useState<PendingFile | null>(null);
 
   // Every async step checks it still belongs to the current file: starting
   // over (or dropping a new file) bumps runId and orphans the old work.
@@ -168,6 +172,8 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
     setStatus("");
     setSignUpNotice(null);
     setShowAllManual(false);
+    setLostConnection(false);
+    setPending(null);
   }
 
   // ---- check ---------------------------------------------------------------
@@ -350,12 +356,18 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
         return;
       }
       const info = readApiError(e);
-      fail(
-        info.network
-          ? `We lost the connection while fixing ${f.name}. If the fix finished, it's in your recent files, and you won't be charged twice for it.`
-          : humanError(e),
-        info.network ? null : "fix",
-      );
+      if (info.network) {
+        // The server may have finished (and charged) after the connection
+        // dropped. Don't offer "Try again" (that would be a second run):
+        // point at the finished file instead.
+        setLostConnection(true);
+        fail(
+          `We lost the connection while fixing ${f.name}. If the fix finished, your file is in the list below. Download it from there rather than fixing it again.`,
+          null,
+        );
+        return;
+      }
+      fail(humanError(e), "fix");
     } finally {
       fixing.current = false;
     }
@@ -413,19 +425,38 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
   // ---- resume (back from checkout, or a reload while confirming email) -----
 
   useEffect(() => {
-    if (!resume) return;
     let alive = true;
-    onResumeRead?.();
-    void loadPendingFile().then((pending) => {
-      if (!alive || !pending) return;
-      waitForPayment.current = resume.paid;
-      void latest.current.runCheck(pending.file, { thenFix: true });
-    });
+    if (resume) {
+      // Back from the checkout page: carry on with the same file.
+      onResumeRead?.();
+      void loadPendingFile().then((saved) => {
+        if (!alive || !saved) return;
+        waitForPayment.current = resume.paid;
+        void latest.current.runCheck(saved.file, { thenFix: true });
+      });
+    } else {
+      // A plain visit with a file still kept from an earlier one (they
+      // closed the tab while confirming their email): offer it back.
+      void loadPendingFile().then((saved) => {
+        if (alive && saved && runId.current === 0) setPending(saved);
+      });
+    }
     return () => {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resume]);
+
+  const continuePending = () => {
+    if (!pending) return;
+    const f = pending.file;
+    setPending(null);
+    void runCheck(f, { thenFix: true });
+  };
+  const dismissPending = () => {
+    setPending(null);
+    void clearPendingFile();
+  };
 
   // ---- render --------------------------------------------------------------
 
@@ -472,6 +503,23 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
         <InlineSignUp purpose="check" onDone={afterSignUp} />
       ) : null}
 
+      {stage === "idle" && pending ? (
+        <Card featured>
+          <View style={{ gap: 10 }}>
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]} accessibilityRole="header" {...({ "aria-level": 2 } as any)}>
+              Pick up where you left off
+            </Text>
+            <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+              We kept {pending.file.name} in this browser while you {pending.reason === "buy" ? "bought credits" : "confirmed your email"}.
+            </Text>
+            <View style={styles.buttonRow}>
+              <Button title={`Continue with ${pending.file.name}`} onPress={continuePending} />
+              <Button title="No thanks" variant="ghost" onPress={dismissPending} />
+            </View>
+          </View>
+        </Card>
+      ) : null}
+
       {stage === "error" && error ? (
         <Card>
           <View style={{ gap: 12 }}>
@@ -480,13 +528,25 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
               {error.retry && file ? (
                 <Button
                   title="Try again"
-                  onPress={() => (error.retry === "fix" && report ? void startFix(file, report) : void runCheck(file))}
+                  onPress={() => {
+                    if (error.retry === "fix" && report) {
+                      setStage("result");
+                      setError(null);
+                      void startFix(file, report);
+                    } else {
+                      void runCheck(file);
+                    }
+                  }}
                 />
               ) : null}
               <DropZone onFile={chooseFile} dragging={dragging} compact label="Choose a different file" />
             </View>
           </View>
         </Card>
+      ) : null}
+
+      {stage === "error" && lostConnection && account ? (
+        <RecentRemediations title="Your fixed files" subtitle="If the fix finished, it's here. A file is only ever charged once." />
       ) : null}
 
       {(stage === "result" || stage === "fixing" || stage === "done") && report && plan && file ? (

@@ -118,7 +118,7 @@ function PageView({
   page,
   bbox,
   pageSize,
-  width,
+  width: fullWidth,
 }: {
   file: File;
   page: number;
@@ -130,6 +130,9 @@ function PageView({
   const [img, setImg] = useState<PageImage | null>(null);
   const [failed, setFailed] = useState(false);
   const isPicture = !isPdfFile(file);
+  // Without a box the page is context only: draw it small. With a box the
+  // page is drawn full width and cropped to a close-up around the box.
+  const width = bbox && pageSize ? fullWidth : Math.min(fullWidth, 200);
 
   useEffect(() => {
     let alive = true;
@@ -161,7 +164,15 @@ function PageView({
   const aspect = img ? img.height / img.width : pageSize ? pageSize[1] / pageSize[0] : 1.294;
   const height = Math.round(width * aspect);
   const box = bbox && pageSize ? boxStyle(bbox, pageSize, width, height) : null;
-  const label = `Page ${page} of your file${box ? ", with the problem outlined" : ""}.`;
+  // Close-up: a window around the box (the whole page is mostly margin at
+  // phone width, and the outlined thing would be a speck).
+  const CROP_MAX = 260;
+  const cropped = !!box && height > CROP_MAX;
+  const frameH = cropped ? Math.min(height, Math.max(180, Math.min(CROP_MAX, box!.height + 150))) : height;
+  const offset = cropped ? Math.max(0, Math.min(height - frameH, box!.top + box!.height / 2 - frameH / 2)) : 0;
+  const label = box
+    ? `${cropped ? "Close-up of page" : "Page"} ${page} of your file, with the problem outlined.`
+    : `Page ${page} of your file.`;
 
   if (failed) {
     return (
@@ -173,28 +184,35 @@ function PageView({
     );
   }
   return (
-    <View
-      accessible
-      accessibilityRole="image"
-      accessibilityLabel={label}
-      style={[styles.pageFrame, { width, height, borderColor: theme.colors.border, backgroundColor: "#FFFFFF" }]}
-    >
-      {img ? (
-        <Image source={{ uri: img.url }} style={{ width, height }} resizeMode="stretch" accessibilityIgnoresInvertColors />
-      ) : (
-        <View style={[StyleSheet.absoluteFill, { alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.surface2 }]}>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Drawing page {page}…</Text>
+    <View style={{ gap: 4 }}>
+      <View
+        accessible
+        accessibilityRole="image"
+        accessibilityLabel={label}
+        style={[styles.pageFrame, { width, height: frameH, borderColor: theme.colors.border, backgroundColor: "#FFFFFF" }]}
+      >
+        <View style={{ position: "absolute", left: 0, top: -offset, width, height }}>
+          {img ? (
+            <Image source={{ uri: img.url }} style={{ width, height }} resizeMode="stretch" accessibilityIgnoresInvertColors />
+          ) : (
+            <View style={[StyleSheet.absoluteFill, { alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.surface2 }]}>
+              <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Drawing page {page}…</Text>
+            </View>
+          )}
+          {img && box ? (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.box,
+                box,
+                Platform.OS === "web" ? ({ boxShadow: "0 0 0 2px #FFFFFF, 0 0 0 4px rgba(0,0,0,0.25)" } as any) : null,
+              ]}
+            />
+          ) : null}
         </View>
-      )}
-      {img && box ? (
-        <View
-          pointerEvents="none"
-          style={[
-            styles.box,
-            box,
-            Platform.OS === "web" ? ({ boxShadow: "0 0 0 2px #FFFFFF, 0 0 0 4px rgba(0,0,0,0.25)" } as any) : null,
-          ]}
-        />
+      </View>
+      {cropped ? (
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>Close-up of page {page}.</Text>
       ) : null}
     </View>
   );

@@ -24,8 +24,8 @@ import { SignInModal } from "./SignInModal";
 import { linkProps } from "./linkProps";
 
 const ITEMS: { label: string; href: string; key: string }[] = [
-  { label: "Home", href: "/", key: "home" },
-  { label: "Audit", href: "/audit", key: "audit" },
+  { label: "Fix a file", href: "/", key: "home" },
+  { label: "Advanced audit", href: "/audit", key: "audit" },
   { label: "Dashboard", href: "/dashboard", key: "dashboard" },
   { label: "Insights", href: "/insights", key: "insights" },
   { label: "Batch", href: "/batch", key: "batch" },

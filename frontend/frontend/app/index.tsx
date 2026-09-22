@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { AuditHistoryEntry, clearHistory, loadHistory } from "../src/domain/auditHistory";
@@ -66,16 +66,24 @@ export default function HomeScreen() {
   const backendHealth = useAppStore((state) => state.backendHealth);
   const refreshBackendUrl = useAppStore((state) => state.refreshBackendUrl);
 
-  // Back from the checkout page (or a reload mid-flow): pick the file up again.
-  const [resume] = useState(() => (params.resume === "fix" ? { paid: params.paid === "1" } : null));
+  // Back from the checkout page: pick the kept file up again. Read in an
+  // effect (the static page renders without query params; the client has
+  // them after hydration), once.
+  const [resume, setResume] = useState<{ paid: boolean } | null>(null);
+  useEffect(() => {
+    if (params.resume === "fix") setResume((r) => r ?? { paid: params.paid === "1" });
+  }, [params.resume, params.paid]);
   const onResumeRead = useCallback(() => {
-    // Clear the query so a reload doesn't re-run it.
-    try {
-      router.replace("/");
-    } catch {
-      /* ignore */
+    // Clear the query so a reload doesn't run it again. History API, not
+    // router.replace: a navigation could remount the page mid-check.
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      try {
+        window.history.replaceState(window.history.state, "", "/");
+      } catch {
+        /* ignore */
+      }
     }
-  }, [router]);
+  }, []);
 
   const [history, setHistory] = useState<AuditHistoryEntry[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
