@@ -9,10 +9,13 @@ import { getBackendUrlInfo } from "../config/backendUrl";
 import { loadToken } from "./account";
 
 export interface AltTextResult {
+  /** Empty when no honest description could be written; see `message`. */
   altText: string;
   provider: string;
   confidence: number;
   aiConfigured: boolean;
+  /** Plain-language reason shown when `altText` is empty. */
+  message?: string | null;
 }
 
 export async function generateAltTextForImage(file: File): Promise<AltTextResult> {

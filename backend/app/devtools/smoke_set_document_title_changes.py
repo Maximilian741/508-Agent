@@ -10,9 +10,14 @@ forbids. The test was codifying the bug.
 
 Now pinned:
   * a document with NOTHING to derive a title from -> SKIPPED, no title
-    written, note tells the user to set it manually
+    written, note tells the user it is left for them
   * a document with a heading -> SUCCESS, the heading IS the title
   * a document with only a usable filename -> SUCCESS, humanized filename
+    (version noise like "v2" dropped)
+  * a heading that is a number ("1") or a section name ("Introduction"), or a
+    camera / chat-app export filename ("IMG_2041", "DOC-20240912-WA0003") ->
+    SKIPPED: "Img 2041" and "Doc 20240912 Wa0003" used to be written and
+    charged
 
 Run with:
     python -m app.devtools.smoke_set_document_title_changes
@@ -80,8 +85,8 @@ def main() -> int:
     check("empty document: executor SKIPS", r is not None and r.status.value == "skipped", getattr(r, "notes", None))
     check("empty document: NO title written (not 'Untitled Document')",
           not (document.metadata.properties or {}).get("title"), repr((document.metadata.properties or {}).get("title")))
-    check("empty document: note tells the user to set it manually",
-          r is not None and "manually" in (r.notes or "").lower(), getattr(r, "notes", None))
+    check("empty document: note tells the user it is left for them",
+          r is not None and "left for you" in (r.notes or "").lower(), getattr(r, "notes", None))
 
     # 2. A heading exists -> it becomes the title.
     h = HeadingNode(id="h1", level=1, content=NodeContent(kind=ContentKind.TEXT, text="Regional Budget Review"),
@@ -98,8 +103,25 @@ def main() -> int:
     r = _run(tree)
     check("document with only a filename: executor SUCCEEDS", r is not None and r.status.value == "success", getattr(r, "notes", None))
     check("document with only a filename: title is the humanized stem",
-          (tree.root.metadata.properties or {}).get("title") == "Q3 Financial Report V2",
+          (tree.root.metadata.properties or {}).get("title") == "Q3 Financial Report",
           repr((tree.root.metadata.properties or {}).get("title")))
+
+    # 4. Junk sources are refused, not humanized into a fake title.
+    for label, kwargs in (
+        ("camera file name", {"filename": "IMG_2041.pdf"}),
+        ("WhatsApp export name", {"filename": "DOC-20240912-WA0003.docx"}),
+        ("heading '1'", {"children": [HeadingNode(
+            id="h1", level=1, content=NodeContent(kind=ContentKind.TEXT, text="1"),
+            metadata=NodeMetadata(page=1, source_format="pdf"), children=[], accessibility_flags=[])]}),
+        ("heading 'Introduction' + file 'scan0001.pdf'", {"filename": "scan0001.pdf", "children": [HeadingNode(
+            id="h1", level=1, content=NodeContent(kind=ContentKind.TEXT, text="Introduction"),
+            metadata=NodeMetadata(page=1, source_format="pdf"), children=[], accessibility_flags=[])]}),
+    ):
+        tree = _doc(**kwargs)
+        r = _run(tree)
+        check(f"{label}: SKIPPED, no title written",
+              r is not None and r.status.value == "skipped" and not (tree.root.metadata.properties or {}).get("title"),
+              f"{getattr(r, 'notes', None)} {(tree.root.metadata.properties or {}).get('title')!r}")
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

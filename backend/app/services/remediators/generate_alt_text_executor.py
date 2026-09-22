@@ -1,17 +1,21 @@
 """Executor for generating alternative text on images.
 
 The executor uses :class:`SemanticInferenceClient` to obtain an alt-text
-suggestion (Claude / OpenAI when configured, otherwise a heuristic fallback).
-It writes the suggestion to ``ImageNode.alt_text`` only when the new value is
-non-empty, and records the provider + confidence in ``metadata.properties`` so
-the UI can flag low-confidence suggestions for human review.
+suggestion. A vision provider (Claude / OpenAI) describes the picture from its
+bytes; without one, the only honest source is a caption a person wrote FOR the
+picture (a ``<figcaption>``, an ``<img title>``, a Word Caption paragraph, or a
+"Figure 2: …" label) — see :func:`app.ai.offline_rules.alt_from_caption`.
+Anything else is refused with a plain reason and left for a person, never
+written and never charged. Every suggestion, from any provider, passes
+:func:`app.ai.offline_rules.vet_alt_text` before it is written.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-from app.ai.semantic_inference import SemanticInferenceClient
+from app.ai.offline_rules import alt_from_caption, vet_alt_text
+from app.ai.semantic_inference import InferenceResult, SemanticInferenceClient, refusal_reason
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -19,7 +23,6 @@ from app.models.accessibility import (
     ImageNode,
     iter_reading_order,
 )
-from app.analyzers.image_analyzer import is_nondescriptive_alt
 from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
@@ -84,9 +87,6 @@ class GenerateAltTextExecutor(RemediationExecutor):
 
         page = getattr(target.metadata, "page", None)
         location = f"page {page}" if page else "the document"
-        context = ""
-        if target.content and target.content.text:
-            context = target.content.text
 
         # Pull multimodal image bytes if the parser captured them.
         properties = target.metadata.properties or {}
@@ -96,48 +96,67 @@ class GenerateAltTextExecutor(RemediationExecutor):
             or properties.get("imageMime")
             or "image/png"
         )
-        nearby_caption = properties.get("caption") or properties.get("nearby_text")
+        # Only a caption, and where the parser found it. "nearby_text" and the
+        # node's own content are NOT captions: the text that happens to sit
+        # above a picture is as likely to be a nav bar, a byline or the next
+        # body paragraph, and every one of those used to be pasted in as the
+        # picture's description (behind an internal node id) and charged.
+        caption = properties.get("caption")
+        caption_source = properties.get("caption_source")
+        from_caption = alt_from_caption(caption, caption_source)
 
-        result = self._client.suggest_alt_text(
-            label=f"Image {target.id}",
-            location=location,
-            page=page,
-            context=context or nearby_caption,
-            caption=nearby_caption,
-            image_b64=image_b64,
-            image_mime=image_mime,
+        if not image_b64 and not from_caption.ok:
+            # Nothing can LOOK at this picture and nobody captioned it: there
+            # is no honest description to write, and no reason to spend an AI
+            # call guessing one from the surrounding text.
+            return _refused(action_code, plan, from_caption.reason)
+        shared_caption = from_caption.ok and _caption_shared(tree, target, caption)
+        shared_note = (
+            "This caption belongs to several pictures at once, so it can't describe each one. "
+            "Each picture needs a person to write one sentence saying what it shows."
         )
+        if not image_b64 and shared_caption:
+            return _refused(action_code, plan, shared_note)
+
+        if not image_b64:
+            # Nothing can look at the pixels, so the author's caption IS the
+            # description. Asking a text-only model to "improve" it would add
+            # words nobody checked against the picture ("Bar chart of…" for
+            # what may be a photo) and cost a paid call — so don't.
+            result = InferenceResult(text=from_caption.text or "", confidence=0.6, provider="heuristic")
+        else:
+            result = self._client.suggest_alt_text(
+                node_id=target.id,
+                label="image",
+                location=location,
+                page=page,
+                caption=caption if from_caption.ok else None,
+                caption_source=caption_source if from_caption.ok else None,
+                image_b64=image_b64,
+                image_mime=image_mime,
+            )
         suggestion = (result.text or "").strip()
         if not suggestion:
-            return ExecutionResult(
-                action_code=action_code,
-                target_node_id=plan.target_node_id,
-                status=ExecutionStatus.SKIPPED,
-                notes="Semantic provider returned empty alt text; no changes applied.",
-            )
-        # Never write alt text that our OWN analyzer would flag as
-        # non-descriptive. The heuristic provider — the fallback when no AI key
-        # is configured, or when the per-job AI cost cap trips partway through
-        # a large document — emits "Image page-3-img2 shown in page 3." when it
-        # has no caption to work from. That names where the image is, not what
-        # it shows; shipping it as a fix and crediting it is the overclaim the
-        # honesty invariant forbids. Skip with a reason the UI can show, so the
-        # image stays in the manual-review queue instead of looking done.
-        if is_nondescriptive_alt(suggestion):
             capped = bool(getattr(self._client, "cost_capped", False))
-            why = (
-                "the per-job AI budget was exhausted before this image"
+            reason = refusal_reason(result) or (
+                "Automatic descriptions stopped for this document before reaching this picture."
                 if capped
-                else "no AI provider is configured and there is no nearby caption to derive it from"
+                else "We could not produce a description for this picture."
             )
-            return ExecutionResult(
-                action_code=action_code,
-                target_node_id=plan.target_node_id,
-                status=ExecutionStatus.SKIPPED,
-                notes=(
-                    f"Could not generate a real description ({why}); refusing to write the "
-                    f"placeholder {suggestion!r}. Left for manual review."
-                ),
+            return _refused(action_code, plan, reason)
+        if shared_caption and result.provider == "heuristic":
+            # A vision call fell back (error / budget) to the caption.
+            return _refused(action_code, plan, shared_note)
+        # Final gate for ANY provider: never write alt text our own analyzer
+        # would flag, an internal id, a menu, a byline or an address. Shipping
+        # it as a fix and charging for it is the overclaim the honesty
+        # invariant forbids; the picture stays in the "needs you" list.
+        problem = vet_alt_text(suggestion, node_id=target.id)
+        if problem:
+            return _refused(
+                action_code,
+                plan,
+                f"We did not write the suggested description because {problem}.",
             )
 
         replaced = existing_alt
@@ -152,10 +171,11 @@ class GenerateAltTextExecutor(RemediationExecutor):
         target.metadata.properties["alt_text_confidence"] = round(result.confidence, 3)
         target.metadata.properties["alt_text_pending_review"] = True
 
+        source_note = " from the picture's own caption" if result.provider == "heuristic" else ""
         if replaced:
-            action_note = f"Replaced non-descriptive alt {replaced!r} using {result.provider}"
+            action_note = f"Replaced non-descriptive alt {replaced!r}{source_note} via {result.provider}"
         else:
-            action_note = f"Generated alt text via {result.provider}"
+            action_note = f"Generated alt text{source_note} via {result.provider}"
         return ExecutionResult(
             action_code=action_code,
             target_node_id=plan.target_node_id,
@@ -165,6 +185,35 @@ class GenerateAltTextExecutor(RemediationExecutor):
                 f"Pending human review. Text={suggestion!r}."
             ),
         )
+
+
+_NEEDS_A_PERSON = "Left for you to describe; nothing was written and you were not charged for it."
+
+
+def _refused(action_code: ActionCode, plan: RemediationPlan, reason: str) -> ExecutionResult:
+    reason = (reason or "").strip()
+    if reason and not reason.endswith((".", "!", "?")):
+        reason += "."
+    return ExecutionResult(
+        action_code=action_code,
+        target_node_id=plan.target_node_id,
+        status=ExecutionStatus.SKIPPED,
+        notes=f"{reason} {_NEEDS_A_PERSON}".strip(),
+    )
+
+
+def _caption_shared(tree: AccessibilityTree, target: ImageNode, caption) -> bool:
+    """True when another content image carries the same caption text."""
+    key = " ".join(str(caption or "").split()).lower()
+    if not key:
+        return False
+    for node in iter_reading_order(tree.root):
+        if node is target or not isinstance(node, ImageNode) or node.is_decorative:
+            continue
+        other = (node.metadata.properties or {}).get("caption")
+        if " ".join(str(other or "").split()).lower() == key:
+            return True
+    return False
 
 
 def _find_image_node(tree: AccessibilityTree, target_id: str) -> Optional[ImageNode]:

@@ -1,16 +1,14 @@
-"""Executor that adds table header cells to data tables that lack them."""
+"""Executor that marks an existing header row on data tables that lack one."""
 
 from __future__ import annotations
 
-from collections import Counter
-from typing import Optional
+import re
+from typing import List, Optional, Sequence
 
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
     ActionCode,
-    ContentKind,
-    NodeContent,
     TableCellNode,
     TableCellType,
     TableHeaderScope,
@@ -22,16 +20,21 @@ from app.services.remediation_planner import RemediationPlan
 from app.services.remediators.base import ExecutionResult, ExecutionStatus, RemediationExecutor
 
 
+_NEEDS_A_PERSON = "Left for you to mark; nothing was changed and you were not charged for it."
+
+
 class AddTableHeadersExecutor(RemediationExecutor):
-    """Promotes the first row of a header-less table to header cells.
+    """Promotes the first row of a header-less table to header cells — only
+    when that row really is a row of column names.
 
-    The strategy is:
-
-    1. If the first row contains exclusively non-empty cells whose text looks
-       like a label (no trailing punctuation, ≤ 8 words), convert each cell to a
-       :class:`TableCellNode` of ``cell_type=HEADER`` and ``header_scope=COLUMN``.
-    2. Otherwise insert a synthetic header row with placeholder labels
-       (``Column 1`` … ``Column N``) so screen readers always have anchors.
+    It never invents header text. It used to: a table whose first row did not
+    look like labels got a synthetic "Column 1 | Column 2" row inserted into
+    the customer's file (visible, bold, repeated on every page) and was
+    charged for it — and a first row of DATA ("2023 | 410 | 12%", "North |
+    120 | 9%") was promoted to headers, so a screen reader announced "410" as
+    a column name for every cell below it. Neither is better than no header.
+    When the first row is not clearly a header row the table is left for a
+    person with the reason.
     """
 
     supported_actions = [ActionCode.ADD_TABLE_HEADERS]
@@ -57,13 +60,10 @@ class AddTableHeadersExecutor(RemediationExecutor):
 
         rows = [child for child in target.children if isinstance(child, TableRowNode)]
         if not rows:
-            row, columns = _synthesize_header_row(target.id, column_count=2)
-            target.children.insert(0, row)
-            return _result(
+            return _refused(
                 action_code,
                 plan,
-                ExecutionStatus.SUCCESS,
-                f"Inserted synthetic header row with {columns} columns (table was empty).",
+                "This table has no rows we could read, so there is no header row to mark.",
             )
 
         first_row = rows[0]
@@ -76,31 +76,28 @@ class AddTableHeadersExecutor(RemediationExecutor):
                 "First row already consists of header cells.",
             )
 
-        if existing_cells and _looks_like_header_row(existing_cells):
-            for cell in existing_cells:
-                cell.cell_type = TableCellType.HEADER
-                if cell.header_scope == TableHeaderScope.NONE:
-                    cell.header_scope = TableHeaderScope.COLUMN
-            return _result(
+        body = [
+            [c for c in r.children if isinstance(c, TableCellNode)]
+            for r in rows[1:]
+        ]
+        problem = header_row_problem(existing_cells, body)
+        if problem:
+            return _refused(
                 action_code,
                 plan,
-                ExecutionStatus.SUCCESS,
-                f"Promoted {len(existing_cells)} cells in row 1 to TH/scope=col.",
+                f"We did not mark a header row because {problem}. "
+                "A person needs to mark (or add) the row of column names.",
             )
 
-        # Use the MODAL (most-common) row width, not max(): a jagged table whose
-        # rows have differing cell counts would otherwise get a header wider than
-        # the table grid, which a real Office engine reflows (mangling the grid).
-        # The dominant row width matches the declared <w:tblGrid> column count.
-        width_counts = Counter(len(r.children) for r in rows)
-        column_count = width_counts.most_common(1)[0][0] if width_counts else 2
-        synthetic_row, columns = _synthesize_header_row(target.id, column_count=column_count)
-        target.children.insert(0, synthetic_row)
+        for cell in existing_cells:
+            cell.cell_type = TableCellType.HEADER
+            if cell.header_scope == TableHeaderScope.NONE:
+                cell.header_scope = TableHeaderScope.COLUMN
         return _result(
             action_code,
             plan,
             ExecutionStatus.SUCCESS,
-            f"Inserted synthetic header row with {columns} placeholder columns.",
+            f"Promoted {len(existing_cells)} cells in row 1 to TH/scope=col.",
         )
 
 
@@ -117,49 +114,78 @@ def _has_flag(plan: RemediationPlan, target, code: AccessibilityFlagCode) -> boo
     return any(flag.code == code for flag in target.accessibility_flags)
 
 
-def _looks_like_header_row(cells) -> bool:
+# A number, amount, percentage, measurement or date — DATA, not a column name.
+# "12%", "$1,200", "(3.5)", "-4", "1/2/2024", "12:30", "3.2 kg".
+_NUMERIC_RE = re.compile(
+    r"^[\s(]*[-+−–]?\s*[$€£¥₹]?\s*\d[\d,.\s]*(?:%|[kmb]n?|bn|kg|g|km|m|cm|mm|lb|lbs|hrs?|h|min|x)?[)\s]*$"
+    r"|^\d{1,4}[/.\-]\d{1,2}(?:[/.\-]\d{1,4})?$"
+    r"|^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]\.?m\.?)?$",
+    re.IGNORECASE,
+)
+# A year on its own. Years are legitimate COLUMN NAMES ("Region | 2023 | 2024")
+# as long as the column under them is not itself a column of years.
+_YEAR_RE = re.compile(r"^(?:FY\s?)?(?:19|20|21)\d\d$", re.IGNORECASE)
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f�]")
+
+
+def _cell_text(cell: TableCellNode) -> str:
+    return " ".join(((cell.content.text or "") if cell.content else "").split())
+
+
+def header_row_problem(cells: Sequence[TableCellNode], body: Sequence[Sequence[TableCellNode]]) -> Optional[str]:
+    """Why ``cells`` is NOT a header row, or None when it clearly is.
+
+    A header row names the columns: every cell is a short label, at least one
+    of them is a word, and it does not read like the data rows beneath it. A
+    row of numbers, amounts or dates is data; a label ending in ':' belongs to
+    a label/value form ("Name: | ___"), not to a column; empty cells mean there
+    is no complete set of names to promote.
+    """
     if not cells:
-        return False
-    for cell in cells:
-        text = (cell.content.text or "").strip() if cell.content else ""
-        if not text:
-            return False
-        if len(text.split()) > 8:
-            return False
-        if text.endswith((".", "!", "?")):
-            return False
-    return True
+        return "the first row has no cells"
+    texts = [_cell_text(c) for c in cells]
+    if any(_CONTROL_RE.search(t) for t in texts):
+        return "the first row's text could not be read reliably"
+    if any(not t for t in texts):
+        return "the first row has empty cells, so it is not a complete row of column names"
+    for t in texts:
+        if len(t.split()) > 8:
+            return "a cell in the first row is a sentence, not a column name"
+        if t.endswith(("!", "?")) or (t.endswith(".") and len(t.split()) >= 2):
+            # "No." / "Amt." are column names; "Revenue grew." is not.
+            return "a cell in the first row is a sentence, not a column name"
+        if t.endswith(":"):
+            return "the first row is a label and its value (a form layout), not a row of column names"
+    years = [bool(_YEAR_RE.match(t)) for t in texts]
+    numeric = [bool(_NUMERIC_RE.match(t)) and not y for t, y in zip(texts, years)]
+    if any(numeric):
+        return "the first row holds numbers or dates (data), not column names"
+    if all(years):
+        # "2021 | 2022 | 2023" over non-year numbers is a header of years; over
+        # more years it is a column of data. Decided per column below.
+        pass
+    elif not any(re.search(r"[^\W\d_]{2,}", t) for t in texts):
+        return "the first row has no words in it"
+    # A year in row 1 is a column name only when the column under it is not
+    # a column of years too ("2023 | 410 | 12%" over "2024 | 455 | 11%").
+    for col, is_year in enumerate(years):
+        if not is_year:
+            continue
+        below = [_cell_text(r[col]) for r in body if col < len(r)]
+        if any(_YEAR_RE.match(t) for t in below if t):
+            return "the first row is a data row (its years continue in the rows below)"
+    if not body:
+        return "the table has only one row, so there is no data for a header row to label"
+    return None
 
 
-def _synthesize_header_row(table_id: str, *, column_count: int) -> tuple[TableRowNode, int]:
-    column_count = max(1, column_count)
-    cells = []
-    for i in range(column_count):
-        cells.append(
-            TableCellNode(
-                id=f"{table_id}-th-{i + 1}",
-                cell_type=TableCellType.HEADER,
-                header_scope=TableHeaderScope.COLUMN,
-                content=NodeContent(kind=ContentKind.TEXT, text=f"Column {i + 1}"),
-                metadata=_passthrough_metadata(),
-                children=[],
-                accessibility_flags=[],
-            )
-        )
-    row = TableRowNode(
-        id=f"{table_id}-thead",
-        content=NodeContent(kind=ContentKind.NONE),
-        metadata=_passthrough_metadata(),
-        children=cells,
-        accessibility_flags=[],
-    )
-    return row, column_count
+def _refused(action_code: ActionCode, plan: RemediationPlan, reason: str) -> ExecutionResult:
+    return _result(action_code, plan, ExecutionStatus.SKIPPED, f"{reason.strip()} {_NEEDS_A_PERSON}")
 
 
-def _passthrough_metadata():
-    from app.models.accessibility import NodeMetadata
-
-    return NodeMetadata(properties={"synthesized": True})
+def _looks_like_header_row(cells, body: Optional[List[List[TableCellNode]]] = None) -> bool:
+    """Back-compat predicate: True when :func:`header_row_problem` finds none."""
+    return header_row_problem(cells, body or [[]]) is None
 
 
 def _result(

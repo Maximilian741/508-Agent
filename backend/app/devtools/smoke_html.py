@@ -55,7 +55,7 @@ DIRTY_HTML = """<!DOCTYPE html>
 <h1>Café Résumé</h1>
 <h3>Subsection jumped a level</h3>
 <p style="color:#888;background:#fff">Inline grey-on-white text (~3.5:1) — a real contrast failure that must be flagged.</p>
-<img src="logo.png">
+<img src="logo.png" title="City of Springfield seal">
 <img src="divider.gif" role="presentation" alt="decorative spacer junk">
 <p><a href="/annual-report">click here</a></p>
 <table>
@@ -216,7 +216,12 @@ def main() -> int:
     run_analyzers(res2.tree)
     check("re-parse: missing-alt flag cleared", _flag_count(res2.tree, MISSING_ALT) == 0, f"got {_flag_count(res2.tree, MISSING_ALT)}")
     check("re-parse: heading jump cleared", _flag_count(res2.tree, JUMP) == 0, f"got {_flag_count(res2.tree, JUMP)}")
-    check("re-parse: table-missing-headers cleared", _flag_count(res2.tree, NO_HEADERS) == 0, f"got {_flag_count(res2.tree, NO_HEADERS)}")
+    # The table whose first row is a sentence has no header row to promote,
+    # and header text is never invented ("Column 1 | Column 2" used to be
+    # inserted and charged), so exactly that one stays open for a person.
+    check("re-parse: label-row table cleared; sentence-row table honestly still flagged",
+          _flag_count(res2.tree, NO_HEADERS) == 1, f"got {_flag_count(res2.tree, NO_HEADERS)}")
+    check("no placeholder header text invented", "Column 1" not in out_text)
     check("re-parse: title flag cleared", _flag_count(res2.tree, TITLE) == 0, f"got {_flag_count(res2.tree, TITLE)}")
     check("re-parse: language flag cleared", _flag_count(res2.tree, LANG) == 0, f"got {_flag_count(res2.tree, LANG)}")
 
@@ -251,12 +256,13 @@ def main() -> int:
     # Both <h4> jumps normalized — none left (bug → second <h4> survives).
     check("multi: every heading jump normalized, no <h4> remains",
           "<h4" not in mtext, "an <h4> survived (index-shift skip)")
-    # Synthesize-path table got a real <thead> header row.
-    check("multi: synthesize-path table gained a <thead> header row", "<thead" in mtext)
+    # The sentence-row table is NOT given invented placeholder headers.
+    check("multi: sentence-row table gets no invented <thead>/'Column N' row",
+          "<thead" not in mtext and "Column 1" not in mtext)
     mres2 = parse_to_tree(str(mout))
     run_analyzers(mres2.tree)
-    check("multi: re-parse clears ALL heading jumps and table-header flags",
-          _flag_count(mres2.tree, JUMP) == 0 and _flag_count(mres2.tree, NO_HEADERS) == 0,
+    check("multi: re-parse clears ALL heading jumps; only the sentence-row table stays flagged",
+          _flag_count(mres2.tree, JUMP) == 0 and _flag_count(mres2.tree, NO_HEADERS) == 1,
           f"jump={_flag_count(mres2.tree, JUMP)} noheaders={_flag_count(mres2.tree, NO_HEADERS)}")
 
     # ------------------------------------------------------------- FP guard

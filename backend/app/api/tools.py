@@ -12,9 +12,10 @@ Design:
 - The path is rate-limited (see ``security/rate_limit.py`` ``/tools`` prefix).
 - Bytes are validated as a real image by magic number, capped in size, and
   never written to disk.
-- The response discloses which provider answered and whether real vision AI is
-  configured, so the UI can be honest when only the heuristic fallback is
-  available (which produces weak, generic text for a context-free image).
+- The response discloses whether real vision AI is configured. Without it the
+  answer is an EMPTY ``altText`` plus a plain ``message`` — a picture with no
+  caption cannot be described by rules, and a placeholder to paste would be
+  worse than nothing.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from typing import Deque, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
+from app.ai.offline_rules import vet_alt_text
 from app.ai.semantic_inference import SemanticInferenceClient
 from app.api.deps import require_user_id
 
@@ -67,12 +69,27 @@ def _alt_text_rate_ok(user_id: str) -> bool:
 class AltTextToolResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Empty when no honest description could be written; ``message`` says why
+    # in words a customer can act on. Never a placeholder to copy.
     altText: str
     provider: str
     confidence: float
-    # True when a real vision provider (claude/openai) is configured; False when
-    # only the offline heuristic answered (a context-free image yields weak text).
+    # True when a real vision provider (claude/openai) is configured.
     aiConfigured: bool
+    message: Optional[str] = None
+
+
+# Customer-facing: no provider names, no settings, nothing only an operator
+# could act on.
+_NO_VISION_MESSAGE = (
+    "Automatic image descriptions aren't available right now, so we can't describe this "
+    "picture for you. Write one sentence saying what it shows, as you would describe it "
+    "to someone over the phone."
+)
+_NO_ANSWER_MESSAGE = (
+    "We couldn't write a useful description of this picture. Please try again in a minute, "
+    "or write one sentence saying what it shows."
+)
 
 
 def _detect_image_mime(head: bytes) -> Optional[str]:
@@ -127,23 +144,46 @@ async def generate_alt_text(
             detail="unsupported_image: expected PNG, JPEG, GIF, WebP, or BMP",
         )
 
-    b64 = base64.b64encode(data).decode("ascii")
     client = SemanticInferenceClient()
+    if client.provider_name == "heuristic":
+        # Nothing on this deployment can LOOK at a picture, and a lone image
+        # has no caption to borrow words from. This used to answer 200 with
+        # "Uploaded image shown in image." — a string our own analyzer calls a
+        # placeholder — under a "Suggested alt text" heading with a Copy
+        # button. Say so instead, and never hand back text to paste.
+        return AltTextToolResponse(
+            altText="",
+            provider=client.provider_name,
+            confidence=0.0,
+            aiConfigured=False,
+            message=_NO_VISION_MESSAGE,
+        )
+
+    b64 = base64.b64encode(data).decode("ascii")
     result = client.suggest_alt_text(
-        label="Uploaded image",
+        label="image",
         location="image",
         image_b64=b64,
         image_mime=mime,
     )
     text = (result.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=502, detail="alt_text_generation_failed")
+    # The vision call can fall back to the offline rules (provider error, or
+    # the per-request budget), and even a real model can answer with a
+    # placeholder or an address. Same gate the document executor uses.
+    if not text or result.provider == "heuristic" or vet_alt_text(text):
+        return AltTextToolResponse(
+            altText="",
+            provider=result.provider,
+            confidence=0.0,
+            aiConfigured=True,
+            message=_NO_ANSWER_MESSAGE,
+        )
 
     return AltTextToolResponse(
         altText=text,
         provider=result.provider,
         confidence=round(float(result.confidence), 3),
-        aiConfigured=(client.provider_name != "heuristic"),
+        aiConfigured=True,
     )
 
 

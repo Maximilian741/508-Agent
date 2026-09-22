@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import re
+from typing import Dict, Set
 
 from app.analyzers.base import Analyzer
 from app.analyzers.helpers import attach_flag, iter_nodes
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
+    DocumentNode,
     ImageNode,
+    SectionNode,
 )
 
 
@@ -46,9 +49,19 @@ _PLACEHOLDER_RE = re.compile(
 # refuse to ship it and lets a re-audit of our own output stay honest.
 # "Image of the document signing ceremony" is NOT matched: no "shown in".
 _LOCATION_ONLY_RE = re.compile(
-    r"^(?:image|picture|figure|graphic|photo|img)\b.*?"
-    r"\bshown\s+(?:in|on)\s+(?:the\s+)?(?:page|slide|sheet|document|deck|file)(?:\s*\d+)?\.?$"
+    r"^(?:[a-z]+\s+)?(?:image|picture|figure|graphic|photo|img)\b.*?"
+    r"\bshown\s+(?:in|on)\s+(?:the\s+)?(?:page|slide|sheet|document|deck|file|image)(?:\s*\d+)?\.?$"
     r"|^(?:image|picture|figure|graphic|photo|img)\b.*?\b(?:page|slide|sheet)\s*\d+\.?$",
+    re.IGNORECASE,
+)
+# Our own old heuristic output: "Image html-img-1 — Home About Contact Login",
+# "Image docx-img-1 — Manager email: Click or tap here…", "Image page-3-img2 —
+# …". It led with an internal node id (an ordinal counter, meaningless to a
+# reader) and then pasted whatever text sat near the picture. No person writes
+# "Image slide-2-img-1", so recognizing the id is enough — and it lets a
+# re-audit of a file we remediated before this fix flag what we wrote.
+_NODE_ID_ALT_RE = re.compile(
+    r"^(?:image|picture|figure|graphic|photo|img)\s+[a-z0-9]+(?:-[a-z0-9]+)*-?img-?\d+\b",
     re.IGNORECASE,
 )
 
@@ -97,19 +110,63 @@ def is_nondescriptive_alt(alt: str) -> bool:
         return True
     if _LOCATION_ONLY_RE.match(a):
         return True
+    if _NODE_ID_ALT_RE.match(a):
+        return True
     if _CAMERA_RE.match(a):
         return True
     return False
+
+
+def scanned_page_numbers(tree: AccessibilityTree) -> Set[int]:
+    """Pages of a SCANNED PDF whose only content is the picture of the page.
+
+    Mirrors ScannedDocumentAnalyzer's document test (>= 80% of pages
+    image-only and < 50 extracted characters per page on average), then keeps
+    the pages that carry an image and < 50 characters of text in the tree.
+    Empty for anything that is not a scanned PDF.
+    """
+    root = tree.root
+    if (root.metadata.source_format or "").lower() != "pdf":
+        return set()
+    props = root.metadata.properties or {}
+    try:
+        pages = int(props.get("page_count") or 0)
+        image_pages = int(props.get("image_only_pages") or 0)
+        total_chars = int(props.get("total_text_chars") or 0)
+    except (TypeError, ValueError):
+        return set()
+    if pages == 0 or not (image_pages >= pages * 0.8 and total_chars / pages < 50):
+        return set()
+    text_chars: Dict[int, int] = {}
+    image_on: Set[int] = set()
+    for node in iter_nodes(tree):
+        page = getattr(node.metadata, "page", None)
+        if not isinstance(page, int):
+            continue
+        if isinstance(node, ImageNode):
+            image_on.add(page)
+        elif not isinstance(node, (DocumentNode, SectionNode)) and node.content and node.content.text:
+            text_chars[page] = text_chars.get(page, 0) + len(node.content.text.strip())
+    return {p for p in image_on if text_chars.get(p, 0) < 50}
 
 
 class MissingAltTextAnalyzer(Analyzer):
     name = "missing_alt_text"
 
     def analyze(self, tree: AccessibilityTree) -> None:
+        # A scanned PDF is ONE problem (no text; it needs OCR), reported once
+        # as SCANNED_DOCUMENT_NO_TEXT. The picture of each page is not a
+        # figure that wants a description — describing a scan in alt text is
+        # not the remedy — so those page images do not also each raise
+        # MISSING_ALT_TEXT (a 12-page scan used to report 13 issues for one
+        # root cause, 12 of them asking a person to "describe" a page).
+        scan_pages = scanned_page_numbers(tree)
         for node in iter_nodes(tree):
             if isinstance(node, ImageNode) and not node.is_decorative:
                 alt_text = (node.alt_text or "").strip()
                 if not alt_text:
+                    if scan_pages and getattr(node.metadata, "page", None) in scan_pages:
+                        continue
                     attach_flag(node, AccessibilityFlagCode.MISSING_ALT_TEXT)
 
 

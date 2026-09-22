@@ -294,11 +294,11 @@ class DOCXParser:
             # picture is best; else the paragraph's own text; else the nearest
             # preceding paragraph with real words.
             for image in _inline_images_in_paragraph(paragraph, image_blobs, ids):
-                cap = _image_context_for_paragraph(paragraph, text)
-                if cap:
+                found = _image_caption_and_source_for_paragraph(paragraph, text)
+                if found:
                     if image.metadata.properties is None:
                         image.metadata.properties = {}
-                    image.metadata.properties["caption"] = cap
+                    image.metadata.properties["caption"], image.metadata.properties["caption_source"] = found
                 body_section.children.append(image)
 
             if text and not link_nodes:
@@ -1241,31 +1241,41 @@ def _docx_row_is_header(row) -> bool:
 
 
 def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[str]:
-    """Nearby human text describing a picture in ``paragraph``, or None.
+    """Nearby human text describing a picture in ``paragraph``, or None (see
+    :func:`_image_caption_and_source_for_paragraph`)."""
+    found = _image_caption_and_source_for_paragraph(paragraph, own_text)
+    return found[0] if found else None
+
+
+def _image_caption_and_source_for_paragraph(paragraph, own_text: str) -> Optional[Tuple[str, str]]:
+    """``(text, caption_source)`` for a picture in ``paragraph``, or None.
 
     1. The NEXT paragraph if it is Word's Caption style (that is how Word
-       itself associates a caption with a picture).
-    2. The picture paragraph's own text (an inline image in a sentence).
-    3. The nearest PRECEDING paragraph with at least three words (a lead-in
-       such as "Figure 2 shows quarterly revenue by region:").
-    Only ever text a human wrote near the image — never a filename.
+       itself associates a caption with a picture) — "caption_style".
+    2. The picture paragraph's own text (an inline image in a sentence) —
+       "own_paragraph".
+    3. The nearest PRECEDING paragraph with at least three words —
+       "preceding_text".
+    Only (1) was written FOR the picture; (2) and (3) are merely near it (a
+    form label, a list item, the next body paragraph), so the alt executor
+    never writes them as a description. Never a filename.
     """
     p_el = paragraph._p  # noqa: SLF001
     nxt = p_el.getnext()
     if nxt is not None and nxt.tag == qn("w:p"):
         cap = _paragraph_caption_text(nxt)
         if cap:
-            return cap[:200]
+            return cap[:200], "caption_style"
     own = " ".join((own_text or "").split())
     if len(own.split()) >= 3:
-        return own[:200]
+        return own[:200], "own_paragraph"
     prev = p_el.getprevious()
     hops = 0
     while prev is not None and hops < 4:
         if prev.tag == qn("w:p"):
             txt = " ".join("".join(t.text or "" for t in prev.iter(qn("w:t"))).split())
             if len(txt.split()) >= 3:
-                return txt[:200]
+                return txt[:200], "preceding_text"
             hops += 1
         prev = prev.getprevious()
     return None

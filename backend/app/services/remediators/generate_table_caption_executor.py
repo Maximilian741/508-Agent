@@ -8,13 +8,19 @@ the table's real content, not speculating), writes it to
 an HTML ``<caption>`` and which a re-parse reads back, clearing the flag — and
 records provider + confidence so the UI can route low-confidence captions to
 human review. Never overwrites an existing caption.
+
+Only an AI provider can write one: the offline heuristic abstains (a list of
+column names is not a caption), and every suggestion passes
+:func:`app.ai.offline_rules.vet_table_caption`, which refuses placeholders
+("Data table") and captions that only repeat the header row.
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from app.ai.semantic_inference import SemanticInferenceClient
+from app.ai.offline_rules import vet_table_caption
+from app.ai.semantic_inference import SemanticInferenceClient, refusal_reason
 from app.models.accessibility import (
     AccessibilityFlagCode,
     AccessibilityTree,
@@ -70,15 +76,37 @@ class GenerateTableCaptionExecutor(RemediationExecutor):
             return _skip(
                 action_code,
                 plan,
-                f"Automatic captioning is only available for HTML "
-                f"(source format: {fmt or 'unknown'}); leaving this table for manual captioning.",
+                f"Captions can't be added automatically to {(fmt.upper() + ' files') if fmt else 'this kind of file'}, "
+                "so this table is left for you to caption. You were not charged for it.",
             )
 
         headers, sample = _table_context(target)
+        # Without an AI provider this abstains: a caption says what the table
+        # is ABOUT in the author's words, and the header row already announces
+        # the column names, so "Table: Region, Q1, Q2" (or, worse, a promoted
+        # data row "Table: 2023, 410, 12%", or "Data table") is never clearly
+        # better than no caption. Those used to be inserted as visible Caption
+        # paragraphs and charged.
         result = self._client.suggest_table_caption(headers=headers, sample=sample)
         suggestion = (result.text or "").strip()
         if not suggestion:
-            return _skip(action_code, plan, "Semantic provider returned empty caption; no changes applied.")
+            return _skip(
+                action_code,
+                plan,
+                _needs_a_person(
+                    refusal_reason(result) or "We could not produce a caption for this table."
+                ),
+            )
+        problem = vet_table_caption(suggestion, headers)
+        if problem:
+            return _skip(
+                action_code,
+                plan,
+                _needs_a_person(
+                    f"We did not add the suggested caption because {problem}. "
+                    "A caption has to say what the table is about"
+                ),
+            )
 
         if target.metadata.properties is None:
             target.metadata.properties = {}
@@ -128,6 +156,13 @@ def _has_caption_flag(plan: RemediationPlan, target: TableNode) -> bool:
     if plan.flag.code == AccessibilityFlagCode.TABLE_CAPTION_MISSING:
         return True
     return any(f.code == AccessibilityFlagCode.TABLE_CAPTION_MISSING for f in target.accessibility_flags)
+
+
+def _needs_a_person(reason: str) -> str:
+    reason = (reason or "").strip()
+    if reason and not reason.endswith((".", "!", "?")):
+        reason += "."
+    return f"{reason} Left for you to caption; nothing was written and you were not charged for it.".strip()
 
 
 def _skip(action_code: ActionCode, plan: RemediationPlan, notes: str) -> ExecutionResult:

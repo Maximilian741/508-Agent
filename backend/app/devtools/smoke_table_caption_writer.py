@@ -5,9 +5,12 @@ context before the row-by-row read-out (WCAG 1.3.1). This pins the new auto-fix
 end to end AND the honesty invariant:
 
   detect   -> captionless data table flagged TABLE_CAPTION_MISSING
-  execute  -> GenerateTableCaptionExecutor derives a caption from the table's
-              own headers/rows (heuristic provider here, deterministic/offline)
-              and stores it in metadata.properties['caption']
+  execute  -> GenerateTableCaptionExecutor asks the AI provider for a caption
+              grounded in the table's own headers/rows (a deterministic local
+              fake here) and stores it in metadata.properties['caption']. With
+              NO AI provider the heuristic abstains — "Table: Region, Q1, Q2"
+              only repeats the header row — and nothing is written or counted
+              (Case A0)
   write    -> html_writer inserts <caption> as the table's first child
   honesty  -> GENERATE_TABLE_CAPTION persists for html; re-parsing the OUTPUT
               reads the <caption> back and TABLE_CAPTION_MISSING clears; tables
@@ -23,7 +26,7 @@ import os
 import sys
 import tempfile
 
-# Deterministic, offline AI: derive the caption from headers, no network.
+# No network, ever: the "AI" below is a local fake.
 os.environ["SEMANTIC_PROVIDER"] = "heuristic"
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp(prefix='508_smoke_cap_')}/s.db")
 
@@ -67,6 +70,25 @@ class _SpyClient:
         return InferenceResult(text="SHOULD NOT BE USED", confidence=0.4, provider="spy")
 
 FLAG = "TABLE_CAPTION_MISSING"
+
+import app.ai.semantic_inference as _si  # noqa: E402
+
+_REAL_BUILD = _si.build_default_provider
+_SEEN_HEADERS: list = []
+
+
+class _GroundedCaptionProvider(_si.HeuristicProvider):
+    """Stands in for a real AI provider; records what it was grounded in."""
+
+    name = "fake-ai"
+
+    def table_caption(self, payload):
+        _SEEN_HEADERS.append(list(payload.get("headers") or []))
+        return InferenceResult(text="Quarterly sales by region", confidence=0.8, provider=self.name)
+
+
+def _use_ai(on: bool) -> None:
+    _si.build_default_provider = (lambda *a, **k: _GroundedCaptionProvider()) if on else _REAL_BUILD
 
 # A real data table: header row + 2 data rows, NO <caption>, NO preceding label.
 DIRTY = """<!DOCTYPE html>
@@ -156,9 +178,23 @@ def main() -> int:
     check("honesty matrix: NOT credited for pdf (no writer support)",
           not _action_persists("GENERATE_TABLE_CAPTION", "pdf"))
 
-    # ---------------------------------------------------------------- Case A
+    # ------------------------------------------ Case A0: no AI -> no caption
     src = tmp / "report.html"
     src.write_text(DIRTY, encoding="utf-8")
+    _use_ai(False)
+    r0 = parse_to_tree(str(src))
+    run_analyzers(r0.tree)
+    e0 = execute_plans(r0.tree, plan_remediations(r0.tree, policy))
+    cap0 = [e for e in e0 if e.action_code.value == "GENERATE_TABLE_CAPTION"]
+    check("A0: without AI the caption is refused (no 'Table: Region, Q1, Q2')",
+          len(cap0) == 1 and cap0[0].status.value == "skipped", str([(e.status.value, e.notes) for e in cap0]))
+    o0 = tmp / "report.noai.html"
+    w0 = write_remediated_html(src, r0.tree, o0)
+    check("A0: no <caption> written", "<caption" not in o0.read_text(encoding="utf-8"))
+    check("A0: nothing counted for it", _count_persisted_fixes(cap0, w0["applied"], "html") == 0)
+
+    # ---------------------------------------------------------------- Case A
+    _use_ai(True)
     res = parse_to_tree(str(src))
     run_analyzers(res.tree)
     check("captionless table flagged TABLE_CAPTION_MISSING", _flag_count(res.tree, FLAG) == 1,
@@ -176,9 +212,10 @@ def main() -> int:
     check("writer inserted exactly one caption", len(applied) == 1, str(result["applied"]))
     out_text = out.read_text(encoding="utf-8")
     check("output contains a <caption>", "<caption>" in out_text, out_text)
-    # Heuristic caption is derived from the headers (grounded, not fabricated).
-    check("caption grounded in table headers (mentions a header)",
-          any(h in out_text for h in ("Region", "Q1", "Q2")), out_text)
+    # The provider was grounded in the table's own header cells.
+    check("caption grounded in table headers (the provider was given them)",
+          "<caption>Quarterly sales by region</caption>" in out_text
+          and bool(_SEEN_HEADERS) and _SEEN_HEADERS[-1] == ["Region", "Q1", "Q2"], str(_SEEN_HEADERS))
 
     # Honesty round-trip: re-parse the OUTPUT, the flag clears.
     res2 = parse_to_tree(str(out))

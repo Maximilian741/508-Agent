@@ -9,8 +9,10 @@ Now:
 * Detection is firstRow-aware — a data grid (>=3 rows, >=2 cols) whose
   PowerPoint "Header Row" band is OFF (Table.first_row is False) is flagged.
 * Promote path: the writer sets <a:tblPr firstRow="1"> on the existing first row.
-* Synthesize path (first row not header-like): the writer inserts a real
-  <a:tr> + the firstRow band — so the fix genuinely reaches the file.
+* First row not header-like (a sentence, numbers): REFUSED. Header text is
+  never invented — a "Column 1 | Column 2" row used to be inserted and charged,
+  which tells a screen-reader user nothing. The table stays flagged for a
+  person, and the file is not touched.
 
 Usage:
     python -m app.devtools.smoke_pptx_table_headers
@@ -116,21 +118,23 @@ def main() -> int:
     Presentation(str(tmp / "promote_out.pptx"))
     check("promote: output reopens cleanly", True)
 
-    # --- Synthesize: sentence first row -> a real <a:tr> inserted + band ---
+    # --- Sentence first row -> refused: no invented header row, no band ---
     p = tmp / "synth.pptx"
     _build(p, 3, 3, "This whole row is a sentence.", header_band=False)
     execs2, xml2 = _remediate(p, tmp / "synth_out.pptx")
-    check("synth: ADD_TABLE_HEADERS ran", any(e.action_code.value == "ADD_TABLE_HEADERS" and e.status.value == "success" for e in execs2))
-    check("synth: firstRow band set on output", 'firstRow="1"' in xml2)
-    check("synth: a real header row was INSERTED (4 <a:tr>)", xml2.count("<a:tr ") + xml2.count("<a:tr>") == 4)
-    check("synth: placeholder header text written", "Column 1" in xml2)
+    refused = [e for e in execs2 if e.action_code.value == "ADD_TABLE_HEADERS"]
+    check("no header row: ADD_TABLE_HEADERS refused with a reason",
+          bool(refused) and all(e.status.value == "skipped" and "not charged" in (e.notes or "") for e in refused))
+    check("no header row: firstRow band NOT set on output", 'firstRow="1"' not in xml2)
+    check("no header row: no row inserted (still 3 <a:tr>)", xml2.count("<a:tr ") + xml2.count("<a:tr>") == 3)
+    check("no header row: no placeholder header text written", "Column 1" not in xml2)
     out = Presentation(str(tmp / "synth_out.pptx"))
     tbl = None
     for shp in out.slides[0].shapes:
         if shp.has_table:
             tbl = shp.table
             break
-    check("synth: reopened table has 4 rows, 3 cols", tbl is not None and len(tbl.rows) == 4 and len(tbl.columns) == 3)
+    check("no header row: reopened table still has 3 rows, 3 cols", tbl is not None and len(tbl.rows) == 3 and len(tbl.columns) == 3)
 
     # --- Defense in depth: a too-narrow header is clamped to the grid width so
     # the table always reopens (expert-found robustness gap). ---
