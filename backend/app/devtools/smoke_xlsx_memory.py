@@ -242,20 +242,39 @@ def _child(path: str) -> int:
     return 0
 
 
-def _run_child(path: Path) -> dict:
+def _start_child(path: Path) -> Tuple[subprocess.Popen, Path]:
     here = Path(__file__).resolve().parents[2]
     env = dict(os.environ)
-    child_tmp = tempfile.mkdtemp(prefix="508_smoke_xlsx_mem_child_")
+    child_tmp = Path(tempfile.mkdtemp(prefix="508_smoke_xlsx_mem_child_"))
     env["DATABASE_URL"] = f"sqlite:///{child_tmp}/s.db"
-    env["MATERIALIZED_ROOT"] = str(Path(child_tmp) / "materialized")
-    proc = subprocess.run(
-        [sys.executable, "-m", "app.devtools.smoke_xlsx_memory", "--child", str(path)],
-        cwd=str(here), env=env, capture_output=True, text=True, timeout=540,
-    )
-    for line in (proc.stdout or "").splitlines():
+    env["MATERIALIZED_ROOT"] = str(child_tmp / "materialized")
+    log = child_tmp / "child.log"
+    # Output to a file, not a pipe: two children run at once, and a full pipe
+    # would stall one while we wait on the other.
+    with open(log, "w", encoding="utf-8") as fh:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "app.devtools.smoke_xlsx_memory", "--child", str(path)],
+            cwd=str(here), env=env, stdout=fh, stderr=subprocess.STDOUT,
+        )
+    return proc, log
+
+
+def _finish_child(started: Tuple[subprocess.Popen, Path]) -> dict:
+    proc, log = started
+    try:
+        proc.wait(timeout=540)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    output = log.read_text(encoding="utf-8", errors="replace")
+    for line in output.splitlines():
         if line.startswith("RESULT_JSON "):
             return json.loads(line[len("RESULT_JSON "):])
-    return {"error": (proc.stdout or "")[-500:] + (proc.stderr or "")[-1500:]}
+    return {"error": output[-2000:]}
+
+
+def _run_child(path: Path) -> dict:
+    return _finish_child(_start_child(path))
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +298,11 @@ def main() -> int:  # noqa: PLR0915
     write_workbook(multi, [(f"Region {i}", dense_rows(), "visible") for i in range(1, 5)])
     ledger = tmp / "ledger.xlsx"
     write_workbook(ledger, [("Ledger", ledger_rows(100_000), "visible")])
-    for label, path, want in (("4 dense sheets", multi, 4), ("100k-row ledger", ledger, 1)):
-        res = _run_child(path)
+    # Both at once (each is its own process, so each peak is its own).
+    cases = [("4 dense sheets", multi, 4), ("100k-row ledger", ledger, 1)]
+    children = [_start_child(path) for _label, path, _want in cases]
+    for (label, path, want), child in zip(cases, children):
+        res = _finish_child(child)
         size = path.stat().st_size / 1e6
         print(f"  {label}: {size:.1f} MB upload -> {res}")
         check(f"{label}: analyze and remediate 200", res.get("analyze") == 200 and res.get("remediate") == 200, str(res))
