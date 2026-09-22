@@ -26,7 +26,10 @@ goes through /pipeline/analyze and /pipeline/remediate over HTTP:
   * only a line that stands on its own (a blank row under it, or the data it
     labels right below) is offered as the workbook title: "Name" over a
     column of names is a heading, and writing it as the title is worse than
-    the filename.
+    the filename;
+  * openpyxl's number-less default tabs ("Sheet", "Chart") are flagged;
+    inline strings read as text; a workbook openpyxl refuses but Excel opens
+    still gets its fixes (openpyxl refusing only OUR output is a failure).
 
 Usage:
     python -m app.devtools.smoke_xlsx_pipeline
@@ -375,8 +378,8 @@ def main() -> int:  # noqa: PLR0915
         cell.cell_type = TableCellType.HEADER
     real_verify = xlsx_writer._verify
 
-    def _tables_fail(path, edits):
-        return ["simulated reopen failure"] if edits.tables else real_verify(path, edits)
+    def _tables_fail(path, edits, source=None):
+        return ["simulated reopen failure"] if edits.tables else real_verify(path, edits, source)
 
     xlsx_writer._verify = _tables_fail
     try:
@@ -507,6 +510,57 @@ def main() -> int:  # noqa: PLR0915
                 "Summary": False, "Sheets": False, "List": False, "Q3 Sheet": False, "Sheet 2 notes": False}
     wrong = {n: want for n, want in defaults.items() if xlsx_parser.is_default_sheet_name(n) != want}
     check("tabs: default names recognised (openpyxl's 'Sheet'/'Chart' too), real names left alone", not wrong, str(wrong))
+
+    # ---- 9. a workbook Excel opens but openpyxl refuses ------------------
+    # Some producers write a font "family" above 14; Excel ignores it,
+    # openpyxl refuses the whole file. Our edits do not touch styles, so the
+    # fixes must still land (read back by our own scanner, the new table part
+    # by openpyxl's table model) instead of every fix failing with a 422.
+    picky = tmp / "picky.xlsx"
+    book = xlsxwriter.Workbook(str(picky))
+    sheet = book.add_worksheet("Stock")
+    sheet.write_row(0, 0, ["Part", "Count"], book.add_format({"bold": True}))
+    for i in range(1, 5):
+        sheet.write_row(i, 0, [f"part {i}", i * 7])
+    book.close()
+    picky.write_bytes(_patch_zip(picky.read_bytes(), "xl/styles.xml", '<family val="2"/>', '<family val="34"/>'))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            openpyxl.load_workbook(picky).close()
+        refuses = False
+    except Exception:
+        refuses = True
+    check("picky: openpyxl really refuses the customer's own file", refuses)
+    res = parse_to_tree(str(picky))
+    res.tree.root.metadata.properties["title"] = "Stock list"
+    t_picky = next(n for n in iter_reading_order(res.tree.root) if isinstance(n, TableNode))
+    for cell in t_picky.children[0].children:
+        cell.cell_type = TableCellType.HEADER
+    wr = write_remediated_xlsx(picky, res.tree, tmp / "picky-out.xlsx")
+    rescan = xlsx_parser.scan_workbook(tmp / "picky-out.xlsx")
+    check("picky: the title and the table still land",
+          sorted(a["action"] for a in wr["applied"]) == ["ADD_TABLE_HEADERS", "SET_DOCUMENT_TITLE"]
+          and rescan.title == "Stock list" and any(b.state == "declared" for s in rescan.sheets for b in s.blocks),
+          str(wr))
+    # ...but when openpyxl opens the customer's file and refuses OURS, that
+    # is our breakage: nothing is applied.
+    real_load = xlsx_writer._openpyxl_load
+
+    def _refuse_ours(path):
+        if str(path).endswith(".tmp"):
+            raise ValueError("simulated: openpyxl refuses the edited workbook")
+        return real_load(path)
+
+    res = parse_to_tree(str(src_path))
+    res.tree.root.metadata.properties["title"] = "Regional sales"
+    xlsx_writer._openpyxl_load = _refuse_ours
+    try:
+        wr = write_remediated_xlsx(src_path, res.tree, tmp / "ours-broken.xlsx")
+    finally:
+        xlsx_writer._openpyxl_load = real_load
+    check("picky: openpyxl refusing only OUR output is still a failure, nothing applied",
+          not wr["applied"] and any(s.get("reason", "").startswith("failed_to_save_xlsx") for s in wr["skipped"]), str(wr))
 
     # ---- 8. inline strings (streaming writers store text in the cell) -----
     inline = tmp / "inline.xlsx"

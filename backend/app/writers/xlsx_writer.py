@@ -350,7 +350,7 @@ def _xml_bytes(root: etree._Element) -> bytes:
 def _build_and_verify(source: Path, dest: Path, edits: _Edits, scan: WorkbookScan) -> List[str]:
     replacements, additions = _plan_parts(source, edits, scan)
     _rewrite_zip(source, dest, replacements, additions)
-    return _verify(dest, edits)
+    return _verify(dest, edits, source)
 
 
 def _plan_parts(source: Path, edits: _Edits, scan: WorkbookScan) -> Tuple[Dict[str, bytes], List[Tuple[str, bytes]]]:
@@ -555,7 +555,41 @@ def _sheet_xml_bytes(path: Path) -> int:
         return sum(i.file_size for i in zf.infolist() if i.filename.lower().startswith("xl/worksheets/"))
 
 
-def _verify(path: Path, edits: _Edits) -> List[str]:
+def _openpyxl_load(path: Path):
+    """Load ``path`` the way verification does (full, or read-only when the
+    worksheets are large). Raises whatever openpyxl raises."""
+    import openpyxl
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # A file handle, not the path: openpyxl refuses a name that does not
+        # end in .xlsx, and the candidate output is a .tmp file.
+        with open(path, "rb") as fh:
+            if _sheet_xml_bytes(path) <= _FULL_VERIFY_MAX_SHEET_XML:
+                return openpyxl.load_workbook(fh)
+            wb = openpyxl.load_workbook(fh, read_only=True)
+            _ = wb.sheetnames
+            return wb
+
+
+def _table_parts_problems(path: Path, edits: _Edits) -> List[str]:
+    """Each new table part, read by openpyxl's own table model on its own."""
+    from openpyxl.worksheet.table import Table as _XlTable
+
+    problems: List[str] = []
+    with zipfile.ZipFile(str(path)) as zf:
+        for te in edits.tables:
+            try:
+                tbl = _XlTable.from_tree(etree.fromstring(zf.read(te.part)))
+            except Exception as exc:
+                problems.append(f"openpyxl cannot read the new table {te.name}: {exc}")
+                continue
+            if tbl.ref != te.block.ref or [c.name for c in tbl.tableColumns] != te.columns:
+                problems.append(f"openpyxl reads {te.name} differently from what we wrote")
+    return problems
+
+
+def _verify(path: Path, edits: _Edits, source: Optional[Path] = None) -> List[str]:
     problems: List[str] = []
     try:
         with zipfile.ZipFile(str(path)) as zf:
@@ -593,46 +627,51 @@ def _verify(path: Path, edits: _Edits) -> List[str]:
     if problems:
         return problems
 
-    # 2. openpyxl reopens it (the brief's bar for "a workbook Excel-family
-    # tools can open"), and sees the new tables where we put them.
+    # 2. openpyxl reopens it (the bar for "a workbook Excel-family tools can
+    # open"), and sees the new tables where we put them.
     try:
-        import openpyxl
-        from openpyxl.worksheet.table import Table as _XlTable
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # A file handle, not the path: openpyxl refuses a name that does
-            # not end in .xlsx, and the candidate output is a .tmp file.
-            if _sheet_xml_bytes(path) <= _FULL_VERIFY_MAX_SHEET_XML:
-                with open(path, "rb") as fh:
-                    wb = openpyxl.load_workbook(fh)
-                try:
-                    for te in edits.tables:
-                        ws = wb[te.sheet.name]
-                        tbl = ws.tables.get(te.name)
-                        if tbl is None or tbl.ref != te.block.ref:
-                            problems.append(f"openpyxl does not see {te.name} at {te.block.ref}")
-                        else:
-                            names = [c.name for c in tbl.tableColumns]
-                            if names != te.columns:
-                                problems.append(f"openpyxl reads different column names for {te.name}")
-                    if edits.title is not None and (wb.properties.title or "") != edits.title:
-                        problems.append("openpyxl reads a different title")
-                finally:
-                    wb.close()
-            else:
-                with open(path, "rb") as fh:
-                    wb = openpyxl.load_workbook(fh, read_only=True)
-                    try:
-                        _ = wb.sheetnames
-                    finally:
-                        wb.close()
-                with zipfile.ZipFile(str(path)) as zf:
-                    for te in edits.tables:
-                        _XlTable.from_tree(etree.fromstring(zf.read(te.part)))
+        wb = _openpyxl_load(path)
     except Exception as exc:
-        problems.append(f"openpyxl could not reopen the workbook: {exc}")
+        # openpyxl is stricter than Excel: some producers write files Excel
+        # opens and openpyxl refuses (a font "family" above 14 is enough).
+        # When it refuses the customer's OWN file too, our edits are not what
+        # it objects to, and failing here would turn every fix on that
+        # workbook into a 422. The edits were already read back above by our
+        # scanner; the new table parts are still checked by openpyxl's own
+        # table model on their own.
+        if source is not None and not _openpyxl_opens(source):
+            logger.info("openpyxl cannot read the source workbook either (%s); verified with our own reader", exc)
+            return _table_parts_problems(path, edits)
+        return [f"openpyxl could not reopen the workbook: {exc}"]
+    try:
+        if getattr(wb, "read_only", False):
+            problems.extend(_table_parts_problems(path, edits))
+        else:
+            for te in edits.tables:
+                ws = wb[te.sheet.name]
+                tbl = ws.tables.get(te.name)
+                if tbl is None or tbl.ref != te.block.ref:
+                    problems.append(f"openpyxl does not see {te.name} at {te.block.ref}")
+                elif [c.name for c in tbl.tableColumns] != te.columns:
+                    problems.append(f"openpyxl reads different column names for {te.name}")
+            if edits.title is not None and (wb.properties.title or "") != edits.title:
+                problems.append("openpyxl reads a different title")
+    except Exception as exc:
+        problems.append(f"openpyxl could not read the workbook back: {exc}")
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
     return problems
+
+
+def _openpyxl_opens(path: Path) -> bool:
+    try:
+        _openpyxl_load(path).close()
+        return True
+    except Exception:
+        return False
 
 
 __all__ = ["write_remediated_xlsx"]
