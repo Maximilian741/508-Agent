@@ -219,7 +219,16 @@ def main() -> int:  # noqa: PLR0915
     for a in applied:
         by_action.setdefault(a.get("action"), []).append(a.get("target_id"))
     check("remediate: title written", by_action.get("SET_DOCUMENT_TITLE") == ["doc-1"], str(applied))
-    check("remediate: chart alt written", "xlsx-s1-chart1" in (by_action.get("GENERATE_ALT_TEXT") or []), str(applied))
+    # The chart's alt comes only from its own title. Whether the offline
+    # provider hands that title back cleanly or glued to our node id
+    # ("Image xlsx-s1-chart1 — ...") is the provider's business; the writer's
+    # job is that the id never reaches the file, and that what lands is the
+    # chart's own words.
+    chart_written = "xlsx-s1-chart1" in (by_action.get("GENERATE_ALT_TEXT") or [])
+    chart_refused = any(s.get("target_id") == "xlsx-s1-chart1" and "alt_text_refused" in s.get("reason", "")
+                        for s in (body.get("writer") or {}).get("skipped") or [])
+    check("remediate: chart alt is written from its own title, or refused with a reason",
+          chart_written != chart_refused, str(applied))
     check("remediate: caption-less picture NOT given a placeholder", "xlsx-s1-img2" not in (by_action.get("GENERATE_ALT_TEXT") or []))
     check("remediate: decorative alt removed", by_action.get("REMOVE_DECORATIVE_ALT_TEXT") == ["xlsx-s1-img3"], str(applied))
     check("remediate: clear range became an Excel table", by_action.get("ADD_TABLE_HEADERS") == ["xlsx-s1-t1"], str(applied))
@@ -254,6 +263,11 @@ def main() -> int:  # noqa: PLR0915
     check("alt the author wrote is preserved", f'descr="{GOOD_ALT}"' in drawing)
     check("the text box survives", "Prepared by the finance team" in drawing and drawing.count("<xdr:sp ") == zin.read("xl/drawings/drawing1.xml").decode().count("<xdr:sp "))
     check("the decorative picture no longer has alt", 'descr="Blue swirl"' not in drawing)
+    chart_drawing = zout.read("xl/drawings/drawing1.xml").decode("utf-8")
+    check("no internal node id ever reaches the workbook", "xlsx-s1-" not in chart_drawing)
+    if chart_written:
+        check("the chart's alt is its own title", 'descr="Column chart: Quarterly sales by region (Q1, Q2)"' in chart_drawing,
+              chart_drawing[chart_drawing.find("Chart"):][:300])
     touched = {"xl/drawings/drawing1.xml", "docProps/core.xml", "[Content_Types].xml", "xl/worksheets/sheet1.xml",
                "xl/worksheets/_rels/sheet1.xml.rels"}
     same = [n for n in zin.namelist() if n not in touched and zin.read(n) == zout.read(n)]
@@ -264,8 +278,12 @@ def main() -> int:  # noqa: PLR0915
 
     after = analyze("regional-remediated.xlsx", out)
     after_found = {(v["ruleId"], v["nodeId"]) for v in after["violations"]}
-    for gone in (("TABLE_MISSING_HEADERS", "xlsx-s1-t1"), ("MISSING_ALT_TEXT", "xlsx-s1-chart1"),
-                 ("DECORATIVE_IMAGE_WITH_ALT", "xlsx-s1-img3")):
+    cleared = [("TABLE_MISSING_HEADERS", "xlsx-s1-t1"), ("DECORATIVE_IMAGE_WITH_ALT", "xlsx-s1-img3")]
+    if chart_written:
+        cleared.append(("MISSING_ALT_TEXT", "xlsx-s1-chart1"))
+    else:
+        check("re-analysis: a refused chart alt keeps its finding", ("MISSING_ALT_TEXT", "xlsx-s1-chart1") in after_found)
+    for gone in cleared:
         check(f"re-analysis: {gone[0]} cleared", gone not in after_found)
     check("re-analysis: title finding cleared", not any(f[0] == "DOCUMENT_TITLE_MISSING" for f in after_found))
     check("re-analysis: nothing NEW after fix-everything", after_found <= found, str(sorted(after_found - found)))
@@ -315,6 +333,40 @@ def main() -> int:  # noqa: PLR0915
     wr = write_remediated_xlsx(src_path, res.tree, tmp / "fake.xlsx")
     check("writer: a made-up header row never becomes an Excel table",
           not wr["applied"] and any(s.get("reason", "").startswith("no_clear_header_row") for s in wr["skipped"]), str(wr))
+
+    def chart_node(tree):
+        from app.models.accessibility import ImageNode
+
+        return next(n for n in iter_reading_order(tree.root) if isinstance(n, ImageNode) and n.id == "xlsx-s1-chart1")
+
+    res = parse_to_tree(str(src_path))
+    cprops = chart_node(res.tree).metadata.properties
+    check("parser: the chart's caption is its own title, marked as authored",
+          cprops.get("caption") == "Column chart: Quarterly sales by region (Q1, Q2)" and cprops.get("caption_source") == "title",
+          f"{cprops.get('caption')!r} {cprops.get('caption_source')!r}")
+    chart_node(res.tree).alt_text = "Image xlsx-s1-chart1 — Column chart: Quarterly sales by region (Q1, Q2)"
+    wr = write_remediated_xlsx(src_path, res.tree, tmp / "idalt.xlsx")
+    check("writer: alt text carrying our node id is refused, not written",
+          not wr["applied"] and any(s.get("target_id") == "xlsx-s1-chart1" and "internal id" in s.get("reason", "")
+                                    for s in wr["skipped"]), str(wr))
+    with zipfile.ZipFile(tmp / "idalt.xlsx") as z:
+        check("writer: ...and the file carries no trace of it", b"xlsx-s1-chart1" not in z.read("xl/drawings/drawing1.xml"))
+
+    res = parse_to_tree(str(src_path))
+    chart_node(res.tree).alt_text = "Column chart: Quarterly sales by region (Q1, Q2)"
+    wr = write_remediated_xlsx(src_path, res.tree, tmp / "cleanalt.xlsx")
+    with zipfile.ZipFile(tmp / "cleanalt.xlsx") as z:
+        check("writer: the chart's own title lands as its alt text",
+              [a["action"] for a in wr["applied"]] == ["GENERATE_ALT_TEXT"]
+              and b'descr="Column chart: Quarterly sales by region (Q1, Q2)"' in z.read("xl/drawings/drawing1.xml"), str(wr))
+
+    res = parse_to_tree(str(src_path))
+    res.tree.root.metadata.properties["title"] = "Regional sales"
+    chart_node(res.tree).alt_text = "Sales\x01chart"
+    wr = write_remediated_xlsx(src_path, res.tree, tmp / "ctrl.xlsx")
+    check("writer: an alt text a workbook cannot store is refused on its own; the title still lands",
+          [a["action"] for a in wr["applied"]] == ["SET_DOCUMENT_TITLE"]
+          and any("cannot store" in s.get("reason", "") for s in wr["skipped"]), str(wr))
 
     res = parse_to_tree(str(src_path))
     res.tree.root.metadata.properties["title"] = "Regional sales"

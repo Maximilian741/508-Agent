@@ -351,6 +351,7 @@ class DrawingObject:
     media_part: Optional[str] = None
     chart_part: Optional[str] = None
     caption: Optional[str] = None
+    caption_source: Optional[str] = None
 
 
 @dataclass
@@ -687,17 +688,31 @@ def _cached_str(el: Optional[etree._Element]) -> str:
     return " ".join(vals).strip()
 
 
+# Where a picture/chart caption came from, in the vocabulary the alt-text
+# rules use: "title" is text the author wrote FOR this object (the chart's own
+# title, a picture's Title field) and may become its alt text; "chart_series"
+# (only the series names, no title) is grounded but says little about what
+# the chart shows, so it is offered as context and not as authored alt text.
+CAPTION_FROM_TITLE = "title"
+CAPTION_FROM_SERIES = "chart_series"
+
+
 def describe_chart(pkg: Package, part: str) -> Optional[str]:
-    """A short, grounded description of a chart from its OWN parts: its type,
-    its title, and its (non-default) series names. None when the chart names
-    nothing — "Column chart" alone describes no chart in particular."""
+    found = chart_caption(pkg, part)
+    return found[0] if found else None
+
+
+def chart_caption(pkg: Package, part: str) -> Optional[Tuple[str, str]]:
+    """``(description, caption_source)`` for a chart, from its OWN parts: its
+    type, its title, and its (non-default) series names. None when the chart
+    names nothing — "Column chart" alone describes no chart in particular."""
     try:
         root = parse_xml(pkg.read(part))
     except Exception:
         return None
     if root.tag == _q(NS_CX, "chartSpace"):
         title = _rich_text(root.find(f".//{_q(NS_CX, 'title')}"))
-        return f"Chart: {title}" if title else None
+        return (f"Chart: {title}", CAPTION_FROM_TITLE) if title else None
     chart = root.find(_q(NS_C, "chart"))
     if chart is None:
         return None
@@ -729,9 +744,9 @@ def describe_chart(pkg: Package, part: str) -> Optional[str]:
         desc = f"{kind}: {title}"
         if len(series) >= 2:
             desc += " (" + ", ".join(series[:3]) + (", …" if len(series) > 3 else "") + ")"
-        return desc
+        return desc, CAPTION_FROM_TITLE
     if series:
-        return f"{kind} of " + ", ".join(series[:3]) + (", …" if len(series) > 3 else "")
+        return f"{kind} of " + ", ".join(series[:3]) + (", …" if len(series) > 3 else ""), CAPTION_FROM_SERIES
     return None
 
 
@@ -837,12 +852,14 @@ def _read_drawing(pkg: Package, part: str) -> List[DrawingObject]:
             chart_part=chart_part,
         )
         if kind == "chart" and chart_part and pkg.has(chart_part):
-            obj_rec.caption = describe_chart(pkg, chart_part)
+            found = chart_caption(pkg, chart_part)
+            if found:
+                obj_rec.caption, obj_rec.caption_source = found
         elif kind == "picture" and title:
             from app.analyzers.image_analyzer import is_nondescriptive_alt
 
             if not is_nondescriptive_alt(title):
-                obj_rec.caption = title
+                obj_rec.caption, obj_rec.caption_source = title, CAPTION_FROM_TITLE
         out.append(obj_rec)
     return out
 
@@ -1361,6 +1378,7 @@ def _image_node(sheet: SheetScan, obj: DrawingObject, number: int, source: str) 
         # base64 into the tree.
         "media_part": obj.media_part,
         "caption": obj.caption,
+        "caption_source": obj.caption_source,
     }
     if _WANT_IMAGE_BYTES and obj.kind == "picture" and obj.media_part:
         ext = posixpath.splitext(obj.media_part)[1].lower()

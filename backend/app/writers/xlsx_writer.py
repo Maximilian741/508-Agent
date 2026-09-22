@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
+import re
 import shutil
 import warnings
 import zipfile
@@ -216,12 +217,20 @@ def _collect_edits(tree: AccessibilityTree, reference: AccessibilityTree, scan: 
     new_title = (root.metadata.properties or {}).get("title")
     old_title = (ref_root.metadata.properties or {}).get("title")
     if isinstance(new_title, str) and new_title.strip() and new_title.strip() != (old_title or "").strip():
-        edits.title = new_title.strip()
+        if _XML_UNSAFE_RE.search(new_title):
+            skipped.append({"target_id": root.id, "action": "SET_DOCUMENT_TITLE",
+                            "reason": "title_refused: it contains characters a workbook cannot store"})
+        else:
+            edits.title = new_title.strip()
 
     new_lang = (root.metadata.language or "").strip()
     old_lang = (ref_root.metadata.language or "").strip()
     if new_lang and new_lang != old_lang:
-        edits.language = new_lang
+        if _XML_UNSAFE_RE.search(new_lang):
+            skipped.append({"target_id": root.id, "action": "SET_DOCUMENT_LANGUAGE",
+                            "reason": "language_refused: it contains characters a workbook cannot store"})
+        else:
+            edits.language = new_lang
 
     ref_nodes = {n.id: n for n in iter_reading_order(ref_root)}
     sheets = {s.index: s for s in scan.sheets}
@@ -233,6 +242,33 @@ def _collect_edits(tree: AccessibilityTree, reference: AccessibilityTree, scan: 
         elif isinstance(node, TableNode) and isinstance(ref, TableNode):
             _collect_table(node, ref, sheets, edits, skipped)
     return edits
+
+
+# "Image xlsx-s1-chart1 — ..." / "Chart xlsx-s2-img1 - ...": a label built
+# from our own node id, the shape an offline suggestion takes when it only
+# glued an id in front of a caption.
+_ID_LABEL_ALT_RE = re.compile(
+    r"^(?:image|picture|figure|graphic|photo|chart)\s+[a-z]+(?:-[a-z0-9]+)+\s+[—–-]\s+",
+    re.IGNORECASE,
+)
+# Characters XML 1.0 cannot carry in an attribute or element: writing one
+# would make lxml refuse the whole part and fail every other fix with it.
+_XML_UNSAFE_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def _alt_problem(text: str, node_id: str) -> Optional[str]:
+    """Why ``text`` must not be written as this object's alt text, or None."""
+    from app.analyzers.image_analyzer import is_nondescriptive_alt
+
+    if _XML_UNSAFE_RE.search(text):
+        return "the suggested description contains characters a workbook cannot store"
+    if node_id and node_id.lower() in text.lower():
+        return "the suggested description contains our internal id for the object instead of words about it"
+    if _ID_LABEL_ALT_RE.match(text):
+        return "the suggested description is a label, not a description"
+    if is_nondescriptive_alt(text):
+        return "the suggested description is a file name or placeholder"
+    return None
 
 
 def _collect_alt(node: ImageNode, ref: ImageNode, edits: _Edits, skipped: List[Dict[str, Any]]) -> None:
@@ -248,6 +284,13 @@ def _collect_alt(node: ImageNode, ref: ImageNode, edits: _Edits, skipped: List[D
     kind = "chart" if props.get("object_kind") == "chart" else "picture"
     what = f"{kind} at {props.get('anchor_cell') or 'its position'} on sheet {props.get('sheet_name')!r}"
     if new:
+        problem = _alt_problem(new, node.id)
+        if problem:
+            # The last gate before the customer's file: whatever produced the
+            # text, this is not a description a person would accept, so the
+            # object keeps its finding and nothing is written or charged.
+            skipped.append({"target_id": node.id, "action": "GENERATE_ALT_TEXT", "reason": f"alt_text_refused: {problem}"})
+            return
         edits.alts.append(
             _AltEdit(node.id, "GENERATE_ALT_TEXT", drawing, int(props["object_index"]), str(props.get("cnvpr_id") or ""), new, what)
         )
