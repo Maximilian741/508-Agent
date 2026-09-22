@@ -59,6 +59,7 @@ except Exception:  # pragma: no cover - never let the AI module break parsing
 class DOCXParser:
     def parse(self, file_path: str) -> Dict[str, object]:
         doc = Document(file_path)
+        ensure_styles_part(doc)
         core_title, core_language = core_title_and_language(doc)
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
@@ -205,6 +206,7 @@ class DOCXParser:
 
         path = Path(file_path)
         reg = register or _no_register
+        ensure_styles_part(doc)  # before ANY style read — see its docstring
         theme_colors = _docx_theme_colors(file_path)
         styles = DocxStyleResolver(doc)
         title, language = core_title_and_language(doc)
@@ -2134,6 +2136,48 @@ def _image_context_for_paragraph(paragraph, own_text: str) -> Optional[Tuple[str
             hops += 1
         prev = prev.getprevious()
     return None
+
+
+def ensure_styles_part(doc) -> None:
+    """Give a DOCX that has NO ``word/styles.xml`` an EMPTY one, before
+    anything reads a style.
+
+    python-docx creates a missing styles part the first time anything touches
+    ``doc.styles`` or ``paragraph.style`` — its template's, with document
+    defaults (Calibri 11pt, spacing) and styles of its own. The writer runs
+    the parser's walk on the copy it saves, so every remediation of such a
+    file — even one approving nothing — silently restyled the whole document
+    (Word renders a file without styles with its built-in defaults, which
+    an empty styles part leaves exactly as they were). The parser reads the
+    same empty part, so what it measures is what Word shows.
+    """
+    from docx.opc.constants import CONTENT_TYPE as _CT
+    from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+    from docx.opc.packuri import PackURI
+    from docx.oxml import parse_xml
+    from docx.parts.styles import StylesPart
+
+    try:
+        doc.part.part_related_by(_RT.STYLES)
+        return
+    except KeyError:
+        pass
+    except Exception:  # pragma: no cover - defensive: leave python-docx to it
+        return
+    package = doc.part.package
+    taken = {str(p.partname) for p in package.iter_parts()}
+    name = "/word/styles.xml"
+    n = 1
+    while name in taken:
+        n += 1
+        name = f"/word/styles{n}.xml"
+    part = StylesPart(
+        PackURI(name),
+        _CT.WML_STYLES,
+        parse_xml('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'),
+        package,
+    )
+    doc.part.relate_to(part, _RT.STYLES)
 
 
 def has_core_properties(doc) -> bool:

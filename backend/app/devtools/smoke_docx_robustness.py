@@ -34,6 +34,12 @@ tracked changes, nested tables, text boxes, 500 pages) showed going wrong:
   * findings carry the PAGE Word last laid them out on (lastRenderedPageBreak
     marks that agree with app.xml's page count) — and no page at all when
     the file does not say
+  * legacy VML pictures (compatibility-mode documents) are found, flagged and
+    described on v:shape@alt; watermarks, OLE previews and mc:Fallback
+    copies are not pictures to describe
+  * no word/styles.xml: remediation does not add python-docx's template
+    styles (a silent restyle of the whole document), the template's en-US is
+    not read as the document's language, and a promotion still lands
 
 Usage:
     python -m app.devtools.smoke_docx_robustness
@@ -56,7 +62,7 @@ os.environ["SEMANTIC_PROVIDER"] = "heuristic"
 from docx import Document  # noqa: E402
 from docx.oxml import OxmlElement, parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls, qn  # noqa: E402
-from docx.shared import Inches  # noqa: E402
+from docx.shared import Inches, Pt  # noqa: E402
 from lxml import etree  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -796,6 +802,58 @@ def main() -> int:
     run_analyzers(res2.tree)
     check("vml: re-parse - no MISSING_ALT_TEXT left, file re-opens",
           "MISSING_ALT_TEXT" not in _codes(res2.tree) and Document(str(out)) is not None, str(_codes(res2.tree)))
+
+    # ===== 14. No word/styles.xml: nothing restyled, nothing invented =========
+    # python-docx CREATES a missing styles part (its template's: Calibri 11pt
+    # document defaults, en-US language) the first time a style is read. The
+    # writer's walk read styles on the copy it saves, so any remediation of
+    # such a file restyled the whole document unreported, and the parser read
+    # the template's en-US as the document's language.
+    d = Document()
+    d.core_properties.title = "No styles"
+    fp = d.add_paragraph()
+    fr = fp.add_run("Program Summary")
+    fr.bold = True
+    fr.font.size = Pt(20)
+    d.add_paragraph("Body text that is long enough to be read as ordinary prose here.")
+    full = tmp / "with_styles.docx"
+    d.save(str(full))
+    src = tmp / "no_styles.docx"
+    with zipfile.ZipFile(full) as zin, zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in zin.namelist():
+            data = zin.read(n)
+            if n in ("word/styles.xml", "word/stylesWithEffects.xml"):
+                continue
+            if n == "word/_rels/document.xml.rels":
+                rroot = etree.fromstring(data)
+                for rel in list(rroot):
+                    if (rel.get("Target") or "").startswith("styles"):
+                        rroot.remove(rel)
+                data = etree.tostring(rroot, xml_declaration=True, encoding="UTF-8", standalone=True)
+            zout.writestr(n, data)
+    res = parse_to_tree(str(src))
+    run_analyzers(res.tree)
+    check("no styles part: the template's en-US is not read as the document's language",
+          not res.tree.root.metadata.language and "DOCUMENT_LANGUAGE_MISSING" in _codes(res.tree),
+          str((res.tree.root.metadata.language, _codes(res.tree))))
+    out = tmp / "no_styles_untouched.docx"
+    wr = write_remediated_docx(src, res.tree, out)
+    with zipfile.ZipFile(out) as z:
+        styles_xml = b"".join(z.read(n) for n in z.namelist() if n.startswith("word/styles"))
+    check("no styles part, nothing approved: nothing applied and no template styles/defaults added",
+          wr["applied"] == [] and b"docDefaults" not in styles_xml and b"<w:style " not in styles_xml,
+          str((wr["applied"], styles_xml[:200])))
+    res = parse_to_tree(str(src))
+    run_analyzers(res.tree)
+    plans = [p for p in plan_remediations(res.tree, POL) if p.flag.code.value == "TEXT_STYLED_AS_HEADING"]
+    execs = execute_plans(res.tree, plans)
+    out = tmp / "no_styles_promoted.docx"
+    wr = write_remediated_docx(src, res.tree, out)
+    res2 = parse_to_tree(str(out))
+    hs = [(n.content.text, n.level) for n in _nodes(res2.tree, HeadingNode)]
+    check("no styles part: a promotion still lands (Heading 1 created in the empty part), file re-opens",
+          hs == [("Program Summary", 1)] and _count_persisted_fixes(execs, wr["applied"], "docx") == 1
+          and Document(str(out)) is not None, str((hs, wr)))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
