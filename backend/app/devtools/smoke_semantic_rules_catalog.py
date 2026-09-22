@@ -254,6 +254,24 @@ HEADER_ROWS = [
     (("Revenue grew in every region.", "Yes"), [("x", "y")], False),
     (("Region", "Q1"), [], False),
     (("$1,200", "$900"), [("$800", "$700")], False),
+    # Promoted only on positive evidence: column names over typed values, or a
+    # row made of words people name columns with.
+    (("Name", "Email", "Phone"), [("Ada", "ada@example.com", "555-0100")], True),
+    (("Term", "Definition"), [("Alt text", "A short description of a picture")], True),
+    (("Item", "Amount"), [("Travel", "12,500"), ("Supplies", "3,100")], True),
+    (("Permit", "Fee", "Turnaround"), [("Building", "$240", "10 days"), ("Event", "$60", "3 days")], True),
+    (("Indicator", "2022", "2024", "Change"), [("Uninsured rate", "9.1%", "7.4%", "-1.7")], True),
+    (("Date received", "Applicant name", "Status"), [("Sept 3", "J. Ortiz", "Open")], True),
+    (("Monday", "Tuesday", "Wednesday"), [("Intake", "Training", "Site visits")], True),
+    (("Programme", "Budget (USD)"), [("Outreach", "120,000")], True),
+    # A first row of other words is as likely to be the first row of DATA.
+    (("Alice", "Engineering", "Denver"), [("Bob", "Sales", "Austin")], False),
+    (("Monday", "Staff meeting", "Room 4"), [("Tuesday", "Training", "Room 2")], False),
+    (("Accessibility", "Making content usable by everyone"), [("Alt text", "A short description")], False),
+    # A label/value form whose first "row" is one filled-in field.
+    (("Name", "Jane Doe"), [("Phone", "555-123-4567"), ("Email", "jane@example.com")], False),
+    (("Salaries", "TBD"), [("Travel", "12,500")], False),
+    (("Contact", "jane@example.com"), [("Office", "Room 4")], False),
 ]
 
 

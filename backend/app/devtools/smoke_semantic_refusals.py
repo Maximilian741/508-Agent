@@ -103,6 +103,9 @@ MIXED_HTML = (
     "<tr><td>2024</td><td>455</td><td>11%</td></tr><tr><td>2025</td><td>470</td><td>9%</td></tr></table>"
     '<table id="t-good"><tr><td>Región</td><td>Q1</td><td>Q2</td></tr>'
     "<tr><td>Norte</td><td>10</td><td>20</td></tr><tr><td>Sur</td><td>8</td><td>9</td></tr></table>"
+    # A roster: every row is words, so its first row is as likely to be data.
+    '<table id="t-words"><tr><td>Alicia</td><td>Ingeniería</td><td>Denver</td></tr>'
+    "<tr><td>Bruno</td><td>Ventas</td><td>Austin</td></tr><tr><td>Carla</td><td>Legal</td><td>Boston</td></tr></table>"
     "</body></html>"
 )
 
@@ -348,7 +351,13 @@ def main() -> int:  # noqa: PLR0915
           '<a href="https://example.com/">read more</a>' in out)
     data_tbl = re.search(r'<table id="t-data">.*?</table>', out, re.S).group(0)
     good_tbl = re.search(r'<table id="t-good">.*?</table>', out, re.S).group(0)
+    words_tbl = re.search(r'<table id="t-words">.*?</table>', out, re.S).group(0)
     check("html: numeric first row NOT promoted to headers", "<th" not in data_tbl, data_tbl[:120])
+    check("html: a roster's first row of names NOT promoted to headers", "<th" not in words_tbl, words_tbl[:120])
+    header_refusals = by_action(body, "ADD_TABLE_HEADERS", "skipped")
+    check("html: both the numeric table and the roster were REFUSED (not merely unflagged)",
+          len(header_refusals) == 2 and any("every row of this table is words" in (e["notes"] or "") for e in header_refusals),
+          str([e["notes"] for e in header_refusals]))
     check("html: real header row promoted", '<th scope="col">Región</th>' in good_tbl, good_tbl[:160])
     check("html: no placeholder 'Column 1' header row anywhere", "Column 1" not in out)
     check("html: no caption synthesized from headers or values", "<caption" not in out)
