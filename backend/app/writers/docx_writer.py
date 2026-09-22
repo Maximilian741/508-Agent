@@ -1115,7 +1115,12 @@ def _apply_table_cell(
         th.attrib.pop(qn("w:val"), None)  # explicitly switched off -> on
         summary = "trPr/tblHeader switched on"
     else:
-        summary = "trPr/tblHeader already present"
+        # The row is already a header row — set by an earlier cell of this
+        # same row in this run, or by the source. Nothing changed, so nothing
+        # is reported: one entry per promoted ROW, not one per cell (a
+        # 3-column promotion used to read as "3 changes" in the applied list
+        # the UI counts).
+        return
     applied.append({"kind": "table_header_row", "target_id": cell.id, "summary": summary})
 
 

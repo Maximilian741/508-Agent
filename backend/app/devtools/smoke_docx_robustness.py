@@ -385,6 +385,8 @@ def main() -> int:
           str([etree.QName(c).localname for c in num_root][-4:]))
     check("schema: the fixes were applied", any(a.get("kind") == "list_conversion" for a in wr["applied"])
           and any(a.get("kind") == "table_header_row" for a in wr["applied"]), str(wr["applied"]))
+    check("applied list: a 3-column header promotion is ONE entry (per row, not per cell)",
+          len([a for a in wr["applied"] if a.get("kind") == "table_header_row"]) == 1, str(wr["applied"]))
 
     # ===== 6. Nothing unapproved is rewritten ================================
     d = Document()
