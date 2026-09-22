@@ -58,9 +58,12 @@ const BASE_CSS = [
   // (Screen keeps --ui-focus in sync). WCAG 2.4.7; never remove.
   ":focus-visible{outline:2px solid var(--ui-focus,#5EEAD4)!important;outline-offset:2px!important}",
   ":focus:not(:focus-visible){outline:none!important}",
-  // Phone widths: the nav links become one horizontally scrolling row under
-  // the brand + account row (see AppNav, data-nav-links).
-  "@media (max-width:760px){[data-nav-links]{order:3;flex-basis:100%!important;flex-wrap:nowrap!important;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}[data-nav-links]::-webkit-scrollbar{display:none}[data-nav-links]>*{flex-shrink:0}}",
+  // Below the content width the nav is two clean rows: brand + account on
+  // top, the links as one row underneath that scrolls sideways on a phone
+  // (see AppNav, data-nav-links). Without this, a laptop-width window wrapped
+  // the account button onto an orphan line of its own. The 4px padding keeps
+  // the focus ring (2px + 2px offset) from being clipped by the scroller.
+  "@media (max-width:1180px){[data-nav-links]{order:3;flex-basis:100%!important;flex-wrap:nowrap!important;overflow-x:auto;scrollbar-width:none;padding:4px}[data-nav-links]::-webkit-scrollbar{display:none}[data-nav-links]>*{flex-shrink:0}}",
   "@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:0.01ms!important;animation-iteration-count:1!important;transition-duration:0.01ms!important;scroll-behavior:auto!important}}",
 ].join("\n");
 

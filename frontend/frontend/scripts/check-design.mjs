@@ -59,11 +59,22 @@ for (const file of scanDirs.flatMap((d) => walk(d))) {
   if (/\bPixelLogo\b/.test(text) && !/src\/ui\/components\/(PixelLogo|AppNav)\.tsx$/.test(rel) && !rel.endsWith("src/ui/theme.ts")) {
     violations.push(`${rel}: PixelLogo used outside the nav lockup (the pixel mark is the logo only)`);
   }
+  // The shader hero is certified (check-contrast) for text, the eyebrow and
+  // buttons over it, and kept special: the two front doors only.
+  if (/^app\//.test(rel) && !/^app\/(landing|index)\.tsx$/.test(rel)) {
+    lines.forEach((line, i) => {
+      if (/^\s*shader(\s*$|=|\s*\/?>)/.test(line) || /<ShaderBackground\b/.test(line)) {
+        violations.push(`${rel}:${i + 1}: shader background outside landing/home`);
+      }
+    });
+  }
 }
 
 // The tour must not open itself.
 const tour = readFileSync(join(root, "src", "ui", "components", "OnboardingTour.tsx"), "utf8");
-if (/if\s*\(\s*!\s*isCompleted\(\)\s*\)\s*setOpen\(true\)/.test(tour)) {
+// Nothing in the tour may READ the "completed" flag: the only reason to read
+// it is to decide to open unasked. It opens via openHowItWorks() only.
+if (/localStorage\.getItem|isCompleted\s*\(/.test(tour)) {
   violations.push("src/ui/components/OnboardingTour.tsx: the tour auto-opens on first visit again");
 }
 
@@ -71,4 +82,4 @@ if (violations.length) {
   console.error(`[design] ${violations.length} violation(s):\n` + violations.join("\n"));
   process.exit(1);
 }
-console.log("[design] no pixel art outside the logo, no external/pixel fonts, one brand lockup, no auto-opening tour — ok");
+console.log("[design] no pixel art outside the logo, no external/pixel fonts, one brand lockup, shader only on landing/home, no auto-opening tour — ok");

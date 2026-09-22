@@ -44,7 +44,6 @@ export default function LinkTextChecker() {
   return (
     <Screen scroll title="Link text checker">
       <Hero
-        shader="ember"
         eyebrow="LINK TEXT"
         title="Link text checker"
         subtitle="Screen-reader users often pull every link onto one list to scan a page. “Click here” and bare URLs are useless there. Paste a link's text to see if it's descriptive (WCAG 2.4.4) — and get a better label suggested from its destination."

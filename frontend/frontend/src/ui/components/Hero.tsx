@@ -26,10 +26,10 @@ export interface HeroProps {
   rightSlot?: ReactNode;
   children?: ReactNode;
   /**
-   * Render the reactive shader behind the hero. `true` (or any non-empty
-   * string, for older call sites that passed a variant name) turns it on.
+   * Render the reactive shader behind the hero. Reserved for the two front
+   * doors (landing + home) so it stays special; every other page gets glass.
    */
-  shader?: boolean | string;
+  shader?: boolean;
   /** 0..1 — shader liveliness; raise it while work is in progress. */
   shaderIntensity?: number;
   /** Accepted for back-compat; ignored. */

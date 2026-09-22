@@ -132,6 +132,9 @@ export function ShaderBackground({ intensity = 0, interactive = true, scrim = tr
   const c = theme.colors;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [live, setLive] = useState(false); // canvas has drawn at least one frame
+  // Follows the OS setting live: switching reduced motion on mid-visit stops
+  // the loop at once (the effect below tears down and does not restart).
+  const [reduced, setReduced] = useState(prefersReducedMotion);
   const intensityRef = useRef(intensity);
   const colorsRef = useRef(c);
   const interactiveRef = useRef(interactive);
@@ -140,8 +143,29 @@ export function ShaderBackground({ intensity = 0, interactive = true, scrim = tr
   interactiveRef.current = interactive;
 
   useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined" || !window.matchMedia) return;
+    let mq: MediaQueryList;
+    try {
+      mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    } catch {
+      return;
+    }
+    const onChange = () => setReduced(mq.matches);
+    onChange();
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if ((mq as any).addListener) (mq as any).addListener(onChange);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", onChange);
+      else if ((mq as any).removeListener) (mq as any).removeListener(onChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (Platform.OS !== "web" || typeof window === "undefined") return;
-    if (prefersReducedMotion()) return;
+    if (reduced) {
+      setLive(false); // the static CSS gradient underneath takes over
+      return;
+    }
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -315,6 +339,7 @@ export function ShaderBackground({ intensity = 0, interactive = true, scrim = tr
     schedule();
 
     return () => {
+      lost = true; // stops any callback already in flight from rescheduling
       if (raf !== 0) cancelAnimationFrame(raf);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pointermove", onPointer);
@@ -327,7 +352,7 @@ export function ShaderBackground({ intensity = 0, interactive = true, scrim = tr
       g.deleteShader(vs);
       g.deleteShader(fs);
     };
-  }, []);
+  }, [reduced]);
 
   if (Platform.OS !== "web") return null;
 
