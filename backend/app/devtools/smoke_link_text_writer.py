@@ -35,9 +35,9 @@ _HREF = "https://example.com/very/long/path"
 def main() -> int:
     failures = 0
 
-    def check(name: str, cond: bool) -> None:
+    def check(name: str, cond: bool, extra: str = "") -> None:
         nonlocal failures
-        print(("PASS" if cond else "FAIL"), "-", name)
+        print(("PASS" if cond else "FAIL"), "-", name, extra if not cond else "")
         if not cond:
             failures += 1
 
@@ -187,8 +187,10 @@ def main() -> int:
     # --- DOCX id-alignment torture: anchor-only link + heading link + mix -----
     # A text-less anchor used to desync the writer's paragraph index (it
     # skipped the paragraph; the parser minted docx-p). A hyperlink inside a
-    # Heading paragraph is never emitted by the parser (heading branch first)
-    # and must not be counted by the writer either.
+    # Heading paragraph is a real link a screen-reader user tabs to: it used
+    # to be skipped by the parser (heading branch first) — now it is emitted
+    # AND rewritten, in the same id order by parser and writer (the writer
+    # runs the parser's own walk), so nothing drifts.
     tp = tmp / "torture.docx"
     d6 = Document()
     p_anchor = d6.add_paragraph("Anchor paragraph keeps its docx-p id ")
@@ -219,8 +221,9 @@ def main() -> int:
     d6.save(str(tp))
     res, links = _links(tp)
     check(
-        "docx: torture doc emits exactly body+fld links (anchor + heading excluded)",
-        [l.content.text for l in links] == ["click here", "field link"],
+        "docx: torture doc emits heading+body+fld links (text-less anchor excluded)",
+        [l.content.text for l in links] == ["a link inside", "click here", "field link"],
+        str([l.content.text for l in links]),
     )
     for i, ln in enumerate(links):
         ln.content = NodeContent(kind=ContentKind.TEXT, text=f"FIXED-{i}")
@@ -228,7 +231,10 @@ def main() -> int:
     _, links2 = _links(to)
     check(
         "docx: torture rewrite lands on the right links (no drift)",
-        [l.content.text for l in links2] == ["FIXED-0", "FIXED-1"],
+        [(l.content.text, l.target) for l in links2]
+        == [("FIXED-0", "https://example.com/heading"), ("FIXED-1", "https://example.com/body"),
+            ("FIXED-2", "https://example.com/fld")],
+        str([(l.content.text, l.target) for l in links2]),
     )
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
