@@ -2608,6 +2608,9 @@ def _action_persists(action_code: str, source_format: str) -> bool:
 #     words, the writer adds no overlay and records ocr_no_recognizable_pages,
 #     and the output is the unreadable scan it started as. Only the writer's
 #     applied entry proves a text layer reached the bytes.
+#   - SET_SLIDE_TITLE (PPTX only): the executor picks the text; the writer can
+#     still refuse (an empty title box that draws the slide's design) or fail
+#     to place a title. Only its applied entry proves the slide got one.
 _WRITER_CONFIRMED_ACTIONS = {
     "FIX_CONTRAST",
     "GENERATE_TABLE_CAPTION",
@@ -2616,6 +2619,7 @@ _WRITER_CONFIRMED_ACTIONS = {
     # DOCX-only; the writer tags each heading promotion it placed (style
     # created if missing, applied, look kept) with action=PROMOTE_HEADING.
     "PROMOTE_HEADING",
+    "SET_SLIDE_TITLE",
 }
 
 # Formats whose writer appends to ``applied`` ONLY for an edit that is in the
@@ -2639,6 +2643,12 @@ _UNCONFIRMED_NOTES = {
         "OCR recognized no text on any page of this scan, so no text layer was "
         "added and the document is still image-only. This fix was not applied "
         "and you were not charged for it."
+    ),
+    "SET_SLIDE_TITLE": (
+        "We could not give this slide a title without changing how it looks, so "
+        "it was left as it was. Add the title in PowerPoint: type it into the "
+        "slide's title box (Home > Layout gives a slide one). This fix was not "
+        "applied and you were not charged for it."
     ),
 }
 

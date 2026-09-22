@@ -54,10 +54,14 @@ from app.models.accessibility import (
     iter_reading_order,
 )
 from app.parsers.html_parser import (
+    HtmlSource,
     _parse_document,
+    _svg_accessible_name,
+    encode_html_text,
     iter_autocomplete_candidates,
     iter_derivable_form_labels,
     iter_positive_tabindex,
+    parse_html_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,28 +91,82 @@ def write_remediated_html(
         logger.exception("html_writer copy failed: %s", exc)
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "copy_failed"}]}
 
+    # The tree the ANALYSIS parsed (no byte stand-ins), when it isn't ``doc``
+    # itself. "Did an executor change this value?" is only answerable against
+    # what the analysis read: the byte-preserving parse holds a stand-in where
+    # the analysis read U+FFFD (an invalid byte) or nothing (a NUL), so
+    # comparing against it saw a change in every title, link and alt holding
+    # one — and rewrote them (destroying the very byte preserve_bytes keeps)
+    # and reported fixes nobody approved.
+    seen_doc = None
     try:
         data = Path(source_path).read_bytes()
-        doc = _parse_document(data)
+        # preserve_bytes: a NUL or an invalid byte in the source goes back out
+        # as that same byte (see parse_html_source) — never dropped, never
+        # turned into U+FFFD.
+        doc, source_info = parse_html_source(data, preserve_bytes=True)
+        if source_info.escaped:
+            # The stand-ins are ordinary characters to lxml. In text they are
+            # harmless, but one INSIDE markup ("<im\0g>", a UTF-32 file) changes
+            # the tree — "<" followed by a stand-in is text, not a tag — and
+            # the analysis's locators (built without them) would then point
+            # at the wrong elements, or the page's markup would be written
+            # back escaped. Keep exact bytes only when the two parses agree
+            # element for element; otherwise write the tree the analysis saw.
+            plain_doc, plain_info = parse_html_source(data)
+            if _tag_sequence(plain_doc) != _tag_sequence(doc):
+                doc, source_info = plain_doc, plain_info
+            else:
+                seen_doc = plain_doc
     except Exception as exc:
         logger.exception("html_writer parse failed: %s", exc)
         # Signal a hard failure so the pipeline cleans up and does NOT charge.
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
+    if source_info.fallback or source_info.blank:
+        # lxml could not build a document from these bytes (or there were no
+        # bytes worth building) and the parser substituted an EMPTY one.
+        # Serialising that would replace the customer's file with a skeleton
+        # page; leave the copy untouched.
+        return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
+
+    path_index = _PathIndex(doc)
 
     def resolve(xpath: Optional[str]) -> Optional[Any]:
+        # Locators are getpath() output; walk them against a per-parent child
+        # index (O(depth) each). doc.xpath() re-scans a parent's children for
+        # every positional step — O(N) per lookup on a page with N siblings,
+        # so O(N^2) for a long table — and libxml2's evaluator fails outright
+        # ("unknown error") on a long path ending in a positional predicate
+        # (a cell ~1000 wrappers deep), which silently skipped the fix.
+        # Every lookup happens on the PRISTINE DOM (phase 1), so the index
+        # never goes stale.
         if not xpath:
             return None
+        el = path_index.resolve(xpath)
+        if el is not None:
+            return el
         try:
             found = doc.xpath(xpath)
         except Exception:
-            return None
+            found = []
         return found[0] if len(found) == 1 else None
+
+    # The same locators against the analysis's own tree (identical element for
+    # element, see above), for reading the values the analysis saw.
+    seen_index = _PathIndex(seen_doc) if seen_doc is not None else None
+
+    def seen(xpath: Optional[str], el: Any) -> Any:
+        if seen_index is None or el is None or not xpath:
+            return el
+        found = seen_index.resolve(xpath)
+        return found if found is not None else el
 
     root = tree.root
     props = root.metadata.properties or {}
 
     # ---- PHASE 1: resolve all locators on the PRISTINE DOM (before mutating) ----
     elements: Dict[str, Any] = {}
+    seen_elements: Dict[str, Any] = {}
     for node in iter_reading_order(root):
         if not isinstance(node, _LOCATABLE):
             continue
@@ -118,6 +176,7 @@ def write_remediated_html(
         xpath = nprops.get("__xpath")
         el = resolve(xpath)
         elements[node.id] = el
+        seen_elements[node.id] = seen(xpath, el)
         if el is None and xpath:
             logger.warning("html_writer: could not resolve %s for node %s", xpath, node.id)
             skipped.append({"target_id": node.id, "reason": "element_not_resolved"})
@@ -145,14 +204,23 @@ def write_remediated_html(
             list_member_els[node.id] = resolve(nprops.get("__xpath"))
 
     html_el = resolve(props.get("__html_xpath"))
+    seen_html = seen(props.get("__html_xpath"), html_el)
     if html_el is None:
-        html_el = doc
+        html_el = seen_html = doc
     title_el = resolve(props.get("__title_xpath"))
+    seen_title = seen(props.get("__title_xpath"), title_el)
+    path_index.release()  # every locator is resolved; nothing reads it again
+    if seen_index is not None:
+        seen_index.release()
 
     # ---- PHASE 2: mutate via the held references ----
+    # Each value is compared with what the ANALYSIS read (the parser strips
+    # them), so only a value an executor changed is written and reported —
+    # not a title/lang/alt that merely has surrounding spaces, or a byte the
+    # analysis could not decode.
     language = root.metadata.language
     if isinstance(language, str) and language.strip() and html_el is not None:
-        if (html_el.get("lang") or None) != language:
+        if ((seen_html.get("lang") or "").strip() or None) != language:
             html_el.set("lang", language)
             applied.append({"action": "SET_DOCUMENT_LANGUAGE", "target_id": root.id})
 
@@ -160,17 +228,19 @@ def write_remediated_html(
     if isinstance(title, str) and title.strip():
         if title_el is None:
             title_el = _ensure_title_element(doc)
-        if title_el is not None and (title_el.text or "") != title:
+            seen_title = None
+        current_title = (seen_title.text or "").strip() if seen_title is not None else ""
+        if title_el is not None and current_title != title:
             title_el.text = title
             applied.append({"action": "SET_DOCUMENT_TITLE", "target_id": root.id})
 
     for node in iter_reading_order(root):
         if isinstance(node, ImageNode):
-            _apply_image(node, elements.get(node.id), applied)
+            _apply_image(node, elements.get(node.id), seen_elements.get(node.id), applied)
         elif isinstance(node, HeadingNode):
             _apply_heading(node, elements.get(node.id), applied)
         elif isinstance(node, LinkNode):
-            _apply_link(node, elements.get(node.id), applied)
+            _apply_link(node, elements.get(node.id), seen_elements.get(node.id), applied)
         elif isinstance(node, TableNode):
             _apply_table(node, elements, applied)
         # TableRow/TableCell handled inside _apply_table.
@@ -231,7 +301,7 @@ def write_remediated_html(
         _apply_list_conversion(node, run_ids, nodes_by_id, list_member_els, applied, skipped)
 
     try:
-        out_bytes = _serialize(doc)
+        out_bytes = _serialize(doc, source_info)
     except Exception as exc:
         logger.exception("html_writer serialize failed: %s", exc)
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: serialize"}]}
@@ -267,6 +337,75 @@ def write_remediated_html(
     return {"applied": applied, "skipped": skipped}
 
 
+_PATH_STEP_RE = re.compile(r"^([^\[\]/]+)(?:\[(\d+)\])?$")
+
+
+def _tag_sequence(doc: Any) -> List[str]:
+    """Every element's tag in document order — the tree's shape."""
+    return [el.tag for el in list(doc.iter()) if isinstance(el.tag, str)]
+
+
+class _PathIndex:
+    """Resolve ``ElementTree.getpath()`` locators with per-parent child lists.
+
+    Each parent's element children are grouped by tag once, on first use, so
+    a step ``tag[n]`` is a list index. A step WITHOUT an index means the tag
+    was unique among its siblings when the path was made; if it is not unique
+    now, the locator is ambiguous and resolves to nothing (as ``doc.xpath``
+    returning several elements did).
+    """
+
+    def __init__(self, doc: Any) -> None:
+        self._root = doc.getroottree().getroot()
+        self._children: Dict[Any, Dict[str, List[Any]]] = {}
+
+    def _groups(self, parent: Any) -> Dict[str, List[Any]]:
+        groups = self._children.get(parent)
+        if groups is None:
+            groups = {"*": []}
+            for child in parent:
+                if isinstance(child.tag, str):
+                    groups.setdefault(child.tag, []).append(child)
+                    groups["*"].append(child)
+            self._children[parent] = groups
+        return groups
+
+    def release(self) -> None:
+        """Drop the cached element proxies INNERMOST first. Freed in the
+        dict's own (outermost-first) order, each release made lxml walk from
+        that node up to the document — O(depth^2): 2.3 s for one 30,000-deep
+        page. See html_parser._elements."""
+        while self._children:
+            self._children.popitem()
+
+    def resolve(self, xpath: str) -> Optional[Any]:
+        if not xpath.startswith("/"):
+            return None
+        steps = xpath[1:].split("/")
+        first = _PATH_STEP_RE.match(steps[0]) if steps else None
+        root = self._root
+        if first is None or root is None or first.group(1) not in ("*", root.tag) or (first.group(2) or "1") != "1":
+            return None
+        cur = root
+        for step in steps[1:]:
+            m = _PATH_STEP_RE.match(step)
+            if not m:
+                return None
+            members = self._groups(cur).get(m.group(1))
+            if not members:
+                return None
+            if m.group(2) is None:
+                if len(members) != 1:
+                    return None
+                cur = members[0]
+            else:
+                pos = int(m.group(2))
+                if pos < 1 or pos > len(members):
+                    return None
+                cur = members[pos - 1]
+        return cur
+
+
 _LIST_MARKER_TOKEN = re.compile(r"^(?:[-*•·]|\d{1,3}[.)])$")
 
 
@@ -286,7 +425,9 @@ def _visible_word_count(html_bytes: bytes) -> int:
         body = root.find("body")
         scope = body if body is not None else root
         total = 0
-        for el in scope.iter():
+        # A held list, not a lazy walk: see html_parser._elements (a lazy walk
+        # over a 20,000-deep page cost 1.3 s per count).
+        for el in list(scope.iter()):
             tag = el.tag if isinstance(el.tag, str) else ""
             if tag.lower() in ("script", "style", "template", "noscript"):
                 continue
@@ -329,14 +470,50 @@ def _apply_contrast(el: Any, fg: str) -> bool:
     return True
 
 
-def _apply_image(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> None:
+def _apply_image(node: ImageNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
+    """``seen_el`` is the element as the analysis parsed it (``el`` itself
+    unless the page carries byte stand-ins): the change test reads it, the
+    write goes to ``el``."""
     # Only GENERATE_ALT_TEXT is a supported HTML image fix in v1. Decorative
     # images are left untouched (a properly empty alt is already correct, and we
     # never edit an image the user didn't approve a fix for).
     if node.is_decorative or not node.alt_text or el is None:
         return
-    if el.get("alt") != node.alt_text:
+    if seen_el is None:
+        seen_el = el
+    if (node.metadata.properties or {}).get("svg_inline"):
+        _apply_svg_name(node, el, seen_el, applied)
+        return
+    # The parser stored the alt stripped; an unchanged " Chart " is not a fix.
+    if (seen_el.get("alt") or "").strip() != node.alt_text:
         el.set("alt", node.alt_text)
+        applied.append({"action": "GENERATE_ALT_TEXT", "target_id": node.id})
+
+
+def _apply_svg_name(node: ImageNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
+    """Name an inline ``<svg role="img">`` with ``aria-label``.
+
+    An ``<svg>`` has no ``alt``. The parser only judges SVGs the author made
+    ONE image with ``role="img"`` (an SVG without it exposes its drawn words
+    as text, and giving it the role would hide them), so the role is already
+    there; it is only re-asserted defensively. ``aria-label`` is the name — it
+    outranks a ``<title>`` child in the accessible-name computation, so it
+    also replaces a non-descriptive title. The parser reads ``aria-label``
+    back, so a re-scan sees a named image.
+    """
+    tag = el.tag.rsplit("}", 1)[-1].lower() if isinstance(el.tag, str) else ""
+    if tag != "svg":
+        return
+    if _svg_accessible_name(seen_el) == node.alt_text:
+        return  # the name the parser read — nothing was approved/changed
+    changed = False
+    if not (el.get("role") or "").strip():
+        el.set("role", "img")
+        changed = True
+    if (seen_el.get("aria-label") or "") != node.alt_text:
+        el.set("aria-label", node.alt_text)
+        changed = True
+    if changed:
         applied.append({"action": "GENERATE_ALT_TEXT", "target_id": node.id})
 
 
@@ -350,14 +527,16 @@ def _apply_heading(node: HeadingNode, el: Any, applied: List[Dict[str, Any]]) ->
         applied.append({"action": "NORMALIZE_HEADING_LEVEL", "target_id": node.id})
 
 
-def _apply_link(node: LinkNode, el: Any, applied: List[Dict[str, Any]]) -> None:
+def _apply_link(node: LinkNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
     if node.content.kind != ContentKind.TEXT or not node.content.text or el is None:
         return
     # Parser only assigns TEXT content to links with no element children, so
     # replacing the text destroys nothing.
     if any(isinstance(c.tag, str) for c in el):
         return
-    if (el.text_content() or "").strip() != node.content.text:
+    if seen_el is None:
+        seen_el = el
+    if (seen_el.text_content() or "").strip() != node.content.text:
         el.text = node.content.text
         applied.append({"action": "IMPROVE_LINK_TEXT", "target_id": node.id})
 
@@ -505,28 +684,39 @@ def _ensure_title_element(doc: Any) -> Optional[Any]:
     return title_el
 
 
-def _serialize(doc: Any) -> bytes:
-    # We always emit UTF-8 bytes, so any existing charset declaration must say
-    # utf-8 or a browser will mis-decode a document we re-encoded. This only
-    # rewrites an EXISTING meta (never injects one) — required for correctness,
-    # not a gratuitous edit.
-    for meta in doc.iter("meta"):
-        if meta.get("charset") is not None:
-            meta.set("charset", "utf-8")
-        elif (meta.get("http-equiv") or "").lower() == "content-type":
-            meta.set("content", "text/html; charset=utf-8")
-    doctype = None
-    try:
-        doctype = doc.getroottree().docinfo.doctype or None
-    except Exception:
-        doctype = None
-    return lxml_html.tostring(
-        doc,
-        encoding="utf-8",
+_LEADING_DOCTYPE_RE = re.compile(r"^\s*<!DOCTYPE[^>]*>[ \t]*(?:\r?\n)?", re.IGNORECASE)
+
+
+def _serialize(doc: Any, source: Optional[HtmlSource] = None) -> bytes:
+    """Serialize back in the SOURCE'S OWN encoding, doctype and declaration.
+
+    We used to always emit UTF-8 (rewriting any <meta charset> to match). For
+    a legacy windows-1252 page with no declaration that shipped UTF-8 bytes
+    the browser still decoded as windows-1252 — every "é" became "Ã©" — and a
+    page served by a server that sends ``charset=ISO-8859-1`` breaks the same
+    way whatever the meta says. Re-encoding with the codec the parser decoded
+    with means every byte of text we did not change comes back as it was, the
+    existing declaration stays true, and nothing is (re)declared.
+
+    The whole document tree is serialized (so a comment before ``<html>`` —
+    e.g. IE's "saved from url" mark — survives), but lxml invents an HTML 4.0
+    Transitional doctype for a page that had none, and adding a doctype can
+    switch a page's rendering mode, so it is only kept if the source had one.
+    """
+    source = source or HtmlSource()
+    # include_meta_content_type=True means "leave the page's own
+    # <meta http-equiv="Content-Type"> alone" (with str output lxml never
+    # injects one). False DELETED it — and for a Word "Save as Web Page"
+    # export that meta is the page's only charset declaration.
+    text = lxml_html.tostring(
+        doc.getroottree(),
+        encoding="unicode",
         method="html",
-        doctype=doctype,
-        include_meta_content_type=False,
+        include_meta_content_type=True,
     )
+    if not source.has_doctype:
+        text = _LEADING_DOCTYPE_RE.sub("", text, count=1)
+    return encode_html_text(text, source)
 
 
 __all__ = ["write_remediated_html"]
