@@ -98,6 +98,10 @@ class AccessibilityFlagCode(str, Enum):
     POSITIVE_TABINDEX = "POSITIVE_TABINDEX"
     LABEL_IN_NAME_MISMATCH = "LABEL_IN_NAME_MISMATCH"
     ANALYSIS_TRUNCATED = "ANALYSIS_TRUNCATED"
+    # Spreadsheet (XLSX) findings. Appended at the END on purpose: other
+    # in-flight flag work appends here too, and a mid-enum insert conflicts.
+    SHEET_NAME_DEFAULT = "SHEET_NAME_DEFAULT"
+    DATA_RANGE_HEADERS_UNCLEAR = "DATA_RANGE_HEADERS_UNCLEAR"
 
 
 class StandardReference(BaseModel):
@@ -428,6 +432,35 @@ FLAG_DEFINITIONS: Dict[AccessibilityFlagCode, AccessibilityFlagDefinition] = {
         standards=StandardReference(
             wcag_2_1=[],
             section_508=[],
+            pdf_ua=[],
+        ),
+    ),
+    # A sheet tab is how a screen-reader user finds their way around a
+    # workbook ("Sheet 2 of 3, Sheet2" says nothing). Renaming it is a content
+    # decision, and every formula, chart and defined name that says Sheet1!A1
+    # would have to be rewritten with it, so this stays with a person.
+    AccessibilityFlagCode.SHEET_NAME_DEFAULT: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.SHEET_NAME_DEFAULT,
+        severity=Severity.WARNING,
+        message="Worksheet still has its default name (such as 'Sheet1'), so its tab does not say what it contains.",
+        standards=StandardReference(
+            wcag_2_1=["2.4.6"],
+            section_508=["E205.4"],
+            pdf_ua=[],
+        ),
+    ),
+    # A block of spreadsheet data whose header row we cannot identify with
+    # confidence (numbers or blanks in the first row, merged cells, a table
+    # whose header row is switched off). TABLE_MISSING_HEADERS is raised only
+    # when there IS a clear header row we can declare; this is the other case,
+    # where declaring one would be a guess.
+    AccessibilityFlagCode.DATA_RANGE_HEADERS_UNCLEAR: AccessibilityFlagDefinition(
+        code=AccessibilityFlagCode.DATA_RANGE_HEADERS_UNCLEAR,
+        severity=Severity.ERROR,
+        message="Data range has no header row we can identify, so a screen reader cannot announce what each column means.",
+        standards=StandardReference(
+            wcag_2_1=["1.3.1"],
+            section_508=["E205.2"],
             pdf_ua=[],
         ),
     ),
@@ -1121,6 +1154,35 @@ REMEDIATION_ACTIONS_BY_FLAG: Dict[AccessibilityFlagCode, List[RemediationAction]
             is_auto_applicable=False,
             supported_node_types=[NodeType.DOCUMENT],
             related_flag_code=AccessibilityFlagCode.ANALYSIS_TRUNCATED,
+        ),
+    ],
+    # Both spreadsheet findings are manual by design: a sheet name has to be
+    # chosen by someone who knows the content (and renaming rewrites every
+    # reference to it), and an unclear header row is exactly the case where
+    # declaring one would be a guess.
+    AccessibilityFlagCode.SHEET_NAME_DEFAULT: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description="Rename the worksheet tab to say what the sheet contains.",
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.SECTION],
+            related_flag_code=AccessibilityFlagCode.SHEET_NAME_DEFAULT,
+        ),
+    ],
+    AccessibilityFlagCode.DATA_RANGE_HEADERS_UNCLEAR: [
+        RemediationAction(
+            action_code=ActionCode.FLAG_FOR_MANUAL_REVIEW,
+            description=(
+                "Add a row of column headings above the data (or turn the table's "
+                "header row on), then format the range as a table."
+            ),
+            requires_ai=False,
+            requires_human_review=True,
+            is_auto_applicable=False,
+            supported_node_types=[NodeType.TABLE],
+            related_flag_code=AccessibilityFlagCode.DATA_RANGE_HEADERS_UNCLEAR,
         ),
     ],
 }

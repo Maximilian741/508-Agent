@@ -39,6 +39,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import require_user_id, require_user_id_or_api_key
 from app.config import get_settings
+from app.intake import IntakeInfo, IntakeResult, effective_format, prepare_upload, upload_suffix
+from app.intake import cleanup as _intake_cleanup
 from app.security.signing import sign_file_url, verify_file_signature
 from app.security.uploads import stream_to_tempfile
 from app.security.url_fetch import (
@@ -192,6 +194,9 @@ class PipelineResponse(BaseModel):
     aiProvider: str
     # Only set by the URL scan, and only on a re-scan of the same URL.
     changes: Optional[ScanChangeReport] = None
+    # Only set when the upload was converted before analysis (an image to a
+    # PDF, a .doc to a .docx): what we did, and what it means for the fix.
+    intake: Optional[IntakeInfo] = None
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +221,8 @@ async def analyze(
     each finding.  Pass ``execute=true`` to also run the executors and bake
     every deterministic fix into the in-memory tree (legacy behavior).
     """
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
+    # Any accepted type (see app/intake): a friendly 400 names what we take.
+    suffix = upload_suffix(file.filename)
 
     settings = get_settings()
     upload_result = await stream_to_tempfile(
@@ -231,12 +235,19 @@ async def analyze(
     # Parsing + analysis are CPU-bound (and remediation can make blocking AI
     # calls). Run them in the threadpool so two concurrent large documents
     # don't freeze the event loop — including /healthz — for everyone else.
+    # Intake converts images / legacy formats first; its errors are already
+    # sentences (415 "save it as .docx", 413 "too large", ...).
+    intake: Optional[IntakeResult] = None
     try:
-        result = await run_in_threadpool(parse_to_tree, str(tmp_path))
+        intake = await run_in_threadpool(prepare_upload, tmp_path, suffix)
+        result = await run_in_threadpool(parse_to_tree, str(intake.path))
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("pipeline parse failed: %s", exc)
-        raise HTTPException(status_code=422, detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.")
+        raise HTTPException(status_code=422, detail=_PARSE_FAILED_DETAIL)
     finally:
+        _intake_cleanup(intake)
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
@@ -366,7 +377,18 @@ async def analyze(
         executions=api_executions,
         score=score,
         aiProvider=provider_name,
+        intake=intake.info() if intake is not None else None,
     )
+
+
+# The sentence for a file that passed the signature check but that no parser
+# could read. Not "you were not charged": /analyze never charges, and
+# /remediate says so itself.
+_PARSE_FAILED_DETAIL = (
+    "We couldn't read this document. It may be damaged, password-protected, or saved in a "
+    "variant we don't support. Open it, save it again as PDF, Word (.docx), PowerPoint (.pptx) "
+    "or Excel (.xlsx), and upload that copy."
+)
 
 
 class AnalyzeUrlRequest(BaseModel):
@@ -950,9 +972,7 @@ async def remediate(
     set of items they want queued for manual review.
     """
 
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".pptx", ".html", ".htm"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix or '(none)'}")
+    suffix = upload_suffix(file.filename)
 
     try:
         approved_ids = set(json.loads(approved_violations) if approved_violations else [])
@@ -966,7 +986,10 @@ async def remediate(
     # Affordability check ONLY (no spend yet). The real debit happens after
     # the remediated file is successfully written, so a parse/write failure
     # never charges the user. A broke user still gets a fast 402 here.
-    fmt = suffix.lstrip(".")
+    # Priced, gated and written as the EFFECTIVE format: a .doc is fixed and
+    # delivered as a .docx, an image as a PDF, and .htm is html (keyed on
+    # "htm", the persisted-fix gate found nothing and every fix was discarded).
+    fmt = effective_format(suffix)
     _precheck_credits(user_id=user_id, doc_format=fmt)
 
     settings = get_settings()
@@ -1004,14 +1027,21 @@ async def remediate(
     # CPU-bound parse/analyze/remediate runs in the threadpool (see analyze).
     # On ANY failure here the job dir is removed and NO credit is charged.
     try:
+        intake = await run_in_threadpool(prepare_upload, source_path, suffix)
+    except HTTPException:
+        _cleanup_job_dir(job_dir)
+        raise
+    except Exception as exc:
+        logger.exception("remediate intake failed: %s", exc)
+        _cleanup_job_dir(job_dir)
+        raise HTTPException(status_code=422, detail=_PARSE_FAILED_DETAIL + " You were not charged.")
+    source_path = intake.path
+    try:
         result = await run_in_threadpool(parse_to_tree, str(source_path))
     except Exception as exc:
         logger.exception("remediate parse failed: %s", exc)
         _cleanup_job_dir(job_dir)
-        raise HTTPException(
-            status_code=422,
-            detail="Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file.",
-        )
+        raise HTTPException(status_code=422, detail=_PARSE_FAILED_DETAIL + " You were not charged.")
 
     tree = result.tree
     engine = RemediationEngine()
@@ -1136,7 +1166,8 @@ async def remediate(
 
     # Write the remediated artifact via the format-specific writer (CPU-bound —
     # PDF tagging re-serializes content streams — so threadpool it too).
-    output_name = _suffix_filename(safe_name, "-remediated")
+    # Named after the file we WRITE: a converted .doc comes back as .docx.
+    output_name = _suffix_filename(source_path.name, "-remediated")
     output_path = job_dir / output_name
     try:
         write_result = await run_in_threadpool(
@@ -1269,6 +1300,14 @@ async def remediate(
     # status="success" "Rewrote link text X -> Y" rows on a PDF whose delivered
     # bytes were identical to the upload.
     _reconcile_executions(executions, _applied, fmt)
+    # An image upload is only worth delivering (and charging for) when the
+    # fix made the picture readable — OCR text or a real description. A title
+    # on a PDF wrapper around an unreadable scan is not clearly better than
+    # the image, so it is withheld like any other non-fix.
+    from app.intake import withhold_hollow_image_fix
+
+    if persisted_fixes and withhold_hollow_image_fix(intake, executions):
+        persisted_fixes = 0
 
     # Not charged must mean not changed. With no persisted fix the run is free,
     # so it may deliver nothing: writers re-serialize and re-assert metadata
@@ -1276,6 +1315,17 @@ async def remediate(
     # — approved_violations=[] returned the 5-credit tagged PDF, uncharged and
     # byte-identical to the paid run. Hand back the uploaded bytes instead.
     if persisted_fixes == 0:
+        if intake.converted:
+            # Not charged, not changed — and not converted either: a free
+            # .doc -> .docx or image -> PDF conversion is a deliverable in its
+            # own right. The customer gets back the bytes they uploaded.
+            try:
+                output_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            output_name = _suffix_filename(intake.original_path.name, "-remediated")
+            output_path = job_dir / output_name
+            source_path = intake.original_path
         try:
             shutil.copyfile(str(source_path), str(output_path))
         except Exception as exc:
@@ -1382,6 +1432,10 @@ async def remediate(
         "writer": write_result,
         "manualReviewItemsCreated": manual_items_created,
         "charged": charged,
+        # Set when the upload was converted (image -> PDF, .doc -> .docx):
+        # what we did, and that a run with no persisted fix hands back the
+        # original bytes, not a free conversion.
+        "intake": intake.info().model_dump() if intake.converted else None,
     }
 
     # Drop a side-by-side metadata file so subsequent /pipeline/files calls
@@ -1843,6 +1897,8 @@ def _media_type_for(name: str) -> str:
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     if lower.endswith(".pptx"):
         return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    if lower.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if lower.endswith((".html", ".htm")):
         return "text/html; charset=utf-8"
     return "application/octet-stream"
@@ -1983,6 +2039,21 @@ _PERSISTED_ACTIONS: Dict[str, set] = {
         "SET_INPUT_AUTOCOMPLETE",
         "FIX_POSITIVE_TABINDEX",
     },
+    # xlsx_writer edits the workbook's parts in place (never an openpyxl
+    # round trip, which would wipe existing alt text) and confirms every edit
+    # by re-reading the saved file; each action below is counted only when
+    # its applied entry is present (XLSX is in _WRITER_CONFIRMED_FORMATS).
+    # Verified by smoke_xlsx_pipeline.
+    "xlsx": {
+        "SET_DOCUMENT_TITLE",          # dc:title in docProps/core.xml
+        "SET_DOCUMENT_LANGUAGE",       # dc:language in docProps/core.xml
+        "GENERATE_ALT_TEXT",           # descr on the picture/chart's cNvPr
+        "REMOVE_DECORATIVE_ALT_TEXT",  # descr removed from a decorative object
+        # A plain range whose first row is unambiguously headings becomes an
+        # Excel table with that row as its header row. Only offered for
+        # blocks the parser judged "candidate"; unclear ones are manual.
+        "ADD_TABLE_HEADERS",
+    },
 }
 
 
@@ -2016,6 +2087,15 @@ _WRITER_CONFIRMED_ACTIONS = {
     "TAG_PDF_STRUCTURE",
     "ADD_OCR_TEXT_LAYER",
 }
+
+# Formats whose writer appends to ``applied`` ONLY for an edit that is in the
+# saved file, for EVERY action it supports (it has no re-assertion path), so
+# the applied list is authoritative for all of them.
+_WRITER_CONFIRMED_FORMATS = {"xlsx"}
+
+
+def _writer_confirms(action_code: str, source_format: str) -> bool:
+    return action_code in _WRITER_CONFIRMED_ACTIONS or (source_format or "").lower() in _WRITER_CONFIRMED_FORMATS
 
 
 # The honest note to put on a success the file doesn't actually carry, per
@@ -2076,7 +2156,7 @@ def _reconcile_executions(executions, applied, source_format: str) -> None:
             e.status = ExecutionStatus.SKIPPED
             e.notes = f"{(e.notes or '').rstrip()} [{_not_persisted_note(source_format)}]".strip()
             continue
-        if code in _WRITER_CONFIRMED_ACTIONS and e.target_node_id not in applied_by_action.get(code, set()):
+        if _writer_confirms(code, source_format) and e.target_node_id not in applied_by_action.get(code, set()):
             e.status = ExecutionStatus.SKIPPED
             e.notes = _unconfirmed_note(code)
 
@@ -2110,7 +2190,7 @@ def _count_persisted_fixes(executions, applied, source_format: str, skipped=None
         code = e.action_code.value
         if not _action_persists(code, source_format):
             continue
-        if code in _WRITER_CONFIRMED_ACTIONS and e.target_node_id not in applied_by_action.get(code, set()):
+        if _writer_confirms(code, source_format) and e.target_node_id not in applied_by_action.get(code, set()):
             continue
         count += 1
     return count

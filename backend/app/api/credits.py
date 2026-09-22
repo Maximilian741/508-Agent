@@ -128,6 +128,12 @@ DOC_FORMAT_COSTS = {
     # cheapest tier alongside docx. MUST match frontend creditCosts.ts.
     "html": 3,
     "htm": 3,
+    # XLSX edits a handful of XML parts in place (core properties, a drawing's
+    # alt text, a new table part), the same tier as docx. Converted uploads
+    # are priced as what they become: .doc/.rtf/.odt -> docx, .xls/.ods ->
+    # xlsx, .ppt/.odp -> pptx, images -> pdf (app/intake.effective_format).
+    # MUST match frontend creditCosts.ts.
+    "xlsx": 3,
 }
 
 

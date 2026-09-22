@@ -26,12 +26,14 @@ from app.writers.docx_writer import write_remediated_docx
 from app.writers.html_writer import write_remediated_html
 from app.writers.pdf_writer import write_remediated_pdf
 from app.writers.pptx_writer import write_remediated_pptx
+from app.writers.xlsx_writer import write_remediated_xlsx
 
 __all__ = [
     "write_remediated_docx",
     "write_remediated_html",
     "write_remediated_pdf",
     "write_remediated_pptx",
+    "write_remediated_xlsx",
     "write_remediated",
 ]
 
@@ -56,6 +58,8 @@ def write_remediated(
         return write_remediated_docx(source_path, tree, output_path)
     if fmt == "pptx":
         return write_remediated_pptx(source_path, tree, output_path)
+    if fmt == "xlsx":
+        return write_remediated_xlsx(source_path, tree, output_path)
     if fmt in {"html", "htm"}:
         return write_remediated_html(source_path, tree, output_path)
     return {

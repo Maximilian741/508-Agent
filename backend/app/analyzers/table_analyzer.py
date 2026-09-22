@@ -21,6 +21,11 @@ class TableMissingHeadersAnalyzer(Analyzer):
     def analyze(self, tree: AccessibilityTree) -> None:
         for node in iter_nodes(tree):
             if isinstance(node, TableNode):
+                # A spreadsheet block with no identifiable header row is
+                # reported once, as DATA_RANGE_HEADERS_UNCLEAR (manual): this
+                # rule's fix would declare row 1 a header, which is the guess.
+                if (node.metadata.properties or {}).get("header_detection") in ("unclear", "off"):
+                    continue
                 header_found = False
                 for row in node.children:
                     if not isinstance(row, TableRowNode):
