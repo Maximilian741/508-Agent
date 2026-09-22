@@ -122,7 +122,60 @@ def main() -> int:
           order[:9] == ["/H1", "/P", "/Form", "/P", "/Form", "/P", "/Form", "/Form", "/P"], str(order))
     i_phone = [i for i, s in enumerate(order) if s == "/P"][5] if order.count("/P") > 5 else -1
     check("the field under 'Phone' follows it", i_phone >= 0 and order[i_phone + 1] == "/Form", str(order))
+
+    # ---- layouts that used to get the WRONG label written (and charged) ----
+    got = _labels(yes_no_before())
+    check("'Yes [ ]  No [ ]': each box takes the word right BEFORE it (the Yes box was labelled 'No')",
+          got == {"cb_yes": "Yes", "cb_no": "No"}, str(got))
+    got = _labels(yes_no_after())
+    check("'[ ] Yes  [ ] No': each box takes the word right AFTER it", got == {"cb_yes": "Yes", "cb_no": "No"}, str(got))
+    got = _labels(captions_below())
+    check("captions printed UNDER fields: no field takes the heading above it or the previous field's caption",
+          got == {"Text1": None, "Text2": None}, str(got))
     return check.done()
+
+
+def _labels(data: bytes):
+    """{/T: label the parser would write} — the same helper the writer uses."""
+    from app.parsers.pdf_parser import FieldLabeler, derive_pdf_field_label, iter_acroform_fields
+
+    r = PdfReader(io.BytesIO(data))
+    lab = FieldLabeler(r)
+    acro = r.trailer["/Root"]["/AcroForm"].get_object()
+    return {str(fo.get("/T")): derive_pdf_field_label(fo, lab) for fo in iter_acroform_fields(acro)}
+
+
+def _form(content: bytes, widgets) -> bytes:
+    w = PdfWriter()
+    f = K.helvetica(w)
+    for i in range(6):
+        content += K.bt("F1", 10, 72, 600 - 14 * i, K.lit("Return this application to the permit office with a copy of your ID."))
+    p = K.add_page(w, content, {"F1": f})
+    refs = [K.widget(w, rect, name=name, ft=ft) for rect, name, ft in widgets]
+    for ref in refs:
+        ref.get_object()[K.NameObject("/P")] = p.indirect_reference
+    p[K.NameObject("/Annots")] = K.ArrayObject(refs)
+    K.set_acroform(w, refs)
+    return K.to_bytes(w)
+
+
+def yes_no_before() -> bytes:
+    c = K.bt("F1", 11, 72, 700, K.lit("Do you own a vehicle?"))
+    c += K.bt("F1", 11, 250, 700, K.lit("Yes")) + K.bt("F1", 11, 300, 700, K.lit("No"))
+    return _form(c, [((272, 698, 282, 708), "cb_yes", "/Btn"), ((316, 698, 326, 708), "cb_no", "/Btn")])
+
+
+def yes_no_after() -> bytes:
+    c = K.bt("F1", 11, 72, 700, K.lit("Do you own a vehicle?"))
+    c += K.bt("F1", 11, 264, 700, K.lit("Yes")) + K.bt("F1", 11, 314, 700, K.lit("No"))
+    return _form(c, [((250, 698, 260, 708), "cb_yes", "/Btn"), ((300, 698, 310, 708), "cb_no", "/Btn")])
+
+
+def captions_below() -> bytes:
+    c = K.bt("F1", 16, 72, 740, K.lit("Signature Page"))
+    c += K.bt("F1", 8, 72, 690, K.lit("Signature of applicant"))
+    c += K.bt("F1", 8, 72, 664, K.lit("Printed name"))
+    return _form(c, [((72, 698, 300, 712), "Text1", "/Tx"), ((72, 672, 300, 686), "Text2", "/Tx")])
 
 
 if __name__ == "__main__":

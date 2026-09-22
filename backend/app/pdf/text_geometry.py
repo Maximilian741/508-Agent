@@ -375,10 +375,15 @@ def label_for_widget(
 
     ``kind`` "text" (text/choice fields): the words on the same line
     immediately to the LEFT of the field, else the words directly ABOVE it
-    starting at its left edge. ``kind`` "check" (a checkbox): the words on
-    the same line immediately to its RIGHT. Returns ``(label, word_keys)`` so
-    the caller can refuse a label claimed by two widgets. Precision first:
-    anything ambiguous returns None and the field stays manual.
+    starting at its left edge. ``kind`` "check" (a checkbox): the words on the
+    same line on the NEARER side of the box — "[ ] Yes" and "Yes [ ]" are both
+    common, and "Yes [ ]  No [ ]" read right-hand-only labelled the Yes box
+    "No". Returns ``(label, word_keys)`` so the caller can refuse a label
+    claimed by two widgets. Precision first: anything ambiguous returns None
+    and the field stays manual. Refusals include: a checkbox with words
+    equally near on both sides; an above-"label" that is larger than the
+    page's body text (a heading, not a label); an above-"label" printed
+    directly UNDER another field (that field's caption).
     """
     r = _norm_rect(rect)
     if r is None:
@@ -388,7 +393,13 @@ def label_for_widget(
     # Fill-in rules typed as text ("________", "......") are the field's line,
     # never part of its label: they are dropped, and they end a label run.
     words = [w for w in words if not _FILLER_RE.match(w.text)]
-    band = [w for w in words if (y0 - 0.35 * h - 2.0) <= w.y <= (y1 + 1.0)]
+    # The "same line" band. A tall field (a multi-line comments box) is
+    # labelled at its TOP line; its full height would sweep in any text that
+    # happens to sit to its left further down.
+    lo = (y0 - 0.35 * h - 2.0) if h <= 30.0 else (y1 - 24.0)
+    band = [w for w in words if lo <= w.y <= (y1 + 1.0)]
+    sizes = sorted(w.size for w in words if w.size > 0)
+    body = sizes[len(sizes) // 2] if sizes else 0.0
 
     def blocked(a: float, b: float, line_y: float) -> bool:
         """Another widget sits between x=a and x=b on this line."""
@@ -410,18 +421,36 @@ def label_for_widget(
 
     if kind == "check":
         right = sorted((w for w in band if w.x0 >= x1 - 1.0), key=lambda w: w.x0)
-        if not right or right[0].x0 - x1 > 40.0:
+        left_c = sorted((w for w in band if w.x1 <= x0 + 1.0), key=lambda w: -w.x1)
+        if right and blocked(x1, right[0].x0, right[0].y):
+            right = []  # the nearest right word is past another widget
+        if left_c and blocked(left_c[0].x1, x0, left_c[0].y):
+            left_c = []
+        gap_r = (right[0].x0 - x1) if right else None
+        gap_l = (x0 - left_c[0].x1) if left_c else None
+        sides = [(g, s) for g, s in ((gap_r, "R"), (gap_l, "L")) if g is not None and g <= 40.0]
+        if not sides:
             return None
-        first = right[0]
-        same_line = [w for w in right if abs(w.y - first.y) <= 2.0]
-        run = _contiguous(same_line, +1)
-        # stop at the next widget on the line
-        cut: List[Word] = []
-        for w in run:
-            if blocked(x1, w.x0, w.y):
-                break
-            cut.append(w)
-        return finish(cut, allow_sentence=True)
+        if len(sides) == 2 and abs(sides[0][0] - sides[1][0]) < 3.0:
+            return None  # words equally near on both sides: whose label is it?
+        side = min(sides)[1]
+        if side == "R":
+            first = right[0]
+            same_line = [w for w in right if abs(w.y - first.y) <= 2.0]
+            run = _contiguous(same_line, +1)
+            # stop at the next widget on the line
+            cut: List[Word] = []
+            for w in run:
+                if blocked(x1, w.x0, w.y):
+                    break
+                cut.append(w)
+            return finish(cut, allow_sentence=True)
+        first = left_c[0]
+        same_line = [w for w in left_c if abs(w.y - first.y) <= 2.0]
+        run = _contiguous(same_line, -1)
+        # never reach past the previous widget on the line
+        kept = [w for w in run if not blocked(w.x1, x0, w.y)]
+        return finish(kept, allow_sentence=True)
 
     left = sorted((w for w in band if w.x1 <= x0 + 1.5), key=lambda w: -w.x1)
     if left and x0 - left[0].x1 <= 100.0:
@@ -448,6 +477,19 @@ def label_for_widget(
     run = _contiguous(line, +1)
     # An above-label must not run past the field (then it labels a row).
     run = [w for w in run if w.x0 <= x1 + 2.0]
+    if not run:
+        return None
+    # Larger than the page's body text: a heading or title, not a label.
+    if body and max(w.size for w in run) > 1.25 * body:
+        return None
+    # Printed directly UNDER another field: that field's caption ("Signature
+    # of applicant" under the signature line), sitting just above this one.
+    rx0, rx1 = min(w.x0 for w in run), max(w.x1 for w in run)
+    for o in other_rects:
+        if o == r:
+            continue
+        if o[0] < rx1 - 1 and o[2] > rx0 + 1 and 0.0 <= o[1] - start.y <= 1.9 * start.size + 2.0:
+            return None
     return finish(run, allow_sentence=False)
 
 

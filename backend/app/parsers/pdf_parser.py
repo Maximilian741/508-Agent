@@ -1015,66 +1015,115 @@ _FIGURE_CAPTION_RE = re.compile(
 )
 
 
-def _caption_for_image(bbox, words) -> Optional[str]:
-    """The "Figure N. ..." caption printed directly under (or over) an image.
-
-    Evidence only: a line that STARTS with a figure label, whose baseline is
-    within ~2.5 line-heights of the image's bottom (or top) edge, and which
-    overlaps the image horizontally. Up to three contiguous lines are taken
-    when the caption wraps. Anything else — body text, a heading, a caption
-    two paragraphs away — is not a caption, and nothing is returned.
-    """
-    if not bbox or not words:
-        return None
+def _text_segments(words) -> List[List[Any]]:
+    """Words grouped into line SEGMENTS in reading order: one baseline, split
+    wherever a horizontal gap is wider than ~1.5 em. Two captions set side by
+    side under two charts share a baseline but are two segments."""
     from app.pdf.text_geometry import _reading_sorted
 
-    x0, y0, x1, y1 = bbox
-    if x1 - x0 < 4 or y1 - y0 < 4:
-        return None
     lines: List[List[Any]] = []
     for w in _reading_sorted(words):
         if lines and abs(lines[-1][0].y - w.y) <= max(2.0, 0.3 * w.size):
             lines[-1].append(w)
         else:
             lines.append([w])
+    segs: List[List[Any]] = []
+    for line in lines:
+        cur = [line[0]]
+        for w in line[1:]:
+            if w.x0 - cur[-1].x1 > max(12.0, 1.5 * max(w.size, cur[-1].size)):
+                segs.append(cur)
+                cur = [w]
+            else:
+                cur.append(w)
+        segs.append(cur)
+    return segs
 
-    def overlaps(line) -> bool:
-        lx0 = min(w.x0 for w in line)
-        lx1 = max(w.x1 for w in line)
-        return lx1 > x0 + 1 and lx0 < x1 - 1
 
-    best = None
-    for i, line in enumerate(lines):
-        text = " ".join(w.text for w in line).strip()
-        if not _FIGURE_CAPTION_RE.match(text) or not overlaps(line):
+def _caption_for_image(bbox, words, other_boxes=()) -> Optional[str]:
+    """The "Figure N. ..." caption printed directly under (or over) an image.
+
+    Evidence only: a line segment that STARTS with a figure label, whose
+    baseline is within ~2.5 line-heights of the image's bottom (or 2 above
+    its top), and which overlaps the image horizontally. Wrapped
+    continuation lines (same left edge, same size, one line-pitch down) are
+    taken, up to three lines. Refused, so nothing is returned:
+
+    * a caption printed directly UNDER another image (``other_boxes``) is
+      that image's caption, never this one's "caption above" — stacked
+      figures used to hand figure 1's caption to figure 2;
+    * two candidates equally close and equally overlapping (whose is it?).
+
+    Side-by-side captions on one baseline are separate segments, so each
+    chart gets its own. Anything else — body text, a heading, a caption two
+    paragraphs away — is not a caption.
+    """
+    if not bbox or not words:
+        return None
+    x0, y0, x1, y1 = bbox
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    segs = _text_segments(words)
+
+    def span(seg) -> Tuple[float, float]:
+        return min(w.x0 for w in seg), max(w.x1 for w in seg)
+
+    def overlap(seg, bx0: float, bx1: float) -> float:
+        sx0, sx1 = span(seg)
+        return max(0.0, min(sx1, bx1) - max(sx0, bx0))
+
+    def below_of(seg, box) -> bool:
+        bx0, by0, bx1, _by1 = box
+        size = max(w.size for w in seg)
+        y = seg[0].y
+        return overlap(seg, bx0, bx1) > 1 and y < by0 and (by0 - y) <= 2.5 * size + 2
+
+    others = [tuple(b) for b in other_boxes if b and tuple(b) != tuple(bbox)]
+    cands: List[Tuple[float, float, str]] = []
+    for i, seg in enumerate(segs):
+        text = " ".join(w.text for w in seg).strip()
+        ov = overlap(seg, x0, x1)
+        if not _FIGURE_CAPTION_RE.match(text) or ov <= 1:
             continue
-        size = max(w.size for w in line)
-        y = line[0].y
-        below = y < y0 and (y0 - y) <= 2.5 * size + 2
+        size = max(w.size for w in seg)
+        y = seg[0].y
+        below = below_of(seg, bbox)
         above = y > y1 and (y - y1) <= 2.0 * size + 2
         if not (below or above):
             continue
+        if above and any(below_of(seg, ob) for ob in others):
+            continue  # it sits under another image: that image's caption
         parts = [text]
-        # Wrapped continuation lines: same left edge, one line-pitch down.
-        prev = line
-        for nxt in lines[i + 1 : i + 3]:
-            if abs(min(w.x0 for w in nxt) - min(w.x0 for w in line)) > 6:
+        sx0 = span(seg)[0]
+        prev = seg
+        for nxt in segs[i + 1 : i + 6]:
+            if len(parts) >= 3:
+                break
+            if nxt[0].y >= prev[0].y - 0.5:
+                continue  # another segment on the same line
+            if abs(span(nxt)[0] - sx0) > 6 or abs(max(w.size for w in nxt) - size) > 0.5:
                 break
             if not (0 < prev[0].y - nxt[0].y <= 1.6 * size):
                 break
-            if _FIGURE_CAPTION_RE.match(" ".join(w.text for w in nxt)):
+            nt = " ".join(w.text for w in nxt).strip()
+            if _FIGURE_CAPTION_RE.match(nt):
                 break
-            parts.append(" ".join(w.text for w in nxt).strip())
+            parts.append(nt)
             prev = nxt
         cand = re.sub(r"\s+", " ", " ".join(parts)).strip()
         dist = (y0 - y) if below else (y - y1)
-        if best is None or dist < best[0]:
-            best = (dist, cand)
-    if best is None:
+        cands.append((dist, ov / max(1.0, span(seg)[1] - span(seg)[0]), cand))
+    if not cands:
         return None
+    cands.sort(key=lambda c: (c[0], -c[1]))
+    best = cands[0]
+    if len(cands) > 1:
+        nxt = cands[1]
+        if abs(nxt[0] - best[0]) <= 2.0 and abs(nxt[1] - best[1]) < 0.1 and nxt[2] != best[2]:
+            return None  # two equally good captions: whose is it?
     from app.pdf.text_decode import is_readable_text
 
-    cap = best[1]
+    cap = best[2]
     if len(cap) > 400 or not is_readable_text(cap):
         return None
     return cap
@@ -1530,7 +1579,7 @@ class PDFParser:
                 caption = None
                 if raw_box is not None and not alt_text and not decorative:
                     ws = _words()
-                    caption = _caption_for_image(raw_box, ws) if ws else None
+                    caption = _caption_for_image(raw_box, ws, placements.values()) if ws else None
                 extra: Dict[str, Any] = {
                     "bbox": _rel_box(raw_box, geo),
                     "page_size": geo.get("page_size"),

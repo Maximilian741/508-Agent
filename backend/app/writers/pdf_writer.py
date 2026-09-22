@@ -305,8 +305,9 @@ def write_remediated_pdf(
                 skipped.append({
                     "target_id": "document",
                     "reason": (
-                        "pdfua_text_unreadable: some text uses a font with no Unicode mapping, so we "
-                        "could not read it — it is tagged, but no heading, list or table was inferred from it"
+                        "pdfua_text_unreadable: some text uses a font whose characters we could not map "
+                        "to Unicode (the font has no usable character map), so we could not read it — it is "
+                        "tagged, but no heading, list or table was inferred from it"
                     ),
                 })
             if ua_report.get("structTree") and not ua_report.get("pdfuaClaimed"):

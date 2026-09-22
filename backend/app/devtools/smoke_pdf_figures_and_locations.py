@@ -65,6 +65,45 @@ def build(crop_offset: float = 0.0) -> bytes:
     return K.to_bytes(w)
 
 
+def two_charts(layout: str) -> bytes:
+    """Two charts, each with its own "Figure N." caption printed BELOW it.
+
+    "side": side by side, both captions on ONE baseline (they used to merge
+    into one line, and both charts got "Figure 1 ... Figure 2 ...").
+    "stacked": chart 2 sits 16pt under caption 1, its own caption 20pt below
+    it (chart 2 used to take caption 1 as its "caption above").
+    "wrap": one chart, a two-line 9pt caption, then 11pt body text 13pt below
+    (the first body line used to be swallowed into the caption).
+    """
+    w = PdfWriter()
+    f = K.helvetica(w)
+    a = K.gray_image(w, 20, 20, 90)
+    b = K.gray_image(w, 20, 20, 150)
+    c = K.bt("F1", 18, 72, 760, K.lit("Winter Charts"))
+    xo = {"ImA": a, "ImB": b}
+    if layout == "side":
+        c += b"q 200 0 0 150 72 500 cm /ImA Do Q\nq 200 0 0 150 320 500 cm /ImB Do Q\n"
+        c += K.bt("F1", 9, 72, 488, K.lit("Figure 1. Snowfall by month"))
+        c += K.bt("F1", 9, 320, 488, K.lit("Figure 2. Salt use by month"))
+        y = 440
+    elif layout == "stacked":
+        c += b"q 300 0 0 150 72 580 cm /ImA Do Q\n"
+        c += K.bt("F1", 9, 72, 566, K.lit("Figure 1. Snowfall by month"))
+        c += b"q 300 0 0 150 72 400 cm /ImB Do Q\n"
+        c += K.bt("F1", 9, 72, 380, K.lit("Figure 2. Salt use by month"))
+        y = 330
+    else:
+        c += b"q 300 0 0 150 72 580 cm /ImA Do Q\n"
+        c += K.bt("F1", 9, 72, 566, K.lit("Figure 1. Snowfall by month at the airport"))
+        c += K.bt("F1", 9, 72, 555, K.lit("station, 2021-2025 seasons."))
+        y = 542
+        xo = {"ImA": a}
+    for i in range(6):
+        c += K.bt("F1", 11, 72, y - 14 * i, K.lit("Depots restock after every storm so crews can reload quickly."))
+    K.add_page(w, c, {"F1": f}, xobjects=xo)
+    return K.to_bytes(w)
+
+
 def parse(data: bytes, name: str = "fig.pdf"):
     from app.parsers.pdf_parser import PDFParser
 
@@ -92,6 +131,21 @@ def main() -> int:
     check("chart carries its printed caption", cp.get("caption") == CAPTION, repr(cp.get("caption")))
     check("...marked as a figure-label caption", cp.get("caption_source") == "figure_label")
     check("logo (nothing under it) gets no caption", "caption" not in logo.metadata.properties)
+
+    def caps(layout: str):
+        _p, r = parse(two_charts(layout), f"{layout}.pdf")
+        return {n.metadata.properties.get("xobject"): n.metadata.properties.get("caption")
+                for n in iter_reading_order(r.tree.root) if isinstance(n, ImageNode)}
+
+    side = caps("side")
+    check("side-by-side charts: each gets ITS OWN caption",
+          side == {"/ImA": "Figure 1. Snowfall by month", "/ImB": "Figure 2. Salt use by month"}, str(side))
+    stacked = caps("stacked")
+    check("stacked charts: chart 2 is not handed chart 1's caption",
+          stacked == {"/ImA": "Figure 1. Snowfall by month", "/ImB": "Figure 2. Salt use by month"}, str(stacked))
+    wrap = caps("wrap")
+    check("a wrapped caption is whole, and the body text under it is not swallowed",
+          wrap == {"/ImA": "Figure 1. Snowfall by month at the airport station, 2021-2025 seasons."}, str(wrap))
 
     seen = {}
 

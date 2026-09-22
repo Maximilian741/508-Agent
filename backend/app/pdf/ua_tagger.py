@@ -2819,7 +2819,7 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         if report["tablesDeclined"]:
             blockers.append(f"{report['tablesDeclined']} table-like grid(s) were not tagged")
         if report["undecodableTextBlocks"]:
-            blockers.append("some text uses a font with no Unicode mapping")
+            blockers.append("some text uses a font we could not map to Unicode")
         if widgets_without_name:
             blockers.append(f"{widgets_without_name} form field(s) have no accessible name")
         if other_annots:
