@@ -216,6 +216,14 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
         setStatus("Create a free account to check this file.");
         return;
       }
+      // Signed out and over the smaller no-account size limit: the server's
+      // sentence says a free account takes bigger files, so offer it here.
+      if (errorStatus(e) === 413 && !loadToken() && /account/i.test(humanError(e))) {
+        setSignUpNotice(humanError(e));
+        setStage("account-to-check");
+        setStatus(humanError(e));
+        return;
+      }
       fail(humanError(e), "check");
     }
   }
@@ -500,7 +508,7 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
       ) : null}
 
       {stage === "account-to-check" && file ? (
-        <InlineSignUp purpose="check" onDone={afterSignUp} />
+        <InlineSignUp purpose="check" notice={signUpNotice} onDone={afterSignUp} />
       ) : null}
 
       {stage === "idle" && pending ? (
