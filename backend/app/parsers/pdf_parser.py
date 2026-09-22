@@ -824,6 +824,11 @@ def _alt_for_xobject(xobject: Dict[str, Any]) -> Tuple[Optional[str], bool]:
     """
 
     alt_obj = xobject.get("/Alt") if "/Alt" in xobject else None
+    if isinstance(_resolve(alt_obj), NullObject):
+        # PDF 32000 7.3.9: a key whose value is null is the same as an absent
+        # key. "/Alt null" is NO alt — not the empty /Alt that declares an
+        # image decorative (which would hide it from assistive technology).
+        alt_obj = None
     raw_alt = _safe_text(alt_obj)
     decorative = False
     structure = xobject.get("/StructParent") or xobject.get("/StructParents")

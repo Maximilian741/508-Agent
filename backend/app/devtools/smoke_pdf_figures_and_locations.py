@@ -204,6 +204,22 @@ def main() -> int:
           c2.metadata.properties.get("bbox") == [64.0, 464.0, 364.0, 614.0]
           and c2.metadata.properties.get("page_size") == [540.0, 720.0], str(c2.metadata.properties.get("bbox")))
 
+    # "/Alt null" is NO alt (a null value = an absent key), never the empty
+    # /Alt that declares an image decorative and hides it from AT.
+    from pypdf.generic import NullObject
+
+    wn = PdfWriter()
+    fn = K.helvetica(wn)
+    imn = K.gray_image(wn, 30, 30, 90)
+    imn.get_object()[NameObject("/Alt")] = NullObject()
+    K.add_page(wn, K.bt("F1", 11, 72, 740, K.lit("A photo of the depot.")) + b"q 200 0 0 200 72 300 cm /ImN Do Q\n",
+               {"F1": fn}, xobjects={"ImN": imn})
+    _pn, rn = parse(K.to_bytes(wn), "altnull.pdf")
+    nn = [n for n in iter_reading_order(rn.tree.root) if isinstance(n, ImageNode)]
+    rules_n = [v.rule_id for v in RemediationEngine().detect_violations(rn.tree)]
+    check("'/Alt null' is missing alt, not decorative", bool(nn) and not nn[0].is_decorative
+          and "MISSING_ALT_TEXT" in rules_n, f"{[n.is_decorative for n in nn]} {rules_n}")
+
     _src3, res3 = parse(build(rotate=90), "rot.pdf")
     c3 = [n for n in iter_reading_order(res3.tree.root) if isinstance(n, ImageNode) and n.metadata.properties.get("xobject") == "/Im1"][0]
     check("a /Rotate 90 page: bbox stays in PDF user space, and the rotation is recorded beside it",
