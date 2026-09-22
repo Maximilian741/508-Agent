@@ -55,6 +55,9 @@ LANGUAGE_SAMPLES = {
         "Los empleados que no elijan un plan durante el periodo de inscripción mantendrán su cobertura actual. Si tiene preguntas, comuníquese con Recursos Humanos.",
         "Este aviso explica sus derechos según la ley. Usted puede tener derecho a doce semanas de licencia sin sueldo cada año para cuidar a un familiar.",
         "La biblioteca estará cerrada el jueves por mantenimiento. Los libros prestados se pueden devolver en el buzón que está junto a la puerta principal, y no habrá multas durante esos días.",
+        # "si" was Italian-only and "será" Portuguese-only: this abstained.
+        "Si tiene alguna pregunta, no dude en ponerse en contacto con nosotros. Será un placer ayudarle "
+        "con todos los trámites y las dos solicitudes pendientes.",
     ],
     "fr": [
         "Le rapport trimestriel est joint pour votre examen. Veuillez envoyer vos commentaires à l'équipe des finances avant vendredi.",
@@ -62,6 +65,15 @@ LANGUAGE_SAMPLES = {
         "Les employés qui ne choisissent pas de régime pendant la période d'inscription conserveront leur couverture actuelle. Pour toute question, contactez les ressources humaines.",
         "Cet avis explique vos droits en vertu de la loi. Vous pouvez avoir droit à douze semaines de congé non payé chaque année pour prendre soin d'un membre de votre famille.",
         "La bibliothèque sera fermée jeudi pour des travaux d'entretien. Les livres empruntés peuvent être déposés dans la boîte située à côté de l'entrée principale.",
+        # "à"-heavy French: "à" was listed only as Portuguese, and this page
+        # came back lang="pt" (10 Portuguese votes to 2) and was charged.
+        "Programme de la journée portes ouvertes. Accueil à 9 h à la mairie, visite du musée à 11 h, "
+        "déjeuner à midi à la cantine scolaire. Atelier de peinture à 14 h à la bibliothèque, puis retour "
+        "à la gare à 17 h. Rendez-vous à l'entrée principale. Inscription gratuite à l'accueil.",
+        "Vous êtes invités à la fête de fin d'année, samedi à 18 h à la salle des fêtes. "
+        "Merci de confirmer votre présence avant le 10 juin à l'adresse ci-dessous.",
+        "Si vous avez des questions, n'hésitez pas à nous contacter. Nous répondrons à toutes les demandes "
+        "dans un délai de deux jours ouvrables.",
     ],
     "de": [
         "Der Quartalsbericht ist zur Überprüfung beigefügt. Bitte senden Sie Ihre Kommentare bis Freitag an das Finanzteam.",
@@ -83,6 +95,9 @@ LANGUAGE_SAMPLES = {
         "Os funcionários que não escolherem um plano durante o período de inscrição manterão a sua cobertura atual. Em caso de dúvidas, entre em contato com os Recursos Humanos.",
         "Este aviso explica os seus direitos nos termos da lei. Você pode ter direito a doze semanas de licença não remunerada por ano para cuidar de um familiar.",
         "A biblioteca estará fechada na quinta-feira para manutenção. Os livros emprestados podem ser devolvidos na caixa ao lado da entrada principal.",
+        # "todos/todas/porque" were Spanish-only.
+        "Todas as inscrições devem ser feitas até sexta-feira. Porque o número de vagas é limitado, "
+        "recomendamos que você se inscreva o quanto antes.",
     ],
     "nl": [
         "Het kwartaalrapport is bijgevoegd voor uw beoordeling. Stuur uw opmerkingen voor vrijdag naar het financiële team.",

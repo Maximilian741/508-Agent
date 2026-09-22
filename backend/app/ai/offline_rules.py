@@ -548,6 +548,13 @@ _GENERIC_LINK_WORDS = frozenset(
 # THAN ONE list are removed below, so only distinctive words vote: "de" and
 # "la" are Spanish, French, Italian and Portuguese at once and used to tip a
 # Spanish page to French by dictionary order.
+#
+# So a word common in two of these languages MUST be listed under both, or it
+# votes for the one list it is in. "à" listed only under Portuguese tagged a
+# French programme ("Accueil à 9 h à la mairie…") lang="pt" and charged for
+# it. The same trap, closed the same way: "si" (French/Spanish "if", Italian
+# impersonal), "será" (Spanish and Portuguese), "todos/todas/porque" (Spanish
+# and Portuguese), "er/hier" (German and Dutch).
 _FUNCTION_WORDS: Dict[str, str] = {
     "en": (
         "the of and to in is that for it as with was on be by at this are from or have an they "
@@ -559,19 +566,19 @@ _FUNCTION_WORDS: Dict[str, str] = {
         "le la les de des du un une et en est que qui dans pour pas par sur au aux avec ce cette "
         "ces il elle ils elles nous vous votre vos notre nos leur leurs son sa ses sont ont été "
         "être avoir fait mais ou où plus tout tous toutes très sans sous entre aussi comme lors "
-        "afin dont chaque peut doit ainsi depuis avant après on se ne y"
+        "afin dont chaque peut doit ainsi depuis avant après on se ne y à si"
     ),
     "es": (
         "el la los las de del y en un una unos unas que es por para con no se su sus al lo como "
         "más pero este esta estos estas ese esa son está están ha han fue ser muy también sobre "
         "entre cuando hasta desde nuestro nuestra nuestros usted ustedes hay ya porque todos todas "
-        "puede sin según durante cada le les otro otra donde año años o"
+        "puede sin según durante cada le les otro otra donde año años o si será"
     ),
     "de": (
         "der die das den dem des und ist nicht mit für auf ein eine einen einem einer zu von im "
         "sie ihre ihr wir sind es auch als bei nach aus wie oder aber wird werden wurde hat haben "
         "sich dass noch nur über unter bis vor zum zur kann können muss diese dieser dieses alle "
-        "mehr sehr jedoch sowie bitte an was am um"
+        "mehr sehr jedoch sowie bitte an was am um er hier"
     ),
     "it": (
         "il lo la i gli le di del della dei delle degli dello un una uno e è che per non con da "
@@ -583,7 +590,7 @@ _FUNCTION_WORDS: Dict[str, str] = {
         "o a os as de do da dos das e é em no na nos nas um uma uns umas que para com não por "
         "pelo pela se seu sua seus suas ao aos à às mais como mas foi são está estão tem têm "
         "ser também sobre entre quando até desde este esta estes estas isso isto pode cada muito "
-        "já ou nosso nossa você vocês será após durante"
+        "já ou nosso nossa você vocês será após durante todos todas porque"
     ),
     "nl": (
         "de het een en van in is dat die niet op te voor met zijn er aan om ook als bij of maar "
@@ -616,7 +623,7 @@ _SPELLING_FEATURES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("it", re.compile(r"zione$|zioni$")),
     ("de", re.compile(r"ß|ung$|ungen$|keit$|heit$|lich$|isch$")),
     ("nl", re.compile(r"ij|heid$|lijk$")),
-    ("fr", re.compile(r"eaux?$|œ|[ûî]")),
+    ("fr", re.compile(r"eaux?$|œ|[ûî]|ées?$")),
 )
 # French elision ("qu'il", "n'est", "j'ai"); Italian articulated elision
 # ("dell'anno", "all'ingresso", "nell'ambito").
