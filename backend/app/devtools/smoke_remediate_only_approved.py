@@ -59,7 +59,10 @@ def _pdf(pages: int = 3, blank: bool = False) -> bytes:
         if blank:
             continue
         cs = DecodedStreamObject()
-        cs.set_data((f"BT /F1 24 Tf 20 260 Td (Section {i} heading) Tj ET\n"
+        # Page 1's big line is a real title: the PDF parser refuses a
+        # numbered division ("Section 0 heading") as the DOCUMENT's title.
+        head = "Annual Salt Report" if i == 0 else f"Section {i} heading"
+        cs.set_data((f"BT /F1 24 Tf 20 260 Td ({head}) Tj ET\n"
                      f"BT /F1 12 Tf 20 230 Td (Body paragraph one on page {i}.) Tj ET\n"
                      f"BT /F1 12 Tf 20 200 Td (Body paragraph two on page {i}.) Tj ET").encode())
         page[NameObject("/Contents")] = w._add_object(cs)  # noqa: SLF001

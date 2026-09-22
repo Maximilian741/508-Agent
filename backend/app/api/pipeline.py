@@ -1408,6 +1408,19 @@ async def remediate(
                         "headings, lists and tables were NOT identified. The document is tagged and "
                         "valid, but those pages need a source-application pass for full structure."
                     )
+        # Same reconciliation for the other things the tagger deliberately
+        # left undone (pdf_writer words them; see app/pdf/ua_tagger.py).
+        _undone = [
+            str(s.get("reason", "")).split(": ", 1)[1]
+            for s in (_skipped or [])
+            if isinstance(s, dict)
+            and str(s.get("reason", "")).startswith(("pdfua_reading_order_declined:", "pdfua_figures_without_alt:"))
+            and ": " in str(s.get("reason", ""))
+        ]
+        if _undone:
+            for _e in executions:
+                if _e.action_code == ActionCode.TAG_PDF_STRUCTURE and _e.status == ExecutionStatus.SUCCESS:
+                    _e.notes = f"{_e.notes.rstrip('.')}. NOTE: " + "; ".join(_undone) + "."
     except Exception:
         pass
 
@@ -2131,12 +2144,20 @@ def _parse_failure(exc: Exception, path: Path, suffix: str) -> HTTPException:
     ``code``/``message`` (added by CodedErrorRoute) say what happened.
     """
     legacy = "Failed to parse document. Ensure it is a valid, uncorrupted PDF, DOCX, PPTX, or HTML file."
+    # A parser that knows WHY it failed carries a user_message (the PDF
+    # parser says a file is password-protected rather than corrupt). Prefer
+    # its sentence; the stable code stays the same either way.
+    user_message = getattr(exc, "user_message", None)
     if suffix == ".pdf":
         from app.api.errors import MESSAGES
 
         if _pdf_is_password_protected(exc, path):
-            return ApiError(422, "password_protected", MESSAGES["password_protected"])
+            return ApiError(422, "password_protected", user_message or MESSAGES["password_protected"])
+        if user_message:
+            return ApiError(422, "invalid_pdf", user_message)
         return ApiError(422, "invalid_pdf", MESSAGES["invalid_pdf"], detail=legacy)
+    if user_message:
+        return HTTPException(status_code=422, detail=user_message)
     return HTTPException(status_code=422, detail=legacy)
 
 

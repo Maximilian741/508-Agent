@@ -144,6 +144,24 @@ class GenerateAltTextExecutor(RemediationExecutor):
                 else "We could not produce a description for this picture."
             )
             return _refused(action_code, plan, reason)
+        # A PDF figure's printed "Figure N." caption is context for a provider
+        # that can SEE the picture. The offline heuristic cannot: all it can
+        # write is the caption again, which a screen reader reads out right
+        # after the figure anyway. Not better than no alt: nothing written,
+        # nothing charged. (Kept from the PDF lane over the general caption
+        # rule, which still applies to Word and HTML captions.)
+        if result.provider == "heuristic" and caption_source == "figure_label":
+            return ExecutionResult(
+                action_code=action_code,
+                target_node_id=plan.target_node_id,
+                status=ExecutionStatus.SKIPPED,
+                notes=(
+                    "Only this picture's printed caption is known, and repeating it as the "
+                    "description adds nothing a screen reader does not already read. It needs "
+                    "a person (or an AI that can see it) to say what it shows. Left for manual "
+                    "review; nothing was written and you were not charged for it."
+                ),
+            )
         if shared_caption and result.provider == "heuristic":
             # A vision call fell back (error / budget) to the caption.
             return _refused(action_code, plan, shared_note)
