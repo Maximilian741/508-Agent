@@ -49,7 +49,7 @@ os.environ["SEMANTIC_PROVIDER"] = "heuristic"
 
 from docx import Document  # noqa: E402
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: E402
-from docx.oxml import OxmlElement  # noqa: E402
+from docx.oxml import OxmlElement, parse_xml  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 from docx.shared import Pt, RGBColor  # noqa: E402
 from lxml import etree  # noqa: E402
@@ -328,6 +328,38 @@ def main() -> int:
           str(_outline(after.tree)))
     check("numbered style: numbering switched off on the paragraph (numId 0), text unchanged",
           num is not None and num.get(f"{W}val") == "0", etree.tostring(ppr).decode() if ppr is not None else "")
+
+    # ===== E2. A number the OLD style drew is kept ============================
+    # A custom "Section Title" style auto-numbers its lines ("1.", "2."). The
+    # Heading 2 style does not: switching style made the number vanish from
+    # the page — a visible content change sold as a fix. The old numbering is
+    # pinned onto the paragraph at the level the old style drew it.
+    d = Document()
+    d.core_properties.title = "Numbered section style"
+    d.styles["Heading 1"].font.size = Pt(18)
+    d.add_heading("Plan", 1)
+    _body(d)
+    list_num = d.styles["List Number"]._element.find(qn("w:pPr")).find(qn("w:numPr"))
+    sect = d.styles.add_style("Section Title", 1)
+    sect.base_style = d.styles["Normal"]
+    sect_ppr = sect._element.get_or_add_pPr()
+    sect_ppr.append(parse_xml(etree.tostring(list_num)))
+    want_num = list_num.find(qn("w:numId")).get(qn("w:val"))
+    p = _fake(d, "Objectives", 14)
+    p.style = sect
+    _body(d)
+    src = tmp / "numbered_section_style.docx"
+    d.save(str(src))
+    res, execs, wr, after = _fix_fake_headings(src, tmp / "numbered_section_style_fixed.docx")
+    check("numbered old style: promoted to Heading 2", dict(_outline(after.tree)).get("Objectives") == 2,
+          str((_outline(after.tree), [e.notes for e in execs])))
+    p_el = _para_xml(tmp / "numbered_section_style_fixed.docx", "Objectives")
+    ppr = p_el.find(f"{W}pPr") if p_el is not None else None
+    num = ppr.find(f"{W}numPr/{W}numId") if ppr is not None else None
+    lvl_el = ppr.find(f"{W}numPr/{W}ilvl") if ppr is not None else None
+    check("numbered old style: its number is kept (old numId pinned on the paragraph, with a level)",
+          num is not None and num.get(f"{W}val") == want_num and lvl_el is not None,
+          etree.tostring(ppr).decode() if ppr is not None else "")
 
     # ===== F. Ambiguous look is declined, not guessed =========================
     d = Document()

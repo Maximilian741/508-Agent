@@ -882,6 +882,34 @@ def _num_id_of(numpr) -> Optional[str]:
     return (el.get(qn("w:val")) or "").strip() if el is not None else None
 
 
+def _style_linked_ilvl(doc, num_id: Optional[str], style_id: Optional[str]) -> Optional[str]:
+    """The ``w:ilvl`` of the numbering level linked to ``style_id``
+    (``<w:lvl><w:pStyle w:val=style_id/>``) in num ``num_id``'s abstract
+    definition, or None. Read without creating a numbering part."""
+    if not num_id or not style_id:
+        return None
+    try:
+        numbering_el = doc.part.part_related_by(OPC_RT.NUMBERING).element
+    except Exception:
+        return None
+    abstract_id = None
+    for num in numbering_el.iterfind(qn("w:num")):
+        if (num.get(qn("w:numId")) or "").strip() == num_id:
+            ref = num.find(qn("w:abstractNumId"))
+            abstract_id = ref.get(qn("w:val")) if ref is not None else None
+            break
+    if abstract_id is None:
+        return None
+    for absn in numbering_el.iterfind(qn("w:abstractNum")):
+        if absn.get(qn("w:abstractNumId")) != abstract_id:
+            continue
+        for lvl in absn.iterfind(qn("w:lvl")):
+            ps = lvl.find(qn("w:pStyle"))
+            if ps is not None and ps.get(qn("w:val")) == style_id:
+                return lvl.get(qn("w:ilvl"))
+    return None
+
+
 def _set_heading_style(doc, styles: DocxStyleResolver, paragraph, level: int) -> Tuple[str, int]:
     """Give ``paragraph`` the ``Heading {level}`` style WITHOUT changing how
     it looks. Returns ``(style_id, properties_pinned)``.
@@ -944,6 +972,24 @@ def _set_heading_style(doc, styles: DocxStyleResolver, paragraph, level: int) ->
         nid = OxmlElement("w:numId")
         nid.set(qn("w:val"), "0")
         numpr.append(nid)
+        _set_ordered_child(pPr, numpr, _PPR_ORDER)
+        pinned += 1
+    elif (
+        pPr.find(qn("w:numPr")) is None
+        and _num_id_of(old_num) not in (None, "", "0")
+        and _num_id_of(new_num) != _num_id_of(old_num)
+    ):
+        # The OLD style numbered this line ("3." from a numbered "Section
+        # Title" style). The heading style does not, so the number would
+        # silently vanish from the page — a visible content change. Keep it,
+        # at the level the old style drew it: an explicit ilvl, else the
+        # numbering level linked to the old style, else level 0 (what Word
+        # uses for a style's numPr without either).
+        numpr = copy.deepcopy(old_num)
+        if numpr.find(qn("w:ilvl")) is None:
+            ilvl = OxmlElement("w:ilvl")
+            ilvl.set(qn("w:val"), _style_linked_ilvl(doc, _num_id_of(old_num), old_sid) or "0")
+            numpr.insert(0, ilvl)
         _set_ordered_child(pPr, numpr, _PPR_ORDER)
         pinned += 1
 
