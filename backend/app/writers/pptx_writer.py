@@ -1387,6 +1387,19 @@ def _apply_pptx_list_conversion(node, text_by_node_id, applied, skipped) -> None
             anchor.addprevious(bu)
         else:
             pPr.append(bu)
+        # A bullet with no hanging indent is drawn touching its text
+        # ("•alpha" — rendered that way by PowerPoint itself), which reads
+        # worse than the typed "- alpha" it replaces. Give it the indent
+        # PowerPoint's own Bullets / Numbering buttons write, unless the author
+        # already set one.
+        if pPr.get("marL") is None and pPr.get("indent") is None:
+            try:
+                lvl = max(0, int(pPr.get("lvl") or 0))
+            except ValueError:
+                lvl = 0
+            hang = 285750 if kind == "bullet" else 342900
+            pPr.set("marL", str(hang + lvl * 457200))
+            pPr.set("indent", str(-hang))
 
         # Strip the typed marker from the first non-empty run.
         for run in paragraph.runs:

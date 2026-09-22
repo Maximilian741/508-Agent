@@ -68,6 +68,17 @@ def _build(path: Path) -> None:
     run = tb.text_frame.paragraphs[0].add_run()
     run.text = "Permit application portal"
     run.hyperlink.address = "https://example.com/permits"
+    # Slide 3: titled, with a typed "- item" list and a typed numbered list.
+    s3 = prs.slides.add_slide(prs.slide_layouts[5])
+    s3.shapes.title.text = "Next steps"
+    lb = s3.shapes.add_textbox(Inches(1), Inches(2), Inches(6), Inches(2))
+    lb.text_frame.text = "- Submit the form"
+    for line in ("- Pay the fee", "- Book an inspection"):
+        lb.text_frame.add_paragraph().text = line
+    nb = s3.shapes.add_textbox(Inches(1), Inches(4.5), Inches(6), Inches(2))
+    nb.text_frame.text = "1. Apply online"
+    for line in ("2. Wait for review", "3. Collect permit"):
+        nb.text_frame.add_paragraph().text = line
     prs.save(str(path))
 
 
@@ -113,7 +124,8 @@ def main() -> int:
     out = tmp / "fixed.pptx"
     rep = write_remediated_pptx(src, res.tree, out)
     kinds = sorted(a.get("kind") for a in rep["applied"])
-    check("fixed deck: the ONLY applied entry is the slide title it set", kinds == ["slide_title"], str(rep["applied"]))
+    check("fixed deck: applied = the slide title + the two approved list conversions, nothing else",
+          kinds == ["list_conversion", "list_conversion", "slide_title"], str(rep["applied"]))
     check("fixed deck: the unapproved 'image.png' descr is not reported as a fix",
           not any(a.get("kind") == "image_alt_text" for a in rep["applied"]))
 
@@ -130,6 +142,23 @@ def main() -> int:
     check("hyperlinked box: no underline override pinned on the link run", r_pr is not None and r_pr.get("u") is None)
     check("hyperlinked box: size and font are still pinned (title style can't restyle it)",
           r_pr is not None and r_pr.get("sz") is not None and r_pr.find(f"{A}latin") is not None)
+    # ---- 3. converted lists get a hanging indent (not "•Submit the form") --
+    s3 = etree.fromstring(_slide(out, 3))
+    paras = [p for p in s3.iter(f"{A}p") if p.find(f"{A}pPr") is not None
+             and (p.find(f"{A}pPr/{A}buChar") is not None or p.find(f"{A}pPr/{A}buAutoNum") is not None)]
+    check("lists: all six typed lines became real bullets/numbers", len(paras) == 6, str(len(paras)))
+    bullets = [p.find(f"{A}pPr") for p in paras if p.find(f"{A}pPr/{A}buChar") is not None]
+    numbers = [p.find(f"{A}pPr") for p in paras if p.find(f"{A}pPr/{A}buAutoNum") is not None]
+    check("lists: each bullet has PowerPoint's own hanging indent (marL=285750, indent=-285750)",
+          len(bullets) == 3 and all(p.get("marL") == "285750" and p.get("indent") == "-285750" for p in bullets),
+          str([(p.get("marL"), p.get("indent")) for p in bullets]))
+    check("lists: each number has the numbering hanging indent (marL=342900, indent=-342900)",
+          len(numbers) == 3 and all(p.get("marL") == "342900" and p.get("indent") == "-342900" for p in numbers),
+          str([(p.get("marL"), p.get("indent")) for p in numbers]))
+    texts = ["".join(t.text or "" for t in p.iter(f"{A}t")) for p in paras]
+    check("lists: the typed markers are gone, the words are not",
+          texts == ["Submit the form", "Pay the fee", "Book an inspection", "Apply online", "Wait for review", "Collect permit"], str(texts))
+
     again = parse_to_tree(str(out))
     run_analyzers(again.tree)
     untitled = [n for n in again.tree.root.children if (n.metadata.properties or {}).get("missing_title")]
