@@ -95,7 +95,6 @@ GEOMETRY_BUDGET_SECONDS = 3.0
 # the vertical padding of the box uses these typical font metrics.
 _ASCENT_EM = 0.9
 _DESCENT_EM = 0.25
-_MAX_RUN_CHARS_MEASURED = 600
 # The contrast analyzer's float tolerance (a colour exactly on the threshold passes).
 _CONTRAST_TOLERANCE = 0.05
 
@@ -1000,32 +999,25 @@ def _image_placements(ops: List[Tuple[Any, bytes]]) -> Dict[str, List[List[float
 
 
 class _PdfRun:
-    """One text-show operation: its decoded text, baseline and x extent, and
+    """One string shown by a text operator: its decoded text, the x of every
+    character boundary, its baseline and font height (all user space), and
     the fill colour it was painted with (None when not a plain rg/g/k)."""
 
-    __slots__ = ("tj", "text", "x0", "x1", "base", "fh", "size", "fill")
+    __slots__ = ("text", "xs", "x0", "x1", "base", "fh", "size", "fill")
 
-    def __init__(self, tj: Any, fill: Optional[str] = None) -> None:
-        self.tj = tj
-        self.text = str(getattr(tj, "txt", "") or "")
-        self.x0 = float(tj.tx)
-        self.x1 = float(tj.displaced_tx)
-        self.base = float(tj.ty)
-        self.fh = abs(float(tj.font_height))
-        try:
-            self.size: Optional[float] = float(tj.font_size)
-        except (TypeError, ValueError, AttributeError):
-            self.size = None
+    def __init__(self, text: str, xs: List[float], base: float, fh: float, size: float, fill: Optional[str]) -> None:
+        self.text = text
+        self.xs = xs  # len(text) + 1 boundaries, left to right
+        self.x0 = xs[0]
+        self.x1 = xs[-1]
+        self.base = base
+        self.fh = fh
+        self.size = size
         self.fill = fill
 
     def x_at(self, i: int) -> float:
         """x where character ``i`` starts (``len(text)`` = where the run ends)."""
-        if i <= 0:
-            return self.x0
-        if i >= len(self.text):
-            return self.x1
-        t = self.tj.transform
-        return float(t[4] + self.tj.word_tx(self.text[:i]) * t[0])
+        return self.xs[max(0, min(i, len(self.xs) - 1))]
 
     def box(self, i: int, j: int) -> List[float]:
         xa, xb = self.x_at(i), self.x_at(j)
@@ -1059,84 +1051,296 @@ def _whiteish(hex6: Optional[str]) -> bool:
         return False
 
 
-class _FillTracker:
-    """Wraps the op iterator: records the fill colour in force for every
-    text-show string pypdf's layout state machine will turn into a run, in the
-    same order, and notices non-white fill paints."""
+def _obj(value: Any) -> Any:
+    return value.get_object() if hasattr(value, "get_object") else value
 
-    def __init__(self, ops: List[Tuple[Any, bytes]]) -> None:
-        self._ops = ops
-        self.fills: List[Optional[str]] = []
-        self.colored_bg = False
 
-    def __iter__(self):
-        fill: Optional[str] = "000000"
-        stack: List[Optional[str]] = []
-        depth = 0  # inside BT/ET or q/Q: where the layout machine reads text ops
-        for operands, op in self._ops:
-            try:
-                if op in (b"BT", b"q"):
-                    depth += 1
-                    if op == b"q":
-                        stack.append(fill)
-                elif op in (b"ET", b"Q"):
-                    depth = max(0, depth - 1)
-                    if op == b"Q":
-                        fill = stack.pop() if stack else "000000"
-                elif op == b"rg" and len(operands) >= 3:
-                    fill = _hex_rgb(operands)
-                elif op == b"g" and len(operands) >= 1:
-                    fill = _hex_rgb([operands[0]] * 3)
-                elif op == b"k" and len(operands) >= 4:
-                    fill = _hex_cmyk(operands)
-                elif op in _UNKNOWN_FILL_OPS:
-                    fill = None
-                elif op in _PAINT_FILL_OPS and fill is not None and not _whiteish(fill):
-                    self.colored_bg = True
-                elif depth and op in (b"Tj", b"'", b'"'):
-                    self.fills.append(fill)
-                elif depth and op == b"TJ" and operands:
-                    self.fills.extend(fill for part in operands[0] if isinstance(part, bytes))
-            except (TypeError, ValueError, IndexError):
-                pass
-            yield operands, op
+class _PageFont:
+    __slots__ = ("encoding", "char_map", "font_dictionary")
+
+    def __init__(self, encoding: Any, char_map: Any, font_dictionary: Any) -> None:
+        self.encoding = encoding
+        self.char_map = char_map
+        self.font_dictionary = font_dictionary
+
+
+def _page_fonts(page: Any) -> Dict[Any, _PageFont]:
+    """``{resource name: decoding maps + font dict}`` for the page (and its
+    inherited resources), ONE font at a time: pypdf's own page-level helper
+    gives up on the whole page when a single font's ToUnicode map is one it
+    can't parse, and a font we can't decode is simply not measured."""
+    from pypdf._cmap import build_char_map_from_dict
+
+    fonts: Dict[Any, _PageFont] = {}
+    node: Any = page
+    hops = 0
+    while node is not None and hops < 32:
+        hops += 1
+        try:
+            resources = _obj(node.get("/Resources"))
+            font_dict = _obj(resources.get("/Font")) if hasattr(resources, "get") else None
+        except Exception:
+            font_dict = None
+        if hasattr(font_dict, "items"):
+            for name, ref in font_dict.items():
+                if name in fonts:
+                    continue
+                try:
+                    ft = _obj(ref)
+                    _subtype, _half_space, encoding, char_map = build_char_map_from_dict(200.0, ft)
+                    fonts[name] = _PageFont(encoding, char_map, ft)
+                except Exception:
+                    continue
+        try:
+            node = _obj(node.get("/Parent"))
+        except Exception:
+            node = None
+    return fonts
+
+
+class _FontMeasure:
+    """Glyph advances for one font, read from the font itself — never guessed.
+
+    * simple fonts (Type1 / TrueType / MMType1): ``/Widths`` indexed by the
+      character CODE (``/FirstChar``), with ``/MissingWidth`` from the font
+      descriptor; a non-embedded standard-14 font without ``/Widths`` uses the
+      Core14 AFM metrics (app.services.pdf_core14_widths);
+    * Type0 with Identity-H: ``/W`` by CID, ``/DW`` otherwise (spec default
+      1000);
+    * anything else (Type3, other CMaps, vertical writing): not measurable.
+
+    Text comes from pypdf's decoding (the font's encoding, then its ToUnicode
+    map), one piece per code, so every character boundary is a glyph edge.
+    """
+
+    def __init__(self, font: Any) -> None:
+        self.font = font
+        fd = getattr(font, "font_dictionary", None) or {}
+        self.subtype = str(_obj(fd.get("/Subtype")) or "")
+        self.ok = False
+        self.code_widths: Optional[Dict[int, float]] = None
+        self.missing: Optional[float] = None
+        self.core: Optional[Dict[str, int]] = None
+        self.cid_widths: Dict[int, float] = {}
+        self.dw = 1000.0
+        try:
+            if self.subtype == "/Type0":
+                self._read_cid_widths(fd)
+            elif self.subtype in ("/Type1", "/TrueType", "/MMType1"):
+                widths = _obj(fd.get("/Widths"))
+                if widths is not None:
+                    first = int(_obj(fd.get("/FirstChar")) or 0)
+                    self.code_widths = {first + k: float(_obj(v)) for k, v in enumerate(widths)}
+                    desc = _obj(fd.get("/FontDescriptor"))
+                    if hasattr(desc, "get") and desc.get("/MissingWidth") is not None:
+                        self.missing = float(_obj(desc.get("/MissingWidth")))
+                    self.ok = True
+                else:
+                    from app.services.pdf_core14_widths import core14_widths
+
+                    self.core = core14_widths(str(_obj(fd.get("/BaseFont")) or ""))
+                    self.ok = self.core is not None
+        except Exception:
+            self.ok = False
+
+    def _read_cid_widths(self, fd: Any) -> None:
+        if str(_obj(fd.get("/Encoding")) or "") != "/Identity-H":
+            return
+        kids = _obj(fd.get("/DescendantFonts")) or []
+        desc = _obj(kids[0]) if len(kids) else None
+        if not hasattr(desc, "get"):
+            return
+        if desc.get("/DW") is not None:
+            self.dw = float(_obj(desc.get("/DW")))
+        w = [_obj(x) for x in (_obj(desc.get("/W")) or [])]
+        i = 0
+        while i + 1 < len(w):
+            first = int(w[i])
+            nxt = w[i + 1]
+            if isinstance(nxt, (list, tuple)) or (hasattr(nxt, "__iter__") and not isinstance(nxt, (str, bytes))):
+                for k, width in enumerate(nxt):
+                    self.cid_widths[first + k] = float(_obj(width))
+                i += 2
+            else:
+                if i + 2 >= len(w):
+                    return
+                last, width = int(w[i + 1]), float(w[i + 2])
+                for cid in range(first, min(last, first + 65535) + 1):
+                    self.cid_widths[cid] = width
+                i += 3
+        self.ok = True
+
+    def glyphs(self, raw: Any) -> Optional[List[Tuple[str, float, bool]]]:
+        """``[(text, width in 1/1000 em, is single-byte code 32)]`` per glyph,
+        or None when any glyph can't be both decoded and measured."""
+        if not self.ok:
+            return None
+        if isinstance(raw, str):
+            original = getattr(raw, "original_bytes", None)
+            raw = original if isinstance(original, (bytes, bytearray)) else raw.encode("latin-1", "replace")
+        data = bytes(raw)
+        font = self.font
+        char_map = font.char_map if isinstance(font.char_map, dict) else {}
+        out: List[Tuple[str, float, bool]] = []
+        if self.subtype == "/Type0":
+            if len(data) % 2:
+                return None
+            for k in range(0, len(data), 2):
+                cid = (data[k] << 8) | data[k + 1]
+                text = char_map.get(chr(cid))
+                if not isinstance(text, str) or not text:
+                    return None
+                out.append((text, self.cid_widths.get(cid, self.dw), False))
+            return out
+        encoding = font.encoding
+        for code in data:
+            if isinstance(encoding, dict):
+                ch = encoding.get(code, chr(code))
+            else:
+                try:
+                    ch = bytes((code,)).decode(encoding or "latin-1")
+                except (LookupError, UnicodeDecodeError):
+                    return None
+            text = char_map.get(ch, ch)
+            if not isinstance(text, str):
+                text = ch
+            if self.code_widths is not None:
+                width = self.code_widths.get(code, self.missing)
+            else:
+                width = self.core.get(ch) if self.core is not None else None
+            if width is None:
+                return None
+            out.append((text, float(width), code == 32))
+        return out
 
 
 def _text_runs(page: Any, ops: List[Tuple[Any, bytes]]) -> Tuple[List[_PdfRun], bool]:
-    """The page's upright text runs, positioned by pypdf's layout-mode text
-    state machine (the same one ``extract_text(extraction_mode="layout")``
-    uses; pinned pypdf), and whether the page paints a coloured background.
-    Text in rotated or mirrored runs is left out."""
-    from pypdf._text_extraction._layout_mode._fixed_width_page import recurs_to_target_op
-    from pypdf._text_extraction._layout_mode._text_state_manager import TextStateManager
+    """The page's upright text runs, measured with the PDF text model, and
+    whether the page paints a coloured background.
 
-    fonts = page._layout_mode_fonts()
-    mgr = TextStateManager()
-    tracker = _FillTracker(ops)
-    it = iter(tracker)
-    tjs: List[Any] = []
-    while True:
-        try:
-            operands, op = next(it)
-        except StopIteration:
-            break
-        if op in (b"BT", b"q"):
-            _groups, found = recurs_to_target_op(it, mgr, b"ET" if op == b"BT" else b"Q", fonts, True)
-            tjs.extend(found)
-        elif op == b"cm":
-            mgr.add_cm(*operands)
-        else:
-            mgr.set_state_param(op, operands)
-    # Colours are only trusted when the two walks saw the same strings.
-    fills: List[Optional[str]] = tracker.fills if len(tracker.fills) == len(tjs) else [None] * len(tjs)
+    Our own small text-state machine (Tm/Tlm, Td/TD/T*/'/", Tc/Tw/Tz/TL/Ts,
+    cm with q/Q, TJ kerning, and the advance after EVERY shown string — which
+    pypdf 4.2's layout mode omits, putting consecutive Tj runs all at the line
+    start). Glyph widths come from the font itself (:class:`_FontMeasure`;
+    pypdf's layout-mode Font is used only for its decoding maps). A string holding a
+    glyph whose width the font doesn't give is NOT measured, and nothing else
+    on that line is either until the text position is set again (Td, Tm, T*
+    ...): a box is measured or it isn't produced. Rotated or mirrored text is
+    left out.
+    """
+    fonts = _page_fonts(page)
+    identity = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    ctm = identity
+    tm = tlm = identity
+    measure: Optional[_FontMeasure] = None
+    measures: Dict[Any, _FontMeasure] = {}
+    tfs = tc = tw = ts = tl = 0.0
+    tz = 100.0
+    fill: Optional[str] = "000000"
+    stack: List[Tuple[Any, ...]] = []
+    lost = False  # the current x on this line is unknown (an unmeasured string)
+    colored_bg = False
     runs: List[_PdfRun] = []
-    for tj, fill in zip(tjs, fills):
-        if getattr(tj, "rotated", False) or getattr(tj, "flip_vertical", False):
-            continue
-        run = _PdfRun(tj, fill)
-        if run.text and run.fh > 0 and run.x1 >= run.x0:
-            runs.append(run)
-    return runs, tracker.colored_bg
+
+    def move(tx: float, ty: float) -> None:
+        nonlocal tm, tlm, lost
+        tlm = _mat_mult((1.0, 0.0, 0.0, 1.0, tx, ty), tlm)
+        tm = tlm
+        lost = False
+
+    def show(raw: Any) -> None:
+        nonlocal tm, lost
+        glyphs = measure.glyphs(raw) if (measure is not None and not lost) else None
+        if glyphs is None:
+            lost = True  # an unmeasured glyph: no box, and the line's x is now unknown
+            return
+        th = tz / 100.0
+        pieces: List[str] = []
+        advances = [0.0]
+        x = 0.0
+        for text_piece, width, is_space in glyphs:
+            step = ((width / 1000.0) * tfs + tc + (tw if is_space else 0.0)) * th
+            # A glyph that maps to several characters (a ligature) spans them evenly.
+            for k in range(1, len(text_piece) + 1):
+                advances.append(x + step * k / len(text_piece))
+            pieces.append(text_piece)
+            x += step
+        text = "".join(pieces)
+        m = _mat_mult(tm, ctm)
+        a, b, c, d, e, f = m
+        if abs(b) < 1e-6 and abs(c) < 1e-6 and a > 0 and d > 0 and text.strip():
+            fh = abs(tfs) * d
+            if fh > 0:
+                xs = [a * t + e for t in advances]
+                runs.append(_PdfRun(text, xs, d * ts + f, fh, tfs, fill))
+        tm = _mat_mult((1.0, 0.0, 0.0, 1.0, x, 0.0), tm)
+
+    for operands, op in ops:
+        try:
+            if op == b"q":
+                stack.append((ctm, fill, measure, tfs, tc, tw, tz, tl, ts))
+            elif op == b"Q":
+                if stack:
+                    ctm, fill, measure, tfs, tc, tw, tz, tl, ts = stack.pop()
+            elif op == b"cm" and len(operands) == 6:
+                ctm = _mat_mult(tuple(float(v) for v in operands), ctm)
+            elif op == b"BT":
+                tm = tlm = identity
+                lost = False
+            elif op == b"Tf" and len(operands) >= 2:
+                name = operands[0]
+                if name not in measures and name in fonts:
+                    measures[name] = _FontMeasure(fonts[name])
+                measure = measures.get(name)
+                tfs = float(operands[1])
+            elif op == b"Tc" and operands:
+                tc = float(operands[0])
+            elif op == b"Tw" and operands:
+                tw = float(operands[0])
+            elif op == b"Tz" and operands:
+                tz = float(operands[0])
+            elif op == b"TL" and operands:
+                tl = float(operands[0])
+            elif op == b"Ts" and operands:
+                ts = float(operands[0])
+            elif op == b"Td" and len(operands) >= 2:
+                move(float(operands[0]), float(operands[1]))
+            elif op == b"TD" and len(operands) >= 2:
+                tl = -float(operands[1])
+                move(float(operands[0]), float(operands[1]))
+            elif op == b"Tm" and len(operands) == 6:
+                tm = tlm = tuple(float(v) for v in operands)
+                lost = False
+            elif op == b"T*":
+                move(0.0, -tl)
+            elif op == b"Tj" and operands:
+                show(operands[0])
+            elif op == b"'" and operands:
+                move(0.0, -tl)
+                show(operands[0])
+            elif op == b'"' and len(operands) >= 3:
+                tw, tc = float(operands[0]), float(operands[1])
+                move(0.0, -tl)
+                show(operands[2])
+            elif op == b"TJ" and operands:
+                for part in operands[0]:
+                    if isinstance(part, (int, float)) or type(part).__name__ in ("NumberObject", "FloatObject"):
+                        tm = _mat_mult((1.0, 0.0, 0.0, 1.0, -float(part) / 1000.0 * tfs * tz / 100.0, 0.0), tm)
+                    else:
+                        show(part)
+            elif op == b"rg" and len(operands) >= 3:
+                fill = _hex_rgb(operands)
+            elif op == b"g" and len(operands) >= 1:
+                fill = _hex_rgb([operands[0]] * 3)
+            elif op == b"k" and len(operands) >= 4:
+                fill = _hex_cmyk(operands)
+            elif op in _UNKNOWN_FILL_OPS:
+                fill = None
+            elif op in _PAINT_FILL_OPS and fill is not None and not _whiteish(fill):
+                colored_bg = True
+        except (TypeError, ValueError, KeyError, IndexError, UnicodeDecodeError):
+            lost = True
+    return runs, colored_bg
 
 
 class _PdfPageGeometry:
@@ -1188,15 +1392,14 @@ class _PdfPageGeometry:
 
     def words_in(self, rect: List[float]) -> Tuple[str, str]:
         """``(context, words)``: the characters whose centre is inside ``rect``,
-        and the full text of the runs they belong to."""
+        and the printed line they sit on (or, when that can't be rebuilt
+        cleanly, the full text of the runs they belong to)."""
         x0, y0, x1, y1 = rect
         picked: List[Tuple[int, int, int]] = []
         for ri, run in enumerate(self.runs):
             mid = run.base + (_ASCENT_EM - _DESCENT_EM) / 2.0 * run.fh
             if not (y0 <= mid <= y1) or run.x1 < x0 or run.x0 > x1 or not run.text.strip():
                 continue
-            if len(run.text) > _MAX_RUN_CHARS_MEASURED:
-                continue  # per-character measuring is quadratic; not for a whole page in one run
             lo = hi = -1
             prev = run.x_at(0)
             for ci in range(len(run.text)):
@@ -1210,9 +1413,61 @@ class _PdfPageGeometry:
                 picked.append((ri, lo, hi))
         if not picked:
             return "", ""
+        line = self._line_of(picked)
+        if line is not None:
+            return line
         words = _norm(" ".join(self.runs[ri].text[lo:hi + 1] for ri, lo, hi in picked))
         context = _norm(" ".join(self.runs[ri].text for ri, _lo, _hi in picked))
         return context, words
+
+    def _line_of(self, picked: List[Tuple[int, int, int]]) -> Optional[Tuple[str, str]]:
+        """The printed line around the picked characters — a link is often its
+        own text-show operation, and "click here" alone says little. Runs on
+        the picked run's baseline, left to right, but only as far as the text
+        is continuous: a gap wider than an em is a column gutter or a tab
+        stop, and text across it is a different sentence (two columns share
+        baselines). A space where the gap is wider than a sliver. None when
+        the picked runs aren't all on one such stretch (wrapped link,
+        overprinted text)."""
+        anchor = self.runs[picked[0][0]]
+        tol = 0.3 * max(anchor.fh, 1.0)
+        same = sorted(
+            (ri for ri, r in enumerate(self.runs) if abs(r.base - anchor.base) <= tol),
+            key=lambda ri: self.runs[ri].x0,
+        )
+        # Continuous stretches of that baseline, overprints dropped.
+        stretches: List[List[int]] = []
+        prev: Optional[_PdfRun] = None
+        for ri in same:
+            r = self.runs[ri]
+            if prev is not None and r.x0 < prev.x1 - 0.5:
+                continue  # overlaps the previous run (overprint / fake bold)
+            if prev is None or r.x0 - prev.x1 > 1.0 * max(r.fh, prev.fh):
+                stretches.append([])
+            stretches[-1].append(ri)
+            prev = r
+        wanted = {ri for ri, _lo, _hi in picked}
+        home = [s for s in stretches if wanted & set(s)]
+        if len(home) != 1 or not wanted <= set(home[0]):
+            return None
+        parts: List[str] = []
+        offset: Dict[int, int] = {}
+        pos = 0
+        prev = None
+        for ri in home[0]:
+            r = self.runs[ri]
+            if prev is not None and r.x0 - prev.x1 > 0.15 * r.fh and parts and not parts[-1].endswith(" ") and not r.text.startswith(" "):
+                parts.append(" ")
+                pos += 1
+            offset[ri] = pos
+            parts.append(r.text)
+            pos += len(r.text)
+            prev = r
+        context = "".join(parts)
+        a = min(offset[ri] + lo for ri, lo, _hi in picked)
+        b = max(offset[ri] + hi + 1 for ri, _lo, hi in picked)
+        words = _norm(context[a:b])
+        return (_norm(context), words) if words else None
 
 
 # ---------------------------------------------------------------------------

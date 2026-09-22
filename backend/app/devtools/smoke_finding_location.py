@@ -166,6 +166,24 @@ def _pdf() -> bytes:
     return out.getvalue()
 
 
+def _helv(text: str, size: float = 12.0) -> float:
+    """Advance of ``text`` in 12 pt Helvetica, from the Core14 AFM table the
+    location code measures non-embedded standard fonts with (its values are
+    pinned against the AFM in main())."""
+    from app.services.pdf_core14_widths import core14_widths
+
+    table = core14_widths("/Helvetica")
+    return sum(table[c] for c in text) * size / 1000.0
+
+
+def _click_rect(dx: float = 0.0, dy: float = 0.0) -> tuple:
+    """A link /Rect around "click here" in "For the details, click here today."
+    (12 pt, baseline 660, x from 72), 1 pt of slack each side."""
+    x0 = 72 + _helv("For the details, ")
+    x1 = x0 + _helv("click here")
+    return (round(x0 - 1 + dx), 655 + dy, round(x1 + 1 + dx), 672 + dy)
+
+
 def _pdf_drawn() -> bytes:
     """A hand-built PDF whose geometry we know exactly (pypdf only).
 
@@ -228,11 +246,104 @@ def _pdf_drawn() -> bytes:
     page(0, 0, (0, 0, 612, 792))
     page(100, 100, (100, 100, 712, 892))
     page(0, 0, (0, 0, 612, 792), rotate=90)
-    # "For the details, " is 93.4 pt of 12 pt Helvetica and "click here" 57.4 pt,
-    # so the words sit at x 165.4-222.8 on baseline 660 (page 1).
-    w.add_annotation(0, Link(rect=(164, 655, 224, 672), url="https://example.com/details"))
-    w.add_annotation(1, Link(rect=(264, 755, 324, 772), url="https://example.com/details"))
-    w.add_annotation(2, Link(rect=(164, 655, 224, 672), url="https://example.com/details"))
+    # "For the details, " is 82.7 pt of 12 pt Helvetica and "click here" 50.7 pt,
+    # so the words sit at x 154.7-205.4 on baseline 660 (page 1).
+    w.add_annotation(0, Link(rect=_click_rect(), url="https://example.com/details"))
+    w.add_annotation(1, Link(rect=_click_rect(100, 100), url="https://example.com/details"))
+    w.add_annotation(2, Link(rect=_click_rect(), url="https://example.com/details"))
+    out = io.BytesIO()
+    w.write(out)
+    return out.getvalue()
+
+
+def _pdf_lines() -> bytes:
+    """Links that are their own text-show operation, inside a line.
+
+    Line 1 (baseline 660): "For the details, " "click here" " today." as three
+    Tj runs, and — on the SAME baseline, across a gutter — "Right column
+    text." at x=400 (two columns share baselines). Line 2 (baseline 620):
+    "See the " "annual report" " for 2025." Links cover "click here" and
+    "annual report" (Core14 Helvetica metrics).
+    Line 3 (baseline 580, font F2 with its OWN /Widths: 500 for every code):
+    "Go " "here" " now." at 10 pt, so "here" is x 87-107 whatever Helvetica
+    says. Line 4 (baseline 540, font F3 whose /Widths cover only A-Z):
+    "ABC" "xyz" — the lowercase run has no width, so it is never measured.
+    Line 5 (baseline 500, font F9: Type0 / Identity-H, /W [1 [400 500 600]],
+    /DW 1000, ToUnicode 1-4 -> A B C space): <0001000200030004> then
+    <00030003>, i.e. "ABC " (x 72-97) then "CC" (x 97-109) at 10 pt.
+    """
+    from pypdf import PdfWriter
+    from pypdf.annotations import Link
+    from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, NameObject, NumberObject, TextStringObject
+
+    w = PdfWriter()
+
+    def helvetica(first: int = 0, widths=None):
+        d = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        })
+        if widths is not None:
+            d[NameObject("/FirstChar")] = NumberObject(first)
+            d[NameObject("/LastChar")] = NumberObject(first + len(widths) - 1)
+            d[NameObject("/Widths")] = ArrayObject([NumberObject(v) for v in widths])
+        return w._add_object(d)
+
+    to_unicode = DecodedStreamObject()
+    to_unicode.set_data(
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        b"/CMapName /Adobe-Identity-UCS def /CMapType 2 def\n"
+        b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n"
+        b"4 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0043>\n<0004> <0020>\nendbfchar\n"
+        b"endcmap CMapName currentdict /CMap defineresource pop end end\n"
+    )
+    cid_font = w._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/CIDFontType2"),
+        NameObject("/BaseFont"): NameObject("/SmokeCID"),
+        NameObject("/CIDSystemInfo"): DictionaryObject({
+            NameObject("/Registry"): TextStringObject("Adobe"),
+            NameObject("/Ordering"): TextStringObject("Identity"),
+            NameObject("/Supplement"): NumberObject(0),
+        }),
+        NameObject("/DW"): NumberObject(1000),
+        NameObject("/W"): ArrayObject([NumberObject(1), ArrayObject([NumberObject(400), NumberObject(500), NumberObject(600)])]),
+    }))
+    type0 = w._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type0"),
+        NameObject("/BaseFont"): NameObject("/SmokeCID"),
+        NameObject("/Encoding"): NameObject("/Identity-H"),
+        NameObject("/DescendantFonts"): ArrayObject([cid_font]),
+        NameObject("/ToUnicode"): w._add_object(to_unicode),
+    }))
+    pg = w.add_blank_page(612, 792)
+    pg[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({
+        NameObject("/F1"): helvetica(),
+        NameObject("/F2"): helvetica(32, [500] * 95),
+        NameObject("/F3"): helvetica(65, [600] * 26),
+        NameObject("/F9"): type0,
+    })})
+    cs = DecodedStreamObject()
+    cs.set_data(
+        b"BT /F1 12 Tf 72 660 Td (For the details, ) Tj (click here) Tj ( today.) Tj ET\n"
+        b"BT /F1 12 Tf 400 660 Td (Right column text.) Tj ET\n"
+        b"BT /F1 12 Tf 72 620 Td (See the ) Tj (annual report) Tj ( for 2025.) Tj ET\n"
+        b"BT /F2 10 Tf 72 580 Td (Go ) Tj (here) Tj ( now.) Tj ET\n"
+        b"BT /F3 10 Tf 72 540 Td (ABC) Tj (xyz) Tj ET\n"
+        b"BT /F9 10 Tf 72 500 Td <0001000200030004> Tj <00030003> Tj ET\n"
+    )
+    pg[NameObject("/Contents")] = w._add_object(cs)
+    w.add_annotation(0, Link(rect=_click_rect(), url="https://example.com/details"))
+    a0 = 72 + _helv("See the ")
+    a1 = a0 + _helv("annual report")
+    w.add_annotation(0, Link(rect=(round(a0 - 1), 615, round(a1 + 1), 632), url="https://example.com/annual"))
+    w.add_annotation(0, Link(rect=(86, 575, 108, 592), url="https://example.com/here"))
+    w.add_annotation(0, Link(rect=(89, 535, 110, 552), url="https://example.com/unmeasured"))
+    w.add_annotation(0, Link(rect=(96.5, 495, 109.5, 512), url="https://example.com/cid"))
     out = io.BytesIO()
     w.write(out)
     return out.getvalue()
@@ -512,6 +623,17 @@ def main() -> int:
     )
 
     # ---- PDF geometry measured from the content stream ---------------------------
+    from app.services.pdf_core14_widths import core14_widths
+
+    helv, helv_bold, times = core14_widths("/Helvetica"), core14_widths("/Helvetica-Bold"), core14_widths("/Times-Roman")
+    check(
+        "Core14 widths match Adobe's AFMs (Helvetica a/l/W/space, Helvetica-Bold l/m, Times-Roman a/m; subset tag ignored; Calibri unknown)",
+        (helv["a"], helv["l"], helv["W"], helv[" "]) == (556, 222, 944, 278)
+        and (helv_bold["l"], helv_bold["m"]) == (278, 889)
+        and (times["a"], times["m"]) == (444, 778)
+        and core14_widths("/ABCDEF+ArialMT") == helv
+        and core14_widths("/Calibri") is None,
+    )
     drawn = _pdf_drawn()
     vs = contract("pdf-drawn", analyze("drawn.pdf", drawn, "application/pdf"), "pdf")
     imgs = sorted((v for v in vs if v["evidence"].get("node_type") == "image"), key=lambda v: v["location"]["page"] or 0)
@@ -534,6 +656,7 @@ def main() -> int:
         imgs[2]["location"] | {"thumbnail": bool(imgs[2]["location"]["thumbnail"])} if len(imgs) == 3 else imgs,
     )
     links = sorted((v for v in vs if v["ruleId"] == "LINK_TEXT_NON_DESCRIPTIVE"), key=lambda v: v["location"]["page"] or 0)
+    flat = [float(v) for v in _click_rect()]
     check(
         "pdf: a link shows the words drawn under its /Rect, inside their sentence",
         len(links) == 3
@@ -547,8 +670,29 @@ def main() -> int:
     check(
         "pdf: link boxes are page-relative (page 2's MediaBox starts at 100,100) and turned on the rotated page",
         [l["location"]["bbox"] for l in links]
-        == [[164.0, 655.0, 224.0, 672.0], [164.0, 655.0, 224.0, 672.0], [655.0, 388.0, 672.0, 448.0]],
+        == [flat, flat, [655.0, 612.0 - flat[2], 672.0, 612.0 - flat[0]]],
         [l["location"]["bbox"] for l in links],
+    )
+
+    vs = contract("pdf-lines", analyze("lines.pdf", _pdf_lines(), "application/pdf"), "pdf")
+    shown = sorted(
+        (v["location"]["snippet"], v["location"]["highlight"])
+        for v in vs
+        if v["evidence"].get("node_type") == "link" and v["location"]["kind"] == "pdf-region"
+    )
+    check(
+        "pdf: a link that is its own text run is shown in its line; text across a column gutter is not stitched on",
+        ("For the details, click here today.", "click here") in shown
+        and ("See the annual report for 2025.", "annual report") in shown,
+        shown,
+    )
+    check("pdf: a font's own /Widths decide where its text is ('here' at x 87-107 with 500-unit glyphs)", ("Go here now.", "here") in shown, shown)
+    check("pdf: a Type0 / Identity-H font is measured by /W and /DW per CID ('CC' at x 97-109)", ("ABC CC", "CC") in shown, shown)
+    check(
+        "pdf: text in a glyph the font gives no width for is never measured (the link keeps its URI, no invented words)",
+        ("https://example.com/unmeasured", "https://example.com/unmeasured") in shown
+        and not any(h and ("xyz" in h or "ABC" in h) for _s, h in shown),
+        shown,
     )
 
     vs = contract("pdf-grey", analyze("grey.pdf", _pdf_grey(), "application/pdf"), "pdf")
