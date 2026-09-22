@@ -141,6 +141,32 @@ def memo_pdf(*, headings: int = 3, bold_run: bool = False) -> bytes:
     return K.to_bytes(w)
 
 
+def grid_pdf() -> bytes:
+    """Prose plus two tiny two-row grids with a BOLD header row.
+
+    Too short to be tagged as tables (a table needs >= 3 rows), so each bold
+    header cell reaches the bold-heading test. The last bold cell of each
+    header row is followed by a plain data cell — which used to make "Owner"
+    a heading, twice. A heading stands alone on its line; a cell does not.
+    """
+    w = PdfWriter()
+    f = K.helvetica(w)
+    fb = K.helvetica(w, bold=True)
+    c = b""
+    y = 720
+    for _g in range(2):
+        for _ in range(3):
+            c += K.bt("F1", 11, 72, y, K.lit(MEMO_BODY))
+            y -= 14
+        y -= 10
+        c += K.bt("FB", 11, 72, y, K.lit("Item")) + K.bt("FB", 11, 300, y, K.lit("Owner"))
+        y -= 14
+        c += K.bt("F1", 11, 72, y, K.lit("Salt delivery")) + K.bt("F1", 11, 300, y, K.lit("Depot crew"))
+        y -= 24
+    K.add_page(w, c, {"F1": f, "FB": fb})
+    return K.to_bytes(w)
+
+
 def remediate(data: bytes, name: str, *, title: bool = True):
     from app.parsers.pdf_parser import PDFParser
     from app.writers.pdf_writer import write_remediated_pdf
@@ -236,6 +262,10 @@ def main() -> int:
     _r2, _w2, out_b = remediate(memo_pdf(bold_run=True), "memo_bold_para.pdf")
     check("bold line followed by more bold (emphasis) is not a heading",
           read_struct_info(PdfReader(str(out_b)))["headings"] == [], str(read_struct_info(PdfReader(str(out_b)))["headings"]))
+    _rg, wg, out_g = remediate(grid_pdf(), "bold_grid.pdf")
+    hg = read_struct_info(PdfReader(str(out_g)))["headings"]
+    check("a bold header CELL sharing its line with another cell is not a heading",
+          hg == [] and not (wg.get("pdfua") or {}).get("boldHeadings"), str(hg))
 
     # already-tagged: carry the author's claim over, never add one
     from app.pdf.ua_tagger import _xmp_packet, tag_pdf

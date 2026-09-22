@@ -1597,10 +1597,26 @@ def _collect_doc_structure_hints(
         return levels, set(), None
     candidates: set = set()
     for pid, rows in per_page:
+        # Baselines of the page's real (non-artifact, non-empty) text blocks.
+        baselines: List[Tuple[int, float]] = []
+        for j, (blk, _sz, art, _b) in enumerate(rows):
+            if art or not _block_text(blk).strip():
+                continue
+            _ox, oy = _block_origin(blk)
+            if oy is not None:
+                baselines.append((j, oy))
         for i, (block, size, is_artifact, bold) in enumerate(rows):
             if not bold or is_artifact or getattr(block, "undecodable", False):
                 continue
             if abs(round(size, 1) - body) > 0.5 or levels.get(round(size, 1)):
+                continue
+            # A section heading stands ALONE on its line. A bold block that
+            # shares its baseline with other text is a cell of a grid we did
+            # not recognise as a table (the last bold header cell is followed
+            # by a plain data cell), a run-in lead, or part of a split line —
+            # never evidence of a heading.
+            _bx, by = _block_origin(block)
+            if by is None or any(j != i and abs(oy - by) <= 2.0 for j, oy in baselines):
                 continue
             t = re.sub(r"\s+", " ", _block_text(block)).strip()
             if not t or len(t) > 80 or len(t.split()) > 12 or not t[0].isalnum():
