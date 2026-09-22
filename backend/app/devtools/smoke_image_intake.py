@@ -161,6 +161,29 @@ def main() -> int:  # noqa: PLR0915
     check("transparency flattened onto white (RGB, no soft mask)", x["/ColorSpace"] == "/DeviceRGB" and "/SMask" not in x)
     check("3-frame TIFF -> 3 pages", len(convert("fax.tiff", tif_buf.getvalue()).pages) == 3)
 
+    # Pixels are compressed a band at a time; every pixel must survive, for
+    # colour, greyscale and 1-bit images whose rows do not end on a byte.
+    import zlib
+
+    from app.intake import images as images_mod
+
+    saved_band = images_mod._BAND_BYTES  # noqa: SLF001
+    images_mod._BAND_BYTES = 997  # noqa: SLF001 - force many bands
+    try:
+        for label, im, name in (
+            ("colour PNG", Image.effect_noise((413, 257), 90).convert("RGB"), "noise.png"),
+            ("greyscale PNG", Image.effect_noise((301, 199), 90).convert("L"), "grey.png"),
+            ("1-bit TIFF, odd width", Image.effect_noise((1701, 93), 90).convert("1"), "bits.tiff"),
+        ):
+            buf = io.BytesIO()
+            im.save(buf, format="TIFF" if name.endswith(".tiff") else "PNG")
+            x = xobj(convert(name, buf.getvalue()))
+            check(f"{label}: every pixel survives the conversion",
+                  x["/Filter"] == "/FlateDecode" and zlib.decompress(x._data) == im.tobytes()  # noqa: SLF001
+                  and (int(x["/Width"]), int(x["/Height"])) == im.size)
+    finally:
+        images_mod._BAND_BYTES = saved_band  # noqa: SLF001
+
     # ---- 2. HTTP: every image type is accepted and analysed -------------
     client = TestClient(app, raise_server_exceptions=False)
     email = "image-smoke@example.com"

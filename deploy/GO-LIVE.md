@@ -126,7 +126,9 @@ You're live.
   path. With OCR on, fixing one adds a real text layer (charged as a PDF).
   With OCR off, the customer is told plainly that the picture's words stay
   unreadable, and a run that could only add a title is not charged — they
-  get their original image back.
+  get their original image back. A large image can take a few hundred MB of
+  RAM while it is converted, so at most 2 convert at once
+  (`IMAGE_CONVERT_CONCURRENCY` in `.env`; lower it to 1 on a 1 GB server).
 - **Legacy Office / OpenDocument uploads (.doc .xls .ppt .rtf .odt .ods
   .odp):** these are converted to .docx/.xlsx/.pptx with LibreOffice, which
   the image does NOT include by default because it costs ~450-600 MB of

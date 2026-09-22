@@ -17,6 +17,8 @@ findings for the pipeline to report (and, where it can, fix).
 
 from __future__ import annotations
 
+import os
+import threading
 import zlib
 from pathlib import Path
 
@@ -28,6 +30,20 @@ MAX_PIXELS_PER_PAGE = 60_000_000          # ~ an A3 page scanned at 600 dpi
 MAX_TOTAL_PIXELS = 150_000_000          # pages stay compressed in memory until written
 MAX_PAGES = 100
 _DEFAULT_DPI = 150.0
+# Pixels are compressed a band at a time (never one full-size raw copy), and
+# only a few conversions run at once: a 2 MB PNG of a white page can decode
+# to 60 megapixels, and each conversion in flight holds its decoded image.
+_BAND_BYTES = 8 * 1024 * 1024
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+_SEM = threading.BoundedSemaphore(_env_int("IMAGE_CONVERT_CONCURRENCY", 2, 1, 16))
 _MAX_PAGE_SIDE_PT = 17 * 72                # anything bigger is scaled to...
 _SCALED_PAGE_SIDE_PT = 11 * 72             # ...an 11-inch long side
 
@@ -81,8 +97,38 @@ def _normalize(frame):
     return frame, "/DeviceRGB", 8
 
 
+def _deflate(frame) -> bytes:
+    """Flate-compress ``frame``'s raw pixels one horizontal band at a time.
+
+    Decompresses to exactly ``frame.tobytes()`` (rows are packed and
+    byte-padded the same way in a band as in the whole image) without ever
+    holding a second full-size copy of the pixels.
+    """
+    w, h = frame.size
+    row_bytes = max(1, (w * {"1": 1, "L": 8}.get(frame.mode, 24) + 7) // 8)
+    band = max(1, _BAND_BYTES // row_bytes)
+    co = zlib.compressobj(6)
+    out = []
+    for top in range(0, h, band):
+        out.append(co.compress(frame.crop((0, top, w, min(h, top + band))).tobytes()))
+    out.append(co.flush())
+    return b"".join(out)
+
+
 def image_to_pdf(src: Path, dest: Path) -> int:
     """Write ``src`` as a PDF at ``dest``; return the number of pages."""
+    if not _SEM.acquire(timeout=60):
+        raise HTTPException(
+            status_code=503,
+            detail="We're converting a lot of images right now. Please try again in a minute.",
+        )
+    try:
+        return _image_to_pdf(src, dest)
+    finally:
+        _SEM.release()
+
+
+def _image_to_pdf(src: Path, dest: Path) -> int:
     from PIL import Image, ImageOps, UnidentifiedImageError
     from pypdf import PdfWriter
     from pypdf.generic import (
@@ -156,12 +202,12 @@ def image_to_pdf(src: Path, dest: Path) -> int:
                     filt = "/DCTDecode"
                     pw, ph = w, h
                 else:
-                    frame = img.copy()
-                    if orientation != 1:
-                        frame = ImageOps.exif_transpose(frame)
+                    # The current frame itself (read before the next seek),
+                    # not a copy: only a rotation or a mode change makes one.
+                    frame = ImageOps.exif_transpose(img) if orientation != 1 else img
                     frame, colorspace, bits = _normalize(frame)
                     pw, ph = frame.size
-                    data = zlib.compress(frame.tobytes(), 6)
+                    data = _deflate(frame)
                     filt = "/FlateDecode"
             except HTTPException:
                 raise
