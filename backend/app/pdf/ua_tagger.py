@@ -942,9 +942,16 @@ def _detect_table_groups(segments, exclude=frozenset(), toc_ctx: Optional[Dict[s
         seg_idxs = [blk[0] for r in run for blk in r]
         if any(lo < f < hi for f in figure_idxs for lo, hi in [(min(seg_idxs), max(seg_idxs))]):
             return False
+        is_toc = _looks_like_toc(run, toc_ctx)
+        if is_toc:
+            # Its rows (entry | [leader] | page number) are kept so each can
+            # be read as ONE paragraph instead of "entry" then a bare "3" —
+            # also for leader-dot contents, which never look like data cells.
+            toc_ctx.setdefault("rows", []).extend([[blk[0] for blk in r] for r in run])
         if not _looks_like_data_cells(run):
             return False
-        if _looks_like_toc(run, toc_ctx):
+        if is_toc:
+            # A grid that WOULD have been tagged a table: counted as declined.
             toc_ctx["declined"] = int(toc_ctx.get("declined") or 0) + 1
             return False
         for rr, r in enumerate(run):
@@ -1944,6 +1951,10 @@ def _tag_page_elements(
     cell_of, tables = _detect_table_groups(segments, toc_ctx=toc_ctx)
     if toc_ctx["declined"]:
         pending["toc_declined"] = toc_ctx["declined"]
+    # segment index -> which TOC row it belongs to (entry, leader, page number)
+    toc_row_of: Dict[int, int] = {
+        sidx: rk for rk, row in enumerate(toc_ctx.get("rows") or []) for sidx in row
+    }
 
     # Pass 1.4b — ruling-line tables (additive). Bordered grids whose cells
     # contain prose / labels / a single column — which the text heuristic
@@ -2117,6 +2128,7 @@ def _tag_page_elements(
             "text": btext,
             "bbox": fbbox,
             "size": meta if kind == "text" else None,
+            "toc_row": toc_row_of.get(idx) if kind == "text" else None,
         })
         if tcell is not None:
             table_cell_mcid[tcell] = mcid
@@ -2246,6 +2258,30 @@ def _tag_page_elements(
                 lspec["yspan"] = (min(ys), max(ys))
             specs.append(lspec)
         else:
+            # A table-of-contents row ("1. Introduction" | leader | "3") reads
+            # as ONE paragraph — "1. Introduction 3" — instead of the entry
+            # and then a bare page number as two unrelated paragraphs. Only
+            # when the row's pieces are consecutive, plain /P leaves.
+            trow = leaf.get("toc_row")
+            if trow is not None and leaf["tag"] == "/P":
+                j = i
+                while (
+                    j < len(leaves)
+                    and leaves[j].get("toc_row") == trow
+                    and leaves[j]["tag"] == "/P"
+                    and leaves[j]["table"] is None
+                    and leaves[j]["group"] is None
+                ):
+                    j += 1
+                if j - i >= 2:
+                    joined = {"s": "/P", "mcids": [lf["mcid"] for lf in leaves[i:j]]}
+                    if leaf.get("bx") is not None and leaf.get("by") is not None:
+                        joined["pos"] = (leaf["bx"], leaf["by"])
+                    specs.append(joined)
+                    if counters is not None:
+                        counters["toc_rows_joined"] = counters.get("toc_rows_joined", 0) + 1
+                    i = j
+                    continue
             node = {"s": leaf["tag"], "mcid": leaf["mcid"]}
             # Position of the block (not written to the file): lets link and
             # form-field elements be placed next to the text on their line.
@@ -2342,6 +2378,12 @@ def _build_struct_elem(
                 _build_struct_elem(writer, kid, ref, page, mcid_to_ref, stats)
             )
         elem[NameObject("/K")] = kid_refs
+    elif spec.get("mcids"):
+        # One element over several marked-content sequences on this page (a
+        # table-of-contents row: entry + page number), in reading order.
+        elem[NameObject("/K")] = ArrayObject([NumberObject(m) for m in spec["mcids"]])
+        for m in spec["mcids"]:
+            mcid_to_ref[m] = ref
     else:
         elem[NameObject("/K")] = NumberObject(spec["mcid"])
         if spec.get("alt"):
@@ -2914,6 +2956,8 @@ def tag_pdf(writer: PdfWriter, tree: AccessibilityTree) -> Dict[str, Any]:
         # of quiet overclaim this project refuses.
         report["tablesDeclined"] = page_counters.get("tables_declined", 0)
         report["tocTablesDeclined"] = page_counters.get("toc_declined", 0)
+        # Contents rows read as one paragraph each ("1. Introduction 3").
+        report["tocRowsJoined"] = page_counters.get("toc_rows_joined", 0)
         report["headingLevelsNormalized"] = headings_clamped
         report["boldHeadings"] = page_counters.get("bold_headings", 0)
         # Recurring off-axis stamps ("DRAFT" on every page) marked /Artifact;

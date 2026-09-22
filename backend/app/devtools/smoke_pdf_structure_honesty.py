@@ -267,6 +267,13 @@ def main() -> int:
     check("re-analysis: no NEW TABLE_MISSING_HEADERS", "TABLE_MISSING_HEADERS" not in rules, str(rules))
     toc_tags = K.marked_tags(r, 1)
     check("dot leaders are /Artifact (4 of them)", toc_tags.count("/Artifact") >= 4, str(toc_tags))
+    # Each contents row reads as ONE paragraph (entry + page number), not the
+    # entry and then a bare "3": 4 rows on the leader page + 4 on the bare TOC.
+    from pypdf.generic import ArrayObject as _Arr
+
+    joined = [e for _d, s, e in K.struct_elems(r) if s == "/P" and isinstance(e.get("/K"), _Arr) and len(e["/K"]) == 2]
+    check("contents rows are one /P each (entry + page number)",
+          len(joined) == 8 and ua.get("tocRowsJoined") == 8, f"{len(joined)} {ua.get('tocRowsJoined')}")
 
     # 4. reading order disclosure
     check("paired two-column page: declined, counted, NOT fixed",
