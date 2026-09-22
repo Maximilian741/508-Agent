@@ -236,7 +236,7 @@ function Stat({
   return (
     <View style={[styles.stat, { borderRadius: theme.radius.none, borderColor: accent ? theme.colors.accent : theme.colors.border, backgroundColor: theme.colors.surface }]}>
       <Text style={{ color: theme.colors.textMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</Text>
-      <Text style={[theme.typography.pixelLarge, { color: accent ? theme.colors.accent : theme.colors.text, marginTop: 4 }]}>{value}</Text>
+      <Text style={[theme.typography.stat, { color: accent ? theme.colors.accent : theme.colors.text, marginTop: 4 }]}>{value}</Text>
       {sub ? <Text style={{ color: theme.colors.textMuted, fontSize: 11, marginTop: 2 }}>{sub}</Text> : null}
     </View>
   );

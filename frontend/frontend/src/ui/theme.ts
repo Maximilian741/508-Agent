@@ -124,18 +124,8 @@ export const typography = {
     fontFamily: fontStacks.mono,
     fontSize: 12,
   },
-  // Historical key names (they were once an arcade pixel font). Kept so the
-  // existing call sites compile; both are clean sans now.
-  /** Small tracked uppercase label (eyebrows, tags). */
-  pixel: {
-    ...sans,
-    fontSize: 12,
-    fontWeight: "600" as const,
-    letterSpacing: 1.2,
-    textTransform: "uppercase" as const,
-  },
-  /** Big numeric readout (scores, prices, credit balances). */
-  pixelLarge: {
+  /** Big readout: scores, prices, credit balances, card headlines. */
+  stat: {
     ...sans,
     fontSize: 30,
     fontWeight: "700" as const,

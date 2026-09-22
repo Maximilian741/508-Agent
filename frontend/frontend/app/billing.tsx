@@ -224,7 +224,7 @@ export default function BillingScreen() {
         <Card style={{ borderColor: theme.colors.accent, borderWidth: 2, marginTop: 16 }}>
           <View style={{ flexDirection: stacked ? "column" : "row", alignItems: stacked ? "flex-start" : "center", gap: 12 }}>
             <View style={{ flex: 1 }}>
-              <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>
+              <Text style={[theme.typography.stat, { color: theme.colors.text }]}>
                 {(subscription.plan || "").replace("_", " ")} plan active
               </Text>
               <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4 }}>
@@ -384,7 +384,7 @@ function PlanCard({ family, interval, busy, onSubscribe }: { family: PlanFamily;
           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>BEST FOR TEAMS</Text>
         </View>
       ) : null}
-      <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{family.name}</Text>
+      <Text style={[theme.typography.stat, { color: theme.colors.text }]}>{family.name}</Text>
       <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 2 }}>{family.blurb}</Text>
       <View style={styles.priceRow}>
         <Text style={[theme.typography.display, { color: theme.colors.text }]}>${dollars}</Text>
@@ -422,7 +422,7 @@ function TierCard({ tier, busy, onChoose }: { tier: Tier; busy: boolean; onChoos
           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>MOST POPULAR</Text>
         </View>
       ) : null}
-      <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{tier.name}</Text>
+      <Text style={[theme.typography.stat, { color: theme.colors.text }]}>{tier.name}</Text>
       <View style={styles.priceRow}>
         <View style={{ marginRight: 8, marginBottom: 8 }}>
           <Icon name="credits" size={20} color={theme.colors.accent} />

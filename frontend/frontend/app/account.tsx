@@ -156,7 +156,7 @@ export default function AccountScreen() {
               <Icon name="credits" size={26} color={theme.colors.accent} />
               <Text
                 style={[
-                  theme.typography.pixelLarge,
+                  theme.typography.stat,
                   { color: theme.colors.text },
                 ]}
               >

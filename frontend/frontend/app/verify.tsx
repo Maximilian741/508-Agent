@@ -80,7 +80,7 @@ export default function VerifyScreen() {
 
         {status === "invalid" ? (
           <Card style={{ borderColor: theme.colors.danger, borderWidth: 2 }}>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.danger }]}>✗ Not a valid certificate</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.danger }]}>✗ Not a valid certificate</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8, lineHeight: 20 }}>
               {certId
                 ? `No certificate was found for id "${certId}".`
@@ -93,7 +93,7 @@ export default function VerifyScreen() {
         {status === "valid" && cert ? (
           <>
             <Card style={{ borderColor: OK_GREEN, borderWidth: 2 }}>
-              <Text style={[theme.typography.pixelLarge, { color: OK_GREEN }]}>✓ Genuine certificate</Text>
+              <Text style={[theme.typography.stat, { color: OK_GREEN }]}>✓ Genuine certificate</Text>
               <Text style={{ color: theme.colors.textMuted, marginTop: 6, marginBottom: 6, lineHeight: 20 }}>
                 This certificate was issued by 508 Agent and has not been altered.
               </Text>

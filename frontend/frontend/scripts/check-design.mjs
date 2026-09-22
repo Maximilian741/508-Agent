@@ -42,7 +42,8 @@ const RULES = [
   { re: /\bPixel(Icon|Glyph|Spinner|Progress|Frame)\b/, why: "pixel-art component outside the logo (use Icon / Spinner / ProgressBar)" },
   { re: /fonts\.(googleapis|gstatic)\.com|use\.typekit\.net|fonts\.bunny\.net/, why: "third-party font host (CSP allows font-src 'self' only)" },
   { re: /VT323|Press Start 2P|PressStart2P|Silkscreen|Pixelify|Architects Daughter|\bKalam\b/, why: "pixel/arcade/handwriting font" },
-  { re: /508 · AGENT|508 · AGENT/, why: "the old double brand wordmark" },
+  { re: /508\s*(·|&middot;|\\u00b7)\s*AGENT/i, why: "the old double brand wordmark" },
+  { re: /typography\.pixel/, why: "the retired pixel type style (use typography.stat / caption)" },
 ];
 
 const violations = [];
