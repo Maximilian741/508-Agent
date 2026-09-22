@@ -38,7 +38,7 @@ from __future__ import annotations
 import codecs
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -439,7 +439,13 @@ class HTMLParser:
     def parse_to_tree(self, file_path: str) -> ParserResult:
         path = Path(file_path)
         data = path.read_bytes()
-        doc = _parse_document(data)
+        doc, source = parse_html_source(data)
+        if source.blank or source.fallback:
+            # No markup or text at all (whitespace, a lone comment/doctype/PHP
+            # tag). Analysing the stand-in empty page reported "title and
+            # language missing" — a near-clean score for a file with nothing in
+            # it — and /remediate then charged to wrap a title around nothing.
+            raise ValueError("This HTML file has no page content to check.")
         roottree = doc.getroottree()
         ids = _Ids()
 
@@ -557,6 +563,19 @@ class HtmlSource:
     # True when lxml could not build a document at all and we substituted an
     # empty one — the writer must never ship that as the customer's page.
     fallback: bool = False
+    # True when the bytes hold no markup or text at all (empty/whitespace):
+    # there is no page to check, and nothing to "fix" into one.
+    blank: bool = False
+    # False when nothing declared the encoding (no BOM, <meta> or XML
+    # declaration) and ``encoding`` is our guess.
+    declared: bool = True
+    # Every source byte was ASCII. With ``declared`` False that means a
+    # browser may decode the page as ANY ASCII-compatible encoding, so the
+    # writer keeps it pure ASCII (see encode_html_text).
+    ascii_only: bool = False
+    # The text carries _BYTE_ESCAPE stand-ins for raw bytes (NULs, sequences
+    # invalid in the declared encoding) that encode_html_text puts back.
+    escaped: bool = False
 
 
 def _parse_document(data: bytes):
@@ -564,8 +583,14 @@ def _parse_document(data: bytes):
     return parse_html_source(data)[0]
 
 
-def parse_html_source(data: bytes) -> Tuple[Any, HtmlSource]:
+def parse_html_source(data: bytes, preserve_bytes: bool = False) -> Tuple[Any, HtmlSource]:
     """Parse bytes into ``(<html> root, HtmlSource)``.
+
+    ``preserve_bytes`` (the writer) keeps bytes the text model can't carry — a
+    NUL, or a byte sequence that is invalid in the page's declared encoding —
+    as private-use stand-ins that :func:`encode_html_text` turns back into the
+    SAME bytes, instead of deleting them (NUL) or replacing them with U+FFFD.
+    The analysis path leaves it off and sees what a browser renders.
 
     Uses lxml.html's default parser, which (unlike the XML parser) does not
     expand custom/external entities, does not fetch external DTDs, and runs with
@@ -581,8 +606,10 @@ def parse_html_source(data: bytes) -> Tuple[Any, HtmlSource]:
     across the whole delivered page (word counts matched, so the content-loss
     gate could not see it).
     """
-    blob = data if data and data.strip() else _EMPTY_HTML.encode("ascii")
-    text, src = decode_html_bytes(blob)
+    text, src = decode_html_bytes(data or b"", preserve_bytes=preserve_bytes)
+    if not text.strip():
+        doc = lxml_html.document_fromstring(_EMPTY_HTML, parser=lxml_html.HTMLParser(no_network=True))
+        return doc, replace(src, blank=True)
     # huge_tree lifts libxml2's default 256-level depth clamp. Below that
     # limit lxml silently DROPS everything nested deeper — no error — and the
     # writer then serialized the truncated tree as the "fixed" file, deleting
@@ -594,10 +621,7 @@ def parse_html_source(data: bytes) -> Tuple[Any, HtmlSource]:
         return lxml_html.document_fromstring(text, parser=parser), src
     except (etree.ParserError, etree.XMLSyntaxError, ValueError):
         doc = lxml_html.document_fromstring(_EMPTY_HTML, parser=lxml_html.HTMLParser(no_network=True))
-        return doc, HtmlSource(
-            encoding=src.encoding, bom=src.bom, xml_decl=src.xml_decl,
-            has_doctype=src.has_doctype, fallback=True,
-        )
+        return doc, replace(src, fallback=True)
 
 
 # ---------------------------------------------------------------------------
@@ -696,9 +720,27 @@ def _cp1252_encode_errors(err: UnicodeError) -> Tuple[bytes, int]:
     return bytes(out), err.end  # type: ignore[attr-defined]
 
 
+# Stand-ins for raw source bytes that the decoded text can't carry: a NUL
+# (libxml2 reads a str as a C string, so one NUL silently ended the document —
+# everything after it vanished from the analysis AND from the "fixed" file,
+# and the content-loss gate, which parses the same way, saw nothing wrong),
+# or a byte sequence invalid in the page's own encoding (decoded as U+FFFD it
+# would be re-encoded as EF BF BD, destroying the original byte). The last
+# 256 code points of Supplementary Private Use Area-B, one per byte value:
+# lxml keeps them as ordinary characters and encode_html_text restores them.
+_BYTE_ESCAPE_BASE = 0x10FF00
+_BYTE_ESCAPE_RE = re.compile("[\U0010FF00-\U0010FFFF]+")
+
+
+def _byte_escape_decode_errors(err: UnicodeError) -> Tuple[str, int]:
+    chunk = err.object[err.start:err.end]  # type: ignore[attr-defined]
+    return "".join(chr(_BYTE_ESCAPE_BASE + b) for b in bytes(chunk)), err.end  # type: ignore[attr-defined]
+
+
 codecs.register_error("a508_cp1252_decode", _cp1252_decode_errors)
 codecs.register_error("a508_html_charref", _html_encode_errors)
 codecs.register_error("a508_cp1252_encode", _cp1252_encode_errors)
+codecs.register_error("a508_byte_escape", _byte_escape_decode_errors)
 
 
 def resolve_charset_label(label: Any) -> Optional[str]:
@@ -758,19 +800,61 @@ def _meta_declared_charset(blob: bytes) -> Optional[str]:
     return None
 
 
-def _decode_as(blob: bytes, codec: str) -> str:
+def _sniff_utf16_without_bom(blob: bytes) -> Optional[str]:
+    """``utf-16-le``/``utf-16-be`` for UTF-16 markup saved WITHOUT a BOM.
+
+    Some Windows tools write that. Read as an ASCII-compatible encoding it is
+    NUL-interleaved garbage (and the NULs used to end the document), so the
+    page analysed as empty and the fix 422'd. Markup is mostly ASCII, so in
+    UTF-16 one byte of most code units is zero — the XML spec's own
+    autodetection keys on the same ``<`` + NUL pattern. Requires the text to
+    start with ``<`` so a binary file never qualifies.
+    """
+    sample = blob[:2048]
+    sample = sample[: len(sample) // 2 * 2]
+    if len(sample) < 8:
+        return None
+    units = len(sample) // 2
+    even_nul = sample[0::2].count(0)
+    odd_nul = sample[1::2].count(0)
+    for codec, zeros, other in (("utf-16-le", odd_nul, even_nul), ("utf-16-be", even_nul, odd_nul)):
+        if zeros >= 0.4 * units and other <= 0.05 * units:
+            head = sample.decode(codec, errors="replace").lstrip()
+            if head.startswith("<"):
+                return codec
+    return None
+
+
+def _decode_as(blob: bytes, codec: str, preserve: bool = False) -> Tuple[str, bool]:
+    """``(text, escaped)``: decode ``blob`` as ``codec``.
+
+    Invalid sequences render as U+FFFD in a browser, so the analysis decodes
+    them the same way; NULs, which a browser drops from page text, are
+    dropped (they would end the document inside libxml2). With ``preserve``
+    (the writer) both are kept as :data:`_BYTE_ESCAPE_BASE` stand-ins instead
+    — ``escaped`` says whether any were needed.
+    """
+    single_nul = not codec.startswith("utf-16")  # a NUL char is one 0x00 byte
+    if preserve and single_nul and _BYTE_ESCAPE_RE.search(blob.decode(codec, errors="replace")):
+        preserve = False  # the page really uses those code points; can't borrow them
     if codec == "cp1252":
-        return blob.decode("cp1252", errors="a508_cp1252_decode")
-    # Invalid sequences in a declared encoding render as U+FFFD in a browser;
-    # decode them the same way rather than failing the whole page.
-    return blob.decode(codec, errors="replace")
+        text = blob.decode("cp1252", errors="a508_cp1252_decode")  # never invalid
+    elif preserve and single_nul:
+        text = blob.decode(codec, errors="a508_byte_escape")
+    else:
+        text = blob.decode(codec, errors="replace")
+    if "\x00" in text:
+        text = text.replace("\x00", chr(_BYTE_ESCAPE_BASE) if preserve and single_nul else "")
+    escaped = bool(preserve and single_nul and _BYTE_ESCAPE_RE.search(text))
+    return text, escaped
 
 
-def decode_html_bytes(blob: bytes) -> Tuple[str, HtmlSource]:
+def decode_html_bytes(blob: bytes, preserve_bytes: bool = False) -> Tuple[str, HtmlSource]:
     """Decode page bytes the way a browser does, and record how.
 
     Order (WHATWG encoding sniffing, minus the HTTP header we don't have):
-      1. a byte-order mark — it beats every declaration;
+      1. a byte-order mark — it beats every declaration (and BOM-less UTF-16
+         markup, which only makes sense one way);
       2. ``<meta charset>`` / ``<meta http-equiv="Content-Type">`` anywhere in
          the ``<head>`` (not just before the first non-ASCII byte);
       3. an XML declaration's ``encoding=`` (XHTML saved to disk);
@@ -779,15 +863,19 @@ def decode_html_bytes(blob: bytes) -> Tuple[str, HtmlSource]:
 
     Returns the decoded text with any leading XML declaration removed (lxml
     refuses a str that carries one) and the :class:`HtmlSource` the writer
-    uses to re-encode identically.
+    uses to re-encode identically. ``preserve_bytes``: see
+    :func:`parse_html_source`.
     """
     bom = b""
     codec: Optional[str] = None
+    declared = True
     body = blob
     for mark, name in _BOMS:
         if blob.startswith(mark):
             bom, codec, body = mark, name, blob[len(mark):]
             break
+    if codec is None:
+        codec = _sniff_utf16_without_bom(body)
     if codec is None:
         codec = _meta_declared_charset(body)
     if codec is None:
@@ -795,40 +883,64 @@ def decode_html_bytes(blob: bytes) -> Tuple[str, HtmlSource]:
         if xm:
             codec = resolve_charset_label(xm.group(1))
     if codec is None:
+        declared = False
         try:
             body.decode("utf-8")
             codec = "utf-8"
         except UnicodeDecodeError:
             codec = "cp1252"
     try:
-        text = _decode_as(body, codec)
+        text, escaped = _decode_as(body, codec, preserve_bytes)
     except (LookupError, UnicodeError):  # pragma: no cover - codecs are allowlisted
         codec = "cp1252"
-        text = _decode_as(body, codec)
+        text, escaped = _decode_as(body, codec, preserve_bytes)
     xml_decl = ""
     xd = _XML_DECL_STR_RE.match(text)
     if xd:
         xml_decl = xd.group(0)
         text = text[xd.end():]
     has_doctype = bool(_DOCTYPE_RE.match(text[:4096]))
-    return text, HtmlSource(encoding=codec, bom=bom, xml_decl=xml_decl, has_doctype=has_doctype)
+    return text, HtmlSource(
+        encoding=codec, bom=bom, xml_decl=xml_decl, has_doctype=has_doctype,
+        declared=declared, ascii_only=body.isascii(), escaped=escaped,
+    )
 
 
 def encode_html_text(text: str, src: HtmlSource) -> bytes:
     """Encode serialized page text back into the source's own encoding.
 
     Inverse of :func:`decode_html_bytes`: same codec, same BOM, same XML
-    declaration. Characters the encoding can't represent (only ever ones we
-    inserted) become numeric character references.
+    declaration, and every byte stand-in back to its original byte. Characters
+    the encoding can't represent (only ever ones we inserted) become numeric
+    character references.
+
+    An UNDECLARED page that was pure ASCII stays pure ASCII: a browser may
+    decode it as UTF-8 or as windows-1252 (Firefox never guesses UTF-8 for a
+    page served over HTTP), and only ASCII reads the same both ways. lxml
+    turns ``&nbsp;``/``&copy;``/``&mdash;`` into the characters themselves, so
+    writing them as raw UTF-8 put "Â " in front of every non-breaking space of
+    a page that never contained a non-ASCII byte.
     """
     codec = src.encoding or "utf-8"
+    if not src.declared and src.ascii_only:
+        codec = "ascii"
     handler = "a508_cp1252_encode" if codec == "cp1252" else "a508_html_charref"
+    full = src.xml_decl + text
     try:
-        out = (src.xml_decl + text).encode(codec, errors=handler)
+        if src.escaped and _BYTE_ESCAPE_RE.search(full):
+            out = bytearray()
+            pos = 0
+            for m in _BYTE_ESCAPE_RE.finditer(full):
+                out += full[pos:m.start()].encode(codec, errors=handler)
+                out += bytes(ord(c) - _BYTE_ESCAPE_BASE for c in m.group(0))
+                pos = m.end()
+            out += full[pos:].encode(codec, errors=handler)
+            encoded = bytes(out)
+        else:
+            encoded = full.encode(codec, errors=handler)
     except LookupError:  # pragma: no cover - codecs are allowlisted
-        out = (src.xml_decl + text).encode("utf-8")
-        return out
-    return src.bom + out
+        return full.encode("utf-8")
+    return src.bom + encoded
 
 
 def _meta(el: Any, roottree: Any, ctx: Optional[Dict[str, Any]] = None) -> NodeMetadata:

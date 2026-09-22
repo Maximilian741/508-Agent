@@ -93,15 +93,19 @@ def write_remediated_html(
 
     try:
         data = Path(source_path).read_bytes()
-        doc, source_info = parse_html_source(data)
+        # preserve_bytes: a NUL or an invalid byte in the source goes back out
+        # as that same byte (see parse_html_source) — never dropped, never
+        # turned into U+FFFD.
+        doc, source_info = parse_html_source(data, preserve_bytes=True)
     except Exception as exc:
         logger.exception("html_writer parse failed: %s", exc)
         # Signal a hard failure so the pipeline cleans up and does NOT charge.
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
-    if source_info.fallback:
-        # lxml could not build a document from these bytes and the parser
-        # substituted an EMPTY one. Serialising that would replace the
-        # customer's file with a blank page; leave the copy untouched.
+    if source_info.fallback or source_info.blank:
+        # lxml could not build a document from these bytes (or there were no
+        # bytes worth building) and the parser substituted an EMPTY one.
+        # Serialising that would replace the customer's file with a skeleton
+        # page; leave the copy untouched.
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "failed_to_open: html"}]}
 
     def resolve(xpath: Optional[str]) -> Optional[Any]:

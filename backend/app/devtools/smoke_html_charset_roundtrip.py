@@ -179,7 +179,17 @@ def main() -> int:
     junk = b"<!-- only a comment -->"
     src = TMP / "comment_only.html"
     src.write_bytes(junk)
-    res = HTMLParser().parse_to_tree(str(src))
+    try:
+        HTMLParser().parse_to_tree(str(src))
+        refused = False
+    except ValueError as exc:
+        refused = "no page content" in str(exc)
+    check("unbuildable page: analysis refuses it (no near-clean score for nothing)", refused)
+    # The writer must hold the line on its own too: hand it a tree from a real
+    # page but the junk bytes as the source.
+    real = TMP / "real_for_junk.html"
+    real.write_bytes(b"<html><head><title>x</title></head><body><p>x</p></body></html>")
+    res = HTMLParser().parse_to_tree(str(real))
     res.tree.root.metadata.language = "en"
     out_path = TMP / "comment_only.out.html"
     rep = write_remediated_html(src, res.tree, out_path)
