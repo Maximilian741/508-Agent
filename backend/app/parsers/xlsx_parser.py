@@ -1356,6 +1356,10 @@ def _image_node(sheet: SheetScan, obj: DrawingObject, number: int, source: str) 
         "cnvpr_name": obj.cnvpr_name,
         "anchor_cell": obj.anchor_cell,
         "chart_part": obj.chart_part,
+        # The picture's bytes inside the package (xl/media/...), so a finding
+        # can show a thumbnail read straight from the zip without inlining
+        # base64 into the tree.
+        "media_part": obj.media_part,
         "caption": obj.caption,
     }
     if _WANT_IMAGE_BYTES and obj.kind == "picture" and obj.media_part:
