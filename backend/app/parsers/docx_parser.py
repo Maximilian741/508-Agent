@@ -254,6 +254,9 @@ class DOCXParser:
         # Where each finding sits, as Word last paginated the file (None when
         # the file does not say — see _rendered_page_map).
         ids.pages = _rendered_page_map(doc.element.body, file_path)
+        # What each line of text is really drawn on (contrast is measured
+        # against it, or not at all when it cannot be known).
+        bgs = _Backgrounds(doc, styles, theme_colors, ids.pages)
 
         # Pre-load embedded images so we can attach bytes to the matching
         # <w:drawing> nodes encountered while iterating paragraphs.
@@ -310,7 +313,7 @@ class DOCXParser:
                         id=li_id,
                         content=NodeContent(kind=ContentKind.TEXT, text=text or "•"),
                         metadata=NodeMetadata(source_format="docx", page=ids.page_of(p_el),
-                                              properties=_text_color_props(paragraph, theme_colors)),
+                                              properties=_text_color_props(paragraph, theme_colors, bgs)),
                         children=[*link_nodes, *image_nodes],
                         accessibility_flags=[],
                     )
@@ -325,7 +328,7 @@ class DOCXParser:
             if heading_level:
                 h_id = ids("docx-h")
                 reg(h_id, paragraph)
-                h_props = dict(_text_color_props(paragraph, theme_colors) or {})
+                h_props = dict(_text_color_props(paragraph, theme_colors, bgs) or {})
                 h_props["heading_visual"] = _heading_visual(p_el, styles, text)
                 body_section.children.append(
                     HeadingNode(
@@ -351,7 +354,7 @@ class DOCXParser:
                 body_section.children.append(image)
 
             if text and not link_nodes:
-                para_props = _text_color_props(paragraph, theme_colors)
+                para_props = _text_color_props(paragraph, theme_colors, bgs)
                 is_fake_heading = _looks_like_fake_heading(paragraph, style_name, text, styles)
                 if is_fake_heading:
                     # Visually a heading (Title/Subtitle style, or short
@@ -463,7 +466,7 @@ class DOCXParser:
         # every printed page — got no finding and no alt, a grey footer was
         # never measured, and a re-scan called the file clean. Their own id
         # space (docx-hfimg / docx-hflink / docx-hfp) keeps body ids stable.
-        furniture = _header_footer_section(doc, ids, reg, theme_colors)
+        furniture = _header_footer_section(doc, ids, reg, theme_colors, bgs)
         if furniture is not None:
             root.children.append(furniture)
 
@@ -587,11 +590,12 @@ def _run_color_hex(run, theme_colors: Dict[str, str]) -> Optional[str]:
         return None
 
 
-def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-    """Per-run text colours (for contrast analysis): explicit sRGB *and* resolved
-    theme colours. Auto/inherited/unknown colours are skipped, never guessed."""
+def _colored_runs(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Tuple[Any, Dict[str, Any]]]:
+    """``[(run, {"c", "sz", "b"})]`` for each visible run whose text colour is
+    known: explicit sRGB *and* resolved theme colours. Auto/inherited/unknown
+    colours are skipped, never guessed."""
     theme_colors = theme_colors or {}
-    out: List[Dict[str, Any]] = []
+    out: List[Tuple[Any, Dict[str, Any]]] = []
     for run in getattr(paragraph, "runs", []) or []:
         if not (run.text or "").strip():
             continue
@@ -604,33 +608,406 @@ def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = Non
                 size_pt = float(run.font.size.pt)
         except Exception:
             size_pt = None
-        out.append({"c": hex6, "sz": size_pt, "b": bool(run.font.bold) if run.font.bold is not None else False})
+        out.append((run, {"c": hex6, "sz": size_pt,
+                          "b": bool(run.font.bold) if run.font.bold is not None else False}))
     return out
 
 
-def _paragraph_bg(paragraph) -> Optional[str]:
-    """Explicit paragraph shading fill (``w:shd@w:fill``) if a real colour."""
-    try:
-        shd = paragraph._p.find(f"{_DOCX_NS}pPr/{_DOCX_NS}shd")
-        if shd is not None:
-            fill = shd.get(f"{_DOCX_NS}fill")
-            if fill and fill.lower() not in ("auto",):
-                return fill
-    except Exception:
-        pass
-    return None
+def _explicit_run_colors(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Per-run text colours (for contrast analysis) — see :func:`_colored_runs`."""
+    return [c for _run, c in _colored_runs(paragraph, theme_colors)]
 
 
-def _text_color_props(paragraph, theme_colors: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Build the ``metadata.properties`` carrying contrast inputs (or empty)."""
-    colors = _explicit_run_colors(paragraph, theme_colors)
-    if not colors:
+def _text_color_props(
+    paragraph,
+    theme_colors: Optional[Dict[str, str]] = None,
+    bgs: Optional["_Backgrounds"] = None,
+    story_root=None,
+) -> Dict[str, Any]:
+    """Build the ``metadata.properties`` carrying contrast inputs (or empty).
+
+    The colours are only worth anything against the background the text is
+    REALLY drawn on. ``bgs`` resolves it (paragraph / cell / table / text-box
+    shading, the page colour, shapes behind the text); when it cannot be
+    known, no colours are emitted at all, so the text is left unflagged
+    instead of being measured — and "fixed" — against an assumed white.
+    Without ``bgs`` nothing is emitted either: there is no caller that may
+    assume white any more.
+    """
+    colored = _colored_runs(paragraph, theme_colors)
+    if not colored or bgs is None:
         return {}
-    props: Dict[str, Any] = {"explicit_text_colors": colors}
-    bg = _paragraph_bg(paragraph)
-    if bg:
+    p_el = paragraph._p  # noqa: SLF001
+    bg = bgs.paragraph(p_el, story_root)
+    if bg is None:
+        return {}
+    # A run with its own highlight or shading sits on THAT colour, not the
+    # paragraph's. It is left out of the measurement — and, because the
+    # writer recolours by colour value, a paragraph where such a run shares a
+    # colour with a measured one is not measured at all (a recolour would
+    # reach the highlighted run too).
+    sid = bgs.styles.paragraph_style_id(p_el) if bgs.styles is not None else None
+    kept: List[Dict[str, Any]] = []
+    left_out: set = set()
+    for run, c in colored:
+        own = bgs.run(run._r, sid)  # noqa: SLF001
+        if own is _NO_SHADING or own == bg:
+            kept.append(c)
+        else:
+            left_out.add(c["c"].upper())
+    if not kept or any(c["c"].upper() in left_out for c in kept):
+        return {}
+    props: Dict[str, Any] = {"explicit_text_colors": kept}
+    if bg != _WHITE:
         props["bg_color"] = bg
     return props
+
+
+# ----- the background text is drawn on ----------------------------------------
+
+_WHITE = "FFFFFF"
+# Sentinels for one layer of the stack: nothing painted here (look further
+# out), or something painted that we cannot name (stop: unknown).
+_NO_SHADING = object()
+_UNKNOWN = object()
+_HEX6_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
+_WPS_NS = "{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}"
+_WPG_NS = "{http://schemas.microsoft.com/office/word/2010/wordprocessingGroup}"
+_VML_NS = "{urn:schemas-microsoft-com:vml}"
+_O_NS = "{urn:schemas-microsoft-com:office:office}"
+_VML_SHAPE_TAGS = tuple(
+    f"{_VML_NS}{t}" for t in ("shape", "rect", "roundrect", "oval", "polyline", "arc", "line",
+                               "curve", "image", "group")
+)
+_Z_BEHIND_RE = re.compile(r"z-index\s*:\s*-")
+# ST_HighlightColor -> RGB (the fixed palette Word paints highlights with).
+_HIGHLIGHT_RGB = {
+    "black": "000000", "blue": "0000FF", "cyan": "00FFFF", "green": "00FF00",
+    "magenta": "FF00FF", "red": "FF0000", "yellow": "FFFF00", "white": "FFFFFF",
+    "darkBlue": "000080", "darkCyan": "008080", "darkGreen": "008000",
+    "darkMagenta": "800080", "darkRed": "800000", "darkYellow": "808000",
+    "darkGray": "808080", "lightGray": "C0C0C0",
+}
+# DrawingML a:schemeClr -> clrScheme name (Word's default colour mapping).
+_SCHEME_CLR_MAP = {
+    "bg1": "lt1", "tx1": "dk1", "bg2": "lt2", "tx2": "dk2",
+    "lt1": "lt1", "dk1": "dk1", "lt2": "lt2", "dk2": "dk2",
+    "accent1": "accent1", "accent2": "accent2", "accent3": "accent3",
+    "accent4": "accent4", "accent5": "accent5", "accent6": "accent6",
+    "hlink": "hlink", "folHlink": "folHlink",
+}
+
+
+def _hex6(value: Optional[str]) -> Optional[str]:
+    v = (value or "").strip().lstrip("#")
+    return v.upper() if _HEX6_RE.match(v) else None
+
+
+def _theme_or_hex(el, attr: str, theme_attr: str, tint_attr: str, shade_attr: str,
+                  theme_colors: Dict[str, str]):
+    """A WordprocessingML colour (``w:fill`` / ``w:color`` and their theme
+    twins) as hex, ``"auto"``, or None when neither is readable. A theme
+    colour wins (Word re-renders it from the theme); the plain attribute is
+    Word's cached copy of it and the fallback."""
+    tc = el.get(qn(theme_attr))
+    if tc:
+        base = theme_colors.get(_THEME_COLOR_MAP.get(tc, tc)) if theme_colors else None
+        if base:
+            return _apply_tint_shade(base, el.get(qn(tint_attr)), el.get(qn(shade_attr)))
+    raw = (el.get(qn(attr)) or "").strip()
+    if raw.lower() == "auto":
+        return "auto"
+    return _hex6(raw)
+
+
+def _shd_layer(shd, theme_colors: Dict[str, str]):
+    """What one ``w:shd`` paints: a hex colour, ``_NO_SHADING`` or ``_UNKNOWN``.
+
+    ``clear`` paints the fill; ``solid`` paints the pattern colour; any other
+    pattern (``pct50``, stripes …) is a mix a reader sees as neither colour,
+    so it is unknown rather than guessed."""
+    if shd is None:
+        return _NO_SHADING
+    val = (shd.get(qn("w:val")) or "clear").strip()
+    if val == "nil":
+        return _NO_SHADING
+    if val == "clear":
+        fill = _theme_or_hex(shd, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", theme_colors)
+        if fill not in (None, "auto"):
+            return fill
+        # No colour we can name: nothing painted only when nothing claims to
+        # be (no fill, or "auto", and no theme fill we failed to resolve).
+        raw = (shd.get(qn("w:fill")) or "").strip().lower()
+        if raw in ("", "auto") and not shd.get(qn("w:themeFill")):
+            return _NO_SHADING
+        return _UNKNOWN
+    if val == "solid":
+        color = _theme_or_hex(shd, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", theme_colors)
+        return color if color not in (None, "auto") else _UNKNOWN
+    return _UNKNOWN
+
+
+def _drawingml_fill(sppr, theme_colors: Dict[str, str]):
+    """A DrawingML shape's own fill from ``spPr``: a hex colour only for a
+    plain, fully-opaque solid fill; ``_UNKNOWN`` for everything else — no
+    fill (see-through, and what is behind a floating box is not known), a
+    gradient / picture / pattern, a colour with modifiers (alpha, lumMod …)
+    or a fill left to the theme's shape style."""
+    if sppr is None:
+        return _UNKNOWN
+    a = _DRAWINGML_NS
+    solid = sppr.find(f"{a}solidFill")
+    if solid is None:
+        return _UNKNOWN
+    clr = next(iter(solid), None)
+    if clr is None or len(clr):  # modifiers change the colour: don't guess
+        return _UNKNOWN
+    tag = etree.QName(clr).localname
+    if tag == "srgbClr":
+        return _hex6(clr.get("val")) or _UNKNOWN
+    if tag == "schemeClr":
+        name = _SCHEME_CLR_MAP.get(clr.get("val") or "")
+        base = theme_colors.get(name) if (name and theme_colors) else None
+        return _hex6(base) or _UNKNOWN
+    return _UNKNOWN
+
+
+def _vml_fill(shape):
+    """A legacy VML shape's fill: only an explicit ``#RRGGBB`` solid fill is
+    known; no fill, a named/system colour or a fill effect is unknown."""
+    if (shape.get("filled") or "t").strip().lower() in ("f", "false"):
+        return _UNKNOWN
+    fill_el = shape.find(f"{_VML_NS}fill")
+    if fill_el is not None and ((fill_el.get("type") or "solid") != "solid" or fill_el.get("opacity")):
+        return _UNKNOWN
+    raw = (shape.get("fillcolor") or "").strip().split(" ")[0]
+    if raw.lower() == "white":
+        return _WHITE
+    if raw.lower() == "black":
+        return "000000"
+    v = raw.lstrip("#")
+    if len(v) == 3 and re.match(r"^[0-9A-Fa-f]{3}$", v):
+        v = "".join(ch * 2 for ch in v)
+    return _hex6(v) or _UNKNOWN
+
+
+def _behind_text_shapes(root_el) -> List[Any]:
+    """Pictures and shapes drawn BEHIND the text of a story (DrawingML
+    ``behindDoc`` anchors, VML shapes with a negative z-index), skipping the
+    mc:Fallback duplicates and Word's page watermark (drawn in the middle of
+    the page, not behind the letterhead)."""
+    out: List[Any] = []
+    for anchor in root_el.iter(_WP_ANCHOR):
+        if _inside(anchor, root_el, (_MC_FALLBACK,)):
+            continue
+        if (anchor.get("behindDoc") or "").strip().lower() in ("1", "true", "on"):
+            out.append(anchor)
+    for shape in root_el.iter(*_VML_SHAPE_TAGS):
+        if _inside(shape, root_el, (_MC_FALLBACK,)):
+            continue
+        if not _Z_BEHIND_RE.search(shape.get("style") or ""):
+            continue
+        ident = f"{shape.get('id') or ''} {shape.get(f'{_O_NS}spid') or ''}".lower()
+        if "watermark" in ident:
+            continue
+        out.append(shape)
+    return out
+
+
+class _Backgrounds:
+    """The colour a paragraph's text is really drawn on, as Word stacks it:
+    run highlight / shading > paragraph shading (direct or style) > table
+    cell shading > table-style shading > row / table shading > an enclosing
+    text box's fill > the page colour. Anything painted that cannot be named
+    — a pattern, a picture or shape behind the text, a page fill effect, a
+    see-through text box — makes the answer unknown (``None``) and the
+    paragraph is not measured: never assume white."""
+
+    def __init__(self, doc, styles: Optional["DocxStyleResolver"], theme_colors: Dict[str, str],
+                 pages: Optional[Dict[Any, int]] = None) -> None:
+        self.styles = styles
+        self.theme = theme_colors or {}
+        self.page = self._page_colour(doc)
+        body = doc.element.body
+        self.body = body
+        self._pages = pages
+        behind = _behind_text_shapes(body)
+        # None -> no body shape behind the text; a set -> the pages they sit on;
+        # _UNKNOWN -> behind something, but on a page the file does not say.
+        self._body_behind: Any = None
+        if behind:
+            anchor_pages = {pages.get(el) for el in behind} if pages else {None}
+            self._body_behind = _UNKNOWN if None in anchor_pages else anchor_pages
+        # A printed header/footer's drawing behind the text (a letterhead
+        # banner, full-page "stationery") is positioned on the page, not in
+        # the header band: it may lie behind any line of any page.
+        self._story_behind: Dict[int, bool] = {}
+        self._furniture_behind = False
+        try:
+            for _kind, part, _variant in iter_header_footer_parts(doc):
+                root_el = part.element
+                has = bool(_behind_text_shapes(root_el))
+                self._story_behind[id(root_el)] = has
+                self._furniture_behind = self._furniture_behind or has
+        except Exception:  # pragma: no cover - a broken header never kills the parse
+            self._furniture_behind = True
+        self._tbl_style_shaded: Dict[Optional[str], bool] = {}
+        self._default_tbl_style = self._default_style_id("table")
+
+    # -- the page ---------------------------------------------------------
+    def _page_colour(self, doc):
+        """White unless ``w:background`` paints the page. A painted page is
+        unknown: Word shows it only with a view setting, never prints it, and
+        a fill effect is a picture."""
+        try:
+            bg = doc.element.find(qn("w:background"))
+        except Exception:  # pragma: no cover - defensive
+            return _UNKNOWN
+        if bg is None:
+            return _WHITE
+        if len(bg):
+            return _UNKNOWN
+        colour = _theme_or_hex(bg, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", self.theme)
+        if colour in (None, "auto", _WHITE):
+            return _WHITE
+        return _UNKNOWN
+
+    def _default_style_id(self, kind: str) -> Optional[str]:
+        if self.styles is None:
+            return None
+        for sid, st in getattr(self.styles, "_styles", {}).items():
+            if st.get(qn("w:type")) == kind and (st.get(qn("w:default")) or "").lower() in ("1", "true", "on"):
+                return sid
+        return None
+
+    # -- one run ------------------------------------------------------------
+    def run(self, r_el, p_style_id: Optional[str]):
+        """A run's OWN background (highlight over run shading), or
+        ``_NO_SHADING`` when it shows the paragraph's."""
+        rpr = r_el.find(qn("w:rPr"))
+        hl = rpr.find(qn("w:highlight")) if rpr is not None else None
+        if hl is not None:
+            val = (hl.get(qn("w:val")) or "").strip()
+            if val and val != "none":
+                return _HIGHLIGHT_RGB.get(val, _UNKNOWN)
+        if self.styles is not None:
+            shd = self.styles.run_element(r_el, p_style_id, qn("w:shd"))
+        else:
+            shd = rpr.find(qn("w:shd")) if rpr is not None else None
+        return _shd_layer(shd, self.theme)
+
+    # -- one paragraph ------------------------------------------------------
+    def paragraph(self, p_el, story_root=None) -> Optional[str]:
+        """The paragraph's background as ``RRGGBB``, or None when unknown."""
+        root = story_root if story_root is not None else self.body
+        sid = self.styles.paragraph_style_id(p_el) if self.styles is not None else None
+        if self.styles is not None:
+            shd = self.styles.paragraph_element(p_el, sid, qn("w:shd"))
+        else:
+            ppr = p_el.find(qn("w:pPr"))
+            shd = ppr.find(qn("w:shd")) if ppr is not None else None
+        layer = _shd_layer(shd, self.theme)
+        if layer is not _NO_SHADING:
+            return None if layer is _UNKNOWN else layer
+
+        last_tr = None
+        anc = p_el.getparent()
+        while anc is not None and anc is not root:
+            tag = anc.tag
+            if tag == qn("w:tc"):
+                tcpr = anc.find(qn("w:tcPr"))
+                layer = _shd_layer(tcpr.find(qn("w:shd")) if tcpr is not None else None, self.theme)
+            elif tag == qn("w:tr"):
+                last_tr = anc
+                layer = _NO_SHADING
+            elif tag == _W_TBL:
+                layer = self._table_layer(anc, last_tr)
+                last_tr = None
+            elif tag == _W_TXBX:
+                # A text box paints its own fill and floats: what is behind a
+                # see-through one is not known, so its fill is the answer.
+                layer = self._text_box_fill(anc)
+                return None if layer is _UNKNOWN else layer
+            else:
+                layer = _NO_SHADING
+            if layer is _UNKNOWN:
+                return None
+            if layer is not _NO_SHADING:
+                return layer
+            anc = anc.getparent()
+
+        # Nothing in the text's own containers paints it: it shows whatever
+        # lies behind the story — shapes behind the text, then the page.
+        if self._behind(p_el, root):
+            return None
+        return None if self.page is _UNKNOWN else self.page
+
+    def _table_layer(self, tbl, tr):
+        tblpr = tbl.find(qn("w:tblPr"))
+        # A table style's shading is conditional (header row, banding, first
+        # column …) on tblLook and position: any shading in it is unknown.
+        ts = tblpr.find(qn("w:tblStyle")) if tblpr is not None else None
+        sid = ts.get(qn("w:val")) if ts is not None else self._default_tbl_style
+        if self._table_style_shaded(sid):
+            return _UNKNOWN
+        if tr is not None:
+            ex = tr.find(f"{qn('w:tblPrEx')}/{qn('w:shd')}")
+            layer = _shd_layer(ex, self.theme)
+            if layer is not _NO_SHADING:
+                return layer
+        return _shd_layer(tblpr.find(qn("w:shd")) if tblpr is not None else None, self.theme)
+
+    def _table_style_shaded(self, sid: Optional[str]) -> bool:
+        if sid in self._tbl_style_shaded:
+            return self._tbl_style_shaded[sid]
+        shaded = False
+        if self.styles is not None and sid:
+            for st in self.styles.chain(sid):
+                for shd in st.iter(qn("w:shd")):
+                    if _shd_layer(shd, self.theme) is not _NO_SHADING:
+                        shaded = True
+                        break
+                if shaded:
+                    break
+        self._tbl_style_shaded[sid] = shaded
+        return shaded
+
+    def _text_box_fill(self, txbx):
+        anc = txbx.getparent()
+        while anc is not None:
+            if anc.tag == f"{_WPS_NS}wsp":
+                return _drawingml_fill(anc.find(f"{_WPS_NS}spPr"), self.theme)
+            if anc.tag in _VML_SHAPE_TAGS:
+                return _vml_fill(anc)
+            if anc.tag in (_W_P, _W_TBL):  # left the drawing without finding its shape
+                return _UNKNOWN
+            anc = anc.getparent()
+        return _UNKNOWN
+
+    def _behind(self, p_el, root) -> bool:
+        """True when a picture or shape may lie behind this paragraph. Where
+        a drawing sits on the page is not worth guessing: a header/footer
+        drawing, or a body drawing on a page the file does not name, counts
+        as behind every line it could reach."""
+        if self._furniture_behind:
+            return True
+        if root is not self.body:
+            key = id(root)
+            if key not in self._story_behind:
+                self._story_behind[key] = bool(_behind_text_shapes(root))
+            # A body drawing (a cover page's full-bleed panel) may reach the
+            # header band of its page.
+            return self._story_behind[key] or self._body_behind is not None
+        if self._body_behind is None:
+            return False
+        if self._body_behind is _UNKNOWN or not self._pages:
+            return True
+        start = self._pages.get(p_el)
+        if start is None:
+            return True
+        # The paragraph covers its start page and every page it runs onto.
+        spans = sum(1 for m in p_el.iter(_W_LRPB) if not _inside(m, p_el, (_W_TXBX, _MC_FALLBACK)))
+        return any(start <= pg <= start + spans for pg in self._body_behind)
 
 
 def _text_excluding_controls(el) -> str:
@@ -1394,7 +1771,7 @@ class _StoryParent:
         self.part = part
 
 
-def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors) -> Optional[SectionNode]:
+def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors, bgs: Optional["_Backgrounds"] = None) -> Optional[SectionNode]:
     section = SectionNode(
         id="docx-page-furniture",
         content=NodeContent(kind=ContentKind.TEXT, text="Page headers and footers"),
@@ -1431,7 +1808,7 @@ def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors) -> Optiona
                 )
             )
             if text and not links:
-                section.children.append(_story_paragraph_node(p_el, parent, text, base, ids, reg, theme_colors))
+                section.children.append(_story_paragraph_node(p_el, parent, text, base, ids, reg, theme_colors, bgs, root_el))
             # Text boxes anchored here (a footer's "Privacy: click here"
             # callout, a letterhead address block). Their pictures already
             # belong to this anchor paragraph; their words and links do not,
@@ -1445,16 +1822,17 @@ def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors) -> Optiona
                 section.children.extend(tb_links)
                 if tb_text and not tb_links:
                     section.children.append(
-                        _story_paragraph_node(tb_p, parent, tb_text, tb_base, ids, reg, theme_colors)
+                        _story_paragraph_node(tb_p, parent, tb_text, tb_base, ids, reg, theme_colors, bgs, root_el)
                     )
     return section if section.children else None
 
 
-def _story_paragraph_node(p_el, parent, text: str, base: Dict[str, Any], ids, reg, theme_colors) -> ParagraphNode:
+def _story_paragraph_node(p_el, parent, text: str, base: Dict[str, Any], ids, reg, theme_colors,
+                          bgs: Optional["_Backgrounds"] = None, story_root=None) -> ParagraphNode:
     """A header/footer line as a ParagraphNode (with its contrast inputs),
     registered so the writer can recolour exactly this paragraph."""
     para = Paragraph(p_el, parent)
-    props = dict(_text_color_props(para, theme_colors) or {})
+    props = dict(_text_color_props(para, theme_colors, bgs, story_root) or {})
     props.update(base)
     hf_id = ids("docx-hfp")
     reg(hf_id, para)
