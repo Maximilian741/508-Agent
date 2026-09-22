@@ -62,7 +62,17 @@ export function LocationPreview({ v, file, fmt, summary, width, compact = false 
       return (
         <View style={{ gap: 8 }}>
           <Thumbnail uri={loc.thumbnail} width={compact ? Math.min(width, 120) : Math.min(width, 240)} />
-          {!compact && loc.snippet ? <Snippet snippet={loc.snippet} highlight={loc.highlight ?? null} label="Its description now" /> : null}
+          {/* The API highlights the snippet only when it IS the picture's
+              current (bad) description; otherwise the snippet is the caption
+              or text beside it, and calling that "its description" told
+              people a picture with NO description already had one. */}
+          {!compact && loc.snippet ? (
+            <Snippet
+              snippet={loc.snippet}
+              highlight={loc.highlight ?? null}
+              label={loc.highlight ? "Its description now" : "Text next to it"}
+            />
+          ) : null}
         </View>
       );
     }
@@ -413,10 +423,12 @@ function PropertiesCard({
                   }
                 : null,
             ]}
-            numberOfLines={1}
+            numberOfLines={compact ? 2 : 1}
           >
             {r.val}
-            {r.bad ? " ← this" : ""}
+            {/* The compact card shows only the one bad row: no pointer needed
+                (it was cut to "not set ← …" in the narrow column). */}
+            {r.bad && !compact ? " ← this" : ""}
           </Text>
         </View>
       ))}

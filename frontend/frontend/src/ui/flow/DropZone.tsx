@@ -24,12 +24,22 @@ interface DropZoneProps {
   /** While false the zone ignores clicks (a file is already in progress). */
   enabled?: boolean;
   maxUploadMb?: number | null;
+  /** The larger limit an account gets, when ``maxUploadMb`` is the signed-out one. */
+  accountMaxUploadMb?: number | null;
   /** Smaller variant: "Check another file". */
   compact?: boolean;
   label?: string;
 }
 
-export function DropZone({ onFile, dragging = false, enabled = true, maxUploadMb, compact = false, label }: DropZoneProps) {
+export function DropZone({
+  onFile,
+  dragging = false,
+  enabled = true,
+  maxUploadMb,
+  accountMaxUploadMb,
+  compact = false,
+  label,
+}: DropZoneProps) {
   const theme = useTheme();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [hovered, setHovered] = useState(false);
@@ -41,7 +51,12 @@ export function DropZone({ onFile, dragging = false, enabled = true, maxUploadMb
 
   const title = label ?? (compact ? "Check another file" : "Drop your file here");
   const sub = compact ? "or drop it anywhere on this page" : "or choose a file";
-  const caption = `${ACCEPTED_SENTENCE}${maxUploadMb ? ` Up to ${maxUploadMb} MB.` : ""}`;
+  const limit = !maxUploadMb
+    ? ""
+    : accountMaxUploadMb && accountMaxUploadMb > maxUploadMb
+      ? ` Up to ${maxUploadMb} MB (${accountMaxUploadMb} MB with a free account).`
+      : ` Up to ${maxUploadMb} MB.`;
+  const caption = `${ACCEPTED_SENTENCE}${limit}`;
   const active = enabled && (dragging || hovered);
 
   return (

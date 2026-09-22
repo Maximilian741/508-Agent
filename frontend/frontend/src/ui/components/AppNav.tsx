@@ -23,15 +23,18 @@ import { CONTENT_MAX_WIDTH } from "./Screen";
 import { SignInModal } from "./SignInModal";
 import { linkProps } from "./linkProps";
 
-const ITEMS: { label: string; href: string; key: string }[] = [
+// signedInOnly: pages that show a person's own data. To a first-time visitor
+// they are empty rooms, and the nav should read as "drop a file", not as a
+// menu of things they can't use yet.
+const ITEMS: { label: string; href: string; key: string; signedInOnly?: boolean }[] = [
   { label: "Fix a file", href: "/", key: "home" },
   { label: "Advanced audit", href: "/audit", key: "audit" },
-  { label: "Dashboard", href: "/dashboard", key: "dashboard" },
-  { label: "Insights", href: "/insights", key: "insights" },
+  { label: "Dashboard", href: "/dashboard", key: "dashboard", signedInOnly: true },
+  { label: "Insights", href: "/insights", key: "insights", signedInOnly: true },
   { label: "Batch", href: "/batch", key: "batch" },
   { label: "Contrast", href: "/tools/contrast", key: "contrast" },
   { label: "Help", href: "/help", key: "help" },
-  { label: "Achievements", href: "/achievements", key: "achievements" },
+  { label: "Achievements", href: "/achievements", key: "achievements", signedInOnly: true },
   { label: "About", href: "/about", key: "about" },
   { label: "Settings", href: "/settings", key: "settings" },
 ];
@@ -42,6 +45,15 @@ export function AppNav() {
   const pathname = usePathname();
   const mockMode = useAppStore((s) => s.mockMode);
   const backendHealth = useAppStore((s) => s.backendHealth);
+  // Start signed-out so the static HTML and the first client render agree
+  // (reading localStorage during render is a hydration mismatch), then
+  // reveal the account pages once the stored account has been read.
+  const [signedIn, setSignedIn] = useState(false);
+  useEffect(() => {
+    setSignedIn(!!loadAccount());
+    return onAccountChanged(() => setSignedIn(!!loadAccount()));
+  }, []);
+  const items = ITEMS.filter((item) => signedIn || !item.signedInOnly);
 
   return (
     <View
@@ -83,7 +95,7 @@ export function AppNav() {
           this row into its own full-width, horizontally scrolling strip
           instead of a three-line wall of links. */}
       <View style={styles.links} {...({ dataSet: { navLinks: "1" } } as any)}>
-        {ITEMS.map((item) => {
+        {items.map((item) => {
           const active = pathname === item.href || (item.href === "/" && pathname === "/index");
           return (
             <Pressable

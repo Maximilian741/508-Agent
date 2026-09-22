@@ -19,7 +19,8 @@ const WORKER_SRC = "/pdfjs/pdf.worker.mjs";
 
 let libPromise: Promise<any> | null = null;
 
-function loadPdfJs(): Promise<any> {
+/** The bundled pdf.js (same origin, CSP-safe). Shared with PdfPreview. */
+export function loadPdfJs(): Promise<any> {
   if (Platform.OS !== "web" || typeof window === "undefined" || typeof document === "undefined") {
     return Promise.reject(new Error("pdf preview is web-only"));
   }

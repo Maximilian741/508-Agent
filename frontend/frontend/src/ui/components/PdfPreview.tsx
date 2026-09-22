@@ -29,6 +29,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Platform, StyleSheet, Text, View } from "react-native";
 
+import { loadPdfJs } from "../flow/pdfPages";
 import { useTheme } from "../useTheme";
 
 interface PdfPreviewProps {
@@ -36,12 +37,10 @@ interface PdfPreviewProps {
   page: number | null;
 }
 
-// pdfjs-dist 4.x ships its worker as a .mjs bundle.  Loading it from a CDN
-// keeps the Expo web bundle small and avoids the Metro / Webpack
-// gymnastics required to inline a Worker file.  Pinning to pdfjs.version
-// guarantees the worker matches the runtime API.
-const buildWorkerSrc = (version: string) =>
-  `https://cdn.jsdelivr.net/npm/pdfjs-dist@${version}/build/pdf.worker.mjs`;
+// pdf.js comes from our own origin (public/pdfjs, via loadPdfJs). It used to
+// load its worker from cdn.jsdelivr.net, which the production CSP
+// (script-src/worker-src 'self') blocks: every PDF preview on the Advanced
+// audit screen failed in production while working in development.
 
 const isPdfFile = (file: File): boolean => {
   if (file.type === "application/pdf") return true;
@@ -87,18 +86,14 @@ export function PdfPreview({ file, page }: PdfPreviewProps) {
       setStatus("loading");
       setError(null);
       try {
-        // Dynamic import avoids dragging pdfjs into the SSR / native bundle.
-        const pdfjs: any = await import("pdfjs-dist");
+        const pdfjs: any = await loadPdfJs();
         if (cancelled) return;
-
-        if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-          pdfjs.GlobalWorkerOptions.workerSrc = buildWorkerSrc(pdfjs.version);
-        }
 
         const arrayBuffer = await file.arrayBuffer();
         if (cancelled) return;
 
-        const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+        // No eval: the CSP forbids it, and pdf.js falls back cleanly.
+        const pdf = await pdfjs.getDocument({ data: arrayBuffer, isEvalSupported: false }).promise;
         if (cancelled) {
           // Best effort cleanup — pdf.destroy is sync-ish.
           try { pdf.destroy?.(); } catch { /* swallow */ }

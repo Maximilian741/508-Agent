@@ -101,6 +101,7 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
   const { width: winWidth } = useWindowDimensions();
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl);
   const maxUploadMb = useAppStore((s) => s.maxUploadMb);
+  const anonMaxUploadMb = useAppStore((s) => s.anonMaxUploadMb);
   const client = useMemo(() => createApiClient({ baseUrl: apiBaseUrl, mockMode: false }), [apiBaseUrl]);
 
   const [stage, setStage] = useState<Stage>("idle");
@@ -254,6 +255,17 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
         `That file is ${fileSizeLabel(f.size)}, and the limit is ${maxUploadMb} MB. Try compressing it, or split it into smaller parts.`,
         null,
       );
+      return;
+    }
+    // Over the no-account limit while signed out: offer the free account now
+    // (the same step the server's 413 leads to) instead of uploading first.
+    if (!loadToken() && anonMaxUploadMb && f.size > anonMaxUploadMb * MB) {
+      const notice =
+        `Without an account you can check files up to ${anonMaxUploadMb} MB. ` +
+        `Create a free account to check this ${fileSizeLabel(f.size)} file.`;
+      setSignUpNotice(notice);
+      setStage("account-to-check");
+      setStatus(notice);
       return;
     }
     void runCheck(f);
@@ -475,7 +487,8 @@ export function OneStepFixer({ renderHero, resume, onResumeRead, onBusyChange }:
       <DropZone
         onFile={chooseFile}
         dragging={dragging}
-        maxUploadMb={maxUploadMb}
+        maxUploadMb={account ? maxUploadMb : anonMaxUploadMb ?? maxUploadMb}
+        accountMaxUploadMb={account ? null : maxUploadMb}
       />
     ) : (
       <StatusLine file={file} stage={stage} onStartOver={busy ? undefined : reset} />
