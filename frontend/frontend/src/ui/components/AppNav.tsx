@@ -12,7 +12,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter, usePathname } from "expo-router";
 
-import { Account, loadAccount, refreshAccount, signOut } from "../../domain/account";
+import { Account, loadAccount, onAccountChanged, refreshAccount, signOut } from "../../domain/account";
 import { useAppStore } from "../../store/useAppStore";
 import { useTheme } from "../useTheme";
 import { alpha, glassStyle } from "../theme";
@@ -182,8 +182,14 @@ function AccountChip() {
         if (fresh) setAccount(fresh);
       })
       .catch((e) => console.warn("[AccountChip] refresh failed", e));
+    // A sign-up or credit change made inline on a page (the home fixer)
+    // shows up here at once.
+    const off = onAccountChanged(() => {
+      if (!cancelled) setAccount(loadAccount());
+    });
     return () => {
       cancelled = true;
+      off();
     };
   }, []);
 

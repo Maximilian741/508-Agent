@@ -1,57 +1,39 @@
 /**
- * Home - workshop-feel dashboard.
+ * Home — the one-step fixer.
  *
- * Three vertically-stacked sections, each with its own spatial rhythm:
- *   1. Welcome strip - serif greeting on the global maple shader, no card.
- *   2. Workshop bench - one tall, considered "Start an audit" panel.
- *   3. Recent work - rows separated by hairlines, not a grid of tiles.
+ * A person drops ANY document and gets an accessible file back, with as
+ * little thinking as possible, and sees where every remaining problem is.
+ * The whole flow lives in src/ui/flow/OneStepFixer; this page only supplies
+ * the shader hero it runs inside (the shader belongs to the front doors, see
+ * scripts/check-design.mjs) and the quiet extras below the fold.
  *
- * No stat tiles. No identical card stack. The page reads top-to-bottom like
- * a notebook page, not a dashboard.
+ * First-time visitors see: the drop zone, one sentence, one link. Returning
+ * visitors also get their recent fixed files and the advanced tools, BELOW
+ * the drop zone and hidden while a file is in progress.
+ *
+ * The step-by-step review with every rule, score and decision is still
+ * there, unchanged, as the "Advanced audit" (/audit).
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { AuditHistoryEntry, clearHistory, loadHistory } from "../src/domain/auditHistory";
+import { loadAccount, onAccountChanged } from "../src/domain/account";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
 import { Chip } from "../src/ui/components/Chip";
+import { Hero } from "../src/ui/components/Hero";
+import { InlineNotice } from "../src/ui/components/InlineNotice";
+import { RecentRemediations } from "../src/ui/components/RecentRemediations";
 import { ScoreBadge } from "../src/ui/components/ScoreBadge";
 import { Screen } from "../src/ui/components/Screen";
-import { Hero } from "../src/ui/components/Hero";
-import { useToast } from "../src/ui/toast";
-import { alpha, glassStyle } from "../src/ui/theme";
-import { useTheme } from "../src/ui/useTheme";
 import { Seo } from "../src/ui/components/Seo";
 import { linkProps } from "../src/ui/components/linkProps";
-
-function greetingFor(date: Date): string {
-  const h = date.getHours();
-  if (h < 5) return "Working late";
-  if (h < 12) return "Good morning";
-  if (h < 18) return "Good afternoon";
-  return "Good evening";
-}
-
-const FIRST_RUN_STEPS = [
-  {
-    n: "1",
-    title: "Drop a document",
-    body: "Upload a PDF, Word, PowerPoint, or HTML file. We never train on your documents.",
-  },
-  {
-    n: "2",
-    title: "Review findings",
-    body: "Walk every WCAG 2.1, Section 508, and PDF/UA finding one at a time, in plain English.",
-  },
-  {
-    n: "3",
-    title: "Approve & download",
-    body: "Approve the fixes you trust, edit the rest, and download a remediated file, plus a conformance certificate.",
-  },
-];
+import { OneStepFixer } from "../src/ui/flow/OneStepFixer";
+import { useToast } from "../src/ui/toast";
+import { useTheme } from "../src/ui/useTheme";
 
 function relativeTime(iso: string | undefined): string {
   if (!iso) return "";
@@ -65,332 +47,137 @@ function relativeTime(iso: string | undefined): string {
   return new Date(iso).toLocaleDateString();
 }
 
+const TOOLS: Array<{ label: string; sub: string; path: string }> = [
+  { label: "Many files at once", sub: "Fix a whole folder", path: "/batch" },
+  { label: "Check a web page", sub: "Paste a link", path: "/scan-url" },
+  { label: "Colour contrast", sub: "Is this text easy to read?", path: "/tools/contrast" },
+  { label: "Picture descriptions", sub: "Write a good one", path: "/tools/alt-text" },
+  { label: "Link words", sub: "Is “click here” a problem?", path: "/tools/link-text" },
+  { label: "Headings", sub: "Check the outline", path: "/tools/headings" },
+  { label: "Plain language", sub: "How easy is it to read?", path: "/tools/readability" },
+  { label: "Help", sub: "Every check, explained", path: "/help" },
+];
+
 export default function HomeScreen() {
   const router = useRouter();
   const theme = useTheme();
   const toast = useToast();
-  const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
+  const params = useLocalSearchParams<{ resume?: string; paid?: string }>();
   const backendHealth = useAppStore((state) => state.backendHealth);
   const refreshBackendUrl = useAppStore((state) => state.refreshBackendUrl);
-  const mockMode = useAppStore((state) => state.mockMode);
-  const setMockMode = useAppStore((state) => state.setMockMode);
+
+  // Back from the checkout page (or a reload mid-flow): pick the file up again.
+  const [resume] = useState(() => (params.resume === "fix" ? { paid: params.paid === "1" } : null));
+  const onResumeRead = useCallback(() => {
+    // Clear the query so a reload doesn't re-run it.
+    try {
+      router.replace("/");
+    } catch {
+      /* ignore */
+    }
+  }, [router]);
 
   const [history, setHistory] = useState<AuditHistoryEntry[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
-  const [now] = useState(() => new Date());
+  const [active, setActive] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
 
   useEffect(() => {
-    if (!mockMode) void refreshBackendUrl();
+    void refreshBackendUrl();
     setHistory(loadHistory());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mockMode, refreshBackendUrl]);
+    setSignedIn(!!loadAccount());
+    return onAccountChanged(() => setSignedIn(!!loadAccount()));
+  }, [refreshBackendUrl]);
 
   const filteredHistory = useMemo(() => {
     const q = historyQuery.trim().toLowerCase();
     if (!q) return history;
-    return history.filter(
-      (e) =>
-        e.filename.toLowerCase().includes(q) ||
-        e.grade.toLowerCase().includes(q) ||
-        e.sourceFormat.toLowerCase().includes(q),
-    );
+    return history.filter((e) => e.filename.toLowerCase().includes(q) || e.sourceFormat.toLowerCase().includes(q));
   }, [history, historyQuery]);
 
-  const ready = mockMode || backendHealth === "ok";
-
-  // Resume copy - what is the user actually in the middle of?
-  const resumeLine = useMemo(() => {
-    const inProgress = history.find(
-      (h) =>
-        h.snapshot &&
-        Object.values(h.snapshot.decisions).some((d) => d.decision === "pending"),
-    );
-    if (inProgress) {
-      const pending = Object.values(inProgress.snapshot!.decisions).filter(
-        (d) => d.decision === "pending",
-      ).length;
-      return `${pending} finding${pending === 1 ? "" : "s"} still waiting on ${inProgress.filename}.`;
-    }
-    if (history.length === 0)
-      return "Find and fix accessibility issues in your PDFs, Word docs, slides, and web pages, checked against WCAG 2.1, Section 508, and PDF/UA.";
-    return `${history.length} document${history.length === 1 ? "" : "s"} on the bench. Pick one up where you left it.`;
-  }, [history]);
-
-  const greeting = `${greetingFor(now)}.`;
+  const returning = signedIn || history.length > 0;
 
   return (
-    <Screen scroll title="Home">
+    <Screen scroll title="Fix a document">
       <Seo
-        title="508 Agent — Document Accessibility Checker & Converter (PDF, Word, PPT)"
-        description="Scan any PDF, Word, PowerPoint or web page for accessibility issues free, then convert it into a 508/WCAG-compliant file with automated, reviewable fixes."
+        title="508 Agent — Make any document accessible: PDF, Word, PowerPoint, Excel"
+        description="Drop a PDF, Word, PowerPoint, Excel file or web page. We check it for accessibility free, fix what we can automatically, and show you exactly where anything left is."
       />
-      {/* === 1. Welcome hero ============================================== */}
-      <Hero
-        shader
-        eyebrow="Home"
-        title={greeting}
-        subtitle={resumeLine}
+
+      <OneStepFixer
+        resume={resume}
+        onResumeRead={onResumeRead}
+        onBusyChange={setActive}
+        renderHero={({ intensity, children }) => (
+          <Hero
+            shader
+            shaderIntensity={intensity}
+            title="Make your document accessible."
+            subtitle="Drop a PDF, Word, PowerPoint, Excel file, web page or picture. We check it for free and fix what we can."
+          >
+            <View style={{ marginTop: 10 }}>{children}</View>
+          </Hero>
+        )}
       />
-      {!ready ? (
-        <Text
-          style={[
-            theme.typography.caption,
-            { color: theme.colors.warning },
-          ]}
-        >
-          Analyzer offline. Demo mode will use sample data.
-        </Text>
+
+      {backendHealth === "error" ? (
+        <InlineNotice tone="warning" title="We can't reach the service right now" message="Try again in a moment." />
       ) : null}
 
-      {/* === 2. Workshop bench - the primary action ====================== */}
-      <Pressable
-        onPress={() => {
-          if (!ready) setMockMode(true);
-          router.push("/audit");
-        }}
-        accessibilityRole="button"
-        // Must CONTAIN the visible label below (WCAG 2.5.3 Label in Name), or a
-        // speech-input user can't activate it by saying what they see.
-        accessibilityLabel={ready ? "Start an audit" : "Start in demo mode"}
-        style={({ hovered }: any) => [
-          styles.bench,
-          {
-            ...(glassStyle(theme.colors) as any),
-            borderRadius: theme.radius.xl,
-            borderColor: hovered ? alpha(theme.colors.accent, 0.6) : theme.colors.glassBorder,
-          },
-          Platform.OS === "web"
-            ? ({
-                boxShadow: hovered
-                  ? `0 0 0 1px ${alpha(theme.colors.accent, 0.35)}, 0 18px 48px -18px ${alpha(theme.colors.accent, 0.45)}`
-                  : theme.isDark
-                    ? theme.shadows.near.webDark
-                    : theme.shadows.near.web,
-              } as any)
-            : null,
-        ]}
-      >
-        <Text
-          style={[
-            theme.typography.eyebrow,
-            { color: theme.colors.accent },
-          ]}
-        >
-          BEGIN
+      <View style={styles.fine}>
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+          Your file stays private. We delete it after about a day and never use it to train AI.{" "}
         </Text>
-        <Text
-          style={[
-            theme.typography.displaySmall as any,
-            { color: theme.colors.text, marginTop: 8 },
-          ]}
+        <Pressable
+          {...linkProps("/privacy")}
+          style={({ focused }: any) => [focused ? focusRing(theme) : null]}
         >
-          Open a document.
-        </Text>
-        <Text
-          style={[
-            theme.typography.body,
-            {
-              color: theme.colors.textMuted,
-              marginTop: 6,
-              maxWidth: 560,
-              lineHeight: 22,
-            },
-          ]}
-        >
-          Drop a PDF, Word, PowerPoint, or HTML file on the audit screen and we will walk
-          every accessibility finding with you, one at a time, in plain English.
-        </Text>
-        <View style={styles.benchFooter}>
-          <Text
-            style={[
-              theme.typography.eyebrow,
-              { color: theme.colors.textMuted, letterSpacing: 0.8 },
-            ]}
-          >
-            .PDF   .DOCX   .PPTX   .HTML
-          </Text>
-          {/* VISUAL affordance only — NOT a control. The whole bench panel is
-              already the button; rendering a real <Button> here nested a
-              <button> inside a <button>, which is invalid HTML, produced a
-              duplicate tab stop, and is announced unpredictably by screen
-              readers. One panel, one control. */}
-          <View
-            style={[
-              styles.benchCta,
-              { backgroundColor: theme.colors.accent, borderRadius: theme.radius.md },
-            ]}
-          >
-            {/* onAccent, not a hardcoded dark: the accent is a deep burnt
-                orange in the light palette, where dark-on-dark fails 1.4.3. */}
-            <Text style={[styles.benchCtaText, { color: theme.colors.onAccent }]}>
-              {ready ? "Start an audit" : "Start in demo mode"}
-            </Text>
-          </View>
-        </View>
-      </Pressable>
-
-      {/* Quiet row of side tools - secondary to the bench.
-          None of these carry an accessibilityLabel on purpose: each panel's
-          visible title and subtitle ARE its name. Hand-written labels here
-          ("Go to batch" over a panel reading "Batch mode") replaced the words
-          a speech-input user can see and say, which is a WCAG 2.5.3 failure —
-          and they drifted from the visible text as the panels were renamed. */}
-      <View style={styles.toolRow}>
-        <Pressable 
-          {...linkProps("/batch")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Batch mode
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            A folder at a time
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/readability")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Readability checker
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Plain-language score (3.1.5)
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/contrast")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Contrast checker
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            WCAG ratios, side-by-side
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/palette")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Palette matrix
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Which colour pairs pass AA
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/accessibility-statement")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Statement generator
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Publish-ready, in seconds
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/alt-text")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Alt-text generator
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Drop an image, get alt text
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/link-text")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Link text checker
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Is “click here” hurting you?
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/tools/headings")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Heading structure checker
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Missing H1? Skipped levels?
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/assessment")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Professional assessment
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Want a human in the loop?
-          </Text>
-        </Pressable>
-        <Pressable 
-          {...linkProps("/help")}
-          style={({ hovered }: any) => [styles.toolLink, hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>
-            Help & glossary
-          </Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Every rule, plain-English
+          <Text style={[theme.typography.caption, { color: theme.colors.text, textDecorationLine: "underline" }]}>
+            Privacy
           </Text>
         </Pressable>
       </View>
 
-      {/* === 3. Recent work - rows, not cards ============================= */}
-      {history.length > 0 ? (
+      <View style={styles.advanced}>
+        <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+          Want to review every change yourself?
+        </Text>
+        <Button title="Advanced audit" variant="ghost" href="/audit" />
+      </View>
+
+      {!active && signedIn ? (
+        <RecentRemediations title="Your fixed files" subtitle="Download any of them again." />
+      ) : null}
+
+      {!active && history.length > 0 ? (
         <View style={styles.recent}>
           <View style={styles.recentHead}>
-            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
-              Recent work
-            </Text>
-            <Pressable accessibilityRole="button" accessibilityLabel="Clear history"
+            <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Your advanced audits</Text>
+            <Pressable
+              accessibilityRole="button"
               onPress={() => {
                 clearHistory();
                 setHistory([]);
-                toast.info("Audit history cleared");
+                toast.info("History cleared");
               }}
+              style={({ focused }: any) => [focused ? focusRing(theme) : null]}
             >
-              <Text
-                style={[
-                  theme.typography.caption,
-                  { color: theme.colors.textMuted, textDecorationLine: "underline" },
-                ]}
-              >
+              <Text style={[theme.typography.caption, { color: theme.colors.textMuted, textDecorationLine: "underline" }]}>
                 Clear history
               </Text>
             </Pressable>
           </View>
-
           {history.length > 4 ? (
             <TextInput
               value={historyQuery}
               onChangeText={setHistoryQuery}
-              placeholder="Filter by name, grade, format..."
+              placeholder="Filter by name or type…"
               placeholderTextColor={theme.colors.textMuted}
-              accessibilityLabel="Filter recent work"
-              style={[
-                styles.search,
-                {
-                  color: theme.colors.text,
-                  borderColor: theme.colors.border,
-                },
-              ]}
+              accessibilityLabel="Filter your advanced audits"
+              style={[styles.search, { color: theme.colors.text, borderColor: theme.colors.border }]}
             />
           ) : null}
-
-          <View style={styles.rows}>
+          <View>
             {filteredHistory.map((entry, i) => (
               <RecentRow
                 key={entry.id}
@@ -400,8 +187,8 @@ export default function HomeScreen() {
                   if (entry.snapshot) {
                     router.push(`/audit?historyId=${encodeURIComponent(entry.id)}` as any);
                   } else {
-                    toast.warning(`Snapshot not available for ${entry.filename}`, {
-                      description: "Drop the source file again - only the summary was kept.",
+                    toast.warning(`We only kept the summary of ${entry.filename}`, {
+                      description: "Drop the file again to see everything.",
                     });
                     router.push("/audit");
                   }
@@ -410,128 +197,54 @@ export default function HomeScreen() {
             ))}
           </View>
         </View>
-      ) : (
-        <FirstRun
-          onSeePricing={() => router.push("/billing" as any)}
-          onSeeTour={() => router.push("/landing" as any)}
-        />
-      )}
+      ) : null}
 
-      {/* Footer - stays quiet at the bottom */}
+      {!active && returning ? (
+        <View style={styles.tools}>
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>More tools</Text>
+          <View style={styles.toolRow}>
+            {TOOLS.map((t) => (
+              <Pressable
+                key={t.path}
+                {...linkProps(t.path)}
+                style={({ hovered, focused }: any) => [
+                  styles.toolLink,
+                  hovered ? { opacity: 0.75 } : null,
+                  focused ? focusRing(theme) : null,
+                ]}
+              >
+                <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "600" }]}>{t.label}</Text>
+                <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>{t.sub}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
       <View style={styles.footer}>
+        <FooterLink label="How it works" path="/landing" />
+        <FooterDot />
+        <FooterLink label="Pricing" path="/billing" />
+        <FooterDot />
+        <FooterLink label="Fix guides" path="/fix" />
+        <FooterDot />
         <FooterLink label="About" path="/about" />
         <FooterDot />
         <FooterLink label="Security" path="/security" />
         <FooterDot />
-        <FooterLink label="Fix guides" path="/fix" />
-        <FooterDot />
         <FooterLink label="Settings" path="/settings" />
-        <FooterDot />
-        <Text
-          style={[
-            theme.typography.caption,
-            { color: theme.colors.textMuted },
-          ]}
-        >
-          {ready ? `Connected to ${apiBaseUrl}` : "Demo mode"}
-        </Text>
       </View>
     </Screen>
   );
 }
 
-function FirstRun({
-  onSeePricing,
-  onSeeTour,
-}: {
-  onSeePricing: () => void;
-  onSeeTour: () => void;
-}) {
-  const theme = useTheme();
-  return (
-    <View style={styles.firstRun}>
-      <Text style={[theme.typography.h2, { color: theme.colors.text }]}>How it works</Text>
-      <View style={styles.steps}>
-        {FIRST_RUN_STEPS.map((s) => (
-          <View
-            key={s.n}
-            style={[
-              styles.step,
-              { borderRadius: theme.radius.md, borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
-            ]}
-          >
-            <View style={[styles.stepDot, { backgroundColor: theme.colors.accent }]}>
-              <Text style={[styles.stepDotText, { color: theme.colors.onAccent }]}>{s.n}</Text>
-            </View>
-            <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>
-              {s.title}
-            </Text>
-            <Text
-              style={[
-                theme.typography.caption,
-                {
-                  color: theme.colors.textMuted,
-                  marginTop: 4,
-                  textTransform: "none",
-                  letterSpacing: 0.2,
-                  lineHeight: 18,
-                },
-              ]}
-            >
-              {s.body}
-            </Text>
-          </View>
-        ))}
-      </View>
-
-      {/* Trust + transparency strip */}
-      <View style={styles.trustRow}>
-        <Chip label="WCAG 2.1" tone="info" />
-        <Chip label="Section 508" tone="info" />
-        <Chip label="PDF/UA" tone="info" />
-      </View>
-      <Text
-        style={[
-          theme.typography.caption,
-          {
-            color: theme.colors.textMuted,
-            textTransform: "none",
-            letterSpacing: 0.2,
-            lineHeight: 19,
-            marginTop: 10,
-            maxWidth: 620,
-          },
-        ]}
-      >
-        Free to start: create an account in seconds and your first audits are on us (25 free
-        credits). After that, credit packs start at $5, or subscribe for a monthly allowance
-        with certificates included.
-      </Text>
-      <View style={styles.firstRunLinks}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="See pricing"
-          onPress={onSeePricing}
-          style={({ hovered }: any) => [hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.accent, fontWeight: "600" }]}>
-            See pricing
-          </Text>
-        </Pressable>
-        <Text style={{ color: theme.colors.textMuted, opacity: 0.5 }}>·</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="The full tour"
-          onPress={onSeeTour}
-          style={({ hovered }: any) => [hovered ? { opacity: 0.7 } : null]}
-        >
-          <Text style={[theme.typography.body, { color: theme.colors.accent, fontWeight: "600" }]}>
-            The full tour
-          </Text>
-        </Pressable>
-      </View>
-    </View>
-  );
+function focusRing(theme: ReturnType<typeof useTheme>) {
+  return {
+    outlineColor: theme.colors.accent,
+    outlineWidth: 2,
+    outlineStyle: "solid",
+    outlineOffset: 2,
+  } as any;
 }
 
 function RecentRow({
@@ -544,146 +257,94 @@ function RecentRow({
   onPress: () => void;
 }) {
   const theme = useTheme();
-  const approved = entry.snapshot
-    ? Object.values(entry.snapshot.decisions).filter((d) => d.decision === "approved").length
-    : 0;
-  const rejected = entry.snapshot
-    ? Object.values(entry.snapshot.decisions).filter((d) => d.decision === "rejected").length
-    : 0;
-
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={`Open ${entry.filename}`}
-      style={({ hovered }: any) => [
+      style={({ hovered, focused }: any) => [
         styles.row,
         {
           borderTopColor: theme.colors.border,
           borderTopWidth: first ? 0 : StyleSheet.hairlineWidth,
           backgroundColor: hovered ? theme.colors.surface + "80" : "transparent",
         },
+        focused ? focusRing(theme) : null,
       ]}
     >
       <View style={{ flex: 1, minWidth: 0 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <Text
-            style={[
-              theme.typography.body,
-              { color: theme.colors.text, fontSize: 16, fontWeight: "600", flexShrink: 1 },
-            ]}
+            style={[theme.typography.body, { color: theme.colors.text, fontSize: 16, fontWeight: "600", flexShrink: 1 }]}
             numberOfLines={1}
           >
             {entry.filename}
           </Text>
           {entry.id.startsWith("demo:") ? <Chip label="Sample" tone="warning" /> : null}
         </View>
-        <Text
-          style={[
-            theme.typography.caption,
-            { color: theme.colors.textMuted, marginTop: 4, textTransform: "none", letterSpacing: 0.2, fontSize: 12 },
-          ]}
-        >
-          {entry.sourceFormat.toUpperCase()} . {entry.totalIssues} finding{entry.totalIssues === 1 ? "" : "s"}
-          {approved + rejected > 0
-            ? `   .   ${approved} approved, ${rejected} rejected`
-            : ""}
-          {"   .   "}{relativeTime(entry.ranAt)}
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 4 }]}>
+          {entry.sourceFormat.toUpperCase()} · {entry.totalIssues} {entry.totalIssues === 1 ? "thing" : "things"} found · {relativeTime(entry.ranAt)}
         </Text>
       </View>
-      <ScoreBadge
-        score={entry.score}
-        grade={entry.grade}
-        subLabel=""
-      />
+      <ScoreBadge score={entry.score} grade={entry.grade} subLabel="" />
     </Pressable>
   );
 }
 
 function FooterLink({ label, path }: { label: string; path: string }) {
   const theme = useTheme();
-  const router = useRouter();
   return (
-    <Pressable 
+    <Pressable
       {...linkProps(path)}
-      accessibilityLabel={label}
-      style={({ hovered, focused }: any) => [
-        hovered ? { opacity: 0.7 } : null,
-        focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
-      ]}
+      style={({ hovered, focused }: any) => [hovered ? { opacity: 0.7 } : null, focused ? focusRing(theme) : null]}
     >
-      <Text
-        style={[
-          theme.typography.caption,
-          { color: theme.colors.textMuted },
-        ]}
-      >
-        {label}
-      </Text>
+      <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>{label}</Text>
     </Pressable>
   );
 }
 
 function FooterDot() {
   const theme = useTheme();
-  return (
-    <Text style={{ color: theme.colors.textMuted, opacity: 0.5 }}>.</Text>
-  );
+  return <Text style={{ color: theme.colors.textMuted }}>·</Text>;
 }
 
 const styles = StyleSheet.create({
-  // 2. Bench - the workshop. Tall, considered, a single object.
-  bench: {
-    borderWidth: 1,
-    paddingHorizontal: 32,
-    paddingVertical: 36,
-    minHeight: 220,
-    justifyContent: "flex-start",
-    ...(Platform.OS === "web"
-      ? ({ transition: "border-color 180ms ease, box-shadow 220ms ease" } as any)
-      : {}),
-  },
-  benchCta: {
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  benchCtaText: {
-    // Colour comes from theme.colors.onAccent at the call site — the readable
-    // foreground for the accent differs per palette.
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  benchFooter: {
+  fine: {
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 28,
     flexWrap: "wrap",
-    gap: 16,
+    alignItems: "center",
+    paddingHorizontal: 4,
+  },
+  advanced: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 4,
+  },
+  tools: {
+    marginTop: 16,
+    paddingHorizontal: 4,
+    gap: 12,
   },
   toolRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 32,
-    marginTop: 32,
-    paddingHorizontal: 4,
+    gap: 24,
   },
   toolLink: {
-    minWidth: 160,
+    minWidth: 150,
     paddingVertical: 4,
   },
-  // 3. Recent work
   recent: {
-    marginTop: 48,
+    marginTop: 16,
     paddingHorizontal: 4,
   },
   recentHead: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 16,
+    marginBottom: 12,
   },
   search: {
     borderBottomWidth: 1,
@@ -691,9 +352,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 0,
     marginBottom: 8,
     fontSize: 14,
-  },
-  rows: {
-    marginTop: 4,
   },
   row: {
     flexDirection: "row",
@@ -709,43 +367,5 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingTop: 32,
     paddingBottom: 24,
-  },
-  // First-run onboarding (shown only when there is no audit history)
-  firstRun: {
-    marginTop: 48,
-    paddingHorizontal: 4,
-  },
-  steps: {
-    flexDirection: "row",
-    gap: 12,
-    flexWrap: "wrap",
-    marginTop: 16,
-  },
-  step: {
-    flex: 1,
-    minWidth: 220,
-    borderWidth: 1,
-    padding: 16,
-  },
-  stepDot: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 10,
-  },
-  stepDotText: { color: "#FFFFFF", fontWeight: "800", fontSize: 13 },
-  trustRow: {
-    flexDirection: "row",
-    gap: 8,
-    flexWrap: "wrap",
-    marginTop: 24,
-  },
-  firstRunLinks: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    marginTop: 14,
   },
 });
