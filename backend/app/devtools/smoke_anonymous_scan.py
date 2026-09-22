@@ -7,8 +7,9 @@ a first-time visitor met a sign-in wall before seeing a single finding.
 Anonymous callers now get the real findings (with autoFixable, location and the
 summary plan), under guards that make the free path structurally cheap:
 
-  1. No AI, of any kind: no provider method is called, no inference client is
-     constructed (not even the offline heuristic one — no executor runs), and
+  1. No AI spend, structurally: no paid provider method is called, no client
+     other than the offline heuristic one is constructed (the fix prediction
+     runs the offline executors on a copy of the tree), and
      build_default_provider is never invoked. ``?execute=true`` is ignored.
      Proven against a fake PAID provider that counts every touch.
   2. Nothing persisted: every table in the database has the same row count
@@ -68,7 +69,7 @@ def _page(pad_bytes: int = 0) -> bytes:
 def _install_fake_paid_provider():
     import app.ai.semantic_inference as si
 
-    touches = {"calls": 0, "clients": 0, "builds": 0}
+    touches = {"calls": 0, "clients": 0, "builds": 0, "paid_clients": 0}
 
     class _FakePaid(si.HeuristicProvider):
         name = "fake-paid"
@@ -103,6 +104,9 @@ def _install_fake_paid_provider():
         touches["clients"] += 1
         kwargs.setdefault("provider", _FakePaid())
         real_init(self, *args, **kwargs)
+        # Anything but the plain offline heuristic is a client that could bill.
+        if type(self.provider) is not si.HeuristicProvider:
+            touches["paid_clients"] += 1
 
     si.SemanticInferenceClient.__init__ = _counting_init
     return touches
@@ -176,7 +180,10 @@ def main() -> int:
     r2 = anon.post("/pipeline/analyze?execute=true", files={"file": ("budget.html", page, "text/html")})
     check("anonymous ?execute=true -> 200 with NO executions (execute ignored)", r2.status_code == 200 and r2.json().get("executions") == [], r2.text[:200])
     check("no AI provider method was called", touches["calls"] == t0["calls"], touches)
-    check("no inference client was constructed (not even offline)", touches["clients"] == t0["clients"], touches)
+    # The fix prediction runs the OFFLINE executors on a copy (so "we can fix
+    # N" is what a remediation would really do); their client is pinned to the
+    # heuristic provider. No client that could ever reach a paid API is built.
+    check("no paid inference client was constructed (only the offline heuristic)", touches["paid_clients"] == t0["paid_clients"], touches)
     check("build_default_provider was never invoked", touches["builds"] == t0["builds"], touches)
     check("aiProvider is still reported (from config, nothing built)", r.json().get("aiProvider") == "heuristic", r.json().get("aiProvider"))
     check("no row was written to ANY table", _row_counts() == before_rows, (before_rows, _row_counts()))

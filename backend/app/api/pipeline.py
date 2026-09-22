@@ -175,8 +175,11 @@ class PipelineViolation(BaseModel):
     fix: Optional[PipelineFix] = None
     # True when a recommended action for this flag persists into THIS
     # format's output and is not FLAG_FOR_MANUAL_REVIEW — i.e. approving it
-    # can change the file. It is a capability, not a promise: an executor
-    # may still refuse a fix it can't make well (and then nothing is charged).
+    # can change the file — AND, on /analyze when no paid AI provider is
+    # configured, the offline executors actually make that fix in a dry run
+    # (see _predict_auto_fixable): a fix they'd refuse is not promised. With a
+    # paid provider it stays the format capability (predicting would mean
+    # paying); a refused fix is then reported, and not charged.
     autoFixable: bool = False
     location: Optional[PipelineLocation] = None
     # /pipeline/remediate only: did an APPROVED fix for this finding reach the
@@ -309,8 +312,10 @@ async def analyze(
     # execute=true billed the paid provider per link and per language guess.
     from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
 
-    # Anonymous: no executors at all — not even offline ones — so the
-    # account-free scan constructs no inference client of any kind.
+    # Anonymous: ?execute is ignored, so this engine gets no executors. The
+    # only executors an anonymous scan ever runs are the OFFLINE ones (pinned
+    # to the heuristic provider), on a throwaway copy, in
+    # _predict_auto_fixable — no paid client is ever built for it.
     engine = RemediationEngine(
         dispatcher=RemediationDispatcher([] if anonymous else get_offline_executors())
     )
@@ -323,6 +328,11 @@ async def analyze(
         )
     finally:
         _discard(location_src)
+    # What a remediation WOULD fix (offline executors on a copy; None when a
+    # paid provider is configured) — also before ?execute=true mutates the tree.
+    predicted_fixes = await run_in_threadpool(
+        _predict_auto_fixable, tree, violations, result.format, file.filename or "document"
+    )
     actions = engine.plan_actions(violations)
     executions = (await run_in_threadpool(engine.execute, tree)) if execute else []
 
@@ -360,7 +370,8 @@ async def analyze(
                 },
                 evidence=v.evidence,
                 recommendedActions=[a.action_code.value for a in REMEDIATION_ACTIONS_BY_FLAG.get(flag_code, [])],
-                autoFixable=_auto_fixable(v.rule_id, result.format),
+                autoFixable=_auto_fixable(v.rule_id, result.format)
+                and (predicted_fixes is None or v.violation_id in predicted_fixes),
                 location=_location_model(locations.get(v.violation_id)),
             )
         )
@@ -415,14 +426,10 @@ async def analyze(
         )
     _persist_analysis_result(user_id, summary, _build_scan_score(violations), file.filename)
 
-    # Provider name for transparency / UI badge.
-    provider_name = "heuristic"
-    try:
-        from app.ai.semantic_inference import build_default_provider
-
-        provider_name = build_default_provider().name
-    except Exception:
-        pass
+    # Provider name for transparency / UI badge — read from config, the same
+    # way the account-free scan does: a free scan has no reason to construct a
+    # paid provider client just to learn its name.
+    provider_name = _configured_provider_name()
 
     # Audit log: record the analyze.  Doc id only — never filename.
     try:
@@ -2088,6 +2095,71 @@ def _auto_fixable(rule_id: str, source_format: str) -> bool:
     return False
 
 
+def _predict_auto_fixable(tree, violations, source_format: str, filename: Optional[str] = None) -> Optional[set]:
+    """Which findings a remediation WOULD fix — or None when that can't be
+    known without spending money.
+
+    When no paid AI provider is configured, /remediate runs exactly the
+    offline executors (the heuristic provider), and they are deterministic —
+    so run them now, on a throwaway copy of the tree, with the same apply
+    policy and the same plan selection /remediate uses. A finding is
+    predicted fixable only if one of its own flag's actions SUCCEEDS on its
+    own node and persists into this format. An executor that refuses a fix it
+    can't make well (a placeholder alt text, a language guess it isn't sure
+    of) therefore makes the promise smaller BEFORE the customer clicks,
+    instead of after they've been shown "we can fix N" and handed fewer.
+
+    With a paid provider configured the real run may do better than the
+    heuristic (a vision model describes the picture), and predicting that
+    would mean calling it — so return None and let the format capability
+    stand. Never raises; any failure also means None.
+
+    ``filename`` is the name the customer uploaded: /remediate parses the
+    file saved under that name, and the title executor may humanize it, while
+    /analyze parsed a random temp name.
+    """
+    if _configured_provider_name() != "heuristic":
+        return None
+    try:
+        from app.models.accessibility import REMEDIATION_ACTIONS_BY_FLAG
+        from app.services.remediators.registry import RemediationDispatcher, get_offline_executors
+
+        copy = tree.model_copy(deep=True)
+        root_props = copy.root.metadata.properties
+        if filename and isinstance(root_props, dict) and "filename" in root_props:
+            root_props["filename"] = Path(filename).name
+        policy = RemediationPolicy(allow_ai_actions=True, require_human_review_for_all=False)
+        plans = plan_remediations(copy, policy)
+        selected = []
+        for v in violations:
+            for plan in plans:
+                if plan.target_node_id == v.location.node_id and plan.flag.code.value == v.rule_id:
+                    if any(_action_persists(a.action_code.value, source_format) for a in plan.actions):
+                        selected.append(plan)
+                    break
+        if not selected:
+            return set()
+        executions = execute_plans(copy, selected, dispatcher=RemediationDispatcher(get_offline_executors()))
+        made = {
+            (e.target_node_id, e.action_code.value)
+            for e in executions
+            if getattr(e.status, "value", e.status) == "success" and _action_persists(e.action_code.value, source_format)
+        }
+        predicted = set()
+        for v in violations:
+            try:
+                flag = AccessibilityFlagCode(v.rule_id)
+            except ValueError:
+                continue
+            codes = [a.action_code.value for a in REMEDIATION_ACTIONS_BY_FLAG.get(flag, [])]
+            if any((v.location.node_id, code) in made for code in codes):
+                predicted.add(v.violation_id)
+        return predicted
+    except Exception:
+        logger.warning("analyze: fix prediction failed; falling back to format capability", exc_info=True)
+        return None
+
+
 def _location_model(raw: Optional[Dict[str, Any]]) -> PipelineLocation:
     if not raw:
         return PipelineLocation()
@@ -2103,7 +2175,9 @@ def _attach_plan_summary(summary: PipelineSummary, violations: List[PipelineViol
     summary.total = total
     summary.autoFixable = fixable
     summary.needsYou = total - fixable
-    summary.cost = _remediation_cost(source_format)
+    # What fixing costs: the format's price, charged only if a fix reaches
+    # the file — so when nothing is auto-fixable there is nothing to pay for.
+    summary.cost = _remediation_cost(source_format) if fixable else 0
 
 
 def _configured_provider_name() -> str:

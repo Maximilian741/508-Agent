@@ -272,8 +272,11 @@ def main() -> int:
         bad_keys = [v["ruleId"] for v in vs if set((v.get("location") or {}).keys()) != KEYS]
         check(f"{label}: every location has exactly the 7 contract keys", not bad_keys, bad_keys)
         check(f"{label}: every autoFixable is a bool", all(isinstance(v.get("autoFixable"), bool) for v in vs))
-        wrong = [v["ruleId"] for v in vs if v["autoFixable"] != expected_auto(v["ruleId"], fmt)]
-        check(f"{label}: autoFixable == persisted-action rule, per finding", not wrong, wrong)
+        # autoFixable is the persisted-action capability AND (no paid provider
+        # here) the offline dry run actually making the fix — so it may be
+        # narrower than the capability, never wider.
+        wrong = [v["ruleId"] for v in vs if v["autoFixable"] and not expected_auto(v["ruleId"], fmt)]
+        check(f"{label}: autoFixable never names a fix this format can't persist", not wrong, wrong)
         locs = [v["location"] for v in vs]
         check(f"{label}: kinds are from the contract", all(l["kind"] in KINDS for l in locs), [l["kind"] for l in locs])
         check(
@@ -297,9 +300,9 @@ def main() -> int:
         s = body.get("summary") or {}
         n_auto = sum(1 for v in vs if v["autoFixable"])
         check(
-            f"{label}: summary total/autoFixable/needsYou/cost",
+            f"{label}: summary total/autoFixable/needsYou/cost (0 when nothing is auto-fixable)",
             s.get("total") == len(vs) and s.get("autoFixable") == n_auto and s.get("needsYou") == len(vs) - n_auto
-            and s.get("cost") == DOC_FORMAT_COSTS[fmt],
+            and s.get("cost") == (DOC_FORMAT_COSTS[fmt] if n_auto else 0),
             {k: s.get(k) for k in ("total", "autoFixable", "needsYou", "cost")},
         )
         return vs
