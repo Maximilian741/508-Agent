@@ -239,6 +239,46 @@ def _is_typed_value(text: str) -> bool:
     return False
 
 
+# "2024-03-01", "3/1/2024", "01.03.2024" — not "4.2" (a decimal).
+_DATE_VALUE_RE = re.compile(r"^\d{1,4}[/\-]\d{1,2}(?:[/\-]\d{1,4})?$|^\d{1,2}\.\d{1,2}\.\d{2,4}$")
+_TIME_VALUE_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]\.?m\.?)?$", re.IGNORECASE)
+# "1 250 000": thousands grouped with spaces, a count (not a phone number).
+_SPACED_THOUSANDS_RE = re.compile(r"^\d{1,3}(?:[   ]\d{3})+$")
+
+
+def _value_kind(text: str) -> Optional[str]:
+    """What sort of typed value ``text`` is — "year", "date", "time", "money",
+    "percent", "phone", "email", "url" or "count" — or None for words.
+
+    A real column holds one sort of value ("Fee": $240, $60). A fact sheet's
+    value column holds a different sort on every row ("Founded 1998",
+    "Employees 240", "Turnover £4.2m"), which is how its first row ("Organisation
+    | Riverside Trust") is told apart from a row of column names.
+    """
+    t = text.strip()
+    if not _is_typed_value(t):
+        return None
+    if _YEAR_RE.match(t):
+        return "year"
+    if _EMAIL_RE.match(t):
+        return "email"
+    if _URL_RE.match(t):
+        return "url"
+    if _TIME_VALUE_RE.match(t):
+        return "time"
+    if _DATE_VALUE_RE.match(t):
+        return "date"
+    if re.search(r"[$€£¥₹]", t):
+        return "money"
+    if "%" in t:
+        return "percent"
+    if _SPACED_THOUSANDS_RE.match(t):
+        return "count"
+    if _PHONE_RE.match(t) and re.search(r"\d[\s().\-]+\d", t) and sum(ch.isdigit() for ch in t) >= 7:
+        return "phone"
+    return "count"
+
+
 def _is_header_word(text: str) -> bool:
     """True when ``text`` reads as a column NAME ("Due date", "Cost (USD)",
     "Phone number", "Q1") rather than as a value."""
@@ -268,7 +308,16 @@ def _is_header_word(text: str) -> bool:
 def _column_contrast(header: str, header_is_year: bool, below: Sequence[str]) -> bool:
     """The column's name is a word (or a year) and what sits under it is
     mostly typed values: "Q1" over "10, 20", "Fee" over "$240, $60",
-    "2023" over "410, 455"."""
+    "2023" over "410, 455".
+
+    A name we do not know as a column name ("Riverside Trust", "Jane Doe",
+    "Denver") counts only over two or more values of ONE sort ("Denver" over
+    410, 455 in a comparison table). Over a year, then a count, then an
+    amount it is the first VALUE of a fact sheet ("Organisation | Riverside
+    Trust" over "Founded | 1998", "Employees | 240", "Turnover | £4.2m"), and
+    promoting it made a screen reader announce "Riverside Trust" as the name
+    of the column holding 1998.
+    """
     values = [v for v in below if v]
     if not values:
         return False
@@ -278,7 +327,19 @@ def _column_contrast(header: str, header_is_year: bool, below: Sequence[str]) ->
         if _is_typed_value(header):
             return False
         typed = [v for v in values if _is_typed_value(v)]
-    return len(typed) / len(values) >= 0.6
+    if len(typed) / len(values) < 0.6:
+        return False
+    if header_is_year or _is_header_word(header):
+        return True
+    return len(typed) >= 2 and len({_value_kind(v) for v in typed}) == 1
+
+
+def _mixed_value_column(values: Sequence[str]) -> bool:
+    """Two or more sorts of value down one column (a year, a count, an
+    amount, a phone number): the value side of a label/value fact sheet."""
+    kinds = {_value_kind(v) for v in values if v}
+    typed_kinds = kinds - {None}
+    return len(typed_kinds) >= 2 or (bool(typed_kinds) and None in kinds and len(kinds) >= 2)
 
 
 def header_row_problem(cells: Sequence[TableCellNode], body: Sequence[Sequence[TableCellNode]]) -> Optional[str]:
@@ -294,7 +355,8 @@ def header_row_problem(cells: Sequence[TableCellNode], body: Sequence[Sequence[T
     ("Alice | Engineering | Denver") looks exactly like a row of names. So a
     row is promoted only on POSITIVE evidence — at least one column whose
     name is a word over values that are numbers, amounts, dates, emails or
-    phone numbers, or every cell being a word people use to name columns
+    phone numbers (a name we do not know as a column name only over values
+    of ONE sort), or every cell being a word people use to name columns
     ("Name | Email | Phone", "Term | Definition", "Q1 | Q2"). Otherwise the
     table is left for a person: a wrong header row is worse than none.
     """
@@ -356,6 +418,14 @@ def header_row_problem(cells: Sequence[TableCellNode], body: Sequence[Sequence[T
                 "a label and its value, not a row of column names"
             )
         return None
+    if len(texts) == 2 and _mixed_value_column([_cell_text(r[1]) for r in body if len(r) > 1]):
+        return (
+            "the first column holds labels and the second holds their values, each a different sort "
+            "(a year, a count, an amount), so the first row is a label and its value, not a row of "
+            "column names"
+        )
+    if any(_is_typed_value(_cell_text(c)) for r in body for c in r):
+        return "nothing shows that the first row names the columns rather than being the first row of data"
     return (
         "every row of this table is words, and nothing shows that the first row names the "
         "columns rather than being the first row of data"

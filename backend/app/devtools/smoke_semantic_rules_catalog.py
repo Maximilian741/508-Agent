@@ -352,6 +352,17 @@ HEADER_ROWS = [
     (("Name", "Jane Doe"), [("Phone", "555-123-4567"), ("Email", "jane@example.com")], False),
     (("Salaries", "TBD"), [("Travel", "12,500")], False),
     (("Contact", "jane@example.com"), [("Office", "Room 4")], False),
+    # A fact sheet: labels down the side whatever their vocabulary, and a
+    # value column of a different sort on every row. Its first row was
+    # promoted (th scope=col / a repeating Word header) and charged.
+    (("Organisation", "Riverside Trust"), [("Founded", "1998"), ("Employees", "240"), ("Turnover", "£4.2m")], False),
+    (("Applicant", "Jane Doe"), [("Submitted", "2024-03-01"), ("Reference", "48213"), ("Callback", "555-123-4567")], False),
+    (("Event", "Annual Gala"), [("Starts", "7:30 pm"), ("Tickets", "$45"), ("Capacity", "300")], False),
+    (("Charity", "Riverside Trust"), [("Founded", "1998")], False),
+    # A column named with a word we don't know still counts over values of
+    # one sort: a comparison table.
+    (("Measure", "Denver", "Austin"), [("Parks", "120", "95"), ("Libraries", "26", "21")], True),
+    (("Country", "Visitors"), [("France", "1 250 000"), ("Spain", "980 000")], True),
 ]
 
 
