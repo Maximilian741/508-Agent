@@ -132,7 +132,7 @@ export function ActivityDashboard({
               { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent },
             ]}
           >
-            <Text style={styles.resumeBtnText}>
+            <Text style={[styles.resumeBtnText, { color: theme.colors.onAccent }]}>
               {auditedToday ? "Open latest" : "Resume"}
             </Text>
           </Pressable>
@@ -145,7 +145,7 @@ export function ActivityDashboard({
               { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent },
             ]}
           >
-            <Text style={styles.resumeBtnText}>Start an audit</Text>
+            <Text style={[styles.resumeBtnText, { color: theme.colors.onAccent }]}>Start an audit</Text>
           </Pressable>
         ) : null}
       </View>

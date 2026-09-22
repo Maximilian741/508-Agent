@@ -22,6 +22,9 @@ export default function ManualReviewScreen() {
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const mockMode = useAppStore((state) => state.mockMode);
   const theme = useTheme();
+  // Selected filter chip: the one accent, with its paired on-accent text.
+  const activeChip = { backgroundColor: theme.colors.accent, borderColor: theme.colors.accent };
+  const activeChipText = { color: theme.colors.onAccent };
   const [editedText, setEditedText] = useState<Record<string, string>>({});
   const [reviewFilter, setReviewFilter] = useState<"all" | "pending" | "resolved">("pending");
   const currentDocId = uploadedDocument?.docId ?? fixedDocId ?? null;
@@ -123,16 +126,16 @@ export default function ManualReviewScreen() {
               <Chip
                 label="Current Document"
                 tone="default"
-                style={scope === "current" ? styles.filterActiveDefault : undefined}
-                textStyle={scope === "current" ? styles.filterActiveText : undefined}
+                style={scope === "current" ? activeChip : undefined}
+                textStyle={scope === "current" ? activeChipText : undefined}
               />
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Set scope to all" onPress={() => setScope("all")}>
               <Chip
                 label="All Unresolved"
                 tone="default"
-                style={scope === "all" ? styles.filterActiveDefault : undefined}
-                textStyle={scope === "all" ? styles.filterActiveText : undefined}
+                style={scope === "all" ? activeChip : undefined}
+                textStyle={scope === "all" ? activeChipText : undefined}
               />
             </Pressable>
           </View>
@@ -183,16 +186,16 @@ export default function ManualReviewScreen() {
             <Chip
               label={`Current Document (${currentDocId})`}
               tone="default"
-              style={scope === "current" ? styles.filterActiveDefault : undefined}
-              textStyle={scope === "current" ? styles.filterActiveText : undefined}
+              style={scope === "current" ? activeChip : undefined}
+              textStyle={scope === "current" ? activeChipText : undefined}
             />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Set scope to all" onPress={() => setScope("all")}>
             <Chip
               label="All Unresolved"
               tone="default"
-              style={scope === "all" ? styles.filterActiveDefault : undefined}
-              textStyle={scope === "all" ? styles.filterActiveText : undefined}
+              style={scope === "all" ? activeChip : undefined}
+              textStyle={scope === "all" ? activeChipText : undefined}
             />
           </Pressable>
         </View>
@@ -216,24 +219,24 @@ export default function ManualReviewScreen() {
             <Chip
               label={`Pending (${pendingCount})`}
               tone="warning"
-              style={reviewFilter === "pending" ? styles.filterActiveDefault : undefined}
-              textStyle={reviewFilter === "pending" ? styles.filterActiveText : undefined}
+              style={reviewFilter === "pending" ? activeChip : undefined}
+              textStyle={reviewFilter === "pending" ? activeChipText : undefined}
             />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Set review filter to resolved" onPress={() => setReviewFilter("resolved")}>
             <Chip
               label={`Resolved (${resolvedCount})`}
               tone="default"
-              style={reviewFilter === "resolved" ? styles.filterActiveDefault : undefined}
-              textStyle={reviewFilter === "resolved" ? styles.filterActiveText : undefined}
+              style={reviewFilter === "resolved" ? activeChip : undefined}
+              textStyle={reviewFilter === "resolved" ? activeChipText : undefined}
             />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Set review filter to all" onPress={() => setReviewFilter("all")}>
             <Chip
               label={`All (${manualReviewQueue.length})`}
               tone="info"
-              style={reviewFilter === "all" ? styles.filterActiveDefault : undefined}
-              textStyle={reviewFilter === "all" ? styles.filterActiveText : undefined}
+              style={reviewFilter === "all" ? activeChip : undefined}
+              textStyle={reviewFilter === "all" ? activeChipText : undefined}
             />
           </Pressable>
         </View>
@@ -369,6 +372,4 @@ const styles = StyleSheet.create({
   link: { fontWeight: "600" },
   suggestionBox: { gap: 8, marginTop: 6 },
   input: { borderWidth: 1, padding: 8 },
-  filterActiveText: { color: "#FFFFFF" },
-  filterActiveDefault: { backgroundColor: "#0369A1", borderColor: "#0369A1" },
 });

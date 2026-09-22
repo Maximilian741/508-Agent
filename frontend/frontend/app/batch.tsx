@@ -1247,7 +1247,7 @@ function BatchRow({
                 },
               ]}
             >
-              <Text style={styles.openButtonText}>Open audit</Text>
+              <Text style={[styles.openButtonText, { color: theme.colors.onAccent }]}>Open audit</Text>
             </Pressable>
           </>
         ) : null}
