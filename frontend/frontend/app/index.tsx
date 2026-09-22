@@ -172,7 +172,7 @@ export default function HomeScreen() {
       >
         <Text
           style={[
-            theme.typography.caption,
+            theme.typography.eyebrow,
             { color: theme.colors.accent },
           ]}
         >
@@ -203,7 +203,7 @@ export default function HomeScreen() {
         <View style={styles.benchFooter}>
           <Text
             style={[
-              theme.typography.caption,
+              theme.typography.eyebrow,
               { color: theme.colors.textMuted, letterSpacing: 0.8 },
             ]}
           >

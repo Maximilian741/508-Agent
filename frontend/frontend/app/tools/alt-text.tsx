@@ -152,7 +152,7 @@ export default function AltTextToolScreen() {
 
           {result ? (
             <View style={[styles.resultBox, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2, borderRadius: theme.radius.xs }]}>
-              <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>SUGGESTED ALT TEXT</Text>
+              <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted }]}>SUGGESTED ALT TEXT</Text>
               <Text
                 accessibilityLabel="Generated alt text"
                 selectable

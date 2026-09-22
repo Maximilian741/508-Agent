@@ -121,7 +121,7 @@ export default function HelpScreen() {
           >
             <Text
               style={[
-                theme.typography.caption,
+                theme.typography.eyebrow,
                 { color: theme.colors.textMuted, marginBottom: 14 },
               ]}
             >
@@ -382,7 +382,7 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
       </Text>
       <Text
         style={[
-          theme.typography.caption,
+          theme.typography.eyebrow,
           { color: theme.colors.textMuted, marginTop: 14 },
         ]}
       >
@@ -398,7 +398,7 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
       </Text>
       <Text
         style={[
-          theme.typography.caption,
+          theme.typography.eyebrow,
           { color: theme.colors.textMuted, marginTop: 14 },
         ]}
       >
@@ -416,7 +416,7 @@ function EntryView({ entry, first }: { entry: IssueCatalogEntry; first: boolean 
         <>
           <Text
             style={[
-              theme.typography.caption,
+              theme.typography.eyebrow,
               { color: theme.colors.warning, marginTop: 14 },
             ]}
           >

@@ -113,12 +113,26 @@ export const typography = {
     fontWeight: "400" as const,
     lineHeight: 22,
   },
+  /**
+   * Small meta text: hints, timestamps, labels, footnotes. Sentence case as
+   * written — it used to force UPPERCASE (an arcade-era habit), which turned
+   * whole sentences into hard-to-read shouting. Use `eyebrow` for a short
+   * tracked uppercase tag.
+   */
   caption: {
     ...sans,
-    fontSize: 12,
+    fontSize: 12.5,
+    fontWeight: "500" as const,
+    letterSpacing: 0.1,
+    lineHeight: 18,
+  },
+  /** Short tracked uppercase tag above a title (hero eyebrow, section kicker). */
+  eyebrow: {
+    ...sans,
+    fontSize: 11,
     fontWeight: "600" as const,
     textTransform: "uppercase" as const,
-    letterSpacing: 0.8,
+    letterSpacing: 1,
   },
   mono: {
     fontFamily: fontStacks.mono,

@@ -237,7 +237,7 @@ export function SystemCheckWizard() {
           {/* Deployment summary */}
           {deployment && !deployment.error ? (
             <View style={[styles.deploy, { borderRadius: theme.radius.md, borderColor: theme.colors.border }]}>
-              <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+              <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 6 }]}>
                 THIS DEPLOYMENT
               </Text>
               <DeployRow label="Environment" value={deployment.environment || "?"} theme={theme} />

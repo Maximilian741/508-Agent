@@ -38,7 +38,7 @@ export default function ReadabilityChecker() {
       />
 
       <Card>
-        <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+        <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 6 }]}>
           YOUR TEXT
         </Text>
         <TextInput
@@ -87,7 +87,7 @@ export default function ReadabilityChecker() {
 
             {result.longSentences.length > 0 ? (
               <View style={{ marginTop: 14 }}>
-                <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+                <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted }]}>
                   LONG SENTENCES TO SPLIT (OVER 25 WORDS)
                 </Text>
                 {result.longSentences.map((s) => (

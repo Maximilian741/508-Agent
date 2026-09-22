@@ -204,7 +204,7 @@ export function LetterFromCurb({ report }: LetterFromCurbProps) {
           <Text style={[styles.avatarText, { color: theme.colors.onAccent }]}>C</Text>
         </View>
         <View style={styles.body}>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 4 }]}>
+          <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 4 }]}>
             A NOTE FROM CURB
           </Text>
           <Text style={[theme.typography.body, { color: theme.colors.text, lineHeight: 22 }]}>

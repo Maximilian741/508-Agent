@@ -177,7 +177,7 @@ export default function FaqScreen() {
             // @ts-ignore — position: sticky is web-only
             style={[styles.toc, { borderRightColor: theme.colors.border, position: "sticky" as any, top: 24 }]}
           >
-            <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 14 }]}>
+            <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 14 }]}>
               ON THIS PAGE
             </Text>
             {SECTIONS.map((s) => (

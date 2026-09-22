@@ -2221,7 +2221,7 @@ function ContrastEvidence({ violation }: { violation: PipelineViolation }) {
         backgroundColor: theme.colors.surface2,
       }}
     >
-      <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 8 }]}>
+      <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 8 }]}>
         COLOUR CONTRAST
       </Text>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>

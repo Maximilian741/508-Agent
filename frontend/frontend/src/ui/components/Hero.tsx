@@ -87,7 +87,7 @@ export function Hero({ eyebrow, title, subtitle, rightSlot, children, shader, sh
             ]}
           >
             <View style={[styles.eyebrowDot, { backgroundColor: theme.colors.accent }]} />
-            <Text style={[theme.typography.caption, styles.eyebrowText, { color: theme.colors.accent }]}>{eyebrow}</Text>
+            <Text style={[theme.typography.eyebrow, { color: theme.colors.accent }]}>{eyebrow}</Text>
           </View>
         ) : null}
         <Text
@@ -148,7 +148,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   eyebrowDot: { width: 6, height: 6, borderRadius: 3 },
-  eyebrowText: { fontSize: 11, letterSpacing: 1 },
   title: {
     fontSize: 34,
     fontWeight: "700",
