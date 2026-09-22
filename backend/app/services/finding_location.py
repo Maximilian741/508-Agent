@@ -459,14 +459,17 @@ class _Context:
     def _page_text_occurrences(self, page: int, needle: str) -> int:
         """How often ``needle`` (whitespace-free) occurs in the tree's text for
         ``page`` — 0, 1 or 2 (meaning "more than once")."""
-        flat = self._page_flat.get(page)
-        if flat is None:
-            parts: List[str] = []
+        if not self._page_flat:
+            # One pass over the tree for every page (not one pass per page).
+            parts: Dict[int, List[str]] = {}
             for n in self.nodes.values():
-                if getattr(getattr(n, "metadata", None), "page", None) == page and not isinstance(n, SectionNode):
-                    parts.append("".join(_own_text(n).split()))
-            flat = chr(31).join(parts)  # a separator no text contains
-            self._page_flat[page] = flat
+                p = getattr(getattr(n, "metadata", None), "page", None)
+                if isinstance(p, int) and not isinstance(n, SectionNode):
+                    parts.setdefault(p, []).append("".join(_own_text(n).split()))
+            # chr(31) joins: a separator no document text contains.
+            self._page_flat = {p: chr(31).join(texts) for p, texts in parts.items()}
+            self._page_flat.setdefault(-1, "")  # marks the index as built
+        flat = self._page_flat.get(page, "")
         first = flat.find(needle)
         if first < 0:
             return 0
@@ -599,8 +602,8 @@ class _Context:
             self._link(node, loc, rule)
             if bbox is None:
                 bbox = self._pdf_link_bbox(node, page)
-                if bbox is not None:
-                    self._pdf_link_words(loc, page, bbox)
+            if bbox is not None and self.fmt == "pdf":
+                self._pdf_link_words(loc, page, bbox)
         elif isinstance(node, HeadingNode):
             text = _own_text(node)
             if text:
@@ -711,8 +714,11 @@ class _Context:
         ratio = contrast_ratio(fg, finding.get("bg") or "FFFFFF")
         if ratio is None:
             return
+        # Its own slice of the geometry budget: this one document-level finding
+        # must not starve every per-page finding of its box.
+        own_deadline = min(self._geo_deadline, time.monotonic() + GEOMETRY_BUDGET_SECONDS / 3.0)
         for page in range(1, len(reader.pages) + 1):
-            if time.monotonic() > self._geo_deadline:
+            if time.monotonic() > own_deadline:
                 return
             geo = self._geometry(page)
             if geo is None or geo.colored_bg:

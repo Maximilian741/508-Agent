@@ -20,7 +20,10 @@ Who a request is billed to decides which bucket it spends:
   (/pipeline, /credits, /documents/upload) gets ``RATE_LIMIT_USER_PER_MIN``
   (300); account/billing/team/tool calls keep ``limit`` (60) per account. A
   per-IP backstop (``RATE_LIMIT_AUTHENTICATED_IP_PER_MIN``, 1200) stops one
-  address from multiplying buckets by minting accounts.
+  address from multiplying buckets by minting accounts. The free routes that
+  call a paid AI provider (/tools) ALSO keep the old per-IP ``limit`` (60)
+  across every account on that address: there, minting accounts would mint
+  AI spend.
 
 A JWT is checked by signature only (no DB): it cannot be forged without
 APP_SECRET, and a revoked one still 401s at the route. An API key is looked up
@@ -92,6 +95,9 @@ _ANON_SCAN_PATH = "/pipeline/analyze"
 # either checks a credential or sends an email, and stays per-IP whatever
 # token the request carries.
 _AUTH_PER_ACCOUNT: frozenset = frozenset({("GET", "/auth/me")})
+# Free routes that call a paid AI provider (0 credits, no email verification):
+# signed-in callers still share ONE per-address budget of ``limit`` for these.
+_FREE_AI_PREFIXES: Tuple[str, ...] = ("/tools",)
 # Signed artifact downloads carry no session (the HMAC is the credential), so
 # they would otherwise spend the anonymous 60/min: a person saving a batch of
 # files one by one is not an abuser. Guessing an HMAC is not a rate problem.
@@ -306,6 +312,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             wait = self._hit(f"{identity}|{family}", now, limit, self._window)
             if not wait:
                 wait = self._hit(f"authip:{ip}", now, self._auth_ip_limit, self._window)
+            if not wait and _has_prefix(path, _FREE_AI_PREFIXES):
+                # Free paid-AI tools keep the old per-ADDRESS ceiling too:
+                # accounts cost nothing to create, so per-account buckets alone
+                # would let one address multiply vision-AI spend by minting
+                # accounts (the 1200/min backstop is 20x the old bound).
+                wait = self._hit(f"aiip:{ip}", now, self._limit, self._window)
             if wait:
                 return self._limited(wait)
             return await call_next(request)

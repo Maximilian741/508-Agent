@@ -25,6 +25,8 @@ Pins:
      never more than the window).
   9. One address can't multiply budgets by minting accounts: the
      authenticated per-IP backstop (probed on a small middleware instance).
+ 10. Free routes that call a paid AI provider (/tools) keep one per-address
+     budget across all accounts: minting accounts must not mint AI spend.
 
 Run: python -m app.devtools.smoke_rate_limit_per_account
 """
@@ -200,6 +202,26 @@ def main() -> int:
     t = mint_session("user-solo")
     codes = [probe2.get("/credits/ping", headers={"Authorization": f"Bearer {t}"}).status_code for _ in range(6)]
     check("per-account ceiling on the probe: the 6th call -> 429 (user limit 5)", codes == [200] * 5 + [429], codes)
+
+    # --- 10: free paid-AI tools keep ONE budget per address, across accounts -------
+    ai_app = FastAPI()
+
+    @ai_app.post("/tools/alt-text")
+    def _alt():
+        return {"ok": True}
+
+    ai_app.add_middleware(RateLimitMiddleware, trust_proxy_headers=True, limit=4, user_limit=100, authenticated_ip_limit=100)
+    ai = TestClient(ai_app, headers={"X-Forwarded-For": "192.0.2.7"})
+    minted = [mint_session(f"farm-{i}") for i in range(5)]
+    codes = [ai.post("/tools/alt-text", headers={"Authorization": f"Bearer {tk}"}).status_code for tk in minted]
+    check(
+        "free AI tool: 5 fresh accounts from one address share its budget (limit 4) -> the 5th is 429",
+        codes == [200] * 4 + [429],
+        codes,
+    )
+    other = TestClient(ai_app, headers={"X-Forwarded-For": "192.0.2.8"})
+    r = other.post("/tools/alt-text", headers={"Authorization": f"Bearer {minted[0]}"})
+    check("...while the same account from another address is unaffected by that address's spend", r.status_code == 200, r.status_code)
 
     defaults = RateLimitMiddleware(app)
     check(
