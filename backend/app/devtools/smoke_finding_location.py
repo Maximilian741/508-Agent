@@ -174,6 +174,8 @@ def _pdf_drawn() -> bytes:
     and a link annotation whose /Rect covers the words "click here".
     Page 2 (MediaBox 100 100 712 892): the SAME picture and link, shifted by
     (+100, +100) in user space — page-relative boxes must come out identical.
+    Page 3: page 1 again with ``/Rotate 90`` — boxes and page size must come
+    out as a viewer shows the page (turned clockwise, 792 x 612).
     """
     from pypdf import PdfWriter
     from pypdf.annotations import Link
@@ -205,9 +207,11 @@ def _pdf_drawn() -> bytes:
     })
     img_ref = w._add_object(img)
 
-    def page(dx: float, dy: float, box) -> None:
+    def page(dx: float, dy: float, box, rotate: int = 0) -> None:
         pg = w.add_blank_page(612, 792)
         pg[NameObject("/MediaBox")] = ArrayObject([FloatObject(v) for v in box])
+        if rotate:
+            pg[NameObject("/Rotate")] = NumberObject(rotate)
         pg[NameObject("/Resources")] = DictionaryObject({
             NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
             NameObject("/XObject"): DictionaryObject({NameObject("/Im1"): img_ref}),
@@ -223,10 +227,45 @@ def _pdf_drawn() -> bytes:
 
     page(0, 0, (0, 0, 612, 792))
     page(100, 100, (100, 100, 712, 892))
+    page(0, 0, (0, 0, 612, 792), rotate=90)
     # "For the details, " is 93.4 pt of 12 pt Helvetica and "click here" 57.4 pt,
     # so the words sit at x 165.4-222.8 on baseline 660 (page 1).
     w.add_annotation(0, Link(rect=(164, 655, 224, 672), url="https://example.com/details"))
     w.add_annotation(1, Link(rect=(264, 755, 324, 772), url="https://example.com/details"))
+    w.add_annotation(2, Link(rect=(164, 655, 224, 672), url="https://example.com/details"))
+    out = io.BytesIO()
+    w.write(out)
+    return out.getvalue()
+
+
+def _pdf_grey() -> bytes:
+    """Grey #949494 text (3.03:1 on white). Page 1 paints a navy background
+    (the analyzer skips such pages, so must we); page 2 has the grey at 24 pt
+    (large text: passes 3:1), black body text, then 10 pt grey fine print set
+    as a kerned TJ array — the text that actually fails."""
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    w = PdfWriter()
+    font = w._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+        NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+    }))
+    for body in (
+        b"0.1 0.1 0.4 rg 0 0 612 792 re f\nBT /F1 10 Tf 0.58 g 72 700 Td (Small grey on navy) Tj ET\n",
+        b"BT /F1 24 Tf 0.58 g 72 700 Td (Big Grey Heading) Tj ET\n"
+        b"BT /F1 12 Tf 0 g 72 660 Td (Body text in black.) Tj ET\n"
+        b"BT /F1 10 Tf 0.58 g 72 640 Td [(Fine) -250 (print applies.)] TJ ET\n",
+    ):
+        pg = w.add_blank_page(612, 792)
+        pg[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        })
+        cs = DecodedStreamObject()
+        cs.set_data(body)
+        pg[NameObject("/Contents")] = w._add_object(cs)
     out = io.BytesIO()
     w.write(out)
     return out.getvalue()
@@ -477,21 +516,27 @@ def main() -> int:
     vs = contract("pdf-drawn", analyze("drawn.pdf", drawn, "application/pdf"), "pdf")
     imgs = sorted((v for v in vs if v["evidence"].get("node_type") == "image"), key=lambda v: v["location"]["page"] or 0)
     check(
-        "pdf: each picture's box is where its page paints it (cm + Do), page-relative on both pages",
-        [i["location"]["page"] for i in imgs] == [1, 2]
+        "pdf: each picture's box is where its page paints it (cm + Do), page-relative on pages 1-2",
+        [i["location"]["page"] for i in imgs] == [1, 2, 3]
         and all(
             i["location"]["kind"] == "pdf-region"
             and i["location"]["bbox"] == [300.0, 400.0, 500.0, 550.0]
             and i["location"]["pageSize"] == [612.0, 792.0]
             and thumb_ok(i["location"]["thumbnail"])
-            for i in imgs
+            for i in imgs[:2]
         ),
         [i["location"] | {"thumbnail": bool(i["location"]["thumbnail"])} for i in imgs],
+    )
+    check(
+        "pdf: on a /Rotate 90 page the picture's box and the page size are as a viewer shows them",
+        len(imgs) == 3 and imgs[2]["location"]["bbox"] == [400.0, 112.0, 550.0, 312.0]
+        and imgs[2]["location"]["pageSize"] == [792.0, 612.0],
+        imgs[2]["location"] | {"thumbnail": bool(imgs[2]["location"]["thumbnail"])} if len(imgs) == 3 else imgs,
     )
     links = sorted((v for v in vs if v["ruleId"] == "LINK_TEXT_NON_DESCRIPTIVE"), key=lambda v: v["location"]["page"] or 0)
     check(
         "pdf: a link shows the words drawn under its /Rect, inside their sentence",
-        len(links) == 2
+        len(links) == 3
         and all(
             l["location"]["highlight"] == "click here"
             and l["location"]["snippet"] == "For the details, click here today."
@@ -500,9 +545,22 @@ def main() -> int:
         [l["location"] for l in links],
     )
     check(
-        "pdf: link boxes are page-relative (page 2's MediaBox starts at 100,100)",
-        [l["location"]["bbox"] for l in links] == [[164.0, 655.0, 224.0, 672.0]] * 2,
+        "pdf: link boxes are page-relative (page 2's MediaBox starts at 100,100) and turned on the rotated page",
+        [l["location"]["bbox"] for l in links]
+        == [[164.0, 655.0, 224.0, 672.0], [164.0, 655.0, 224.0, 672.0], [655.0, 388.0, 672.0, 448.0]],
         [l["location"]["bbox"] for l in links],
+    )
+
+    vs = contract("pdf-grey", analyze("grey.pdf", _pdf_grey(), "application/pdf"), "pdf")
+    grey = by_rule(vs, "LOW_CONTRAST_TEXT")
+    gl0 = grey[0]["location"] if grey else {}
+    check(
+        "pdf: the contrast finding points at the text that fails (10 pt grey, page 2), not the passing 24 pt"
+        " grey heading nor the grey on the navy page",
+        bool(grey) and gl0.get("page") == 2 and gl0.get("kind") == "pdf-region"
+        and gl0.get("snippet") == "Fine print applies." and gl0.get("highlight") == "Fine print applies."
+        and (gl0.get("bbox") or [0])[0] == 72.0 and (gl0.get("bbox") or [0, 0, 0, 0])[1] < 640 < (gl0.get("bbox") or [0, 0, 0, 0])[3],
+        gl0,
     )
 
     from app.models.accessibility import (

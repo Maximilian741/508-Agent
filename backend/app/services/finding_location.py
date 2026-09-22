@@ -33,7 +33,10 @@ worse than none:
       one page get no box rather than possibly the wrong one.
   Every PDF box is page-relative (the MediaBox's lower-left corner is the
   origin, as ``pageSize`` is the MediaBox's size) — identical to raw user
-  space for the usual ``[0 0 w h]`` MediaBox.
+  space for the usual ``[0 0 w h]`` MediaBox. On a page with ``/Rotate``,
+  ``bbox`` and ``pageSize`` are turned to the page AS A VIEWER SHOWS IT
+  (origin still bottom-left; a 90-degree page reports ``[h, w]``), because
+  every viewer applies the rotation before anyone looks at the box.
 * Thumbnails decode the image bytes the parser kept, or read the same image
   back from the source file by the reference the parser recorded (DOCX
   relationship id, PPTX shape id, PDF XObject name, HTML ``data:`` src). It
@@ -93,6 +96,8 @@ GEOMETRY_BUDGET_SECONDS = 3.0
 _ASCENT_EM = 0.9
 _DESCENT_EM = 0.25
 _MAX_RUN_CHARS_MEASURED = 600
+# The contrast analyzer's float tolerance (a colour exactly on the threshold passes).
+_CONTRAST_TOLERANCE = 0.05
 
 _TABLE_FLAGS = {
     "TABLE_MISSING_HEADERS",
@@ -508,6 +513,41 @@ class _Context:
             return None
         return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
 
+    def _pdf_rotation(self, page: int) -> int:
+        reader = self._pdf()
+        if reader is None:
+            return 0
+        try:
+            rot = int(reader.pages[page - 1].rotation) % 360
+        except Exception:
+            return 0
+        return rot if rot in (90, 180, 270) else 0
+
+    def _as_displayed(self, loc: Dict[str, Any]) -> None:
+        """Turn ``bbox``/``pageSize`` to the way a viewer SHOWS a page with
+        ``/Rotate`` (origin still bottom-left). A viewer applies /Rotate, so a
+        box in unrotated user space would land in the wrong place on a
+        90-degree page; for the usual unrotated page nothing changes."""
+        rot = self._pdf_rotation(loc["page"])
+        if not rot:
+            return
+        w, h = loc["pageSize"]
+        if rot in (90, 270):
+            loc["pageSize"] = [h, w]
+        box = loc["bbox"]
+        if box is None:
+            return
+
+        def turn(x: float, y: float) -> Tuple[float, float]:
+            if rot == 90:  # clockwise: the left edge becomes the top edge
+                return y, w - x
+            if rot == 180:
+                return w - x, h - y
+            return h - y, x  # 270: counter-clockwise
+
+        (ax, ay), (bx, by) = turn(box[0], box[1]), turn(box[2], box[3])
+        loc["bbox"] = [round(min(ax, bx), 2), round(min(ay, by), 2), round(max(ax, bx), 2), round(max(ay, by), 2)]
+
     # -- the location --------------------------------------------------------
 
     def locate(self, v: Any) -> Dict[str, Any]:
@@ -525,6 +565,8 @@ class _Context:
             loc["kind"] = "document"
             if rule in _DOCUMENT_LEVEL_ELEMENT_RULES:
                 self._document_level(loc, rule)
+            elif rule == "LOW_CONTRAST_TEXT" and self.fmt == "pdf":
+                self._pdf_contrast(loc, props)
             if loc["page"] is not None and self.fmt == "pdf":
                 loc["pageSize"] = self._page_size(node, loc["page"])
         elif isinstance(node, ImageNode):
@@ -609,6 +651,8 @@ class _Context:
         elif loc["bbox"] is not None:
             # A box with no page frame to draw it in is no location at all.
             loc["bbox"] = None
+        if self.fmt == "pdf" and loc["page"] is not None and loc["pageSize"] is not None:
+            self._as_displayed(loc)
         # Contract invariant: highlight is a literal substring of snippet.
         if loc["highlight"] and (not loc["snippet"] or loc["highlight"] not in loc["snippet"]):
             loc["highlight"] = None
@@ -649,6 +693,52 @@ class _Context:
             loc["snippet"], loc["highlight"] = _window(text, text)
         else:
             loc["kind"] = "document" if loc["page"] is None else "text"
+
+    def _pdf_contrast(self, loc: Dict[str, Any], props: Dict[str, Any]) -> None:
+        """Point the document-level PDF contrast finding at the first text
+        really painted in the flagged colour, at a size where that colour
+        fails (a large heading in the same grey may pass), on a page without
+        a coloured background — the parser's own rules for this finding."""
+        finding = props.get("contrast_finding")
+        if not isinstance(finding, dict):
+            return
+        fg = str(finding.get("fg") or "").upper()
+        reader = self._pdf()
+        if len(fg) != 6 or reader is None:
+            return
+        from app.analyzers.contrast import contrast_ratio, required_ratio
+
+        ratio = contrast_ratio(fg, finding.get("bg") or "FFFFFF")
+        if ratio is None:
+            return
+        for page in range(1, len(reader.pages) + 1):
+            if time.monotonic() > self._geo_deadline:
+                return
+            geo = self._geometry(page)
+            if geo is None or geo.colored_bg:
+                continue
+            for i, run in enumerate(geo.runs):
+                if run.fill != fg or not run.text.strip():
+                    continue
+                if ratio + _CONTRAST_TOLERANCE >= required_ratio(run.size, False):
+                    continue
+                # The rest of that line in the same colour and size (a TJ
+                # array or a kerned line is several runs).
+                parts, boxes, prev = [run.text], [run.box(0, len(run.text))], run
+                for nxt in geo.runs[i + 1:i + 40]:
+                    if nxt.fill != fg or nxt.size != run.size or abs(nxt.base - run.base) > 0.5 or nxt.x0 < prev.x1 - 0.5:
+                        break
+                    if nxt.x0 - prev.x1 > 0.15 * run.fh and not parts[-1].endswith(" ") and not nxt.text.startswith(" "):
+                        parts.append(" ")
+                    parts.append(nxt.text)
+                    boxes.append(nxt.box(0, len(nxt.text)))
+                    prev = nxt
+                text = _norm("".join(parts))
+                loc["page"] = page
+                loc["bbox"] = self._quad(_union(boxes))
+                loc["snippet"], loc["highlight"] = _window(text, text)
+                loc["kind"] = "text"
+                return
 
     def _pdf_link_words(self, loc: Dict[str, Any], page: Optional[int], rect: List[float]) -> None:
         """Show the words the link annotation covers on the page, when the
@@ -904,17 +994,23 @@ def _image_placements(ops: List[Tuple[Any, bytes]]) -> Dict[str, List[List[float
 
 
 class _PdfRun:
-    """One text-show operation: its decoded text, baseline and x extent."""
+    """One text-show operation: its decoded text, baseline and x extent, and
+    the fill colour it was painted with (None when not a plain rg/g/k)."""
 
-    __slots__ = ("tj", "text", "x0", "x1", "base", "fh")
+    __slots__ = ("tj", "text", "x0", "x1", "base", "fh", "size", "fill")
 
-    def __init__(self, tj: Any) -> None:
+    def __init__(self, tj: Any, fill: Optional[str] = None) -> None:
         self.tj = tj
         self.text = str(getattr(tj, "txt", "") or "")
         self.x0 = float(tj.tx)
         self.x1 = float(tj.displaced_tx)
         self.base = float(tj.ty)
         self.fh = abs(float(tj.font_height))
+        try:
+            self.size: Optional[float] = float(tj.font_size)
+        except (TypeError, ValueError, AttributeError):
+            self.size = None
+        self.fill = fill
 
     def x_at(self, i: int) -> float:
         """x where character ``i`` starts (``len(text)`` = where the run ends)."""
@@ -930,16 +1026,88 @@ class _PdfRun:
         return [min(xa, xb), self.base - _DESCENT_EM * self.fh, max(xa, xb), self.base + _ASCENT_EM * self.fh]
 
 
-def _text_runs(page: Any, ops: List[Tuple[Any, bytes]]) -> List[_PdfRun]:
+# Fill-colour reading mirrors pdf_parser._pdf_text_colors (rg / g / k, and a
+# page that paints a non-white fill is a "coloured background" page), except
+# that q/Q restore the colour as a renderer does and any other colour-setting
+# operator makes it unknown — so a run is only ever tied to a colour it was
+# really painted with.
+_PAINT_FILL_OPS = {b"f", b"F", b"f*", b"b", b"b*", b"B", b"B*"}
+_UNKNOWN_FILL_OPS = {b"sc", b"scn", b"cs"}
+
+
+def _hex_rgb(channels: Any) -> str:
+    r, g, b = (max(0, min(255, round(float(c) * 255))) for c in channels[:3])
+    return f"{r:02X}{g:02X}{b:02X}"
+
+
+def _hex_cmyk(channels: Any) -> str:
+    c, m, y, k = (float(x) for x in channels[:4])
+    vals = (round(255 * (1 - c) * (1 - k)), round(255 * (1 - m) * (1 - k)), round(255 * (1 - y) * (1 - k)))
+    return "".join(f"{max(0, min(255, v)):02X}" for v in vals)
+
+
+def _whiteish(hex6: Optional[str]) -> bool:
+    try:
+        return all(int(hex6[i:i + 2], 16) >= 242 for i in (0, 2, 4))  # type: ignore[index]
+    except (TypeError, ValueError):
+        return False
+
+
+class _FillTracker:
+    """Wraps the op iterator: records the fill colour in force for every
+    text-show string pypdf's layout state machine will turn into a run, in the
+    same order, and notices non-white fill paints."""
+
+    def __init__(self, ops: List[Tuple[Any, bytes]]) -> None:
+        self._ops = ops
+        self.fills: List[Optional[str]] = []
+        self.colored_bg = False
+
+    def __iter__(self):
+        fill: Optional[str] = "000000"
+        stack: List[Optional[str]] = []
+        depth = 0  # inside BT/ET or q/Q: where the layout machine reads text ops
+        for operands, op in self._ops:
+            try:
+                if op in (b"BT", b"q"):
+                    depth += 1
+                    if op == b"q":
+                        stack.append(fill)
+                elif op in (b"ET", b"Q"):
+                    depth = max(0, depth - 1)
+                    if op == b"Q":
+                        fill = stack.pop() if stack else "000000"
+                elif op == b"rg" and len(operands) >= 3:
+                    fill = _hex_rgb(operands)
+                elif op == b"g" and len(operands) >= 1:
+                    fill = _hex_rgb([operands[0]] * 3)
+                elif op == b"k" and len(operands) >= 4:
+                    fill = _hex_cmyk(operands)
+                elif op in _UNKNOWN_FILL_OPS:
+                    fill = None
+                elif op in _PAINT_FILL_OPS and fill is not None and not _whiteish(fill):
+                    self.colored_bg = True
+                elif depth and op in (b"Tj", b"'", b'"'):
+                    self.fills.append(fill)
+                elif depth and op == b"TJ" and operands:
+                    self.fills.extend(fill for part in operands[0] if isinstance(part, bytes))
+            except (TypeError, ValueError, IndexError):
+                pass
+            yield operands, op
+
+
+def _text_runs(page: Any, ops: List[Tuple[Any, bytes]]) -> Tuple[List[_PdfRun], bool]:
     """The page's upright text runs, positioned by pypdf's layout-mode text
     state machine (the same one ``extract_text(extraction_mode="layout")``
-    uses; pinned pypdf). Text in rotated or mirrored runs is left out."""
+    uses; pinned pypdf), and whether the page paints a coloured background.
+    Text in rotated or mirrored runs is left out."""
     from pypdf._text_extraction._layout_mode._fixed_width_page import recurs_to_target_op
     from pypdf._text_extraction._layout_mode._text_state_manager import TextStateManager
 
     fonts = page._layout_mode_fonts()
     mgr = TextStateManager()
-    it = iter(ops)
+    tracker = _FillTracker(ops)
+    it = iter(tracker)
     tjs: List[Any] = []
     while True:
         try:
@@ -953,20 +1121,25 @@ def _text_runs(page: Any, ops: List[Tuple[Any, bytes]]) -> List[_PdfRun]:
             mgr.add_cm(*operands)
         else:
             mgr.set_state_param(op, operands)
+    # Colours are only trusted when the two walks saw the same strings.
+    fills: List[Optional[str]] = tracker.fills if len(tracker.fills) == len(tjs) else [None] * len(tjs)
     runs: List[_PdfRun] = []
-    for tj in tjs:
+    for tj, fill in zip(tjs, fills):
         if getattr(tj, "rotated", False) or getattr(tj, "flip_vertical", False):
             continue
-        run = _PdfRun(tj)
+        run = _PdfRun(tj, fill)
         if run.text and run.fh > 0 and run.x1 >= run.x0:
             runs.append(run)
-    return runs
+    return runs, tracker.colored_bg
 
 
 class _PdfPageGeometry:
-    def __init__(self, runs: List[_PdfRun], images: Dict[str, List[List[float]]]) -> None:
+    def __init__(
+        self, runs: List[_PdfRun], images: Dict[str, List[List[float]]], colored_bg: bool = False
+    ) -> None:
         self.runs = runs
         self.images = images
+        self.colored_bg = colored_bg
         chars: List[str] = []
         where: List[Tuple[int, int]] = []
         for ri, run in enumerate(runs):
@@ -986,13 +1159,13 @@ class _PdfPageGeometry:
         ops = ContentStream(page["/Contents"].get_object(), page.pdf, "bytes").operations
         images = _image_placements(ops)
         try:
-            runs = _text_runs(page, ops)
+            runs, colored_bg = _text_runs(page, ops)
         except Exception:
             # An unusual font or operator: pictures keep their boxes; text
             # findings on this page simply get none.
             logger.debug("finding_location: text runs unavailable", exc_info=True)
-            runs = []
-        return cls(runs, images)
+            runs, colored_bg = [], True
+        return cls(runs, images, colored_bg)
 
     def find_text(self, needle: str) -> Optional[List[float]]:
         """Box of the ONE place ``needle`` (whitespace-free) is drawn, else None."""
