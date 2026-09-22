@@ -219,6 +219,15 @@ class PPTXParser:
         )
         ids = _IdCounter()
         slides_missing_titles = 0
+        # Slide size in points, for the location contract (so a finding can be
+        # drawn where it is on the slide). python-pptx answers None for a deck
+        # without <p:sldSz>; PowerPoint then uses the 10in x 7.5in default.
+        try:
+            _sw = int(prs.slide_width or 9144000)
+            _sh = int(prs.slide_height or 6858000)
+        except (TypeError, ValueError):
+            _sw, _sh = 9144000, 6858000
+        page_size = [round(_sw / _EMU_PER_PT, 2), round(_sh / _EMU_PER_PT, 2)]
 
         for slide_index, slide in enumerate(prs.slides, start=1):
             slide_title = ""
@@ -242,7 +251,7 @@ class PPTXParser:
                 except Exception:
                     title_shape_id = None
 
-            section_props: dict = {"slide_number": slide_index}
+            section_props: dict = {"slide_number": slide_index, "page_size": list(page_size)}
             if not slide_title:
                 # Per-slide marker so the analyzer can flag THIS slide (the
                 # issue count then reflects how many slides lack titles).
@@ -271,6 +280,7 @@ class PPTXParser:
                         float(getattr(title_shape, "left", 0) or 0),
                     )
                 }
+                _h_props.update(_location_props(_abs_rect_emu(title_shape), page_size))
                 _h_cc = _contrast_props_for_shape(title_shape, theme_colors)
                 if _h_cc:
                     _h_props.update(_h_cc)
@@ -297,14 +307,25 @@ class PPTXParser:
                     title_shape_id is not None
                     and getattr(shape, "shape_id", None) == title_shape_id
                 )
-                top = float(getattr(shape, "top", 0) or 0)
-                left = float(getattr(shape, "left", 0) or 0)
-                shape_meta_props = {"order_hint": (top, left)}
+                rect = _abs_rect_emu(shape)
+                if rect is not None:
+                    # Slide coordinates, also for a shape inside a moved or
+                    # scaled group (python-pptx reports those in the group's
+                    # own child space, so "topmost" compared apples/oranges).
+                    left, top = float(rect[0]), float(rect[1])
+                else:
+                    top = float(getattr(shape, "top", 0) or 0)
+                    left = float(getattr(shape, "left", 0) or 0)
+                loc = _location_props(rect, page_size)
+                shape_meta_props = {"order_hint": (top, left), **loc}
                 if _image_kind(shape):
                     section.children.append(_picture_to_image_node(shape, slide_index, ids, shape_meta_props))
                     continue
                 if shape.has_table:
-                    section.children.append(_table_to_node_pptx(shape.table, slide_index, ids))
+                    table_node = _table_to_node_pptx(shape.table, slide_index, ids)
+                    if loc:
+                        table_node.metadata.properties = {**(table_node.metadata.properties or {}), **loc}
+                    section.children.append(table_node)
                     continue
                 if hasattr(shape, "text_frame") and shape.text_frame:
                     text = (shape.text or "").strip()
@@ -347,7 +368,8 @@ class PPTXParser:
                                     id=ids(f"slide-{slide_index}-link"),
                                     target=str(href),
                                     content=NodeContent(kind=ContentKind.TEXT, text=text),
-                                    metadata=NodeMetadata(page=slide_index, source_format="pptx"),
+                                    # The link's box is the shape it sits in.
+                                    metadata=NodeMetadata(page=slide_index, source_format="pptx", properties=dict(loc)),
                                     children=[],
                                     accessibility_flags=[],
                                 )
@@ -407,6 +429,73 @@ def _iter_shapes_recursive(shapes):
                 continue
         else:
             yield shape
+
+
+_P_GRP_SP_TAG = "{http://schemas.openxmlformats.org/presentationml/2006/main}grpSp"
+_P_GRP_SP_PR_TAG = "{http://schemas.openxmlformats.org/presentationml/2006/main}grpSpPr"
+_EMU_PER_PT = 12700.0
+
+
+def _abs_rect_emu(shape) -> Optional[Tuple[int, int, int, int]]:
+    """``(left, top, width, height)`` of ``shape`` in SLIDE coordinates (EMU).
+
+    python-pptx reports a grouped shape's position in its group's CHILD
+    coordinate space (``a:chOff``/``a:chExt``), which is only the slide's own
+    space when the group was never moved or resized. Map the rectangle out
+    through every enclosing group's transform. Placeholders get their
+    inherited layout position from python-pptx. None when the shape has no
+    usable geometry.
+    """
+    try:
+        left, top = int(shape.left), int(shape.top)
+        width, height = int(shape.width), int(shape.height)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    x0, y0, x1, y1 = float(left), float(top), float(left + width), float(top + height)
+    try:
+        parent = shape._element.getparent()  # noqa: SLF001
+    except Exception:
+        parent = None
+    while parent is not None and parent.tag == _P_GRP_SP_TAG:
+        xfrm = parent.find(f"{_P_GRP_SP_PR_TAG}/{_A_NS}xfrm")
+        if xfrm is None:
+            break
+        off, ext = xfrm.find(f"{_A_NS}off"), xfrm.find(f"{_A_NS}ext")
+        ch_off, ch_ext = xfrm.find(f"{_A_NS}chOff"), xfrm.find(f"{_A_NS}chExt")
+        if off is None or ext is None or ch_off is None or ch_ext is None:
+            break
+        try:
+            ox, oy = float(off.get("x")), float(off.get("y"))
+            ex, ey = float(ext.get("cx")), float(ext.get("cy"))
+            cx, cy = float(ch_off.get("x")), float(ch_off.get("y"))
+            cex, cey = float(ch_ext.get("cx")), float(ch_ext.get("cy"))
+        except (TypeError, ValueError):
+            break
+        sx = ex / cex if cex else 1.0
+        sy = ey / cey if cey else 1.0
+        x0, x1 = ox + (x0 - cx) * sx, ox + (x1 - cx) * sx
+        y0, y1 = oy + (y0 - cy) * sy, oy + (y1 - cy) * sy
+        parent = parent.getparent()
+    return int(round(x0)), int(round(y0)), int(round(x1 - x0)), int(round(y1 - y0))
+
+
+def _location_props(rect: Optional[Tuple[int, int, int, int]], page_size: Optional[List[float]]) -> Dict[str, Any]:
+    """``bbox``/``page_size`` for the shared location contract: points, origin
+    at the slide's BOTTOM-left (the same convention as a PDF page), so one
+    highlight overlay serves both formats."""
+    if rect is None or page_size is None:
+        return {}
+    left, top, width, height = rect
+    slide_h = page_size[1] * _EMU_PER_PT
+    return {
+        "bbox": [
+            round(left / _EMU_PER_PT, 2),
+            round((slide_h - (top + height)) / _EMU_PER_PT, 2),
+            round((left + width) / _EMU_PER_PT, 2),
+            round((slide_h - top) / _EMU_PER_PT, 2),
+        ],
+        "page_size": list(page_size),
+    }
 
 
 _P_PIC_TAG = "{http://schemas.openxmlformats.org/presentationml/2006/main}pic"
