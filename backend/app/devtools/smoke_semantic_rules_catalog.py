@@ -292,6 +292,8 @@ HEADER_ROWS = [
     (("Date received", "Applicant name", "Status"), [("Sept 3", "J. Ortiz", "Open")], True),
     (("Monday", "Tuesday", "Wednesday"), [("Intake", "Training", "Site visits")], True),
     (("Programme", "Budget (USD)"), [("Outreach", "120,000")], True),
+    # Numbers written the way other scripts write them are still numbers.
+    (("اللغة", "عدد المتحدثين"), [("العربية", "٤٢٠ مليون"), ("日本語", "1億2500万")], True),
     # A first row of other words is as likely to be the first row of DATA.
     (("Alice", "Engineering", "Denver"), [("Bob", "Sales", "Austin")], False),
     (("Monday", "Staff meeting", "Room 4"), [("Tuesday", "Training", "Room 2")], False),

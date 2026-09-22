@@ -133,8 +133,12 @@ _UNIT_WORDS = frozenset(
     "% day days wk wks week weeks mo mos month months yr yrs year years hr hrs hour hours "
     "min mins minute minutes sec secs second seconds page pages people persons person staff "
     "unit units item items k m bn million millions billion billions thousand thousands "
-    "km mi kg g lb lbs ft in cm mm ml l fte usd eur gbp pts points x times".split()
+    "km mi kg g lb lbs ft in cm mm ml l fte usd eur gbp pts points x times "
+    # Scale words in other scripts ("٤٢٠ مليون" = 420 million).
+    "مليون ملايين مليار ألف آلاف".split()
 )
+# East Asian large numbers written with unit characters: "1億2500万", "3千".
+_CJK_NUMBER_RE = re.compile(r"^\d[\d,.]*(?:[万億千百兆亿][\d,.]*)+$")
 _EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$")
 _URL_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
 _PHONE_RE = re.compile(r"^\+?[\d\s().\-]{7,}$")
@@ -219,7 +223,7 @@ def _is_typed_value(text: str) -> bool:
     t = text.strip()
     if not t:
         return False
-    if _NUMERIC_RE.match(t) or _YEAR_RE.match(t):
+    if _NUMERIC_RE.match(t) or _YEAR_RE.match(t) or _CJK_NUMBER_RE.match(t):
         return True
     if _EMAIL_RE.match(t) or _URL_RE.match(t) or (_PHONE_RE.match(t) and sum(ch.isdigit() for ch in t) >= 7):
         return True
