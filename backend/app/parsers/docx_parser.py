@@ -1194,21 +1194,50 @@ def _heading_visual(p_el, styles: "DocxStyleResolver", text: str) -> Dict[str, A
 
 def iter_header_footer_parts(doc) -> List[Tuple[str, Any, str]]:
     """``[("header"|"footer", part, variant)]`` — variant is the reference's
-    ``w:type`` ("default", "first" or "even") — for every header/footer part a section
-    actually references (default, first-page and even-page variants), in
-    section order, each part ONCE — sections that "link to previous" share a
-    part and must not be audited twice. Unreferenced parts are ignored, like
-    Word ignores them."""
+    ``w:type`` ("default", "first" or "even") — for every header/footer part
+    Word actually PRINTS, in section order, each part ONCE (sections that
+    "link to previous" share a part and must not be audited twice).
+
+    Printed means: the default variant always; the first-page variant only
+    in a section with "Different first page" (``w:titlePg``); the even-page
+    variant only when the document has "Different odd & even pages"
+    (``w:evenAndOddHeaders`` in settings). Word keeps the part and its
+    reference when either option is switched OFF, so a template that once
+    had a first-page letterhead still carries it — auditing that part
+    reported (and charged to fix) a logo no reader ever meets. A section
+    with no reference of a variant inherits the previous section's, as Word
+    does. Unreferenced parts are ignored, like Word ignores them.
+
+    The parser and the writer both walk headers through this one function,
+    so the ``docx-hf*`` ids they mint cannot disagree.
+    """
     out: List[Tuple[str, Any, str]] = []
     seen: set = set()
     hdr, ftr = qn("w:headerReference"), qn("w:footerReference")
     rid_attr = qn("r:id")
     try:
         related = doc.part.related_parts
-        sect_prs = list(doc.element.body.iter(qn("w:sectPr")))
+        sect_prs = [
+            sp for sp in doc.element.body.iter(qn("w:sectPr"))
+            # A tracked change to section properties keeps the OLD sectPr
+            # inside w:sectPrChange; it is history, not a section.
+            if sp.getparent() is None or sp.getparent().tag != qn("w:sectPrChange")
+        ]
     except Exception:  # pragma: no cover - defensive
         return out
+    even_on = False
+    try:
+        # Read the settings part only if it exists — ``doc.settings`` would
+        # CREATE one, and the writer runs this walk on the copy it saves.
+        from docx.opc.constants import RELATIONSHIP_TYPE as _RT
+
+        settings_el = doc.part.part_related_by(_RT.SETTINGS).element
+        even_on = _toggle_on(settings_el.find(qn("w:evenAndOddHeaders")))
+    except Exception:  # no settings part: Word's default (off)
+        even_on = False
+    effective: Dict[Tuple[str, str], Any] = {}
     for sp in sect_prs:
+        own: List[Tuple[str, str]] = []
         for ref in sp:
             if ref.tag == hdr:
                 kind = "header"
@@ -1216,14 +1245,34 @@ def iter_header_footer_parts(doc) -> List[Tuple[str, Any, str]]:
                 kind = "footer"
             else:
                 continue
+            variant = ref.get(qn("w:type")) or "default"
             part = related.get(ref.get(rid_attr)) if hasattr(related, "get") else None
             if part is None or getattr(part, "element", None) is None:
+                continue
+            effective[(kind, variant)] = part
+            own.append((kind, variant))
+        printed = {"default"}
+        if _toggle_on(sp.find(qn("w:titlePg"))):
+            printed.add("first")
+        if even_on:
+            printed.add("even")
+        # This section's own references first (document order), then what it
+        # inherits — a fixed order both walks reproduce.
+        inherited = [
+            (k, v) for k in ("header", "footer") for v in ("default", "first", "even")
+            if (k, v) not in own
+        ]
+        for kind, variant in own + inherited:
+            if variant not in printed:
+                continue
+            part = effective.get((kind, variant))
+            if part is None:
                 continue
             key = _partname(part) or id(part)
             if key in seen:
                 continue
             seen.add(key)
-            out.append((kind, part, (ref.get(qn("w:type")) or "default")))
+            out.append((kind, part, variant))
     return out
 
 
@@ -1283,21 +1332,40 @@ def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors) -> Optiona
                 )
             )
             if text and not links:
-                para = Paragraph(p_el, parent)
-                props = dict(_text_color_props(para, theme_colors) or {})
-                props.update(base)
-                hf_id = ids("docx-hfp")
-                reg(hf_id, para)
-                section.children.append(
-                    ParagraphNode(
-                        id=hf_id,
-                        content=NodeContent(kind=ContentKind.TEXT, text=text),
-                        metadata=NodeMetadata(source_format="docx", properties=props),
-                        children=[],
-                        accessibility_flags=[],
-                    )
+                section.children.append(_story_paragraph_node(p_el, parent, text, base, ids, reg, theme_colors))
+            # Text boxes anchored here (a footer's "Privacy: click here"
+            # callout, a letterhead address block). Their pictures already
+            # belong to this anchor paragraph; their words and links do not,
+            # and were never read. Fallback copies are skipped as in the body.
+            for tb_p in _iter_text_box_paragraphs(p_el):
+                tb_text = paragraph_text(tb_p).strip()
+                tb_base = dict(base, in_text_box=True)
+                tb_links = _link_nodes_from_p(
+                    tb_p, part, ids, prefix="docx-hflink", reg=reg, context_text=tb_text, extra_props=tb_base,
                 )
+                section.children.extend(tb_links)
+                if tb_text and not tb_links:
+                    section.children.append(
+                        _story_paragraph_node(tb_p, parent, tb_text, tb_base, ids, reg, theme_colors)
+                    )
     return section if section.children else None
+
+
+def _story_paragraph_node(p_el, parent, text: str, base: Dict[str, Any], ids, reg, theme_colors) -> ParagraphNode:
+    """A header/footer line as a ParagraphNode (with its contrast inputs),
+    registered so the writer can recolour exactly this paragraph."""
+    para = Paragraph(p_el, parent)
+    props = dict(_text_color_props(para, theme_colors) or {})
+    props.update(base)
+    hf_id = ids("docx-hfp")
+    reg(hf_id, para)
+    return ParagraphNode(
+        id=hf_id,
+        content=NodeContent(kind=ContentKind.TEXT, text=text),
+        metadata=NodeMetadata(source_format="docx", properties=props),
+        children=[],
+        accessibility_flags=[],
+    )
 
 
 def _iter_sdt_aware(parent_el, want_tag: str):
