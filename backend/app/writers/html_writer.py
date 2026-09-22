@@ -91,6 +91,14 @@ def write_remediated_html(
         logger.exception("html_writer copy failed: %s", exc)
         return {"applied": [], "skipped": [{"target_id": str(source_path), "reason": "copy_failed"}]}
 
+    # The tree the ANALYSIS parsed (no byte stand-ins), when it isn't ``doc``
+    # itself. "Did an executor change this value?" is only answerable against
+    # what the analysis read: the byte-preserving parse holds a stand-in where
+    # the analysis read U+FFFD (an invalid byte) or nothing (a NUL), so
+    # comparing against it saw a change in every title, link and alt holding
+    # one — and rewrote them (destroying the very byte preserve_bytes keeps)
+    # and reported fixes nobody approved.
+    seen_doc = None
     try:
         data = Path(source_path).read_bytes()
         # preserve_bytes: a NUL or an invalid byte in the source goes back out
@@ -108,6 +116,8 @@ def write_remediated_html(
             plain_doc, plain_info = parse_html_source(data)
             if _tag_sequence(plain_doc) != _tag_sequence(doc):
                 doc, source_info = plain_doc, plain_info
+            else:
+                seen_doc = plain_doc
     except Exception as exc:
         logger.exception("html_writer parse failed: %s", exc)
         # Signal a hard failure so the pipeline cleans up and does NOT charge.
@@ -141,11 +151,22 @@ def write_remediated_html(
             found = []
         return found[0] if len(found) == 1 else None
 
+    # The same locators against the analysis's own tree (identical element for
+    # element, see above), for reading the values the analysis saw.
+    seen_index = _PathIndex(seen_doc) if seen_doc is not None else None
+
+    def seen(xpath: Optional[str], el: Any) -> Any:
+        if seen_index is None or el is None or not xpath:
+            return el
+        found = seen_index.resolve(xpath)
+        return found if found is not None else el
+
     root = tree.root
     props = root.metadata.properties or {}
 
     # ---- PHASE 1: resolve all locators on the PRISTINE DOM (before mutating) ----
     elements: Dict[str, Any] = {}
+    seen_elements: Dict[str, Any] = {}
     for node in iter_reading_order(root):
         if not isinstance(node, _LOCATABLE):
             continue
@@ -155,6 +176,7 @@ def write_remediated_html(
         xpath = nprops.get("__xpath")
         el = resolve(xpath)
         elements[node.id] = el
+        seen_elements[node.id] = seen(xpath, el)
         if el is None and xpath:
             logger.warning("html_writer: could not resolve %s for node %s", xpath, node.id)
             skipped.append({"target_id": node.id, "reason": "element_not_resolved"})
@@ -182,15 +204,23 @@ def write_remediated_html(
             list_member_els[node.id] = resolve(nprops.get("__xpath"))
 
     html_el = resolve(props.get("__html_xpath"))
+    seen_html = seen(props.get("__html_xpath"), html_el)
     if html_el is None:
-        html_el = doc
+        html_el = seen_html = doc
     title_el = resolve(props.get("__title_xpath"))
+    seen_title = seen(props.get("__title_xpath"), title_el)
     path_index.release()  # every locator is resolved; nothing reads it again
+    if seen_index is not None:
+        seen_index.release()
 
     # ---- PHASE 2: mutate via the held references ----
+    # Each value is compared with what the ANALYSIS read (the parser strips
+    # them), so only a value an executor changed is written and reported —
+    # not a title/lang/alt that merely has surrounding spaces, or a byte the
+    # analysis could not decode.
     language = root.metadata.language
     if isinstance(language, str) and language.strip() and html_el is not None:
-        if (html_el.get("lang") or None) != language:
+        if ((seen_html.get("lang") or "").strip() or None) != language:
             html_el.set("lang", language)
             applied.append({"action": "SET_DOCUMENT_LANGUAGE", "target_id": root.id})
 
@@ -198,17 +228,19 @@ def write_remediated_html(
     if isinstance(title, str) and title.strip():
         if title_el is None:
             title_el = _ensure_title_element(doc)
-        if title_el is not None and (title_el.text or "") != title:
+            seen_title = None
+        current_title = (seen_title.text or "").strip() if seen_title is not None else ""
+        if title_el is not None and current_title != title:
             title_el.text = title
             applied.append({"action": "SET_DOCUMENT_TITLE", "target_id": root.id})
 
     for node in iter_reading_order(root):
         if isinstance(node, ImageNode):
-            _apply_image(node, elements.get(node.id), applied)
+            _apply_image(node, elements.get(node.id), seen_elements.get(node.id), applied)
         elif isinstance(node, HeadingNode):
             _apply_heading(node, elements.get(node.id), applied)
         elif isinstance(node, LinkNode):
-            _apply_link(node, elements.get(node.id), applied)
+            _apply_link(node, elements.get(node.id), seen_elements.get(node.id), applied)
         elif isinstance(node, TableNode):
             _apply_table(node, elements, applied)
         # TableRow/TableCell handled inside _apply_table.
@@ -438,21 +470,27 @@ def _apply_contrast(el: Any, fg: str) -> bool:
     return True
 
 
-def _apply_image(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> None:
+def _apply_image(node: ImageNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
+    """``seen_el`` is the element as the analysis parsed it (``el`` itself
+    unless the page carries byte stand-ins): the change test reads it, the
+    write goes to ``el``."""
     # Only GENERATE_ALT_TEXT is a supported HTML image fix in v1. Decorative
     # images are left untouched (a properly empty alt is already correct, and we
     # never edit an image the user didn't approve a fix for).
     if node.is_decorative or not node.alt_text or el is None:
         return
+    if seen_el is None:
+        seen_el = el
     if (node.metadata.properties or {}).get("svg_inline"):
-        _apply_svg_name(node, el, applied)
+        _apply_svg_name(node, el, seen_el, applied)
         return
-    if el.get("alt") != node.alt_text:
+    # The parser stored the alt stripped; an unchanged " Chart " is not a fix.
+    if (seen_el.get("alt") or "").strip() != node.alt_text:
         el.set("alt", node.alt_text)
         applied.append({"action": "GENERATE_ALT_TEXT", "target_id": node.id})
 
 
-def _apply_svg_name(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> None:
+def _apply_svg_name(node: ImageNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
     """Name an inline ``<svg>``: ``role="img"`` + ``aria-label``.
 
     An ``<svg>`` has no ``alt``. ``role="img"`` makes assistive tech treat it
@@ -464,13 +502,13 @@ def _apply_svg_name(node: ImageNode, el: Any, applied: List[Dict[str, Any]]) -> 
     tag = el.tag.rsplit("}", 1)[-1].lower() if isinstance(el.tag, str) else ""
     if tag != "svg":
         return
-    if _svg_accessible_name(el) == node.alt_text:
+    if _svg_accessible_name(seen_el) == node.alt_text:
         return  # the name the parser read — nothing was approved/changed
     changed = False
     if not (el.get("role") or "").strip():
         el.set("role", "img")
         changed = True
-    if (el.get("aria-label") or "") != node.alt_text:
+    if (seen_el.get("aria-label") or "") != node.alt_text:
         el.set("aria-label", node.alt_text)
         changed = True
     if changed:
@@ -487,14 +525,16 @@ def _apply_heading(node: HeadingNode, el: Any, applied: List[Dict[str, Any]]) ->
         applied.append({"action": "NORMALIZE_HEADING_LEVEL", "target_id": node.id})
 
 
-def _apply_link(node: LinkNode, el: Any, applied: List[Dict[str, Any]]) -> None:
+def _apply_link(node: LinkNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
     if node.content.kind != ContentKind.TEXT or not node.content.text or el is None:
         return
     # Parser only assigns TEXT content to links with no element children, so
     # replacing the text destroys nothing.
     if any(isinstance(c.tag, str) for c in el):
         return
-    if (el.text_content() or "").strip() != node.content.text:
+    if seen_el is None:
+        seen_el = el
+    if (seen_el.text_content() or "").strip() != node.content.text:
         el.text = node.content.text
         applied.append({"action": "IMPROVE_LINK_TEXT", "target_id": node.id})
 
