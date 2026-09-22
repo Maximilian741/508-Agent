@@ -15,7 +15,7 @@ import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
-import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { Spinner } from "../src/ui/components/Spinner";
 import { EmptyState } from "../src/ui/components/EmptyState";
 import { useToast } from "../src/ui/toast";
 import { useAppStore } from "../src/store/useAppStore";
@@ -115,7 +115,7 @@ export default function AdminScreen() {
           {metricsLoading ? (
             <Card>
               <View style={styles.loadingRow}>
-                <PixelSpinner />
+                <Spinner />
                 <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>Loading metrics…</Text>
               </View>
             </Card>
@@ -184,7 +184,7 @@ export default function AdminScreen() {
 
             {loading ? (
               <View style={styles.loadingRow}>
-                <PixelSpinner />
+                <Spinner />
                 <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>Fetching log...</Text>
               </View>
             ) : error ? (

@@ -1,15 +1,15 @@
 import { ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { MaterialIcons } from "@expo/vector-icons";
 
+import { alpha, glassStyle } from "../theme";
 import { useTheme } from "../useTheme";
 import { Button } from "./Button";
-import { PixelIcon, PixelGlyph } from "./PixelIcon";
+import { Icon, IconName } from "./Icon";
 
 interface EmptyStateProps {
   title: string;
-  /** Pixel-art glyph for the canonical retro empty state. */
-  icon?: PixelGlyph;
+  /** Line icon (any Feather name or an Icon alias such as "doc"). */
+  icon?: IconName;
   /** Body copy (preferred). */
   body?: string;
   /** Legacy alias for `body`. */
@@ -20,8 +20,8 @@ interface EmptyStateProps {
   actionLabel?: string;
   /** Legacy: callback for the legacy button. */
   onAction?: () => void;
-  /** Legacy: fall back to a MaterialIcons glyph if no PixelGlyph supplied. */
-  materialIcon?: keyof typeof MaterialIcons.glyphMap;
+  /** Legacy name for `icon` (older call sites passed MaterialIcons names). */
+  materialIcon?: IconName;
   tone?: "default" | "warning" | "danger" | "info";
 }
 
@@ -43,14 +43,8 @@ export function EmptyState({
 
   return (
     <View style={styles.container}>
-      <View style={[styles.iconWrap, { borderColor: accent }]}>
-        {icon ? (
-          <PixelIcon name={icon} size={5} color={accent} />
-        ) : materialIcon ? (
-          <MaterialIcons name={materialIcon} size={28} color={accent} />
-        ) : (
-          <PixelIcon name="spark" size={5} color={accent} />
-        )}
+      <View style={[styles.iconWrap, { borderColor: alpha(accent, 0.35), backgroundColor: alpha(accent, 0.1) }]}>
+        <Icon name={icon ?? materialIcon ?? "inbox"} size={26} color={accent} />
       </View>
       <Text style={styles.title}>{title}</Text>
       {copy ? <Text style={styles.message}>{copy}</Text> : null}
@@ -76,24 +70,23 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       alignItems: "center",
       justifyContent: "center",
       gap: theme.spacing.md,
-      padding: theme.spacing.xl,
-      backgroundColor: theme.colors.surface,
+      paddingHorizontal: theme.spacing.xxl,
+      paddingVertical: theme.spacing.xxxl,
+      ...(glassStyle(theme.colors) as any),
       borderRadius: theme.radius.lg,
       borderWidth: 1,
-      borderColor: theme.colors.border,
+      borderColor: theme.colors.glassBorder,
     },
     iconWrap: {
-      width: 72,
-      height: 72,
-      borderRadius: theme.radius.md,
-      borderWidth: 2,
+      width: 56,
+      height: 56,
+      borderRadius: theme.radius.lg,
+      borderWidth: 1,
       alignItems: "center",
       justifyContent: "center",
-      backgroundColor: theme.colors.bg,
     },
     title: {
       ...theme.typography.h2,
-      ...theme.typography.pixel,
       color: theme.colors.text,
       textAlign: "center",
     },
@@ -101,7 +94,7 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       ...theme.typography.body,
       color: theme.colors.textMuted,
       textAlign: "center",
-      maxWidth: 360,
+      maxWidth: 380,
     },
     actionWrap: {
       marginTop: theme.spacing.xs,

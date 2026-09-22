@@ -27,9 +27,9 @@ import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
-import { PixelIcon, PixelGlyph } from "../src/ui/components/PixelIcon";
+import { Icon, IconName } from "../src/ui/components/Icon";
 import { Screen } from "../src/ui/components/Screen";
-import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { Spinner } from "../src/ui/components/Spinner";
 import { SignInModal } from "../src/ui/components/SignInModal";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
@@ -101,7 +101,7 @@ export default function AccountScreen() {
     return (
       <Screen scroll title="Account">
         <View style={styles.emptyWrap}>
-          <PixelSpinner />
+          <Spinner />
           <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 12 }]}>
             Looking you up...
           </Text>
@@ -153,7 +153,7 @@ export default function AccountScreen() {
               Balance
             </Text>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 }}>
-              <PixelIcon name="coin" size={5} color={theme.colors.accent} />
+              <Icon name="credits" size={26} color={theme.colors.accent} />
               <Text
                 style={[
                   theme.typography.pixelLarge,
@@ -523,7 +523,7 @@ export default function AccountScreen() {
                   paddingVertical: 8,
                 }}
               >
-                <PixelIcon name="check" size={3} color={theme.colors.success} />
+                <Icon name="check" size={16} color={theme.colors.success} />
                 <Text style={{ color: theme.colors.success, fontSize: 13, fontWeight: "600" }}>
                   Email verified
                 </Text>
@@ -693,16 +693,16 @@ function ActivityRow({ entry, isLast }: { entry: HistoryEntry; isLast: boolean }
   // A deferred remediation debit ("spend_once") is a spend like any other to
   // the reader — only the ledger bookkeeping differs.
   const isSpend = entry.kind === "spend" || entry.kind === "spend_once";
-  const iconName: PixelGlyph =
+  const iconName: IconName =
     entry.kind === "purchase"
-      ? "coin"
+      ? "credit-card"
       : isSpend
-      ? "bolt"
+      ? "zap"
       : entry.kind === "grant"
-      ? "spark"
+      ? "gift"
       : entry.kind === "refund"
-      ? "arrow_left"
-      : "coin";
+      ? "rotate-ccw"
+      : "credit-card";
   const amountText = (entry.amount > 0 ? "+" : "") + entry.amount;
   const amountColor = isSpend ? theme.colors.warning : theme.colors.success;
 
@@ -717,7 +717,7 @@ function ActivityRow({ entry, isLast }: { entry: HistoryEntry; isLast: boolean }
       ]}
     >
       <View style={styles.kindIcon}>
-        <PixelIcon name={iconName} size={3} color={iconColor} />
+        <Icon name={iconName} size={16} color={iconColor} />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={{ color: theme.colors.text, fontWeight: "600", fontSize: 13 }}>

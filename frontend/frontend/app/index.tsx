@@ -22,6 +22,7 @@ import { ScoreBadge } from "../src/ui/components/ScoreBadge";
 import { Screen } from "../src/ui/components/Screen";
 import { Hero } from "../src/ui/components/Hero";
 import { useToast } from "../src/ui/toast";
+import { alpha, glassStyle } from "../src/ui/theme";
 import { useTheme } from "../src/ui/useTheme";
 import { Seo } from "../src/ui/components/Seo";
 import { linkProps } from "../src/ui/components/linkProps";
@@ -125,7 +126,8 @@ export default function HomeScreen() {
       />
       {/* === 1. Welcome hero ============================================== */}
       <Hero
-        eyebrow="HOME"
+        shader
+        eyebrow="Home"
         title={greeting}
         subtitle={resumeLine}
       />
@@ -153,10 +155,19 @@ export default function HomeScreen() {
         style={({ hovered }: any) => [
           styles.bench,
           {
-            borderRadius: theme.radius.md,
-            borderColor: hovered ? theme.colors.accent : theme.colors.border,
-            backgroundColor: theme.colors.surface,
+            ...(glassStyle(theme.colors) as any),
+            borderRadius: theme.radius.xl,
+            borderColor: hovered ? alpha(theme.colors.accent, 0.6) : theme.colors.glassBorder,
           },
+          Platform.OS === "web"
+            ? ({
+                boxShadow: hovered
+                  ? `0 0 0 1px ${alpha(theme.colors.accent, 0.35)}, 0 18px 48px -18px ${alpha(theme.colors.accent, 0.45)}`
+                  : theme.isDark
+                    ? theme.shadows.near.webDark
+                    : theme.shadows.near.web,
+              } as any)
+            : null,
         ]}
       >
         <Text
@@ -206,7 +217,7 @@ export default function HomeScreen() {
           <View
             style={[
               styles.benchCta,
-              { backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm },
+              { backgroundColor: theme.colors.accent, borderRadius: theme.radius.md },
             ]}
           >
             {/* onAccent, not a hardcoded dark: the accent is a deep burnt
@@ -450,7 +461,7 @@ function FirstRun({
             ]}
           >
             <View style={[styles.stepDot, { backgroundColor: theme.colors.accent }]}>
-              <Text style={styles.stepDotText}>{s.n}</Text>
+              <Text style={[styles.stepDotText, { color: theme.colors.onAccent }]}>{s.n}</Text>
             </View>
             <Text style={[theme.typography.body, { color: theme.colors.text, fontWeight: "700" }]}>
               {s.title}
@@ -629,7 +640,7 @@ const styles = StyleSheet.create({
     minHeight: 220,
     justifyContent: "flex-start",
     ...(Platform.OS === "web"
-      ? ({ transition: "border-color 180ms ease" } as any)
+      ? ({ transition: "border-color 180ms ease, box-shadow 220ms ease" } as any)
       : {}),
   },
   benchCta: {

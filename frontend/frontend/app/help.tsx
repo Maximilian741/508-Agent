@@ -1,7 +1,7 @@
 /**
  * Help & WCAG Glossary - structured as a reference document.
  *
- * Page is a real reference: serif display title, left-rail sticky TOC on web,
+ * Page is a real reference: display title, left-rail sticky TOC on web,
  * flowing prose with horizontal rules between rule entries. No card-of-everything.
  */
 
@@ -12,9 +12,12 @@ import {
   CATALOG_ENTRIES,
   IssueCatalogEntry,
 } from "../src/domain/issueCatalog";
+import { Button } from "../src/ui/components/Button";
 import { Chip } from "../src/ui/components/Chip";
 import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
+import { Icon } from "../src/ui/components/Icon";
+import { openHowItWorks } from "../src/ui/components/OnboardingTour";
 import { Screen } from "../src/ui/components/Screen";
 import { useTheme } from "../src/ui/useTheme";
 import { Seo } from "../src/ui/components/Seo";
@@ -96,7 +99,18 @@ export default function HelpScreen() {
         eyebrow="HELP"
         title="Help & glossary"
         subtitle="Every accessibility check this tool runs, in plain English, with the underlying WCAG 2.1, Section 508, and PDF/UA citations. Use it as a reference when deciding whether to approve or reject a fix."
-      />
+      >
+        {/* The step-by-step guide lives here now; it no longer pops up on a
+            first visit. */}
+        <View style={{ flexDirection: "row", marginTop: 6 }}>
+          <Button
+            title="Take the guided tour"
+            variant="secondary"
+            onPress={openHowItWorks}
+            icon={<Icon name="compass" size={16} color={theme.colors.accent} />}
+          />
+        </View>
+      </Hero>
 
       <View style={styles.layout}>
         {/* Left rail: sticky TOC on web. */}

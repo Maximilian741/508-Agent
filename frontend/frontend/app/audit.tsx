@@ -64,7 +64,7 @@ import { useFileDrop } from "../src/hooks/useFileDrop";
 import { useKeyboardShortcuts } from "../src/hooks/useKeyboardShortcuts";
 import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
-import { PixelIcon } from "../src/ui/components/PixelIcon";
+import { Icon } from "../src/ui/components/Icon";
 import { Card } from "../src/ui/components/Card";
 import { Chip } from "../src/ui/components/Chip";
 import { Dialog } from "../src/ui/components/Dialog";
@@ -78,7 +78,7 @@ import { SeverityHeatmap } from "../src/ui/components/SeverityHeatmap";
 import { IssueNavigator } from "../src/ui/components/IssueNavigator";
 import { PdfPreview } from "../src/ui/components/PdfPreview";
 import { Skeleton, SkeletonBlock } from "../src/ui/components/Skeleton";
-import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { Spinner } from "../src/ui/components/Spinner";
 import { Hero } from "../src/ui/components/Hero";
 import { openHowItWorks } from "../src/ui/components/OnboardingTour";
 import { Portal } from "../src/ui/components/Portal";
@@ -1077,8 +1077,8 @@ export default function AuditScreen() {
             { backgroundColor: theme.colors.accent + "DD" },
           ]}
         >
-          <Text style={styles.dropOverlayText}>Drop to audit</Text>
-          <Text style={styles.dropOverlaySub}>PDF · DOCX · PPTX · HTML accepted</Text>
+          <Text style={[styles.dropOverlayText, { color: theme.colors.onAccent }]}>Drop to audit</Text>
+          <Text style={[styles.dropOverlaySub, { color: theme.colors.onAccent }]}>PDF · DOCX · PPTX · HTML accepted</Text>
         </View>
       ) : null}
       {showHelp ? <KeyboardHelpOverlay onClose={() => setShowHelp(false)} /> : null}
@@ -1188,7 +1188,7 @@ export default function AuditScreen() {
       />
       <Hero
         eyebrow="AUDIT"
-        title="508 Agent Audit"
+        title="Audit a document"
         subtitle="Drop a document, walk through every finding, approve only the fixes you want."
         rightSlot={
           <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
@@ -1220,21 +1220,21 @@ export default function AuditScreen() {
               accessibilityLabel="How it works"
               style={({ hovered }: any) => [
                 styles.howButton,
-                { borderColor: theme.colors.border, backgroundColor: "rgba(255,255,255,0.12)" },
-                hovered ? { backgroundColor: "rgba(255,255,255,0.2)" } : null,
+                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
+                hovered ? { backgroundColor: theme.colors.surface3 } : null,
               ]}
             >
-              <Text style={[styles.howButtonText, { color: "rgba(255,255,255,0.9)" }]}>How it works</Text>
+              <Text style={[styles.howButtonText, { color: theme.colors.text }]}>How it works</Text>
             </Pressable>
             <Pressable accessibilityRole="button"
               onPress={() => setShowHelp(true)}
               accessibilityLabel="Show keyboard shortcuts"
               style={[
                 styles.helpButton,
-                { borderColor: theme.colors.border, backgroundColor: "rgba(255,255,255,0.12)" },
+                { borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 },
               ]}
             >
-              <Text style={[styles.helpButtonText, { color: "rgba(255,255,255,0.85)" }]}>?</Text>
+              <Text style={[styles.helpButtonText, { color: theme.colors.text }]}>?</Text>
             </Pressable>
           </View>
         }
@@ -1295,7 +1295,7 @@ export default function AuditScreen() {
       <Card>
         <View style={styles.stepHeader}>
           <View style={[styles.stepNumber, { backgroundColor: theme.colors.accent }]}>
-            <Text style={styles.stepNumberText}>1</Text>
+            <Text style={[styles.stepNumberText, { color: theme.colors.onAccent }]}>1</Text>
           </View>
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
             Upload a document
@@ -1324,7 +1324,7 @@ export default function AuditScreen() {
               },
             ]}
           >
-            <PixelIcon name="doc" size={5} color={theme.colors.accent} />
+            <Icon name="upload-cloud" size={32} color={theme.colors.accent} />
             <Text style={[theme.typography.h2, { color: theme.colors.text, marginTop: 10, textAlign: "center" }]}>
               Drop a PDF, Word, PowerPoint, or HTML file here
             </Text>
@@ -1332,7 +1332,7 @@ export default function AuditScreen() {
               Or click anywhere in this box to choose one from your computer
             </Text>
             <View style={[styles.dropZoneCta, { borderRadius: theme.radius.sm, backgroundColor: theme.colors.accent }]}>
-              <Text style={styles.dropZoneCtaText}>Choose file</Text>
+              <Text style={[styles.dropZoneCtaText, { color: theme.colors.onAccent }]}>Choose file</Text>
             </View>
             <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 10 }]}>
               .pdf · .docx · .pptx · .html{maxUploadMb ? ` · up to ${maxUploadMb} MB` : ""}
@@ -1482,7 +1482,7 @@ export default function AuditScreen() {
                       },
                     ]}
                   >
-                    <Text style={styles.sampleBadgeText}>
+                    <Text style={[styles.sampleBadgeText, { color: theme.colors.bg }]}>
                       {sample.scenario === "clean" ? "EASY" : sample.scenario === "typical" ? "TYPICAL" : "HARD"}
                     </Text>
                   </View>
@@ -1504,7 +1504,7 @@ export default function AuditScreen() {
         <Card>
           <View style={styles.stepHeader}>
             <View style={[styles.stepNumber, { backgroundColor: theme.colors.accent }]}>
-              <Text style={styles.stepNumberText}>2</Text>
+              <Text style={[styles.stepNumberText, { color: theme.colors.onAccent }]}>2</Text>
             </View>
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
               We found {totalIssues} {totalIssues === 1 ? "issue" : "issues"}
@@ -1636,7 +1636,7 @@ export default function AuditScreen() {
         <Card>
           <View style={styles.stepHeader}>
             <View style={[styles.stepNumber, { backgroundColor: theme.colors.accent }]}>
-              <Text style={styles.stepNumberText}>3</Text>
+              <Text style={[styles.stepNumberText, { color: theme.colors.onAccent }]}>3</Text>
             </View>
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
               {currentViolation
@@ -1901,7 +1901,7 @@ export default function AuditScreen() {
         <Card>
           <View style={styles.stepHeader}>
             <View style={[styles.stepNumber, { backgroundColor: theme.colors.accent }]}>
-              <Text style={styles.stepNumberText}>4</Text>
+              <Text style={[styles.stepNumberText, { color: theme.colors.onAccent }]}>4</Text>
             </View>
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
               Apply approved fixes
@@ -2103,7 +2103,7 @@ export default function AuditScreen() {
             </View>
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 12, marginTop: 16 }}>
-            <PixelSpinner />
+            <Spinner />
             <Text
               style={[
                 theme.typography.body,
@@ -2437,14 +2437,14 @@ function IssueCard(props: {
             title={props.decision === "approved" ? "Approved (a)" : "Approve (a)"}
             onPress={() => props.onDecide("approved", props.customText)}
             variant={props.decision === "approved" ? "primary" : "secondary"}
-            icon={<PixelIcon name="check" size={3} color={props.decision === "approved" ? "#FFFFFF" : "#1F140A"} />}
+            icon={<Icon name="check" size={16} color={props.decision === "approved" ? theme.colors.onAccent : theme.colors.text} />}
           />
           <Button title="Edit & approve (e)" onPress={() => props.onSetEditing(true)} variant="ghost" />
           <Button
             title={props.decision === "rejected" ? "Rejected (r)" : "Reject (r)"}
             onPress={() => props.onDecide("rejected")}
             variant={props.decision === "rejected" ? "primary" : "ghost"}
-            icon={<PixelIcon name="x" size={3} color={props.decision === "rejected" ? "#FFFFFF" : "#B43A2E"} />}
+            icon={<Icon name="x" size={16} color={props.decision === "rejected" ? theme.colors.onAccent : theme.colors.danger} />}
           />
         </View>
       )}

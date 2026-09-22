@@ -1,11 +1,11 @@
 /**
- * HowItWorksWizard — the detailed first-run walkthrough + on-demand guide.
+ * HowItWorksWizard — the detailed, on-demand guide.
  *
- * Auto-opens once on first web visit (localStorage flag), and can be
- * re-opened from anywhere by calling `openHowItWorks()` (dispatches a window
- * event the mounted wizard listens for) — wired to "How it works" buttons on
- * the dashboard and audit screens, and to a replay control in Settings via
- * `clearTourCompleted()`.
+ * It NEVER opens by itself: a seven-step modal on a first visit was a wall of
+ * jargon between a new visitor and the one thing they came to do (drop a
+ * file). It opens only when someone asks, via `openHowItWorks()` (dispatches a
+ * window event the mounted wizard listens for) — wired to "How it works"
+ * buttons on Help, the dashboard and the audit screen.
  *
  * Portaled to <body> so the backdrop can never be trapped by a transformed
  * ancestor (the bug that collapsed fixed-position overlays to a thin strip).
@@ -73,19 +73,10 @@ const STEPS: Step[] = [
     badge: "YOU'RE SET",
     title: "Where everything lives",
     body:
-      "Dashboard = your saved audits (search, re-open, or delete them there). Audit = run a new one. Batch = several at once. Contrast = a standalone colour checker. Help = FAQ and costs. Settings = themes, demo mode, and a button to replay this guide anytime.",
+      "Dashboard = your saved audits (search, re-open, or delete them there). Audit = run a new one. Batch = several at once. Contrast = a standalone colour checker. Help = FAQ, costs, and this guide (replay it from there anytime). Settings = themes and demo mode.",
     tip: "Stuck on a specific finding? Every one has a 'Learn more' link to the official rule.",
   },
 ];
-
-function isCompleted(): boolean {
-  if (typeof window === "undefined") return true;
-  try {
-    return Boolean(window.localStorage.getItem(TOUR_COMPLETED_KEY));
-  } catch {
-    return true;
-  }
-}
 
 function markCompleted(): void {
   if (typeof window === "undefined") return;
@@ -114,12 +105,6 @@ export function OnboardingTour() {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState(0);
-
-  // Auto-open once on first visit.
-  useEffect(() => {
-    if (Platform.OS !== "web") return;
-    if (!isCompleted()) setOpen(true);
-  }, []);
 
   // Listen for on-demand opens.
   useEffect(() => {

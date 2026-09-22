@@ -32,7 +32,7 @@ import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { openHowItWorks } from "../src/ui/components/OnboardingTour";
 import { openSystemCheck } from "../src/ui/components/SystemCheckWizard";
-import { PixelIcon } from "../src/ui/components/PixelIcon";
+import { Icon } from "../src/ui/components/Icon";
 import { Screen } from "../src/ui/components/Screen";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
@@ -184,7 +184,7 @@ export default function DashboardScreen() {
         {authChecked ? (
           <Card>
             <View style={styles.signInBlock}>
-              <PixelIcon name="key" size={4} color={theme.colors.accent} />
+              <Icon name="key" size={20} color={theme.colors.accent} />
               <View style={{ flex: 1, gap: 6 }}>
                 <Text style={[theme.typography.h2, { color: theme.colors.text }]}>
                   Sign in to see your dashboard

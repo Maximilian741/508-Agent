@@ -1,16 +1,14 @@
-import { Theme, border, darkColors, focus, lightColors, radius, shadows, spacing, twilightColors, typography } from "./theme";
+import { Theme, auroraColors, border, darkColors, focus, lightColors, radius, shadows, spacing, typography } from "./theme";
 import { useAppStore } from "../store/useAppStore";
 
 /**
- * Resolve the active theme. The three modes intentionally produce three
- * visually distinct palettes:
- *   - "system"  -> twilight (dusky violet, warm peach accents)
- *   - "light"   -> cream parchment
- *   - "dark"    -> deep walnut/umber
+ * Resolve the active theme. The three modes produce three distinct palettes:
+ *   - "system"  -> Aurora (the default: deep ink with a cool bloom)
+ *   - "light"   -> Light (paper-white, deep teal accent)
+ *   - "dark"    -> Graphite (neutral near-black, maximum contrast)
  *
- * "system" no longer mirrors the OS - users picked it expecting a different
- * look, not a clone of one of the other two. If a user wants their OS
- * preference reflected, they should pick Light or Dark explicitly.
+ * "system" deliberately does not mirror the OS: the product is dark-first,
+ * and users who want light pick it explicitly.
  */
 export function useTheme(): Theme {
   const themeMode = useAppStore((state) => state.themeMode);
@@ -19,9 +17,10 @@ export function useTheme(): Theme {
       ? darkColors
       : themeMode === "light"
         ? lightColors
-        : twilightColors;
+        : auroraColors;
   return {
     colors,
+    isDark: themeMode !== "light",
     spacing,
     radius,
     border,

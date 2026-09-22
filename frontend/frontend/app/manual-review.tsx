@@ -370,5 +370,5 @@ const styles = StyleSheet.create({
   suggestionBox: { gap: 8, marginTop: 6 },
   input: { borderWidth: 1, padding: 8 },
   filterActiveText: { color: "#FFFFFF" },
-  filterActiveDefault: { backgroundColor: "#0EA5E9", borderColor: "#0EA5E9" },
+  filterActiveDefault: { backgroundColor: "#0369A1", borderColor: "#0369A1" },
 });

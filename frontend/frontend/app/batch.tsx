@@ -46,7 +46,7 @@ import { EmptyState } from "../src/ui/components/EmptyState";
 import { Hero } from "../src/ui/components/Hero";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
-import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { Spinner } from "../src/ui/components/Spinner";
 import { useToast } from "../src/ui/toast";
 import { useTheme } from "../src/ui/useTheme";
 
@@ -916,8 +916,8 @@ export default function BatchScreen() {
             { backgroundColor: theme.colors.accent + "DD" },
           ]}
         >
-          <Text style={styles.dropOverlayText}>Drop to queue</Text>
-          <Text style={styles.dropOverlaySub}>
+          <Text style={[styles.dropOverlayText, { color: theme.colors.onAccent }]}>Drop to queue</Text>
+          <Text style={[styles.dropOverlaySub, { color: theme.colors.onAccent }]}>
             Multiple files OK · PDF · DOCX · PPTX · HTML
           </Text>
         </View>
@@ -1024,7 +1024,7 @@ export default function BatchScreen() {
               />
               {inFlight > 0 ? (
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <PixelSpinner size={3} />
+                  <Spinner size={16} />
                   <Chip label={`analyzing: ${inFlight}`} tone="info" />
                 </View>
               ) : null}

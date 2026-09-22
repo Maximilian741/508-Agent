@@ -23,7 +23,7 @@ import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-na
 import { requestPasswordReset, signIn } from "../../domain/account";
 import { useTheme } from "../useTheme";
 import { Button } from "./Button";
-import { PixelIcon } from "./PixelIcon";
+import { Icon } from "./Icon";
 
 // Web-only portal: render the modal directly under document.body so it
 // escapes any ancestor that has a CSS transform (which would otherwise
@@ -360,7 +360,7 @@ function WelcomeStep(props: WelcomeStepProps) {
   return (
     <View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        <PixelIcon name="key" size={4} color={theme.colors.accent} />
+        <Icon name="key" size={22} color={theme.colors.accent} />
         <Text
           style={[
             theme.typography.caption,
@@ -586,7 +586,7 @@ function SuccessStep({ theme, name }: SuccessStepProps) {
       accessibilityLiveRegion={"polite" as any}
       style={{ alignItems: "center", paddingVertical: 18 }}
     >
-      <PixelIcon name="check" size={6} color={theme.colors.success} />
+      <Icon name="check-circle" size={36} color={theme.colors.success} />
       <Text
         style={[
           theme.typography.displaySmall,

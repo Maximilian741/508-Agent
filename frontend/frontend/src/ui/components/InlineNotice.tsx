@@ -1,7 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { MaterialIcons } from "@expo/vector-icons";
-
+import { alpha } from "../theme";
 import { useTheme } from "../useTheme";
+import { Icon, IconName } from "./Icon";
 
 interface InlineNoticeProps {
   title: string;
@@ -25,8 +25,8 @@ export function InlineNotice({
   const color = toneColor(theme, tone);
 
   return (
-    <View style={[styles.container, { borderColor: color, backgroundColor: `${color}1A` }]}>
-      <MaterialIcons name={iconName(tone)} size={18} color={color} />
+    <View style={[styles.container, { borderColor: alpha(color, 0.35), backgroundColor: `${color}1A` }]}>
+      <Icon name={iconName(tone)} size={18} color={color} style={{ marginTop: 2 }} />
       <View style={styles.textWrap}>
         <Text style={[styles.title, { color }]}>{title}</Text>
         <Text style={styles.message}>{message}</Text>
@@ -37,7 +37,7 @@ export function InlineNotice({
             onPress={onAction}
             style={({ hovered, pressed }: any) => [
               styles.actionBtn,
-              { borderColor: color, backgroundColor: pressed ? `${color}33` : `${color}22` },
+              { borderColor: alpha(color, 0.5), backgroundColor: pressed ? `${color}33` : `${color}22` },
               hovered ? { opacity: 0.9 } : null,
             ]}
           >
@@ -56,10 +56,10 @@ const toneColor = (theme: ReturnType<typeof useTheme>, tone: InlineNoticeProps["
   return theme.colors.info;
 };
 
-const iconName = (tone: InlineNoticeProps["tone"]) => {
+const iconName = (tone: InlineNoticeProps["tone"]): IconName => {
   if (tone === "success") return "check-circle";
-  if (tone === "warning") return "warning";
-  if (tone === "danger") return "error";
+  if (tone === "warning") return "alert-triangle";
+  if (tone === "danger") return "alert-circle";
   return "info";
 };
 

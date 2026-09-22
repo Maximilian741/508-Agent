@@ -83,7 +83,8 @@ export default function LandingScreen() {
         description="Upload a PDF, Word, PowerPoint or HTML file and convert it into an accessible, Section 508 / WCAG 2.1 / PDF-UA compliant version. Free scan, automated fixes, honest reporting."
       />
       <Hero
-        eyebrow="508 AGENT"
+        shader
+        eyebrow="Document accessibility, automated"
         title="Make every document accessible, and prove it."
         subtitle="508 Agent finds every WCAG 2.1, Section 508 & PDF/UA issue in your PDF, Word, PowerPoint, and HTML files, fixes them automatically (including writing the alt text for your images), and hands you a conformance report. Your first audits are free."
       >
@@ -158,7 +159,7 @@ export default function LandingScreen() {
               ]}
             >
               <View style={[styles.stepDot, { backgroundColor: theme.colors.accent }]}>
-                <Text style={styles.stepDotText}>{s.n}</Text>
+                <Text style={[styles.stepDotText, { color: theme.colors.onAccent }]}>{s.n}</Text>
               </View>
               <Text
                 style={[theme.typography.h2, { color: theme.colors.text, fontSize: 16 }]}
