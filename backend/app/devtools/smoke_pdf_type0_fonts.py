@@ -81,10 +81,10 @@ def build(*, to_unicode: bool = True, broken: bool = False, numeric: bool = Fals
     return K.to_bytes(w)
 
 
-def helvetica_null_title() -> bytes:
+def helvetica_null_title(*, derivable: bool = True) -> bytes:
     w = PdfWriter()
     f = K.helvetica(w)
-    c = K.bt("F1", 22, 72, 720, K.lit("Quarterly Permit Review"))
+    c = K.bt("F1", 22 if derivable else 11, 72, 720, K.lit("Quarterly Permit Review"))
     for i in range(12):
         c += K.bt("F1", 11, 72, 690 - 14 * i, K.lit("Permit volume grew in every district this quarter, led by the east side."))
     K.add_page(w, c, {"F1": f})
@@ -217,6 +217,19 @@ def main() -> int:
     r = pipe.remediate("nulltitle.pdf", nt)
     t3 = str((PdfReader(io.BytesIO(pipe.download(r.json()))).metadata or {}).get("/Title") or "")
     check("remediation writes the real title, never 'NullObject'", t3 == "Quarterly Permit Review", repr(t3))
+    # No title can be derived (every line the same size): the null must NOT
+    # be stringified into the output's /Info by pypdf's add_metadata.
+    nt2 = helvetica_null_title(derivable=False)
+    r = pipe.remediate("nulltitle2.pdf", nt2)
+    check("remediate (null title, nothing derivable) succeeds", r.status_code == 200, r.text[:200])
+    body4 = r.json()
+    ex4 = {e["actionCode"]: e for e in body4.get("executions", [])}
+    check("...SET_DOCUMENT_TITLE honestly skipped", (ex4.get("SET_DOCUMENT_TITLE") or {}).get("status") == "skipped",
+          str(ex4.get("SET_DOCUMENT_TITLE")))
+    out4 = PdfReader(io.BytesIO(pipe.download(body4)))
+    info4 = {str(k): str(v) for k, v in (out4.metadata or {}).items()}
+    check("the output's /Info never says 'NullObject' (was the literal title)",
+          "NullObject" not in info4.values() and "/Title" not in info4, str(info4))
 
     return check.done()
 

@@ -32,6 +32,7 @@ from pypdf.generic import (
     DictionaryObject,
     IndirectObject,
     NameObject,
+    NullObject,
     TextStringObject,
 )
 
@@ -123,6 +124,14 @@ def write_remediated_pdf(
             existing_metadata = dict(reader.metadata or {})
         except Exception:
             existing_metadata = {}
+        # pypdf's add_metadata() writes str(value) for every entry, and
+        # str(NullObject) is "NullObject": a source with "/Title null" (every
+        # PyMuPDF file) came back with the literal title "NullObject" — shown
+        # in the viewer's title bar — whenever no title was derived. A null
+        # value is an absent key (PDF 32000 7.3.9): drop it here, and from the
+        # clone's own /Info, so nothing can stringify it later.
+        existing_metadata = {k: v for k, v in existing_metadata.items() if not _is_null(v)}
+        _drop_null_info_entries(writer)
         if title and not is_readable_text(str(title)):
             # Last line of defence: never write glyph codes or control bytes
             # as the document title (the Type0 "\x00:\x00L..." /Title). The
@@ -373,6 +382,26 @@ def write_remediated_pdf(
     if notices:
         result["notices"] = notices
     return result
+
+
+def _is_null(value: Any) -> bool:
+    try:
+        value = value.get_object() if hasattr(value, "get_object") else value
+    except Exception:
+        return False
+    return value is None or isinstance(value, NullObject)
+
+
+def _drop_null_info_entries(writer: PdfWriter) -> None:
+    """Remove null-valued entries from the output's document /Info."""
+    try:
+        info = writer._info  # noqa: SLF001 — pypdf keeps /Info here
+        info = info.get_object() if hasattr(info, "get_object") else info
+        if isinstance(info, DictionaryObject):
+            for k in [k for k, v in info.items() if _is_null(v)]:
+                del info[k]
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("could not scrub null /Info entries", exc_info=True)
 
 
 def _preserve_encryption(reader: PdfReader, writer: PdfWriter) -> str:
