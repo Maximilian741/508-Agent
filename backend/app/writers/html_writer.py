@@ -491,13 +491,15 @@ def _apply_image(node: ImageNode, el: Any, seen_el: Any, applied: List[Dict[str,
 
 
 def _apply_svg_name(node: ImageNode, el: Any, seen_el: Any, applied: List[Dict[str, Any]]) -> None:
-    """Name an inline ``<svg>``: ``role="img"`` + ``aria-label``.
+    """Name an inline ``<svg role="img">`` with ``aria-label``.
 
-    An ``<svg>`` has no ``alt``. ``role="img"`` makes assistive tech treat it
-    as ONE image (instead of a group of loose shapes and text fragments) and
-    ``aria-label`` is its name — it outranks a ``<title>`` child in the
-    accessible-name computation, so it also replaces a non-descriptive title.
-    The parser reads ``aria-label`` back, so a re-scan sees a named image.
+    An ``<svg>`` has no ``alt``. The parser only judges SVGs the author made
+    ONE image with ``role="img"`` (an SVG without it exposes its drawn words
+    as text, and giving it the role would hide them), so the role is already
+    there; it is only re-asserted defensively. ``aria-label`` is the name — it
+    outranks a ``<title>`` child in the accessible-name computation, so it
+    also replaces a non-descriptive title. The parser reads ``aria-label``
+    back, so a re-scan sees a named image.
     """
     tag = el.tag.rsplit("}", 1)[-1].lower() if isinstance(el.tag, str) else ""
     if tag != "svg":

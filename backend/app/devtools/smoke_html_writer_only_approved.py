@@ -49,7 +49,7 @@ CAFE = (
     b"<p>Bienvenue au caf\xc3\xa9, notre menu est ci-dessous pour tous les clients du quartier.</p>"
     b'<a href="/menu">Menu du caf\xe9</a> <a href="/about">Notre histoire</a>'
     b'<img src="terrasse.png" alt="Terrasse du caf\xe9">'
-    b'<svg width="40" height="40"><title>Logo du caf\xe9</title><text x="1" y="20">Caf\xe9</text></svg>'
+    b'<svg role="img" width="40" height="40"><title>Logo du caf\xe9</title><text x="1" y="20">Caf\xe9</text></svg>'
     b"<figure><img src=\"x.png\"><figcaption>Photo de la terrasse du caf\xc3\xa9 au printemps</figcaption></figure>"
     b"</body></html>"
 )
@@ -103,7 +103,7 @@ def main() -> int:
     for frag in UNTOUCHED:
         check(f"mixed bytes: {frag[:30]!r}... kept byte for byte", frag in out)
     check("mixed bytes: no U+FFFD written anywhere", b"\xef\xbf\xbd" not in out)
-    check("mixed bytes: the named SVG was not re-named", b"aria-label" not in out and b'role="img"' not in out)
+    check("mixed bytes: the named role=img SVG was not re-named", b"aria-label" not in out)
 
     approved, applied, out = _writer_roundtrip("nul", NUL)
     check("NUL: applied == approved (one alt)", applied == approved, f"{applied} vs {approved}")

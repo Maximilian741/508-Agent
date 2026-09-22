@@ -1235,7 +1235,7 @@ def _build_node(el: Any, tag: str, ids: _Ids, roottree: Any, ctx: Dict[str, Any]
 
     if tag == "svg":
         # Never walk an <svg>'s children as page content. It is either an
-        # image (role="img", or it draws visible text) or it is left alone.
+        # image (role="img") or it is left alone.
         svg = _build_svg(el, ids, roottree)
         return svg if svg is not None else []
 
@@ -1510,22 +1510,27 @@ def _svg_accessible_name(svg: Any) -> str:
 def _build_svg(el: Any, ids: _Ids, roottree: Any) -> Optional[ImageNode]:
     """An inline ``<svg>`` as an image, or None when it is not one we judge.
 
-    Emitted ONLY when the SVG is unambiguously content:
-      * ``role="img"`` — the author declared it an image; or
-      * it draws visible words (<text>) — a badge, a labelled diagram.
-    A plain icon SVG (no role, no text) could be decorative or not, so we make
-    no claim about it. SVGs hidden from assistive tech (aria-hidden,
-    role=presentation/none, ``hidden``, inline display:none) are skipped, and
-    so are SVGs inside a link or button — the control's name rules own those.
+    Emitted ONLY for ``role="img"`` — the author declared it one image, so
+    assistive tech treats its children as presentational and it needs a name
+    of its own (WCAG 1.1.1, axe's svg-img-alt). An SVG WITHOUT that role is
+    not judged: its drawn words (<text>) are already exposed to a screen
+    reader as text — a badge that draws "Fees waived" is read as "Fees
+    waived" — so there is no missing alternative to report, and "fixing" it
+    with role="img" + a label would hide those words behind whatever the label
+    says. A plain icon (no role, no text) could be decorative or not, so we
+    make no claim about it either. SVGs hidden from assistive tech
+    (aria-hidden, role=presentation/none, ``hidden``, inline display:none)
+    are skipped, and so are SVGs inside a link or button — the control's name
+    rules own those.
 
-    An unnamed content SVG raises MISSING_ALT_TEXT like an ``<img>`` with no
-    alt; the writer's fix is ``role="img"`` + ``aria-label``. The drawn text
-    is offered as the grounded ``caption`` (it is literally what the image
-    says) when it is short enough to read as a name — a chart's axis labels
-    are not a description, so long text gets no caption.
+    An unnamed ``role="img"`` SVG raises MISSING_ALT_TEXT like an ``<img>``
+    with no alt; the writer's fix is ``aria-label``. The words it draws —
+    hidden from assistive tech by the role — are offered as the grounded
+    ``caption`` when they are short enough to read as a name (a chart's axis
+    labels are not a description, so long text gets no caption).
     """
     role = (el.get("role") or "").strip().lower()
-    if role in {"presentation", "none"}:
+    if role != "img":
         return None
     if el.get("hidden") is not None or _style_hides(el):
         return None
@@ -1537,8 +1542,6 @@ def _build_svg(el: Any, ids: _Ids, roottree: Any) -> Optional[ImageNode]:
         if anc is not el and _tag(anc) in ("a", "button"):
             return None
     drawn = _svg_visible_text(el)
-    if role != "img" and not drawn:
-        return None
     name = _svg_accessible_name(el)
     props: Dict[str, Any] = {"__xpath": roottree.getpath(el), "svg_inline": True, **_locate_props(el)}
     if drawn:

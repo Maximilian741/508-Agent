@@ -3,7 +3,7 @@
 An image has no text to quote, so a finding on it could only say "an image
 is missing alt text" — on a page with forty images the person could not tell
 which. For the shared location contract (``location.snippet``) the parser
-records, on every image node (``<img>`` and content ``<svg>``):
+records, on every image node (``<img>`` and ``<svg role="img">``):
   * ``snippet`` — the start tag as written (attribute order kept; the HTML
     parser lower-cases attribute NAMES, which HTML ignores anyway), long values
     (a data: URI) elided, at most 200 characters;
@@ -33,7 +33,7 @@ PAGE = """<!DOCTYPE html>
 <img src="charts/q3.png" width="400" class="chart">
 <p>Some words here.</p>
 <img src="data:image/png;base64,{b64}">
-<svg viewBox="0 0 10 10"><text>Fees waived</text></svg>
+<svg viewBox="0 0 10 10" role="img"><text>Fees waived</text></svg>
 </body></html>
 """.replace("{b64}", "iVBORw0KGgo" + "A" * 400)
 
@@ -65,14 +65,14 @@ def main() -> int:
     page.write_text(PAGE, encoding="utf-8")
     imgs = _images(page)
     props = [n.metadata.properties or {} for n in imgs]
-    check("three image nodes (two <img>, one drawn-text <svg>)", len(imgs) == 3, str(len(imgs)))
+    check("three image nodes (two <img>, one role=img <svg>)", len(imgs) == 3, str(len(imgs)))
     check("the chart's snippet is its start tag, attributes in the author's order",
           props[0].get("snippet") == '<img src="charts/q3.png" width="400" class="chart">', repr(props[0].get("snippet")))
     check("the chart is on line 5", props[0].get("line") == 5, str(props[0].get("line")))
     check("a data: URI is elided, and the snippet stays under 200 characters",
           props[1].get("snippet", "").startswith('<img src="data:image/png;base64,iVBOR')
           and "…" in props[1].get("snippet", "") and len(props[1]["snippet"]) <= 200, repr(props[1].get("snippet")))
-    check("the SVG badge says which SVG, and where", props[2].get("snippet", "").lower() == '<svg viewbox="0 0 10 10">' and props[2].get("line") == 8,
+    check("the SVG badge says which SVG, and where", props[2].get("snippet", "").lower() == '<svg viewbox="0 0 10 10" role="img">' and props[2].get("line") == 8,
           f"{props[2].get('snippet')!r} line {props[2].get('line')}")
 
     from app.models.accessibility import HeadingNode, ParagraphNode
