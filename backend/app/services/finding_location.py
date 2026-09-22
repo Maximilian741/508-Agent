@@ -41,7 +41,10 @@ worse than none:
   back from the source file by the reference the parser recorded (DOCX
   relationship id, PPTX shape id, PDF XObject name, HTML ``data:`` src). It
   NEVER fetches a URL. Pillow does the work; the count, pixel area and wall
-  time are all capped, and any failure is simply ``thumbnail: None``.
+  time are all capped, and any failure is simply ``thumbnail: None``. A PDF
+  image is never handed to pypdf's decoder (which inflates a stream without
+  limit): ``_pdf_xobject_image`` inflates at most the bytes the image's own
+  dictionary declares, so a small upload can't expand into gigabytes.
 * Nothing here may fail a request: every finding degrades to
   ``{"kind": "document", ...None}`` on any error.
 """
@@ -52,8 +55,10 @@ import base64
 import io
 import logging
 import re
+import struct
 import time
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -1662,7 +1667,8 @@ class _Thumbnailer:
                     pass
         return None
 
-    # PDF: the page's image XObject by name, decoded by pypdf (needs Pillow).
+    # PDF: the page's image XObject by name, decoded by _pdf_xobject_image —
+    # NEVER by pypdf (``page.images`` / ``get_data()`` inflate without limit).
     def _pdf_image(self, name: Any, page: Optional[int]) -> Any:
         if not name or not page:
             return None
@@ -1681,19 +1687,11 @@ class _Thumbnailer:
         pg = pages[page - 1]
         key = "/" + str(name).lstrip("/")
         try:
-            xobjects = pg["/Resources"]["/XObject"]
-            xo = xobjects[key].get_object()
-            w = int(xo.get("/Width") or 0)
-            h = int(xo.get("/Height") or 0)
-            if w <= 0 or h <= 0 or w * h > MAX_THUMB_SOURCE_PIXELS:
-                return None
+            xo = _obj(_obj(_obj(pg["/Resources"])["/XObject"])[key])
         except Exception:
             return None
-        try:
-            img = pg.images[key]
-            return getattr(img, "image", None)
-        except Exception:
-            return None
+        return _pdf_xobject_image(xo)
+
 
     # HTML: only a data: URI src is ever decoded. Remote images are NEVER fetched.
     def _html_image(self, xpath: Any) -> Optional[bytes]:
@@ -1718,6 +1716,342 @@ class _Thumbnailer:
             return base64.b64decode(payload, validate=False)
         except Exception:
             return None
+
+
+# ---------------------------------------------------------------------------
+# PDF image XObjects, decoded with a hard memory bound
+# ---------------------------------------------------------------------------
+#
+# A PDF image declares its size (/Width, /Height, colour space, bits per
+# component), so the number of sample bytes it can MEAN is known before a
+# single byte is inflated. pypdf 4.2 ignores that: ``page.images[...]`` and
+# ``stream.get_data()`` inflate the whole Flate stream, and a ~1 MB upload that
+# inflates to gigabytes took the server down through the thumbnail. Here every
+# stream is inflated to at most the bytes its own dictionary says it holds (the
+# rest is never inflated — a viewer ignores it too), a stream whose ENCODED size
+# is over MAX_THUMB_SOURCE_BYTES is not read, anything bigger than
+# MAX_THUMB_DECODED_BYTES decoded is not attempted, and a filter or colour
+# space we can't bound is simply "no thumbnail".
+
+# Decoded sample bytes one PDF thumbnail may produce (image, and separately its
+# soft mask). A 300-dpi colour page (A4 or Letter) is ~26 MB.
+MAX_THUMB_DECODED_BYTES = 32 * 1024 * 1024
+
+_FLATE = {"/FlateDecode", "/Fl"}
+_ASCII_HEX = {"/ASCIIHexDecode", "/AHx"}
+_ASCII_85 = {"/ASCII85Decode", "/A85"}
+_DCT = {"/DCTDecode", "/DCT"}
+_JPX = {"/JPXDecode"}
+_CCITT = {"/CCITTFaxDecode", "/CCF"}
+
+
+def _bounded_inflate(data: bytes, limit: int) -> Optional[bytes]:
+    """At most ``limit`` bytes of the zlib stream ``data``; the rest is never
+    inflated. None if the stream is not zlib at all."""
+    if limit <= 0:
+        return b""
+    try:
+        return zlib.decompressobj().decompress(data, limit)
+    except zlib.error:
+        # A raw deflate stream without the zlib header (seen in the wild).
+        try:
+            return zlib.decompressobj(-zlib.MAX_WBITS).decompress(data, limit)
+        except zlib.error:
+            return None
+
+
+def _pdf_filters(stream: Any) -> Optional[List[Tuple[str, Any]]]:
+    """``[(filter name, its DecodeParms or None), ...]`` in decode order."""
+    try:
+        filters = _obj(stream.get("/Filter"))
+        parms = _obj(stream.get("/DecodeParms", stream.get("/DP")))
+        if filters is None:
+            return []
+        if not isinstance(filters, list):
+            filters = [filters]
+            parms = [parms]
+        elif not isinstance(parms, list):
+            parms = [parms] * len(filters) if parms is not None else []
+        out: List[Tuple[str, Any]] = []
+        for i, f in enumerate(filters):
+            p = _obj(parms[i]) if i < len(parms) else None
+            out.append((str(_obj(f)), p if hasattr(p, "get") else None))
+        return out
+    except Exception:
+        return None
+
+
+def _pdf_stream_bytes(stream: Any, limit: int) -> Optional[Tuple[bytes, str, Any]]:
+    """``(bytes, codec, codec parms)`` for a PDF stream, never inflating more
+    than ``limit`` bytes.
+
+    ``codec`` is "" when ``bytes`` are the decoded samples; otherwise it is the
+    image codec left to apply (DCT / JPX / CCITT, or "png" for a Flate stream
+    with a PNG predictor, whose ``bytes`` are still the zlib data). None =
+    unsupported (LZW, RunLength, JBIG2, a TIFF predictor...) or unreadable.
+    """
+    raw = getattr(stream, "_data", None)  # the bytes as stored: never get_data()
+    if isinstance(raw, str):
+        raw = raw.encode("latin-1", "replace")
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_THUMB_SOURCE_BYTES:
+        return None
+    filters = _pdf_filters(stream)
+    if filters is None:
+        return None
+    data = bytes(raw)
+    for i, (name, parms) in enumerate(filters):
+        last = i == len(filters) - 1
+        if name in _ASCII_HEX or name in _ASCII_85:
+            from pypdf.filters import ASCII85Decode, ASCIIHexDecode
+
+            try:  # at most 4x the input (ASCII85's "z"), which is capped above
+                data = (ASCIIHexDecode if name in _ASCII_HEX else ASCII85Decode).decode(data)
+            except Exception:
+                return None
+            if isinstance(data, str):
+                data = data.encode("latin-1", "replace")
+        elif name in _FLATE:
+            try:
+                predictor = int(_obj(parms.get("/Predictor", 1))) if parms is not None else 1
+            except (TypeError, ValueError):
+                return None
+            if predictor >= 10 and last:
+                return data, "png", parms
+            if predictor > 1:
+                return None  # a TIFF predictor, or PNG rows fed to another filter
+            inflated = _bounded_inflate(data, limit)
+            if inflated is None:
+                return None
+            data = inflated
+        elif last and (name in _DCT or name in _JPX or name in _CCITT):
+            return data, name, parms
+        else:
+            return None
+    return data, "", None
+
+
+def _pdf_colour_space(cs: Any, depth: int = 0) -> Optional[Tuple[str, int, Any]]:
+    """``(kind, components, palette)`` — kind is gray | rgb | cmyk | indexed |
+    separation; ``palette`` is the RGB lookup bytes of an Indexed space."""
+    cs = _obj(cs)
+    if depth > 3 or cs is None:
+        return None
+    if isinstance(cs, list):
+        if not cs:
+            return None
+        head = str(_obj(cs[0]))
+        if len(cs) == 1:
+            return _pdf_colour_space(cs[0], depth + 1)
+        if head == "/ICCBased":
+            try:
+                n = int(_obj(_obj(cs[1]).get("/N")))
+            except Exception:
+                return None
+            return {1: ("gray", 1, None), 3: ("rgb", 3, None), 4: ("cmyk", 4, None)}.get(n)
+        if head == "/CalRGB":
+            return ("rgb", 3, None)
+        if head == "/CalGray":
+            return ("gray", 1, None)
+        if head == "/Separation":
+            return ("separation", 1, None)
+        if head in ("/Indexed", "/I") and len(cs) >= 4:
+            base = _pdf_colour_space(cs[1], depth + 1)
+            if base is None or base[0] not in ("gray", "rgb", "cmyk"):
+                return None
+            try:
+                hival = int(_obj(cs[2]))
+            except (TypeError, ValueError):
+                return None
+            if not 0 <= hival <= 255:
+                return None
+            n = base[1]
+            want = (hival + 1) * n
+            lookup = _obj(cs[3])
+            if hasattr(lookup, "get") and hasattr(lookup, "get_data"):  # a stream
+                got = _pdf_stream_bytes(lookup, want)
+                if got is None or got[1]:
+                    return None
+                table = got[0]
+            else:
+                table = getattr(lookup, "original_bytes", None)
+                if table is None:
+                    table = bytes(lookup) if isinstance(lookup, (bytes, bytearray)) else str(lookup).encode("latin-1", "replace")
+            if len(table) < want:
+                return None
+            table = table[:want]
+            if n == 1:
+                rgb = b"".join(bytes((v, v, v)) for v in table)
+            elif n == 3:
+                rgb = bytes(table)
+            else:  # CMYK entries: the naive conversion is plenty for a thumbnail
+                out = bytearray()
+                for j in range(0, want, 4):
+                    c, m, y, k = table[j], table[j + 1], table[j + 2], table[j + 3]
+                    out += bytes(int((255 - v) * (255 - k) / 255) for v in (c, m, y))
+                rgb = bytes(out)
+            return ("indexed", 1, rgb)
+        return None
+    name = str(cs)
+    if name in ("/DeviceGray", "/G", "/CalGray"):
+        return ("gray", 1, None)
+    if name in ("/DeviceRGB", "/RGB", "/CalRGB"):
+        return ("rgb", 3, None)
+    if name in ("/DeviceCMYK", "/CMYK"):
+        return ("cmyk", 4, None)
+    return None
+
+
+def _png_wrap(w: int, h: int, depth: int, colour_type: int, idat: bytes, plte: Optional[bytes]) -> bytes:
+    """A PNG file around a PDF Flate stream that uses a PNG predictor — the
+    same filtered-rows-in-zlib layout — so Pillow's C decoder un-filters it."""
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+    head = chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, depth, colour_type, 0, 0, 0))
+    return b"\x89PNG\r\n\x1a\n" + head + (chunk(b"PLTE", plte) if plte else b"") + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def _pdf_xobject_image(xo: Any, soft_mask: bool = False) -> Any:
+    """A PIL image (already thumbnail-sized) of a PDF image XObject, with alpha
+    from its /SMask — or None.
+
+    Memory is bounded by the image's OWN declared size, never by what its
+    stream inflates to (see the section comment above). Never raises.
+    """
+    try:
+        from PIL import Image, ImageOps
+
+        if not hasattr(xo, "get") or xo.get("/Subtype") != "/Image":
+            return None
+        w = int(_obj(xo.get("/Width")) or 0)
+        h = int(_obj(xo.get("/Height")) or 0)
+        if w <= 0 or h <= 0 or w * h > MAX_THUMB_SOURCE_PIXELS:
+            return None
+        if bool(_obj(xo.get("/ImageMask", False))):  # a stencil: 1 bit, 0 = painted
+            kind, ncomp, palette, bpc = "gray", 1, None, 1
+        else:
+            cs = _pdf_colour_space(xo.get("/ColorSpace"))
+            kind, ncomp, palette = cs if cs is not None else ("", 0, None)
+            bpc = int(_obj(xo.get("/BitsPerComponent", 8)) or 8)
+        if soft_mask and kind != "gray":
+            return None
+        filters = _pdf_filters(xo)
+        if filters is None:
+            return None
+        terminal = filters[-1][0] if filters else ""
+        image_codec = terminal in _DCT or terminal in _JPX or terminal in _CCITT
+        # The samples the dictionary declares. Raw / Flate images decode to
+        # exactly this; an image codec (JPEG, JPEG 2000, fax) is always smaller.
+        expected = ((w * max(ncomp, 1) * bpc + 7) // 8) * h
+        if not image_codec and (not kind or expected > MAX_THUMB_DECODED_BYTES):
+            return None
+        got = _pdf_stream_bytes(xo, min(expected, MAX_THUMB_DECODED_BYTES))
+        if got is None:
+            return None
+        data, codec, parms = got
+
+        if codec in _DCT or codec in _JPX:
+            img = Image.open(io.BytesIO(data))
+            iw, ih = img.size
+            if iw * ih > MAX_THUMB_SOURCE_PIXELS:
+                return None
+            if codec in _JPX and iw * ih * 4 > MAX_THUMB_DECODED_BYTES:
+                return None  # JPEG 2000 decodes at full size
+            try:
+                img.draft("RGB", (THUMB_MAX_PX * 2, THUMB_MAX_PX * 2))  # JPEG: decode at 1/2..1/8 scale
+            except Exception:
+                pass
+            img.load()
+        elif codec in _CCITT:
+            from pypdf.filters import CCITTFaxDecode
+
+            # A TIFF header in front of the fax data; libtiff fills w x h and stops.
+            img = Image.open(io.BytesIO(CCITTFaxDecode.decode(data, parms, h)), formats=("TIFF",))
+            if img.size != (w, h):
+                return None
+            img.load()
+        elif bpc not in (1, 2, 4, 8) or (kind in ("rgb", "cmyk") and bpc != 8):
+            return None
+        elif codec == "png":
+            try:
+                declared = (
+                    int(_obj(parms.get("/Colors", 1))),
+                    int(_obj(parms.get("/BitsPerComponent", 8))),
+                    int(_obj(parms.get("/Columns", 1))),
+                )
+            except (TypeError, ValueError):
+                return None
+            if declared != (ncomp, bpc, w):
+                return None
+            plte = None
+            if kind == "indexed":
+                colour_type, plte = 3, palette[: 3 * (1 << bpc)]
+            elif kind in ("gray", "separation"):
+                colour_type = 0
+            elif kind == "rgb":
+                colour_type = 2
+            else:  # CMYK: four bytes a pixel, un-filtered exactly like RGBA
+                colour_type = 6
+            img = Image.open(io.BytesIO(_png_wrap(w, h, bpc, colour_type, data, plte)), formats=("PNG",))
+            # Pillow inflates only until the IHDR's rows are full: the same
+            # bound as _bounded_inflate, in C.
+            img.load()
+            if kind == "cmyk":
+                img = Image.frombytes("CMYK", img.size, img.tobytes())
+        else:
+            if len(data) < expected:
+                return None  # truncated: never pad a picture with invented pixels
+            if kind == "indexed":
+                img = Image.frombytes("P", (w, h), data, "raw", "P" if bpc == 8 else f"P;{bpc}")
+                img.putpalette(palette)
+            elif kind in ("gray", "separation"):
+                raw_mode = {1: "1", 2: "L;2", 4: "L;4", 8: "L"}[bpc]
+                img = Image.frombytes("1" if bpc == 1 else "L", (w, h), data, "raw", raw_mode)
+            else:
+                img = Image.frombytes("RGB" if kind == "rgb" else "CMYK", (w, h), data)
+        del data
+
+        # /Decode: only the plain inversion [1 0] of a one-channel image is
+        # honoured; any other remapping would show colours the page doesn't.
+        invert = kind == "separation"  # tint 1.0 = full ink = dark
+        decode = _obj(xo.get("/Decode"))
+        if decode is not None and codec not in _DCT and codec not in _JPX:
+            try:
+                pairs = [float(_obj(v)) for v in decode]
+            except (TypeError, ValueError):
+                return None
+            top = float((1 << bpc) - 1) if kind == "indexed" else 1.0
+            if pairs and all(pairs[i] == (0.0 if i % 2 == 0 else top) for i in range(len(pairs))):
+                pass
+            elif kind in ("gray", "separation") and pairs[:2] == [1.0, 0.0]:
+                invert = not invert
+            else:
+                return None
+
+        # Shrink BEFORE any widening conversion (a palette image made RGBA
+        # at full size would be 4 bytes a pixel).
+        if img.mode == "1":
+            img = img.convert("L")
+        elif img.mode == "CMYK":
+            img = img.convert("RGB")
+        img.thumbnail((THUMB_MAX_PX, THUMB_MAX_PX))
+        if img.mode not in ("RGB", "RGBA", "L", "LA"):
+            img = img.convert("RGBA" if ("A" in img.mode or "transparency" in img.info) else "RGB")
+        if invert:
+            img = ImageOps.invert(img.convert("L"))
+
+        smask = None if soft_mask else _obj(xo.get("/SMask"))
+        if smask is not None and hasattr(smask, "get"):
+            alpha = _pdf_xobject_image(smask, soft_mask=True)
+            if alpha is None:
+                return None  # a mask we can't read: no half-drawn picture
+            img = img.convert("RGBA")
+            img.putalpha(alpha.convert("L").resize(img.size))
+        return img
+    except Exception:
+        logger.debug("finding_location: PDF image thumbnail failed", exc_info=True)
+        return None
 
 
 __all__ = ["build_locations", "empty_location", "png_thumbnail_data_uri"]
