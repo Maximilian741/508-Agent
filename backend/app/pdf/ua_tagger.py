@@ -248,15 +248,35 @@ def _count_text_ops(ops) -> int:
 
 
 def _block_font_size(block_ops) -> float:
-    """Largest ``Tf`` font size used inside a BT..ET block (0 if none)."""
+    """Largest EFFECTIVE font size shown inside a BT..ET block (0 if no Tf).
+
+    Effective = the ``Tf`` size times the text matrix's vertical scale. Most
+    producers put the size in ``Tf`` and leave ``Tm`` unscaled, but Cairo and
+    Skia write ``1 Tf`` and carry the size in ``Tm`` ("12 0 0 12 x y Tm"): read
+    as Tf alone every block was "1pt", so such documents got no headings and
+    no title at all. (A uniform CTM scale cancels out: every size decision
+    here is a ratio to body text.)
+    """
+    import math
+
     size = 0.0
+    tf = None
+    tm_scale = 1.0
     for operands, op in block_ops:
-        if op == b"Tf" and len(operands) >= 2:
-            try:
-                size = max(size, float(operands[1]))
-            except (TypeError, ValueError):
-                pass
-    return size
+        try:
+            if op == b"Tf" and len(operands) >= 2:
+                tf = float(operands[1])
+            elif op == b"Tm" and len(operands) >= 6:
+                c, d = float(operands[2]), float(operands[3])
+                s = math.hypot(c, d)
+                tm_scale = s if s > 1e-6 else 1.0
+            elif op in (b"Tj", b"TJ", b"'", b'"') and tf is not None:
+                size = max(size, abs(tf) * tm_scale)
+        except (TypeError, ValueError):
+            continue
+    if size == 0.0 and tf is not None:
+        size = abs(tf) * tm_scale  # a Tf with no show op after it
+    return round(size, 2)
 
 
 def _heading_levels(sizes: List[float], weights: Optional[List[int]] = None) -> Dict[float, int]:

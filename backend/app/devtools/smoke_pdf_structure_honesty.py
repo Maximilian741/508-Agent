@@ -200,6 +200,18 @@ def contents_first_pdf(big: str = "Contents") -> bytes:
     return K.to_bytes(w)
 
 
+def cairo_pdf() -> bytes:
+    """Cairo/Skia style: every block is "1 Tf", the size lives in Tm."""
+    w = PdfWriter()
+    f = K.helvetica(w)
+    c = b"BT /F1 1 Tf 20 0 0 20 72 720 Tm (Snow Route Handbook) Tj ET\n"
+    c += b"BT /F1 1 Tf 15 0 0 15 72 690 Tm (Getting Started) Tj ET\n"
+    for i in range(10):
+        c += b"BT /F1 1 Tf 11 0 0 11 72 %d Tm (%s) Tj ET\n" % (660 - 14 * i, BODY.encode())
+    K.add_page(w, c, {"F1": f})
+    return K.to_bytes(w)
+
+
 def remediate(data: bytes, name: str, *, title: bool = True):
     from app.parsers.pdf_parser import PDFParser
     from app.writers.pdf_writer import write_remediated_pdf
@@ -326,6 +338,15 @@ def main() -> int:
         check(f"the first SECTION's name ({big!r}) is not offered as the document title",
               not rb.tree.root.metadata.properties.get("title_candidate"),
               repr(rb.tree.root.metadata.properties.get("title_candidate")))
+
+    # 9. sizes carried in the text matrix (Cairo/Skia "1 Tf" + "20 0 0 20 Tm")
+    rcai, _wc, out_c = remediate(cairo_pdf(), "cairo.pdf")
+    check("Tm-scaled text: the title is found",
+          rcai.tree.root.metadata.properties.get("title_candidate") == "Snow Route Handbook",
+          repr(rcai.tree.root.metadata.properties.get("title_candidate")))
+    hc = [(h["level"], h["text"].strip()) for h in read_struct_info(PdfReader(str(out_c)))["headings"]]
+    check("Tm-scaled text: headings are ranked by their real size",
+          hc == [(1, "Snow Route Handbook"), (2, "Getting Started")], str(hc))
 
     _rg, wg, out_g = remediate(grid_pdf(), "bold_grid.pdf")
     hg = read_struct_info(PdfReader(str(out_g)))["headings"]
