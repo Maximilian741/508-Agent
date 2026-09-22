@@ -95,6 +95,7 @@ _DRAWING_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingD
 _DRAWINGML_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _PIC_NS = "{http://schemas.openxmlformats.org/drawingml/2006/picture}"
 _REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_V_SHAPE_TAG = "{urn:schemas-microsoft-com:vml}shape"
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +572,8 @@ def _apply_image(
             return  # untouched — leave the author's docPr exactly as it was
 
     doc_pr = image_by_id.get(image.id)
-    if doc_pr is None or getattr(doc_pr, "tag", None) != f"{_DRAWING_NS}docPr":
+    holder_tag = getattr(doc_pr, "tag", None)
+    if doc_pr is None or holder_tag not in (f"{_DRAWING_NS}docPr", _V_SHAPE_TAG):
         # No rId fallback: an rId names the image BYTES, not the picture —
         # it is shared by every copy of a pasted logo, and a header's rIds
         # are a different namespace from the body's. The registry names every
@@ -579,6 +581,27 @@ def _apply_image(
         skipped.append({"target_id": image.id, "reason": "image_instance_not_found_in_source"})
         return
     rid = (image.metadata.properties or {}).get("image_rid") or "?"
+
+    if holder_tag == _V_SHAPE_TAG:
+        # A legacy VML picture: its description is v:shape@alt. VML has no
+        # "decorative" mark Word honours, so that request is refused (and,
+        # being unwritten, never reported applied).
+        if image.is_decorative:
+            skipped.append({"target_id": image.id, "reason": "vml_picture_cannot_be_marked_decorative"})
+            return
+        vml_alt = _xml_safe((image.alt_text or "").strip()).strip()
+        if not vml_alt:
+            skipped.append({"target_id": image.id, "reason": "alt_text_empty_and_not_decorative"})
+            return
+        doc_pr.set("alt", vml_alt)
+        applied.append(
+            {
+                "kind": "image_alt_text",
+                "target_id": image.id,
+                "summary": f"v:shape[{image.id} rid={rid}] alt={vml_alt!r}",
+            }
+        )
+        return
 
     if image.is_decorative:
         # Decorative: descr must be empty AND hidden=1 on THIS instance.

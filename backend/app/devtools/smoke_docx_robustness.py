@@ -723,6 +723,80 @@ def main() -> int:
     check("pages: a generated file with no render marks gets NO page numbers (not 'page 1' for all)",
           all(n.metadata.page is None for n in iter_reading_order(res.tree.root)))
 
+    # ===== 13. Legacy VML pictures (compatibility-mode documents) =============
+    # A document still in Word 97-2003 compatibility mode keeps its pictures
+    # as <w:pict><v:shape><v:imagedata r:id=…/>; their description is
+    # v:shape@alt. They were invisible: no finding, no fix. A watermark and an
+    # embedded OLE object's preview are not pictures to describe, and the VML
+    # copy Word keeps in mc:Fallback of a modern picture is not a second one.
+    vns = 'xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"'
+    d = Document()
+    d.core_properties.title = "Legacy pictures"
+    d.add_heading("Legacy pictures", 1)
+    d.add_paragraph("A scanned map of the district appears below this sentence of prose.")
+    vrid, _img = d.part.get_or_add_image(_png(21))
+    vp = d.add_paragraph()
+    vp._p.append(parse_xml(
+        f'<w:r {nsdecls("w", "r")} {vns}><w:pict><v:shape id="_x0000_i1025" type="#_x0000_t75" '
+        f'style="width:60pt;height:40pt"><v:imagedata r:id="{vrid}" o:title="scan0042"/></v:shape>'
+        '</w:pict></w:r>'))
+    orid, _img2 = d.part.get_or_add_image(_png(22))
+    op = d.add_paragraph("Embedded worksheet: ")
+    op._p.append(parse_xml(
+        f'<w:r {nsdecls("w", "r")} {vns}><w:object><v:shape id="_x0000_i1026" type="#_x0000_t75" '
+        f'style="width:80pt;height:40pt"><v:imagedata r:id="{orid}" o:title=""/></v:shape>'
+        '<o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" ShapeID="_x0000_i1026" DrawAspect="Content" '
+        'ObjectID="_1234"/></w:object></w:r>'))
+    # A modern picture stored twice: DrawingML in mc:Choice, VML in mc:Fallback.
+    d.add_paragraph("A photograph of the new clinic, with its own description below.")
+    d.add_picture(_png(23), width=Inches(1))
+    mp = d.paragraphs[-1]._p
+    drun = mp.find(qn("w:r"))
+    drawing = drun.find(qn("w:drawing"))
+    brid = drawing.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip").get(qn("r:embed"))
+    alt = parse_xml(
+        f'<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        f'{nsdecls("w", "r")} {vns}><mc:Choice Requires="wps"/><mc:Fallback><w:pict>'
+        f'<v:shape id="_x0000_i1027" type="#_x0000_t75" style="width:72pt;height:36pt">'
+        f'<v:imagedata r:id="{brid}" o:title=""/></v:shape></w:pict></mc:Fallback></mc:AlternateContent>')
+    drun.remove(drawing)
+    alt[0].append(drawing)
+    drun.append(alt)
+    # A picture watermark in the header.
+    hdr = d.sections[0].header
+    wrid, _img3 = hdr.part.get_or_add_image(_png(24))
+    hdr.paragraphs[0]._p.append(parse_xml(
+        f'<w:r {nsdecls("w", "r")} {vns}><w:pict><v:shape id="WordPictureWatermark1" type="#_x0000_t75" '
+        f'style="position:absolute;width:400pt;height:300pt"><v:imagedata r:id="{wrid}" o:title="seal"/>'
+        '</v:shape></w:pict></w:r>'))
+    src = tmp / "vml.docx"
+    d.save(str(src))
+    res = parse_to_tree(str(src))
+    run_analyzers(res.tree)
+    imgs = _nodes(res.tree, ImageNode)
+    vml_imgs = [n for n in imgs if (n.metadata.properties or {}).get("vml_picture")]
+    check("vml: the legacy picture is ONE node (not the watermark, the OLE preview or a Fallback copy)",
+          len(imgs) == 2 and len(vml_imgs) == 1, str([(n.id, n.metadata.properties.get("vml_picture")) for n in imgs]))
+    check("vml: it is flagged, and its file-name title is not taken as alt",
+          bool(vml_imgs) and not vml_imgs[0].alt_text
+          and any(f.code.value == "MISSING_ALT_TEXT" for f in vml_imgs[0].accessibility_flags))
+    for n in imgs:
+        n.alt_text = f"Described {n.id}"
+    out = tmp / "vml_fixed.docx"
+    wr = write_remediated_docx(src, res.tree, out)
+    check("vml: writer confirms both alts", sorted(a["target_id"] for a in wr["applied"] if a.get("kind") == "image_alt_text")
+          == sorted(n.id for n in imgs), str(wr))
+    with zipfile.ZipFile(out) as z:
+        droot = etree.fromstring(z.read("word/document.xml"))
+    shapes = {s.get("id"): s.get("alt") for s in droot.iter("{urn:schemas-microsoft-com:vml}shape")}
+    check("vml: the alt lands on that v:shape only (OLE preview and Fallback copy untouched)",
+          vml_imgs and shapes.get("_x0000_i1025") == f"Described {vml_imgs[0].id}"
+          and shapes.get("_x0000_i1026") is None and shapes.get("_x0000_i1027") is None, str(shapes))
+    res2 = parse_to_tree(str(out))
+    run_analyzers(res2.tree)
+    check("vml: re-parse - no MISSING_ALT_TEXT left, file re-opens",
+          "MISSING_ALT_TEXT" not in _codes(res2.tree) and Document(str(out)) is not None, str(_codes(res2.tree)))
+
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0
 

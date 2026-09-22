@@ -843,7 +843,7 @@ def _rendered_page_map(body_el, file_path: str) -> Optional[Dict[Any, int]]:
     if not markers or len(markers) + 1 != word_pages:
         return None
     counted = set(markers)
-    tags = {_W_P, _W_TBL, qn("w:tr"), qn("w:tc"), _WP_INLINE, _WP_ANCHOR,
+    tags = {_W_P, _W_TBL, qn("w:tr"), qn("w:tc"), _WP_INLINE, _WP_ANCHOR, _V_SHAPE,
             qn("w:hyperlink"), qn("w:fldSimple")}
     out: Dict[Any, int] = {}
     page = 1
@@ -968,8 +968,28 @@ def _inside(el, stop, tags) -> bool:
     return False
 
 
+_V_SHAPE = "{urn:schemas-microsoft-com:vml}shape"
+_V_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
+_R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+_O_RELID = "{urn:schemas-microsoft-com:office:office}relid"
+_W_OBJECT = qn("w:object")
+
+
+def _vml_picture_rid(shape) -> Optional[str]:
+    """The image rId of a legacy VML picture (``<w:pict><v:shape><v:imagedata
+    r:id=…>``), or None for anything that is not one: other VML shapes,
+    the preview image of an embedded OLE object (``w:object``), and
+    watermarks (decorative page background Word draws in the header)."""
+    if "watermark" in (shape.get("id") or "").lower():
+        return None
+    imd = shape.find(_V_IMAGEDATA)
+    if imd is None:
+        return None
+    return imd.get(_R_ID) or imd.get(_O_RELID) or None
+
+
 def iter_paragraph_drawings(p_el) -> Iterator[Tuple[Any, str, Any]]:
-    """``(wrapper, rId, docPr)`` for every picture drawn inside ``<w:p>``.
+    """``(wrapper, rId, alt_holder)`` for every picture drawn inside ``<w:p>``.
 
     One entry per ``wp:inline`` / ``wp:anchor`` that shows an image, in
     document order, with THAT drawing's own ``<wp:docPr>`` (where Word keeps
@@ -977,10 +997,23 @@ def iter_paragraph_drawings(p_el) -> Iterator[Tuple[Any, str, Any]]:
     its own entry with its own docPr — the text box's anchor no longer also
     claims the picture's blip and gets the alt written onto the text box.
     Drawings in ``mc:Fallback`` (the legacy duplicate) are skipped.
+
+    Legacy VML pictures (``w:pict/v:shape`` with ``v:imagedata`` — what a
+    document still in Word 97-2003 compatibility mode keeps its pictures as)
+    are entries too, with the ``v:shape`` itself as the alt holder (its
+    ``alt`` attribute is the picture's alternative text). They used to be
+    invisible: a converted agency template's pictures got no finding at all.
     """
     wrappers = (_WP_INLINE, _WP_ANCHOR)
-    for wrapper in p_el.iter(*wrappers):
+    for wrapper in p_el.iter(_WP_INLINE, _WP_ANCHOR, _V_SHAPE):
         if _inside(wrapper, p_el, (_MC_FALLBACK,)):
+            continue
+        if wrapper.tag == _V_SHAPE:
+            if _inside(wrapper, p_el, (_W_OBJECT,)):
+                continue
+            vml_rid = _vml_picture_rid(wrapper)
+            if vml_rid:
+                yield wrapper, vml_rid, wrapper
             continue
         blip = None
         for cand in wrapper.iter(_A_BLIP):
@@ -1021,10 +1054,19 @@ def _image_nodes_from_p(
     context_done = False
     for wrapper, rid, doc_pr in iter_paragraph_drawings(p_el):
         page = ids.page_of(wrapper)
-        alt_text = (doc_pr.get("descr") or doc_pr.get("title") or "").strip()
-        is_decorative = (doc_pr.get("hidden") or "").lower() in {"1", "true"}
+        vml = doc_pr.tag == _V_SHAPE
+        if vml:
+            # VML keeps the description in v:shape@alt. (v:imagedata@o:title
+            # is usually the original FILE name — never read as alt.)
+            alt_text = (doc_pr.get("alt") or "").strip()
+            is_decorative = False
+        else:
+            alt_text = (doc_pr.get("descr") or doc_pr.get("title") or "").strip()
+            is_decorative = (doc_pr.get("hidden") or "").lower() in {"1", "true"}
         b64, mime = blobs.get(rid, (None, None))
         properties: Dict[str, Any] = {"image_rid": rid, "docx_story": story, "docx_part": partname}
+        if vml:
+            properties["vml_picture"] = True
         if extra_props:
             properties.update(extra_props)
         if b64:
