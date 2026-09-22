@@ -314,6 +314,12 @@ HEADER_ROWS = [
 
 def main() -> int:
     failures = 0
+    # Check names quote Arabic/CJK cases; a Windows console (cp1252) must not
+    # turn that into a crash of the smoke itself.
+    try:
+        sys.stdout.reconfigure(errors="backslashreplace")
+    except Exception:  # pragma: no cover - non-reconfigurable stream
+        pass
 
     def check(name: str, cond: bool, extra: str = "") -> None:
         nonlocal failures
