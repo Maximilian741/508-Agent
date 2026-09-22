@@ -22,7 +22,11 @@ goes through /pipeline/analyze and /pipeline/remediate over HTTP:
     table conversion fails verification, and a failed save is a 422 with no
     charge;
   * a sheet longer than the scan window keeps its data block whole, and data
-    we did not read is disclosed (ANALYSIS_TRUNCATED), never silently dropped.
+    we did not read is disclosed (ANALYSIS_TRUNCATED), never silently dropped;
+  * only a line that stands on its own (a blank row under it, or the data it
+    labels right below) is offered as the workbook title: "Name" over a
+    column of names is a heading, and writing it as the title is worse than
+    the filename.
 
 Usage:
     python -m app.devtools.smoke_xlsx_pipeline
@@ -414,6 +418,37 @@ def main() -> int:  # noqa: PLR0915
     check("window: a block longer than the window keeps its full extent", props.get("cell_range") == "A1:C120", str(props.get("cell_range")))
     check("window: ...and is still offered the fix", props.get("header_detection") == "candidate", str(props.get("header_detection")))
     check("window: data below the window is disclosed (ANALYSIS_TRUNCATED)", any(v.rule_id == "ANALYSIS_TRUNCATED" for v in viols))
+
+    # ---- 6. which line may become the workbook title -----------------------
+    # The title fix prefers the sheet's own title line over the filename, so
+    # a column heading mistaken for a title would be written into the file.
+    def title_of(name: str, rows) -> object:
+        p = tmp / name
+        book = xlsxwriter.Workbook(str(p))
+        sheet = book.add_worksheet("Data")
+        for (r, c, v) in rows:
+            sheet.write(r, c, v)
+        book.close()
+        return (parse_to_tree(str(p)).tree.root.metadata.properties or {}).get("title_candidate")
+
+    one_col = [(0, 0, "Name")] + [(i, 0, n) for i, n in enumerate(["Alice Jones", "Bob Smith", "Carol White"], 1)]
+    check("title: 'Name' over a column of names is NOT the workbook title", title_of("names.xlsx", one_col) is None,
+          repr(title_of("names.xlsx", one_col)))
+    listed = [(0, 0, "Contacts"), (1, 0, "Alice"), (2, 0, "Bob"), (5, 0, "Item"), (5, 1, "Cost")] + [
+        (6 + i, c, v) for i in range(4) for c, v in ((0, f"thing {i}"), (1, i))
+    ]
+    check("title: the first entry of a list above the data is not a title", title_of("listed.xlsx", listed) is None,
+          repr(title_of("listed.xlsx", listed)))
+    titled = [(0, 0, "Department budget 2025"), (2, 0, "Department"), (2, 1, "Q1")] + [
+        (3 + i, c, v) for i in range(4) for c, v in ((0, f"Dept {i}"), (1, i))
+    ]
+    check("title: a line with a blank row under it still is", title_of("titled.xlsx", titled) == "Department budget 2025",
+          repr(title_of("titled.xlsx", titled)))
+    labelled = [(0, 0, "Department budget 2025"), (1, 0, "Department"), (1, 1, "Q1")] + [
+        (2 + i, c, v) for i in range(4) for c, v in ((0, f"Dept {i}"), (1, i))
+    ]
+    check("title: ...and so does the label right above the data", title_of("labelled.xlsx", labelled) == "Department budget 2025",
+          repr(title_of("labelled.xlsx", labelled)))
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

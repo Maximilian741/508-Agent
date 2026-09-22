@@ -1410,6 +1410,14 @@ def _title_candidate(scan: WorkbookScan) -> Optional[str]:
         t = " ".join(text.split())
         if r > first_row or c > max(3, first_col + 1):
             return None  # not the sheet's opening line: a side note, a footer
+        # A title stands on its own: a blank row under it, or the data block
+        # it labels starts right under it. Text directly below it means it is
+        # the first entry of a list ("Name" over a column of names is a
+        # column heading, and writing it as the workbook title is worse than
+        # the filename).
+        labels_first_block = first is not None and first.r1 == r + 1 and first.c1 <= c <= first.c2
+        if not labels_first_block and any(rr == r + 1 for (rr, _cc) in sheet.grid):
+            return None
         if not (3 <= len(t) <= 120) or len(t.split()) > 15:
             return None
         if t.endswith((":", ".")) or not re.search(r"[^\W\d_]", t):
