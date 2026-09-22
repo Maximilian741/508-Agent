@@ -237,7 +237,7 @@ export function SystemCheckWizard() {
           {/* Deployment summary */}
           {deployment && !deployment.error ? (
             <View style={[styles.deploy, { borderRadius: theme.radius.md, borderColor: theme.colors.border }]}>
-              <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+              <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 6 }]}>
                 THIS DEPLOYMENT
               </Text>
               <DeployRow label="Environment" value={deployment.environment || "?"} theme={theme} />
@@ -277,7 +277,7 @@ export function SystemCheckWizard() {
                 hovered ? { opacity: 0.92 } : null,
               ]}
             >
-              <Text style={{ color: "#FFFFFF", fontWeight: "800", fontSize: 13 }}>Done</Text>
+              <Text style={{ color: theme.colors.onAccent, fontWeight: "800", fontSize: 13 }}>Done</Text>
             </Pressable>
           </View>
         </Pressable>
@@ -301,7 +301,7 @@ function StatusDot({ state, theme }: { state: StepState; theme: any }) {
   }
   return (
     <View style={[styles.dot, { backgroundColor: bg }]}>
-      <Text style={{ color: "#FFFFFF", fontWeight: "800", fontSize: 12 }}>{glyph}</Text>
+      <Text style={{ color: theme.colors.bg, fontWeight: "800", fontSize: 12 }}>{glyph}</Text>
     </View>
   );
 }

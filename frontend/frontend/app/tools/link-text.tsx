@@ -44,14 +44,13 @@ export default function LinkTextChecker() {
   return (
     <Screen scroll title="Link text checker">
       <Hero
-        shader="ember"
         eyebrow="LINK TEXT"
         title="Link text checker"
         subtitle="Screen-reader users often pull every link onto one list to scan a page. “Click here” and bare URLs are useless there. Paste a link's text to see if it's descriptive (WCAG 2.4.4) — and get a better label suggested from its destination."
       />
 
       <Card>
-        <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+        <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 6 }]}>
           LINK TEXT (WHAT THE USER SEES)
         </Text>
         <TextInput
@@ -62,7 +61,7 @@ export default function LinkTextChecker() {
           placeholderTextColor={theme.colors.textMuted}
           style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}
         />
-        <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 14, marginBottom: 6 }]}>
+        <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginTop: 14, marginBottom: 6 }]}>
           DESTINATION URL (OPTIONAL — USED TO SUGGEST A LABEL)
         </Text>
         <TextInput
@@ -91,7 +90,7 @@ export default function LinkTextChecker() {
 
           {!verdict.ok && suggestion ? (
             <View style={[styles.suggestBox, { borderColor: theme.colors.accent, backgroundColor: theme.colors.surface2 }]}>
-              <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginBottom: 6 }]}>
+              <Text style={[theme.typography.eyebrow, { color: theme.colors.textMuted, marginBottom: 6 }]}>
                 SUGGESTED LABEL (FROM THE URL — EDIT TO TASTE)
               </Text>
               <View style={styles.suggestRow}>

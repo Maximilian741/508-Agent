@@ -37,7 +37,7 @@ export function ScoreBadge({ score, grade, fromScore = 0, subLabel }: ScoreBadge
   return (
     <View style={[styles.wrap, { borderRadius: theme.radius.none, backgroundColor: tone.bg, borderColor: tone.border }]}>
       <View style={styles.row}>
-        <Text style={[theme.typography.pixelLarge, styles.score, { color: tone.text }]}>{display.toFixed(1)}</Text>
+        <Text style={[theme.typography.stat, styles.score, { color: tone.text }]}>{display.toFixed(1)}</Text>
         <View style={[styles.gradePill, { borderRadius: theme.radius.pill, backgroundColor: tone.text }]}>
           <Text style={[styles.gradeText, { color: tone.bg }]}>{grade}</Text>
         </View>

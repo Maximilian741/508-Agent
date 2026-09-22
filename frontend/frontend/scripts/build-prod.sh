@@ -30,6 +30,9 @@ npx expo export -p web --output-dir dist
 rm -f dist/_sitemap.html
 node scripts/generate-sitemap.mjs dist
 node scripts/check-internal-links.mjs dist
+node scripts/check-contrast.mjs
+node scripts/check-design.mjs
+node scripts/check-fix-plan.mjs
 node scripts/render-nginx-conf.mjs dist nginx.conf
 
 echo "Build complete. Output: ${PROJECT_DIR}/dist (serve with ${PROJECT_DIR}/nginx.conf)"

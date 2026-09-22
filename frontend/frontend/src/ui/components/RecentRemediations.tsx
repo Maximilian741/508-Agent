@@ -53,7 +53,10 @@ function _when(iso?: string | null): string {
   return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-export function RecentRemediations() {
+export function RecentRemediations({
+  title = "Recent remediations",
+  subtitle = "Fixed files from your last remediations, in case a download did not reach you.",
+}: { title?: string; subtitle?: string } = {}) {
   const theme = useTheme();
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl);
   const mockMode = useAppStore((s) => s.mockMode);
@@ -86,10 +89,8 @@ export function RecentRemediations() {
     <Card>
       <View style={styles.headerRow}>
         <View style={{ flexShrink: 1 }}>
-          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Recent remediations</Text>
-          <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 2 }]}>
-            Fixed files from your last remediations, in case a download did not reach you.
-          </Text>
+          <Text style={[theme.typography.h2, { color: theme.colors.text }]}>{title}</Text>
+          <Text style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 2 }]}>{subtitle}</Text>
         </View>
       </View>
 

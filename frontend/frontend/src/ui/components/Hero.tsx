@@ -1,16 +1,23 @@
 /**
- * Hero — top-of-page billboard.
+ * Hero — the top-of-page panel on every screen.
  *
- * A flat, warm typeset panel (surface2) with a hairline bottom rule — no
- * animated shader, no gradient, no white-text-over-smoke. The serif title and
- * ember eyebrow sit directly on the panel in palette colours so contrast is
- * honest in every theme. The `shader`/`shaderOpacity` props are accepted but
- * ignored (kept so existing call sites compile) — the shader system is retired.
+ * A rounded glass panel with a large, tight sans headline. Pass `shader` to
+ * put the reactive ShaderBackground behind it (landing + home use it); pass
+ * `shaderIntensity` (0..1) to make the field brighten while something is
+ * happening — e.g. while a document is being processed.
+ *
+ * The shader always renders under its palette scrim, and the contrast script
+ * proves every text token (and the accent eyebrow pill) passes AA over ANY
+ * pixel the shader can emit, so text colours here are the normal palette
+ * tokens. Keep a shader hero to text, the eyebrow and buttons: tinted status
+ * chips are only certified on surfaces, so they belong below the hero.
  */
 import React, { ReactNode } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 
+import { glassStyle } from "../theme";
 import { useTheme } from "../useTheme";
+import { ShaderBackground } from "./ShaderBackground";
 
 export interface HeroProps {
   eyebrow?: string;
@@ -18,33 +25,81 @@ export interface HeroProps {
   subtitle?: string;
   rightSlot?: ReactNode;
   children?: ReactNode;
-  /** Retired — accepted for back-compat, no longer renders anything. */
-  shader?: string;
+  /**
+   * Render the reactive shader behind the hero. Reserved for the two front
+   * doors (landing + home) so it stays special; every other page gets glass.
+   */
+  shader?: boolean;
+  /** 0..1 — shader liveliness; raise it while work is in progress. */
+  shaderIntensity?: number;
+  /** Accepted for back-compat; ignored. */
   shaderOpacity?: number;
 }
 
-export function Hero({ eyebrow, title, subtitle, rightSlot, children }: HeroProps) {
+export function Hero({ eyebrow, title, subtitle, rightSlot, children, shader, shaderIntensity = 0 }: HeroProps) {
   const theme = useTheme();
+  const withShader = Platform.OS === "web" && !!shader;
+  const shadow = theme.isDark ? theme.shadows.near.webDark : theme.shadows.near.web;
 
   return (
     <View
       // @ts-ignore - region landmark
       accessibilityRole={Platform.OS === "web" ? ("region" as any) : undefined}
+      accessibilityLabel={Platform.OS === "web" ? title : undefined}
       style={[
         styles.wrap,
+        withShader ? styles.wrapShader : null,
+        Platform.OS === "web"
+          ? ({ paddingHorizontal: withShader ? "clamp(22px, 4vw, 40px)" : "clamp(20px, 3vw, 28px)" } as any)
+          : null,
         {
-          backgroundColor: theme.colors.surface2,
-          borderBottomWidth: theme.border.medium,
-          borderBottomColor: theme.colors.accent,
-        },
+          borderRadius: theme.radius.xl,
+          borderColor: theme.colors.glassBorder,
+          ...(withShader ? { backgroundColor: theme.colors.shaderBase } : glassStyle(theme.colors)),
+          ...(Platform.OS === "web" ? ({ boxShadow: shadow } as any) : theme.shadows.near.rn),
+        } as any,
       ]}
     >
-      <View style={[styles.content, { gap: 6 }]}>
+      {withShader ? <ShaderBackground intensity={shaderIntensity} /> : null}
+      {!withShader && Platform.OS === "web" ? (
+        // A faint top sheen so the glass reads as a lit surface.
+        <View
+          pointerEvents="none"
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              // @ts-ignore web-only
+              backgroundImage: `linear-gradient(180deg, ${theme.isDark ? "rgba(255,255,255,0.035)" : "rgba(255,255,255,0.7)"} 0%, transparent 60%)`,
+            } as any,
+          ]}
+        />
+      ) : null}
+      <View style={[styles.content, { gap: 10 }]}>
         {eyebrow ? (
-          <Text style={[styles.eyebrow, { color: theme.colors.accent }]}>{eyebrow}</Text>
+          <View
+            style={[
+              styles.eyebrow,
+              {
+                borderRadius: theme.radius.pill,
+                borderColor: theme.colors.glassBorder,
+                backgroundColor: theme.colors.accentSoft,
+              },
+            ]}
+          >
+            <View style={[styles.eyebrowDot, { backgroundColor: theme.colors.accent }]} />
+            <Text style={[theme.typography.eyebrow, { color: theme.colors.accent }]}>{eyebrow}</Text>
+          </View>
         ) : null}
         <Text
-          style={[styles.title, { color: theme.colors.text }]}
+          style={[
+            withShader ? theme.typography.display : [theme.typography.title, styles.title],
+            // Scale the headline with the viewport on web (CSS, not a JS
+            // width measurement, which reads 0 in some embedded views).
+            Platform.OS === "web"
+              ? ({ fontSize: withShader ? "clamp(34px, 5.4vw, 48px)" : "clamp(26px, 4vw, 34px)", lineHeight: "1.14" } as any)
+              : null,
+            { color: theme.colors.text },
+          ]}
           // Page title = the h1 of every screen. We sell heading structure;
           // the app must have it too.
           accessibilityRole="header"
@@ -53,7 +108,9 @@ export function Hero({ eyebrow, title, subtitle, rightSlot, children }: HeroProp
           {title}
         </Text>
         {subtitle ? (
-          <Text style={[styles.subtitle, { color: theme.colors.textMuted }]}>{subtitle}</Text>
+          <Text style={[styles.subtitle, withShader ? styles.subtitleLarge : null, { color: theme.colors.textMuted }]}>
+            {subtitle}
+          </Text>
         ) : null}
         {children}
       </View>
@@ -62,42 +119,51 @@ export function Hero({ eyebrow, title, subtitle, rightSlot, children }: HeroProp
   );
 }
 
-const serif = Platform.select({
-  ios: "Iowan Old Style, Charter, Georgia, serif",
-  android: "serif",
-  default: "'Iowan Old Style', 'Charter', 'Georgia', serif",
-}) as any;
-
 const styles = StyleSheet.create({
   wrap: {
+    position: "relative",
+    overflow: "hidden",
     flexDirection: "row",
     alignItems: "center",
     gap: 16,
-    padding: 28,
-    borderRadius: 0, // square top-of-page panel — part of the dossier look
+    paddingHorizontal: 28,
+    paddingVertical: 28,
+    borderWidth: 1,
     flexWrap: "wrap",
-    minHeight: 150,
+    minHeight: 140,
   },
-  content: { flex: 1 },
+  wrapShader: {
+    paddingHorizontal: 36,
+    paddingVertical: 48,
+    minHeight: 280,
+  },
+  content: { flex: 1, minWidth: 260, zIndex: 1 },
   eyebrow: {
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 1.4,
-    textTransform: "uppercase",
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderWidth: 1,
   },
+  eyebrowDot: { width: 6, height: 6, borderRadius: 3 },
   title: {
-    fontFamily: serif,
-    fontSize: 42,
+    fontSize: 34,
     fontWeight: "700",
-    letterSpacing: -0.2,
-    lineHeight: 48,
+    letterSpacing: -0.9,
+    lineHeight: 40,
   },
   subtitle: {
     fontSize: 15,
-    lineHeight: 22,
-    maxWidth: 640,
+    lineHeight: 23,
+    maxWidth: 680,
   },
-  right: { marginLeft: "auto" },
+  subtitleLarge: {
+    fontSize: 17,
+    lineHeight: 26,
+  },
+  right: { marginLeft: "auto", zIndex: 1 },
 });
 
 export default Hero;

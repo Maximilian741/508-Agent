@@ -62,14 +62,14 @@ export default function JoinScreen() {
       <View style={{ marginTop: 16 }}>
         {!token ? (
           <Card style={{ borderColor: theme.colors.danger, borderWidth: 2 }}>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.danger }]}>Missing invite link</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.danger }]}>Missing invite link</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8 }}>
               This page needs an invitation token. Use the link from your invite email.
             </Text>
           </Card>
         ) : state === "joined" ? (
           <Card style={{ borderColor: OK_GREEN, borderWidth: 2 }}>
-            <Text style={[theme.typography.pixelLarge, { color: OK_GREEN }]}>You're in</Text>
+            <Text style={[theme.typography.stat, { color: OK_GREEN }]}>You're in</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8, marginBottom: 12 }}>
               You joined {teamName ? `“${teamName}”` : "the team"}. You now share the team's credits and free certificates.
             </Text>
@@ -77,13 +77,13 @@ export default function JoinScreen() {
           </Card>
         ) : state === "error" ? (
           <Card style={{ borderColor: theme.colors.danger, borderWidth: 2 }}>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.danger }]}>Couldn't accept invite</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.danger }]}>Couldn't accept invite</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8, marginBottom: 12 }}>{errorMsg}</Text>
             <Button title="Try again" variant="secondary" onPress={() => setState("idle")} />
           </Card>
         ) : signedIn ? (
           <Card>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>Accept your invitation</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.text }]}>Accept your invitation</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8, marginBottom: 12, lineHeight: 20 }}>
               You're signed in as {account?.email || "your account"}. The invite must match this email address.
             </Text>
@@ -96,7 +96,7 @@ export default function JoinScreen() {
           </Card>
         ) : (
           <Card>
-            <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>Sign in to accept</Text>
+            <Text style={[theme.typography.stat, { color: theme.colors.text }]}>Sign in to accept</Text>
             <Text style={{ color: theme.colors.textMuted, marginTop: 8, marginBottom: 12, lineHeight: 20 }}>
               Sign in (or create an account) with the email your invitation was sent to, then accept.
             </Text>

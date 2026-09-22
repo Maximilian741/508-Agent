@@ -29,7 +29,7 @@ import {
 import { Button } from "../src/ui/components/Button";
 import { Card } from "../src/ui/components/Card";
 import { Hero } from "../src/ui/components/Hero";
-import { PixelIcon } from "../src/ui/components/PixelIcon";
+import { Icon } from "../src/ui/components/Icon";
 import { Screen } from "../src/ui/components/Screen";
 import { SignInModal } from "../src/ui/components/SignInModal";
 import { useTheme } from "../src/ui/useTheme";
@@ -224,7 +224,7 @@ export default function BillingScreen() {
         <Card style={{ borderColor: theme.colors.accent, borderWidth: 2, marginTop: 16 }}>
           <View style={{ flexDirection: stacked ? "column" : "row", alignItems: stacked ? "flex-start" : "center", gap: 12 }}>
             <View style={{ flex: 1 }}>
-              <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>
+              <Text style={[theme.typography.stat, { color: theme.colors.text }]}>
                 {(subscription.plan || "").replace("_", " ")} plan active
               </Text>
               <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginTop: 4 }}>
@@ -360,7 +360,7 @@ function IntervalToggle({ interval, onChange, theme }: { interval: Interval; onC
             onPress={() => onChange(opt)}
             style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: theme.radius.pill, backgroundColor: active ? theme.colors.accent : "transparent" }}
           >
-            <Text style={{ color: active ? "#FFFFFF" : theme.colors.textMuted, fontWeight: "700", fontSize: 13 }}>
+            <Text style={{ color: active ? theme.colors.onAccent : theme.colors.textMuted, fontWeight: "700", fontSize: 13 }}>
               {opt === "month" ? "Monthly" : "Annual · save 17%"}
             </Text>
           </Pressable>
@@ -384,7 +384,7 @@ function PlanCard({ family, interval, busy, onSubscribe }: { family: PlanFamily;
           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>BEST FOR TEAMS</Text>
         </View>
       ) : null}
-      <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{family.name}</Text>
+      <Text style={[theme.typography.stat, { color: theme.colors.text }]}>{family.name}</Text>
       <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 2 }}>{family.blurb}</Text>
       <View style={styles.priceRow}>
         <Text style={[theme.typography.display, { color: theme.colors.text }]}>${dollars}</Text>
@@ -422,10 +422,10 @@ function TierCard({ tier, busy, onChoose }: { tier: Tier; busy: boolean; onChoos
           <Text style={{ color: theme.colors.accent, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 }}>MOST POPULAR</Text>
         </View>
       ) : null}
-      <Text style={[theme.typography.pixelLarge, { color: theme.colors.text }]}>{tier.name}</Text>
+      <Text style={[theme.typography.stat, { color: theme.colors.text }]}>{tier.name}</Text>
       <View style={styles.priceRow}>
         <View style={{ marginRight: 8, marginBottom: 8 }}>
-          <PixelIcon name="coin" size={4} color={theme.colors.accent} />
+          <Icon name="credits" size={20} color={theme.colors.accent} />
         </View>
         <Text style={[theme.typography.display, { color: theme.colors.text }]}>${dollars}</Text>
         <Text style={{ color: theme.colors.textMuted, fontSize: 13, marginLeft: 6, marginBottom: 8 }}>one-time</Text>

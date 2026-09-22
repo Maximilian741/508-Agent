@@ -35,6 +35,14 @@ RUN node scripts/generate-sitemap.mjs dist
 # Fails the build if navigation stopped rendering as crawlable <a href>, or a
 # link points at a page that didn't export.
 RUN node scripts/check-internal-links.mjs dist
+# Fails the build if any palette text/background pair drops below WCAG AA.
+RUN node scripts/check-contrast.mjs
+# Fails the build if pixel art spreads beyond the logo, a third-party or
+# pixel font sneaks in, or the first-visit tour starts auto-opening again.
+RUN node scripts/check-design.mjs
+# Fails the build if the one-step fixer would promise, price or report a fix
+# differently from the response, or show an error as raw JSON.
+RUN node scripts/check-fix-plan.mjs
 # Routing (/pricing -> pricing.html), security headers and a CSP whose
 # inline-script hashes come from this exact bundle.
 RUN node scripts/render-nginx-conf.mjs dist /app/nginx.conf

@@ -171,6 +171,11 @@ ${hasNotFound ? "\n    error_page 404 /+not-found.html;\n" : ""}
 ${block("^~ /_expo/static/", IMMUTABLE, "$uri =404")}
 ${block("^~ /assets/", IMMUTABLE, "$uri =404")}
 
+    # The bundled pdf.js (the home page draws the customer's own PDF pages
+    # with it). Browsers refuse a module script served as octet-stream, and
+    # older nginx mime.types have no .mjs entry.
+${block("^~ /pdfjs/", REVALIDATE, "$uri =404").replace("location ^~ /pdfjs/ {\n", "location ^~ /pdfjs/ {\n        types { text/javascript mjs; }\n        default_type text/javascript;\n")}
+
     # Dynamic routes: serve the exported shell so hydration matches the route.
 ${dynamicShells.map((d) => block(`^~ ${d.prefix}`, REVALIDATE, `$uri $uri.html $uri/index.html "${d.shell}"`)).join("\n")}
 

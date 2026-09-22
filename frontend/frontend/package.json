@@ -8,10 +8,15 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "build:web": "expo export -p web --output-dir dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:design": "node scripts/check-design.mjs",
+    "check:fix-plan": "node scripts/check-fix-plan.mjs"
   },
   "dependencies": {
+    "@expo/vector-icons": "~15.0.3",
     "expo": "~54.0.32",
+    "expo-font": "~14.0.11",
     "expo-router": "~6.0.22",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",

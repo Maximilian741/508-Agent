@@ -1,13 +1,10 @@
 /**
- * Button — clean static control.
+ * Button — the app's one button.
  *
- * No cursor-tracking spotlight and no accent glow (both were "fancy generated
- * app" tells). Hover gives a 1px lift (+ a close contact shadow on filled
- * variants); press settles back with a small scale. The keyboard focus ring is
- * a 2px ember outline at 2px offset — WCAG-critical, kept exactly.
- *
- * Variants: primary (filled accent), secondary (raised surface), ghost
- * (outline only), danger (filled danger).
+ * Variants: primary (filled accent), secondary (raised glass), ghost (outline
+ * only), danger (filled danger). Hover lifts 1px; the primary adds a soft
+ * accent bloom. The keyboard focus ring is a 2px accent outline at 2px offset
+ * — WCAG-critical, kept exactly.
  */
 import React, { ReactNode, useState } from "react";
 import {
@@ -19,6 +16,7 @@ import {
   ViewStyle,
 } from "react-native";
 
+import { alpha } from "../theme";
 import { useTheme } from "../useTheme";
 import { linkProps } from "./linkProps";
 
@@ -56,13 +54,15 @@ export function Button({
   const styles = createStyles(theme);
   const isDisabled = disabled || loading;
   const [hovered, setHovered] = useState(false);
-  const isDark = theme.colors.bg === "#150E08";
-  const filled = variant === "primary" || variant === "danger";
   const nav = href ? linkProps(href, onPress) : null;
 
   const hoverShadow =
-    Platform.OS === "web" && hovered && !isDisabled && filled
-      ? ({ boxShadow: isDark ? theme.shadows.near.webDark : theme.shadows.near.web } as any)
+    Platform.OS === "web" && hovered && !isDisabled
+      ? variant === "primary"
+        ? ({ boxShadow: `0 0 0 1px ${alpha(theme.colors.accent, 0.5)}, 0 8px 24px -8px ${alpha(theme.colors.accent, theme.isDark ? 0.55 : 0.45)}` } as any)
+        : variant === "danger"
+          ? ({ boxShadow: `0 8px 24px -8px ${alpha(theme.colors.danger, 0.5)}` } as any)
+          : ({ boxShadow: theme.isDark ? theme.shadows.near.webDark : theme.shadows.near.web } as any)
       : null;
 
   return (
@@ -84,7 +84,7 @@ export function Button({
         Platform.OS === "web"
           ? ({
               // @ts-ignore
-              transition: "transform 120ms ease, box-shadow 160ms ease, background-color 160ms ease, border-color 160ms ease, opacity 160ms ease",
+              transition: "transform 140ms ease, box-shadow 200ms ease, background-color 160ms ease, border-color 160ms ease, opacity 160ms ease",
             } as any)
           : null,
         hovered && !isDisabled ? styles[`hovered_${variant}`] : null,
@@ -96,7 +96,7 @@ export function Button({
       ]}
     >
       {loading ? (
-        <ActivityIndicator color={styles.text.color} />
+        <ActivityIndicator color={variant === "primary" ? theme.colors.onAccent : variant === "danger" ? theme.colors.onDanger : theme.colors.text} />
       ) : (
         <>
           {icon}
@@ -114,35 +114,38 @@ const createStyles = (theme: ReturnType<typeof useTheme>) =>
       alignItems: "center",
       justifyContent: "center",
       gap: theme.spacing.sm,
-      paddingVertical: theme.spacing.sm,
-      paddingHorizontal: theme.spacing.lg,
-      borderRadius: theme.radius.sm,
+      minHeight: 40,
+      paddingVertical: 9,
+      paddingHorizontal: 18,
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: "transparent",
     },
-    primary: { backgroundColor: theme.colors.accent },
+    primary: { backgroundColor: theme.colors.accent, borderColor: theme.colors.accent },
     secondary: {
       backgroundColor: theme.colors.surface2,
-      borderWidth: theme.border.thin,
-      borderColor: theme.colors.border,
+      borderColor: theme.colors.glassBorder,
     },
     ghost: {
       backgroundColor: "transparent",
-      borderWidth: theme.border.thin,
       borderColor: theme.colors.border,
     },
-    danger: { backgroundColor: theme.colors.danger },
+    danger: { backgroundColor: theme.colors.danger, borderColor: theme.colors.danger },
     text: {
       ...theme.typography.body,
+      fontSize: 14,
+      lineHeight: 20,
       color: theme.colors.text,
     },
-    text_primary: { color: theme.colors.onAccent, fontWeight: "700" },
-    text_secondary: { color: theme.colors.text, fontWeight: "700" },
-    text_ghost: { color: theme.colors.text, fontWeight: "700" },
-    text_danger: { color: theme.colors.onDanger, fontWeight: "700" },
+    text_primary: { color: theme.colors.onAccent, fontWeight: "600" },
+    text_secondary: { color: theme.colors.text, fontWeight: "600" },
+    text_ghost: { color: theme.colors.text, fontWeight: "600" },
+    text_danger: { color: theme.colors.onDanger, fontWeight: "600" },
     hovered_primary: { transform: [{ translateY: -1 }] },
-    hovered_secondary: { borderColor: theme.colors.accent, transform: [{ translateY: -1 }] },
-    hovered_ghost: { borderColor: theme.colors.accent, backgroundColor: theme.colors.accent + "0F" },
+    hovered_secondary: { borderColor: alpha(theme.colors.accent, 0.5), transform: [{ translateY: -1 }] },
+    hovered_ghost: { borderColor: alpha(theme.colors.accent, 0.6), backgroundColor: theme.colors.accentSoft },
     hovered_danger: { transform: [{ translateY: -1 }] },
-    pressed: { opacity: 0.92, transform: [{ scale: 0.97 }] },
+    pressed: { opacity: 0.94, transform: [{ scale: 0.98 }] },
     focused: {
       // @ts-ignore - web outline shorthand (WCAG focus ring)
       outlineColor: theme.colors.accent,

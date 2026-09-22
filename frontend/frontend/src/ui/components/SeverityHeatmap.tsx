@@ -58,7 +58,7 @@ export function SeverityHeatmap({ errors, warnings, infos }: SeverityHeatmapProp
         },
       ]}
     >
-      {count > 0 ? <Text style={styles.count}>{count}</Text> : null}
+      {count > 0 ? <Text style={[styles.count, { color: theme.colors.bg }]}>{count}</Text> : null}
     </Animated.View>
   );
 

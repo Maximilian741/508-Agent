@@ -134,6 +134,13 @@ function _readCache(): Account | null {
   }
 }
 
+/**
+ * Fired on `window` whenever the cached account changes (sign-in, sign-out,
+ * a fresh /auth/me, a grant). The nav's account chip listens, so a sign-up
+ * that happens inline on a page shows up in the nav at once.
+ */
+export const ACCOUNT_CHANGED_EVENT = "508-account-changed";
+
 function _writeCache(account: Account | null): void {
   memoryAccount = account;
   if (!_isWeb()) return;
@@ -143,6 +150,35 @@ function _writeCache(account: Account | null): void {
   } catch {
     // ignore quota
   }
+  try {
+    window.dispatchEvent(new Event(ACCOUNT_CHANGED_EVENT));
+  } catch {
+    // ignore (very old browsers)
+  }
+}
+
+/** Subscribe to account changes (web). Returns the unsubscribe function. */
+export function onAccountChanged(listener: () => void): () => void {
+  if (!_isWeb()) return () => undefined;
+  window.addEventListener(ACCOUNT_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(ACCOUNT_CHANGED_EVENT, listener);
+}
+
+/** An Error carrying what the API said, for src/domain/apiErrors.ts. */
+function _apiError(res: Response, body: any, fallback: string): Error {
+  const detail = body && (body.detail || body.message);
+  const err = new Error(typeof detail === "string" ? detail : fallback) as Error & {
+    status?: number;
+    code?: string;
+    serverMessage?: string;
+    retryAfter?: number;
+  };
+  err.status = res.status;
+  if (body && typeof body.code === "string") err.code = body.code;
+  else if (typeof detail === "string" && /^[a-z][a-z0-9_]{1,63}$/.test(detail)) err.code = detail;
+  if (body && typeof body.message === "string") err.serverMessage = body.message;
+  if (body && typeof body.retryAfter === "number") err.retryAfter = body.retryAfter;
+  return err;
 }
 
 function _isHistoryEntry(x: any): x is HistoryEntry {
@@ -262,12 +298,26 @@ export function loadToken(): string | null {
  * Throws on transport/credential failure so the caller can surface an inline
  * error in the modal.
  */
+export interface SignInResult {
+  user: Account;
+  token: string;
+  /**
+   * The starter credits wait on a verified email on this deploy and this
+   * account hasn't verified yet: say "check your inbox", never "buy credits".
+   * From the backend's `verificationRequired`, or inferred from a 403
+   * verify_email_first on the starter grant (older backend).
+   */
+  verificationRequired: boolean;
+  /** The backend mailed the verification link as part of this sign-up. */
+  verificationSent: boolean;
+}
+
 export async function signIn(
   email: string,
   displayName?: string,
   password?: string,
   remember: boolean = true,
-): Promise<{ user: Account; token: string }> {
+): Promise<SignInResult> {
   const trimmedEmail = (email || "").trim();
   const trimmedName = (displayName || "").trim() || trimmedEmail.split("@")[0] || "You";
   const reqBody: Record<string, string> = {
@@ -283,8 +333,7 @@ export async function signIn(
   });
   if (!res.ok) {
     const body = await _readJson(res);
-    const detail = (body && (body.detail || body.message)) || ("HTTP " + res.status);
-    throw new Error(typeof detail === "string" ? detail : "Sign in failed");
+    throw _apiError(res, body, "Sign in failed");
   }
   const body = await _readJson(res);
   const token: string | null = body && typeof body.token === "string" ? body.token : null;
@@ -294,6 +343,8 @@ export async function signIn(
   }
   _writeToken(token, remember);
   _writeCache(user);
+  let verificationRequired = Boolean(body && body.verificationRequired === true);
+  const verificationSent = Boolean(body && body.verificationSent === true);
 
   // Best-effort starter grant. Idempotent on the server; ignore failures.
   try {
@@ -302,12 +353,20 @@ export async function signIn(
       const grantBody = await _readJson(grantRes);
       const refreshed = _coerceAccount(grantBody && (grantBody.user || grantBody));
       if (refreshed) _writeCache(refreshed);
+    } else if (grantRes.status === 403) {
+      // Older backends don't send verificationRequired; the grant's
+      // "verify_email_first" says the same thing.
+      const grantBody = await _readJson(grantRes);
+      const detail = grantBody && (grantBody.code || grantBody.detail);
+      if (detail === "verify_email_first") verificationRequired = true;
     }
   } catch (e) {
     console.warn("[account] grant-starter failed (ignored)", e);
   }
 
-  return { user: _readCache() || user, token };
+  const fresh = _readCache() || user;
+  if (fresh.emailVerifiedAt) verificationRequired = false;
+  return { user: fresh, token, verificationRequired, verificationSent };
 }
 
 /** Forget local credentials and fire-and-forget a server logout. */
@@ -364,8 +423,7 @@ export async function purchaseTier(tier: Tier): Promise<Account> {
   });
   if (!res.ok) {
     const body = await _readJson(res);
-    const detail = (body && (body.detail || body.message)) || ("HTTP " + res.status);
-    throw new Error(typeof detail === "string" ? detail : "Purchase failed");
+    throw _apiError(res, body, "Purchase failed");
   }
   // The backend returns { newBalance, purchased, tier } — NOT a user object.
   // (The old code expected { user } and threw on every successful purchase,
@@ -451,20 +509,31 @@ export async function getSubscription(): Promise<SubscriptionStatus> {
   }
 }
 
-async function _checkoutUrl(path: string, payload: Record<string, unknown>): Promise<string> {
+/** A same-app path only (never an absolute URL someone could smuggle in). */
+function _appPath(p?: string): string | null {
+  return p && p.startsWith("/") && !p.startsWith("//") ? p : null;
+}
+
+async function _checkoutUrl(
+  path: string,
+  payload: Record<string, unknown>,
+  returnPath?: string,
+  cancelPath?: string,
+): Promise<string> {
   const origin = _origin();
+  const back = _appPath(returnPath);
+  const cancel = _appPath(cancelPath) ?? back;
   const res = await apiFetch(path, {
     method: "POST",
     body: JSON.stringify({
       ...payload,
-      success_url: `${origin}/account`,
-      cancel_url: `${origin}/billing`,
+      success_url: `${origin}${back ?? "/account"}`,
+      cancel_url: `${origin}${cancel ?? "/billing"}`,
     }),
   });
   if (!res.ok) {
     const body = await _readJson(res);
-    const detail = (body && (body.detail || body.message)) || "HTTP " + res.status;
-    throw new Error(typeof detail === "string" ? detail : "Checkout failed");
+    throw _apiError(res, body, "Checkout failed");
   }
   const body = await _readJson(res);
   const url = body && typeof body.url === "string" ? body.url : null;
@@ -472,9 +541,14 @@ async function _checkoutUrl(path: string, payload: Record<string, unknown>): Pro
   return url;
 }
 
-/** Start a one-time credit-pack Stripe Checkout; returns the redirect URL. */
-export function startCreditCheckout(tier: string): Promise<string> {
-  return _checkoutUrl("/billing/create-checkout-session", { tier });
+/**
+ * Start a one-time credit-pack Stripe Checkout; returns the redirect URL.
+ * `returnPath` (an app path such as "/?resume=fix") is where Stripe sends the
+ * buyer back on success AND cancel — the one-step fixer uses it so a person
+ * who ran out mid-file lands back on that file, not on /account.
+ */
+export function startCreditCheckout(tier: string, returnPath?: string, cancelPath?: string): Promise<string> {
+  return _checkoutUrl("/billing/create-checkout-session", { tier }, returnPath, cancelPath);
 }
 
 /** Start a recurring subscription Stripe Checkout; returns the redirect URL. */
@@ -629,16 +703,45 @@ export async function addCredits(amount: number, description: string): Promise<v
  * Idempotently ask the server for the starter pack. Safe to call after
  * sign-in completes; failures are swallowed.
  */
-export async function grantStarterCredits(): Promise<void> {
-  if (!_readToken()) return;
+/**
+ * Ask for the starter pack and say what happened:
+ *  - "granted": credits were just added;
+ *  - "already": this account (or mailbox) already had them;
+ *  - "verify":  they wait on a confirmed email (403 verify_email_first);
+ *  - "error":   anything else (signed out, offline, 5xx).
+ * The one-step fixer uses this to tell "check your inbox" from "buy credits".
+ */
+export async function grantStarterStatus(): Promise<"granted" | "already" | "verify" | "error"> {
+  if (!_readToken()) return "error";
   try {
     const res = await apiFetch("/auth/grant-starter", { method: "POST" });
-    if (!res.ok) return;
+    const body = await _readJson(res);
+    if (res.status === 403) {
+      const code = body && (body.code || body.detail);
+      return code === "verify_email_first" ? "verify" : "error";
+    }
+    if (!res.ok) return "error";
+    const next = _coerceAccount(body && (body.user || body));
+    if (next) _writeCache(next);
+    return body && body.granted === true ? "granted" : "already";
+  } catch (e) {
+    console.warn("[account] grantStarterStatus failed", e);
+    return "error";
+  }
+}
+
+export async function grantStarterCredits(): Promise<boolean> {
+  if (!_readToken()) return false;
+  try {
+    const res = await apiFetch("/auth/grant-starter", { method: "POST" });
+    if (!res.ok) return false;
     const body = await _readJson(res);
     const next = _coerceAccount(body && (body.user || body));
     if (next) _writeCache(next);
+    return true;
   } catch (e) {
     console.warn("[account] grantStarterCredits failed", e);
+    return false;
   }
 }
 

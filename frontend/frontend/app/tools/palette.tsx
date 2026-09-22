@@ -112,7 +112,7 @@ export default function PaletteMatrix() {
               onPress={addColor}
               style={[styles.addBtn, { backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm }]}
             >
-              <Text style={{ color: "#fff", fontWeight: "700" }}>Add</Text>
+              <Text style={{ color: theme.colors.onAccent, fontWeight: "700" }}>Add</Text>
             </Pressable>
           </View>
         ) : (

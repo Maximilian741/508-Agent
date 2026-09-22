@@ -182,7 +182,7 @@ export default function FixGuideScreen() {
         </Text>
         {entry.manualJudgment ? (
           <>
-            <Text style={[theme.typography.caption, { color: theme.colors.warning, marginTop: 14 }]}>
+            <Text style={[theme.typography.eyebrow, { color: theme.colors.warning, marginTop: 14 }]}>
               WHERE YOU STILL HAVE TO DECIDE
             </Text>
             <Text style={[theme.typography.body, { color: theme.colors.text, marginTop: 4, lineHeight: 22 }]}>

@@ -1,27 +1,31 @@
 /**
- * Persistent top navigation strip.
+ * Persistent top navigation strip (a glass bar).
  *
- * Logo on the left, route quick-jump destinations in the middle, account
- * chip + connection chip on the right. The account chip handles three
- * states: signed in (shows display name + credits with a dropdown menu),
- * and signed out (a primary-tinted button that opens SignInModal).
+ * Brand lockup on the left: the pixel "508" mark followed by the word
+ * "Agent", with ONE accessible name, "508 Agent" (the mark is the 508;
+ * repeating "508" in text was the clunky double brand). Route pills in the
+ * middle, account chip + connection chip on the right. The account chip has
+ * two states: signed in (display name + credits with a dropdown menu) and
+ * signed out (a primary button that opens SignInModal).
  */
 import React, { useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter, usePathname } from "expo-router";
 
-import { Account, loadAccount, refreshAccount, signOut } from "../../domain/account";
+import { Account, loadAccount, onAccountChanged, refreshAccount, signOut } from "../../domain/account";
 import { useAppStore } from "../../store/useAppStore";
 import { useTheme } from "../useTheme";
+import { alpha, glassStyle } from "../theme";
 import { Chip } from "./Chip";
-import { PixelIcon } from "./PixelIcon";
+import { Icon } from "./Icon";
 import { PixelLogo } from "./PixelLogo";
+import { CONTENT_MAX_WIDTH } from "./Screen";
 import { SignInModal } from "./SignInModal";
 import { linkProps } from "./linkProps";
 
 const ITEMS: { label: string; href: string; key: string }[] = [
-  { label: "Home", href: "/", key: "home" },
-  { label: "Audit", href: "/audit", key: "audit" },
+  { label: "Fix a file", href: "/", key: "home" },
+  { label: "Advanced audit", href: "/audit", key: "audit" },
   { label: "Dashboard", href: "/dashboard", key: "dashboard" },
   { label: "Insights", href: "/insights", key: "insights" },
   { label: "Batch", href: "/batch", key: "batch" },
@@ -46,32 +50,39 @@ export function AppNav() {
       style={[
         styles.bar,
         {
-          backgroundColor: theme.colors.surface,
-          borderBottomColor: theme.colors.border,
+          ...(glassStyle(theme.colors, 20) as any),
+          borderBottomColor: theme.colors.glassBorder,
         },
       ]}
     >
+      <View style={styles.inner}>
       <Pressable
         {...linkProps("/")}
-        // Must contain the visible wordmark (WCAG 2.5.3): a speech-input user
-        // says what they see — "508 Agent" — not "Home".
-        accessibilityLabel="508 Agent — home"
-        style={({ focused }: any) => [styles.brand, focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null]}
+        // One name for one brand. It contains the visible word "Agent"
+        // (WCAG 2.5.3 Label in Name) and says the mark's "508" aloud.
+        accessibilityLabel="508 Agent"
+        style={({ focused }: any) => [
+          styles.brand,
+          { borderRadius: theme.radius.sm },
+          focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
+        ]}
       >
-        <View style={[styles.logoFrame, { borderRadius: theme.radius.none }]}>
-          <PixelLogo size={3} color={theme.colors.accent} />
+        <View
+          // The pixel mark IS the "508" of the lockup; the link's name carries it.
+          // @ts-ignore - web aria
+          aria-hidden={true}
+          importantForAccessibility="no-hide-descendants"
+          style={styles.logoFrame}
+        >
+          <PixelLogo size={3} color={theme.colors.accent} showGrid={false} />
         </View>
-        <Text style={[theme.typography.pixel, styles.brandText, { color: theme.colors.text }]}>508 · AGENT</Text>
+        <Text style={[styles.brandText, { color: theme.colors.text }]}>Agent</Text>
       </Pressable>
 
-      <View
-        accessibilityRole={Platform.OS === "web" ? ("separator" as any) : undefined}
-        // @ts-ignore - aria-hidden on web
-        aria-hidden={true}
-        style={[styles.brandDivider, { backgroundColor: theme.colors.border }]}
-      />
-
-      <View style={styles.links}>
+      {/* data-nav-links: on narrow screens the base CSS (app/+html.tsx) turns
+          this row into its own full-width, horizontally scrolling strip
+          instead of a three-line wall of links. */}
+      <View style={styles.links} {...({ dataSet: { navLinks: "1" } } as any)}>
         {ITEMS.map((item) => {
           const active = pathname === item.href || (item.href === "/" && pathname === "/index");
           return (
@@ -82,20 +93,20 @@ export function AppNav() {
               // A link to the current page is aria-current, not aria-selected
               // (selected is only valid on tabs/options/grid cells).
               {...({ "aria-current": active ? "page" : undefined } as any)}
-              style={({ focused }: any) => [
+              style={({ focused, hovered }: any) => [
                 styles.link,
                 {
-                  borderRadius: theme.radius.none,
-                  borderColor: active ? theme.colors.accent : "transparent",
-                  backgroundColor: active ? theme.colors.accent + "1A" : "transparent",
+                  borderRadius: theme.radius.pill,
+                  borderColor: active ? alpha(theme.colors.accent, 0.35) : "transparent",
+                  backgroundColor: active ? theme.colors.accentSoft : hovered ? theme.colors.surface2 : "transparent",
                 },
                 focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
               ]}
             >
               <Text
                 style={{
-                  color: active ? theme.colors.accent : theme.colors.text,
-                  fontWeight: active ? "700" : "500",
+                  color: active ? theme.colors.accent : theme.colors.textMuted,
+                  fontWeight: active ? "600" : "500",
                   fontSize: 13,
                 }}
               >
@@ -132,7 +143,7 @@ export function AppNav() {
               style={{
                 width: 6,
                 height: 6,
-                borderRadius: 0,
+                borderRadius: 3,
                 backgroundColor: mockMode
                   ? theme.colors.warning
                   : backendHealth === "ok"
@@ -144,6 +155,7 @@ export function AppNav() {
             />
           }
         />
+      </View>
       </View>
     </View>
   );
@@ -170,8 +182,14 @@ function AccountChip() {
         if (fresh) setAccount(fresh);
       })
       .catch((e) => console.warn("[AccountChip] refresh failed", e));
+    // A sign-up or credit change made inline on a page (the home fixer)
+    // shows up here at once.
+    const off = onAccountChanged(() => {
+      if (!cancelled) setAccount(loadAccount());
+    });
     return () => {
       cancelled = true;
+      off();
     };
   }, []);
 
@@ -279,7 +297,7 @@ function AccountChip() {
         ]}
       >
         <View style={[styles.avatar, { backgroundColor: theme.colors.accent }]}>
-          <PixelIcon name="user" size={3} color={theme.colors.onAccent} />
+          <Icon name="user" size={14} color={theme.colors.onAccent} />
         </View>
         <Text
           style={{ color: theme.colors.text, fontWeight: "700", fontSize: 12 }}
@@ -288,11 +306,11 @@ function AccountChip() {
           {account.displayName}
         </Text>
         <View style={[styles.creditPill, { borderRadius: theme.radius.pill, backgroundColor: theme.colors.accent + "22" }]}>
-          <Text style={[theme.typography.pixel, { color: theme.colors.accent, fontSize: 11 }]}>
+          <Text style={{ color: theme.colors.accent, fontSize: 11, fontWeight: "700", fontVariant: ["tabular-nums"] }}>
             {creditsLabel}
           </Text>
         </View>
-        <Text style={{ color: theme.colors.textMuted, fontSize: 11 }}>v</Text>
+        <Icon name="chevron-down" size={14} color={theme.colors.textMuted} />
       </Pressable>
 
       {open ? (
@@ -308,7 +326,9 @@ function AccountChip() {
               {
                 borderRadius: theme.radius.md,
                 backgroundColor: theme.colors.surface,
-                borderColor: theme.colors.border,
+                borderColor: theme.colors.glassBorder,
+                // @ts-ignore web shadow
+                boxShadow: theme.isDark ? theme.shadows.far.webDark : theme.shadows.far.web,
                 top: anchor?.top ?? 56,
                 right: anchor?.right ?? 16,
               },
@@ -359,6 +379,7 @@ function MenuItem({
       accessibilityRole="button"
       style={({ hovered, focused }: any) => [
         styles.acctMenuItem,
+        { borderRadius: theme.radius.sm },
         hovered ? { backgroundColor: theme.colors.surface2 } : null,
         focused ? ({ outlineColor: theme.colors.accent, outlineWidth: 2, outlineStyle: "solid", outlineOffset: 2 } as any) : null,
       ]}
@@ -370,29 +391,27 @@ function MenuItem({
 
 const styles = StyleSheet.create({
   bar: {
+    borderBottomWidth: 1,
+    zIndex: 10,
+  },
+  inner: {
+    width: "100%",
+    maxWidth: CONTENT_MAX_WIDTH,
+    alignSelf: "center",
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingVertical: 10,
-    borderBottomWidth: 1,
-    gap: 16,
+    gap: 18,
     flexWrap: "wrap",
   },
-  brand: { flexDirection: "row", alignItems: "center", gap: 10 },
-  brandDivider: { width: 1, height: 22, marginHorizontal: 12, opacity: 0.6 },
-  logoFrame: { padding: 4 },
-  logo: {
-    width: 28,
-    height: 28,
-    borderRadius: 4,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  brandText: { fontSize: 13, fontWeight: "800", letterSpacing: 1.4 },
-  links: { flexDirection: "row", gap: 4, alignItems: "center", flexShrink: 1, flexWrap: "wrap" },
+  brand: { flexDirection: "row", alignItems: "center", gap: 9, paddingVertical: 4, paddingRight: 4 },
+  logoFrame: { paddingVertical: 2 },
+  brandText: { fontSize: 17, fontWeight: "700", letterSpacing: -0.3, lineHeight: 20 },
+  links: { flexDirection: "row", gap: 2, alignItems: "center", flexShrink: 1, flexWrap: "wrap" },
   link: {
     paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     borderWidth: 1,
   },
   right: {
@@ -417,7 +436,7 @@ const styles = StyleSheet.create({
   avatar: {
     width: 24,
     height: 24,
-    borderRadius: 0,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -438,10 +457,8 @@ const styles = StyleSheet.create({
     position: (Platform.OS === "web" ? "fixed" : "absolute") as any,
     minWidth: 220,
     borderWidth: 1,
-    paddingVertical: 4,
+    padding: 4,
     zIndex: 9999,
-    // @ts-ignore
-    boxShadow: "0 8px 24px rgba(31, 20, 10, 0.18)",
   },
   acctMenuHeader: {
     paddingVertical: 8,

@@ -15,7 +15,7 @@ import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Hero } from "../src/ui/components/Hero";
 import { Screen } from "../src/ui/components/Screen";
-import { PixelSpinner } from "../src/ui/components/PixelSpinner";
+import { Spinner } from "../src/ui/components/Spinner";
 import { EmptyState } from "../src/ui/components/EmptyState";
 import { useToast } from "../src/ui/toast";
 import { useAppStore } from "../src/store/useAppStore";
@@ -115,7 +115,7 @@ export default function AdminScreen() {
           {metricsLoading ? (
             <Card>
               <View style={styles.loadingRow}>
-                <PixelSpinner />
+                <Spinner />
                 <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>Loading metrics…</Text>
               </View>
             </Card>
@@ -184,7 +184,7 @@ export default function AdminScreen() {
 
             {loading ? (
               <View style={styles.loadingRow}>
-                <PixelSpinner />
+                <Spinner />
                 <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>Fetching log...</Text>
               </View>
             ) : error ? (
@@ -236,7 +236,7 @@ function Stat({
   return (
     <View style={[styles.stat, { borderRadius: theme.radius.none, borderColor: accent ? theme.colors.accent : theme.colors.border, backgroundColor: theme.colors.surface }]}>
       <Text style={{ color: theme.colors.textMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</Text>
-      <Text style={[theme.typography.pixelLarge, { color: accent ? theme.colors.accent : theme.colors.text, marginTop: 4 }]}>{value}</Text>
+      <Text style={[theme.typography.stat, { color: accent ? theme.colors.accent : theme.colors.text, marginTop: 4 }]}>{value}</Text>
       {sub ? <Text style={{ color: theme.colors.textMuted, fontSize: 11, marginTop: 2 }}>{sub}</Text> : null}
     </View>
   );

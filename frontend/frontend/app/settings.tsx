@@ -41,7 +41,7 @@ import { useAppStore } from "../src/store/useAppStore";
 import { Button } from "../src/ui/components/Button";
 import { openSystemCheck } from "../src/ui/components/SystemCheckWizard";
 import { Card } from "../src/ui/components/Card";
-import { PixelIcon } from "../src/ui/components/PixelIcon";
+import { Icon } from "../src/ui/components/Icon";
 import { Chip } from "../src/ui/components/Chip";
 import { InlineNotice } from "../src/ui/components/InlineNotice";
 import { Screen } from "../src/ui/components/Screen";
@@ -178,7 +178,7 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Icon name="image" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Report branding</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -257,7 +257,7 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Icon name="code" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Developer API</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -342,7 +342,7 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="play" size={3} color={theme.colors.accent} />
+          <Icon name="play-circle" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo Mode</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -362,7 +362,7 @@ export default function SettingsScreen() {
       {__DEV__ ? (
         <Card>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <PixelIcon name="key" size={3} color={theme.colors.accent} />
+            <Icon name="key" size={18} color={theme.colors.accent} />
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Free-scan gate (dev only)</Text>
           </View>
           <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -408,7 +408,7 @@ export default function SettingsScreen() {
       {showOperatorTools ? (
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="bolt" size={3} color={theme.colors.accent} />
+          <Icon name="server" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Analyzer service URL</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -459,18 +459,18 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="star" size={3} color={theme.colors.accent} />
+          <Icon name="sun" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Appearance</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-          Three distinct looks: dusky Twilight (default), warm Light parchment, or deep Dark walnut.
+          Three looks: Aurora (the default, deep ink with a cool glow), crisp Light, or neutral Graphite.
         </Text>
         <View style={styles.themeRow}>
           {(["system", "light", "dark"] as const).map((mode) => (
             <Pressable accessibilityRole="button"
               key={mode}
               onPress={() => setThemeMode(mode)}
-              accessibilityLabel={`Set theme to ${mode === "system" ? "twilight" : mode}`}
+              accessibilityLabel={`Set theme to ${mode === "system" ? "Aurora" : mode === "light" ? "Light" : "Graphite"}`}
               style={[
                 styles.themeChoice,
                 {
@@ -489,19 +489,19 @@ export default function SettingsScreen() {
                   },
                 ]}
               >
-                {mode === "system" ? "Twilight" : mode === "light" ? "Light" : "Dark"}
+                {mode === "system" ? "Aurora" : mode === "light" ? "Light" : "Graphite"}
               </Text>
             </Pressable>
           ))}
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginTop: 8, fontSize: 12 }]}>
-          Twilight is a dusky violet/peach palette - the default. Pick Light for cream parchment, Dark for deep walnut. (Your OS is currently {systemScheme === "dark" ? "Dark" : "Light"}; Twilight ignores it on purpose so all three options look different.)
+          Aurora is the default. Pick Light for a bright paper-white page, Graphite for a hue-free near-black with maximum contrast. (Your OS is currently {systemScheme === "dark" ? "Dark" : "Light"}; Aurora ignores it on purpose so all three options look different.) Every palette is checked against WCAG AA contrast.
         </Text>
       </Card>
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+          <Icon name="bell" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Notifications</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -554,7 +554,7 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="coin" size={3} color={theme.colors.accent} />
+          <Icon name="database" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Demo data</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -603,7 +603,7 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="doc" size={3} color={theme.colors.accent} />
+          <Icon name="clock" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Audit history</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -630,7 +630,7 @@ export default function SettingsScreen() {
 
       <Card>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <PixelIcon name="gear" size={3} color={theme.colors.accent} />
+          <Icon name="activity" size={18} color={theme.colors.accent} />
           <Text style={[theme.typography.h2, { color: theme.colors.text }]}>Diagnostics</Text>
         </View>
         <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
@@ -647,7 +647,7 @@ export default function SettingsScreen() {
       {showOperatorTools ? (
         <Card>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <PixelIcon name="spark" size={3} color={theme.colors.accent} />
+            <Icon name="cpu" size={18} color={theme.colors.accent} />
             <Text style={[theme.typography.h2, { color: theme.colors.text }]}>AI provider</Text>
           </View>
           <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
