@@ -241,7 +241,8 @@ def main() -> int:  # noqa: PLR0915
     ex = {(e["actionCode"], e["targetNodeId"]): e for e in body["executions"]}
     img_ex = ex.get(("GENERATE_ALT_TEXT", "xlsx-s1-img2"))
     check("remediate: refused picture reported as skipped with a reason",
-          img_ex is not None and img_ex["status"] == "skipped" and "placeholder" in img_ex["notes"], str(img_ex))
+          img_ex is not None and img_ex["status"] == "skipped"
+          and any(w in (img_ex["notes"] or "") for w in ("placeholder", "nothing was written")), str(img_ex))
     check("remediate: no manual item reported as a success",
           all(e["status"] != "success" for e in body["executions"] if e["actionCode"] == "FLAG_FOR_MANUAL_REVIEW"))
 

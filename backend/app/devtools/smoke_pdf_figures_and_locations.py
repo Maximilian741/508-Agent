@@ -169,6 +169,17 @@ def main() -> int:
     plans = [p for p in _plans(res.tree) if p.target_node_id == chart.id and p.flag.code.value == "MISSING_ALT_TEXT"]
     check("a MISSING_ALT_TEXT plan exists for the chart", bool(plans))
     if plans:
+        # The provider is only asked when it can SEE the picture (with no
+        # pixels the caption itself is the whole description, and no paid
+        # call is made); give the chart pixels so the hand-off is exercised.
+        import base64 as _b64
+        import io as _io
+
+        from PIL import Image as _Image
+
+        _buf = _io.BytesIO()
+        _Image.new("L", (30, 30), 90).save(_buf, "PNG")
+        chart.metadata.properties.setdefault("image_b64", _b64.b64encode(_buf.getvalue()).decode())
         GenerateAltTextExecutor(client=_Spy()).execute(plans[0], res.tree)
     check("GENERATE_ALT_TEXT hands the caption to the provider", seen.get("caption") == CAPTION, repr(seen.get("caption")))
 

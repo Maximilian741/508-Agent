@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from fastapi import HTTPException
+from app.api.errors import ApiError
 from pydantic import BaseModel, ConfigDict
 
 NATIVE_FORMATS = {
@@ -106,18 +106,14 @@ def upload_suffix(filename: Optional[str]) -> str:
     name = Path(filename or "").name
     suffix = Path(name).suffix.lower()
     if not suffix:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "That file has no extension, so we can't tell what kind of document it is. "
-                "Rename it with its extension (for example report.pdf) and upload it again."
-            ),
+        raise ApiError(
+            400,
+            "unsupported_type",
+            "That file has no extension, so we can't tell what kind of document it is. "
+            "Rename it with its extension (for example report.pdf) and upload it again.",
         )
     if suffix not in ACCEPTED_SUFFIXES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"We can't check {suffix} files. {ACCEPTED_SENTENCE}",
-        )
+        raise ApiError(400, "unsupported_type", f"We can't check {suffix} files. {ACCEPTED_SENTENCE}")
     return suffix
 
 
@@ -133,7 +129,7 @@ def effective_format(suffix: str) -> str:
         return "pdf"
     if s in OFFICE_CONVERSIONS:
         return OFFICE_CONVERSIONS[s]
-    raise HTTPException(status_code=400, detail=f"We can't check {s or 'these'} files. {ACCEPTED_SENTENCE}")
+    raise ApiError(400, "unsupported_type", f"We can't check {s or 'these'} files. {ACCEPTED_SENTENCE}")
 
 
 def prepare_upload(path: Path, suffix: str) -> IntakeResult:
@@ -194,7 +190,7 @@ def prepare_upload(path: Path, suffix: str) -> IntakeResult:
                 f"Your fixed file will be a .{target}, which opens in current versions of Office."
             ),
         )
-    raise HTTPException(status_code=400, detail=f"We can't check {s} files. {ACCEPTED_SENTENCE}")
+    raise ApiError(400, "unsupported_type", f"We can't check {s} files. {ACCEPTED_SENTENCE}")
 
 
 # What makes a picture of a document readable. Anything else we might write

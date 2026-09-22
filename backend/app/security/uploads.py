@@ -29,6 +29,8 @@ from typing import Callable, Dict, Optional
 
 from fastapi import HTTPException, UploadFile
 
+from app.api.errors import ApiError
+
 logger = logging.getLogger(__name__)
 
 
@@ -148,6 +150,13 @@ def _mismatch_message(suffix: str, head: bytes) -> str:
     )
 
 
+def _mismatch_error(suffix: str, head: bytes) -> ApiError:
+    """The coded 400 for a signature mismatch (sentence from _mismatch_message)."""
+    s = suffix.lower()
+    code = "password_protected" if s in _OOXML and head.startswith(_OLE2) else "file_content_mismatch"
+    return ApiError(400, code, _mismatch_message(s, head))
+
+
 async def stream_to_tempfile(
     upload: UploadFile,
     max_bytes: int,
@@ -214,7 +223,7 @@ async def stream_to_tempfile(
 
     if written == 0:
         tmp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="That file is empty (0 bytes). Check that it saved correctly and upload it again.")
+        raise ApiError(400, "empty_upload", "That file is empty (0 bytes). Check that it saved correctly and upload it again.")
 
     sniffed = _sniff_kind(head)
 
@@ -237,9 +246,9 @@ def validate_signature(path: Path, suffix: str, head: Optional[bytes] = None) ->
     check = _CUSTOM_MAGIC.get(s)
     prefixes = _MAGIC_PREFIXES.get(s)
     if check is not None and not check(head):
-        raise HTTPException(status_code=400, detail=_mismatch_message(s, head))
+        raise _mismatch_error(s, head)
     if prefixes and not any(head.startswith(p) for p in prefixes):
-        raise HTTPException(status_code=400, detail=_mismatch_message(s, head))
+        raise _mismatch_error(s, head)
     # Zip-based formats: confirm it is the package it claims to be, and not
     # a decompression bomb, before any parser or converter opens it.
     if s in _OOXML:
@@ -303,39 +312,35 @@ def validate_ooxml_package(path: Path, expected_suffix: Optional[str] = None) ->
         with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
             if "[Content_Types].xml" not in names:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"This is a zip file, not {_kind(s) if s else 'an Office document'}. "
-                        "Open the original in Office, save it again, and upload that copy."
-                    ),
+                raise ApiError(
+                    400,
+                    "invalid_ooxml",
+                    f"This is a zip file, not {_kind(s) if s else 'an Office document'}. "
+                    "Open the original in Office, save it again, and upload that copy.",
                 )
             _zip_bomb_guard(zf)
             if s in _OOXML_FAMILY_MARKERS:
                 family = _ooxml_family(zf.read("[Content_Types].xml"))
                 if family is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"This file is named {s} but it is not {_kind(s)} we can open. "
-                            "Open it in Office, save it again, and upload that copy."
-                        ),
+                    raise ApiError(
+                        400,
+                        "invalid_ooxml",
+                        f"This file is named {s} but it is not {_kind(s)} we can open. "
+                        "Open it in Office, save it again, and upload that copy.",
                     )
                 if family != s:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"This file is named {s} but it is really {_kind(family)}. "
-                            f"Rename it to end in {family} and upload it again."
-                        ),
+                    raise ApiError(
+                        400,
+                        "file_content_mismatch",
+                        f"This file is named {s} but it is really {_kind(family)}. "
+                        f"Rename it to end in {family} and upload it again.",
                     )
     except zipfile.BadZipFile:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"This {s or 'Office'} file is damaged (it is not a complete zip package). "
-                "Open it in Office, save it again, and upload that copy."
-            ),
+        raise ApiError(
+            400,
+            "invalid_ooxml",
+            f"This {s or 'Office'} file is damaged (it is not a complete zip package). "
+            "Open it in Office, save it again, and upload that copy.",
         )
 
 
@@ -351,20 +356,23 @@ def validate_odf_package(path: Path, suffix: str) -> None:
                 mimetype = ""
             _zip_bomb_guard(zf)
     except zipfile.BadZipFile:
-        raise HTTPException(
-            status_code=400,
-            detail=f"This {s} file is damaged. Open it in LibreOffice, save it again, and upload that copy.",
+        raise ApiError(
+            400,
+            "invalid_document",
+            f"This {s} file is damaged. Open it in LibreOffice, save it again, and upload that copy.",
         )
     if want and mimetype != want:
         actual = next((ext for ext, m in _ODF_MIMETYPES.items() if m == mimetype), None)
         if actual:
-            raise HTTPException(
-                status_code=400,
-                detail=f"This file is named {s} but it is really {_kind(actual)}. Rename it to end in {actual} and upload it again.",
+            raise ApiError(
+                400,
+                "file_content_mismatch",
+                f"This file is named {s} but it is really {_kind(actual)}. Rename it to end in {actual} and upload it again.",
             )
-        raise HTTPException(
-            status_code=400,
-            detail=f"This file is named {s} but it is not {_kind(s)}. It may be damaged, or have the wrong extension.",
+        raise ApiError(
+            400,
+            "file_content_mismatch",
+            f"This file is named {s} but it is not {_kind(s)}. It may be damaged, or have the wrong extension.",
         )
 
 

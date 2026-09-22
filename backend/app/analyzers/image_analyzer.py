@@ -122,7 +122,13 @@ def scanned_page_numbers(tree: AccessibilityTree) -> Set[int]:
 
     Mirrors ScannedDocumentAnalyzer's document test (>= 80% of pages
     image-only and < 50 extracted characters per page on average), then keeps
-    the pages that carry an image and < 50 characters of text in the tree.
+    the pages that carry an image and < 50 characters of text in the tree
+    AND whose pictures cover at least half of the page. A scan is a picture
+    OF the page; a one-page flyer with a 200 pt photo and a one-line heading
+    also has < 50 characters, but its photo is a figure that needs alt text,
+    and dropping that finding would hide the one fix the file needs.
+    A picture whose box the parser could not measure counts as covering its
+    page (the scan reading is the one we already had for it).
     Empty for anything that is not a scanned PDF.
     """
     root = tree.root
@@ -139,15 +145,31 @@ def scanned_page_numbers(tree: AccessibilityTree) -> Set[int]:
         return set()
     text_chars: Dict[int, int] = {}
     image_on: Set[int] = set()
+    covered: Dict[int, float] = {}
     for node in iter_nodes(tree):
         page = getattr(node.metadata, "page", None)
         if not isinstance(page, int):
             continue
         if isinstance(node, ImageNode):
             image_on.add(page)
+            covered[page] = covered.get(page, 0.0) + _page_share(node)
         elif not isinstance(node, (DocumentNode, SectionNode)) and node.content and node.content.text:
             text_chars[page] = text_chars.get(page, 0) + len(node.content.text.strip())
-    return {p for p in image_on if text_chars.get(p, 0) < 50}
+    return {p for p in image_on if text_chars.get(p, 0) < 50 and covered.get(p, 0.0) >= 0.5}
+
+
+def _page_share(node: ImageNode) -> float:
+    """The share of its page a picture covers (1.0 when it can't be told)."""
+    props = node.metadata.properties or {}
+    box, size = props.get("bbox"), props.get("page_size")
+    try:
+        x0, y0, x1, y1 = (float(v) for v in list(box)[:4])
+        w, h = (float(v) for v in list(size)[:2])
+    except (TypeError, ValueError):
+        return 1.0
+    if w <= 0 or h <= 0:
+        return 1.0
+    return max(0.0, abs(x1 - x0) * abs(y1 - y0)) / (w * h)
 
 
 class MissingAltTextAnalyzer(Analyzer):

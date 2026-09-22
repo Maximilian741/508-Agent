@@ -1437,9 +1437,11 @@ def _image_nodes_from_p(
 ) -> List[ImageNode]:
     """ImageNodes for the pictures in ``p_el`` (see ``iter_paragraph_drawings``).
 
-    ``context_fn`` returns ``(kind, text)`` — kind ``"caption"`` for a real
-    caption, ``"nearby"`` for other text near the picture — evaluated only
-    when the paragraph actually has a picture.
+    ``context_fn`` returns ``(text, caption_source)`` — the source says what
+    the words are (``"caption_style"`` / ``"figure_label"`` for a real
+    caption, ``"nearby_text"`` / ``"preceding_text"`` for words that only sit
+    near the picture; see ``app.ai.offline_rules.alt_from_caption``) —
+    evaluated only when the paragraph actually has a picture.
     """
     out: List[ImageNode] = []
     context: Optional[Tuple[str, str]] = None
@@ -1817,7 +1819,9 @@ def _header_footer_section(doc, ids: "_IdCounter", reg, theme_colors, bgs: Optio
             section.children.extend(
                 _image_nodes_from_p(
                     p_el, blobs, ids, "docx-hfimg", reg, story=kind, partname=partname,
-                    context_fn=(lambda _c=ctx: ("nearby", _c[:200]) if _c else None),
+                    # Letterhead words beside a logo: shown as its location
+                    # snippet, never written as its description.
+                    context_fn=(lambda _c=ctx: (_c[:200], "nearby_text") if _c else None),
                     extra_props={"page_furniture": kind, "docx_story_variant": variant},
                 )
             )

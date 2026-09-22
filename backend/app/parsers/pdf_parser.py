@@ -1666,8 +1666,10 @@ class PDFParser:
                 )
             # A page with image content but essentially no extractable text is
             # almost certainly a scanned page (or a poster/infographic). Used
-            # downstream to flag SCANNED_DOCUMENT_NO_TEXT.
-            if page_image_count > 0 and page_text_chars < 50:
+            # downstream to flag SCANNED_DOCUMENT_NO_TEXT. Only when the
+            # pictures cover the page: a short page with a line of real text
+            # and a small photo is not "pictures of text" and does not need OCR.
+            if page_image_count > 0 and page_text_chars < 50 and _images_cover_page(page_images, placements, geo):
                 image_only_pages += 1
 
             # --- Links -------------------------------------------------------
@@ -1792,6 +1794,27 @@ def _page_geometry(page: Any) -> Dict[str, Any]:
         return {}
 
 
+def _images_cover_page(page_images: Any, placements: Dict[str, Any], geo: Dict[str, Any]) -> bool:
+    """Do a page's pictures cover at least half of it (a scan's picture of the
+    page does)? A picture whose placement was not measured counts as covering
+    the page, which is the reading the page had before placements existed."""
+    size = (geo or {}).get("page_size")
+    try:
+        w, h = float(size[0]), float(size[1])
+    except (TypeError, ValueError, IndexError):
+        return True
+    if w <= 0 or h <= 0:
+        return True
+    total = 0.0
+    for name, _xobject in page_images:
+        box = placements.get(str(name).lstrip("/"))
+        if box is None:
+            return True
+        x0, y0, x1, y1 = (float(v) for v in box)
+        total += abs(x1 - x0) * abs(y1 - y0)
+    return total >= 0.5 * w * h
+
+
 def _rel_box(box: Any, geo: Dict[str, Any]) -> Optional[List[float]]:
     """``box`` (user space) relative to the page box origin, clamped to it."""
     if not box or not geo or "page_size" not in geo:
@@ -1851,41 +1874,30 @@ def _text_op_census(reader: Any, page: Any, font_cache: Dict[Any, Any]) -> Tuple
 
 
 def _image_thumbnail(xobject: Any) -> Optional[str]:
-    """A small PNG preview (<= 240 px wide) as a data URI, or None.
+    """A small PNG preview (<= 240 px on its longer side) as a data URI, or None.
 
-    Decoded with pypdf's own image support (Pillow). JPEGs are decoded at a
-    reduced scale; anything huge, exotic or failing is simply skipped — a
-    missing preview is fine, a stalled request is not.
+    Decoded by the finding-location thumbnailer, whose memory is bounded by
+    the image's DECLARED size, never by what its stream inflates to. pypdf's
+    own decoder inflates the whole stream first: a 255 KB PDF whose 1000 x 1000
+    picture inflates to 256 MB took one anonymous analyze to ~560 MB.
+    Anything huge, exotic or failing is simply skipped — a missing preview is
+    fine, a stalled request is not.
     """
     try:
         w = int(xobject.get("/Width") or 0)
         h = int(xobject.get("/Height") or 0)
         if w <= 0 or h <= 0 or w * h > _THUMB_MAX_SOURCE_PIXELS:
             return None
-        from io import BytesIO
+        from app.services.finding_location import _pdf_xobject_image, png_thumbnail_data_uri
 
-        from pypdf.filters import _xobj_to_image
-
-        _ext, _img_bytes, img = _xobj_to_image(xobject)
+        img = _pdf_xobject_image(xobject)
         if img is None:
             return None
-        if img.mode not in ("RGB", "L", "RGBA", "LA"):
-            img = img.convert("RGB")
+        uri = png_thumbnail_data_uri(img)
         # Keep each preview small: a report can carry dozens of them.
-        for max_w in (_THUMB_MAX_W, 160):
-            t = img
-            # The location contract: a thumbnail is at most 240 px on its
-            # LONGER side (a tall image used to come back 240 x 480).
-            longest = max(t.width, t.height)
-            if longest > max_w:
-                ratio = max_w / float(longest)
-                t = t.resize((max(1, int(t.width * ratio)), max(1, int(t.height * ratio))))
-            buf = BytesIO()
-            t.save(buf, format="PNG", optimize=True)
-            data = buf.getvalue()
-            if len(data) <= 60_000:
-                return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
-        return None
+        if uri is None or len(uri) > 80_000:
+            return None
+        return uri
     except Exception:
         return None
 

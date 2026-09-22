@@ -116,7 +116,9 @@ def main() -> int:
         return c.post("/pipeline/analyze", files={"file": (name, data, mime)}, headers=auth if headers is None else headers)
 
     # --- uploads -------------------------------------------------------------------
-    coded("empty upload", analyze("empty.pdf", b""), 400, "empty_upload", detail="empty_upload")
+    # detail became the sentence itself when uploads learned to name what is
+    # wrong with a file; the code is what a program branches on.
+    coded("empty upload", analyze("empty.pdf", b""), 400, "empty_upload", contains="empty")
     coded("PDF bytes named .docx", analyze("really.docx", b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF", DOCX), 400, "file_content_mismatch")
     coded("a zip that isn't a Word file", analyze("zip.docx", _not_ooxml_zip(), DOCX), 400, "invalid_ooxml")
     coded("unsupported type", analyze("setup.exe", b"MZ\x90\x00" * 10), 400, "unsupported_type", contains=".exe")

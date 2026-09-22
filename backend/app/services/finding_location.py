@@ -31,9 +31,10 @@ worse than none:
       text-show operators' measured start and advance, and ONLY when the
       finding's text occurs exactly once on its page. Two equal headings on
       one page get no box rather than possibly the wrong one.
-  Every PDF box is page-relative (the MediaBox's lower-left corner is the
-  origin, as ``pageSize`` is the MediaBox's size) — identical to raw user
-  space for the usual ``[0 0 w h]`` MediaBox. On a page with ``/Rotate``,
+  Every PDF box is page-relative (the CropBox's lower-left corner is the
+  origin, as ``pageSize`` is the CropBox's size; pypdf defaults the CropBox
+  to the MediaBox) — identical to raw user space for the usual ``[0 0 w h]``
+  page. On a page with ``/Rotate``,
   ``bbox`` and ``pageSize`` are turned to the page AS A VIEWER SHOWS IT
   (origin still bottom-left; a 90-degree page reports ``[h, w]``), because
   every viewer applies the rotation before anyone looks at the box.
@@ -377,7 +378,7 @@ class _Context:
             reader = self._pdf()
             if reader is not None:
                 try:
-                    box = reader.pages[page - 1].mediabox
+                    box = reader.pages[page - 1].cropbox
                     return self._pair([float(box.width), float(box.height)])
                 except Exception:
                     return None
@@ -503,13 +504,22 @@ class _Context:
         if reader is None:
             return None
         try:
-            box = reader.pages[page - 1].mediabox
+            box = reader.pages[page - 1].cropbox
             return float(box.left), float(box.bottom), float(box.width), float(box.height)
         except Exception:
             return None
 
+    def _user_space(self, bbox: List[float], page: Optional[int]) -> List[float]:
+        """Undo :meth:`_page_relative`'s shift (for a box the parser already
+        made page-relative). Unchanged when the source can't be read."""
+        box = self._pdf_page_box(page)
+        if box is None:
+            return bbox
+        ox, oy = box[0], box[1]
+        return [bbox[0] + ox, bbox[1] + oy, bbox[2] + ox, bbox[3] + oy]
+
     def _page_relative(self, bbox: List[float], page: Optional[int]) -> Optional[List[float]]:
-        """Shift a user-space box so the MediaBox's lower-left is the origin
+        """Shift a user-space box so the CropBox's lower-left is the origin
         (what ``pageSize`` measures), clipped to the page; None if it is off
         the page entirely. Unchanged when the source can't be read."""
         box = self._pdf_page_box(page)
@@ -571,6 +581,13 @@ class _Context:
         loc = empty_location(page=page)
         props = getattr(node.metadata, "properties", None) or {}
         bbox = self._quad(props.get("bbox"))
+        if bbox is not None and self.fmt == "pdf":
+            # The PDF parser records boxes already relative to the page's
+            # visible corner (pdf_parser._rel_box). Everything measured here
+            # (text runs, placements, /Rect) is in user space, and the box is
+            # made page-relative once, below; shifting a parser box again put
+            # it 100 pt off on a page whose box starts at 100,100.
+            bbox = self._user_space(bbox, page)
 
         if isinstance(node, DocumentNode):
             loc["kind"] = "document"

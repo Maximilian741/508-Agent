@@ -233,12 +233,12 @@ def main() -> int:  # noqa: PLR0915
     rep = post("/pipeline/analyze", named, scan_png, "image/png").json()
     ids = [v["id"] for v in rep["violations"]]
     b0 = balance()
-    _real_derive = _title_mod._derive_title
-    _title_mod._derive_title = lambda tree, target: "Board minutes, March"
+    _real_derive = _title_mod._derive_title_verdict
+    _title_mod._derive_title_verdict = lambda tree, target: ("Board minutes, March", "")
     try:
         rr = post("/pipeline/remediate", named, scan_png, "image/png", ids)
     finally:
-        _title_mod._derive_title = _real_derive
+        _title_mod._derive_title_verdict = _real_derive
     body = rr.json()
     check("OCR off: 200, not charged", rr.status_code == 200 and body["charged"] is False and balance() == b0,
           f"{rr.status_code} {body.get('charged')} {b0}->{balance()}")

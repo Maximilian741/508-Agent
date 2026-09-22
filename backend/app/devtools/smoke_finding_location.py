@@ -160,6 +160,12 @@ def _pdf() -> bytes:
     buf = io.BytesIO()
     Image.open(io.BytesIO(_png(400, 300, (20, 120, 200)))).convert("RGB").save(buf, "PDF")
     w = PdfWriter(clone_from=PdfReader(io.BytesIO(buf.getvalue())))
+    # An 800 x 600 page with the 400 x 300 picture in its corner: a figure.
+    # (A picture that fills a text-less page is a SCAN — one OCR finding,
+    # no per-page "describe this picture".)
+    from pypdf.generic import RectangleObject
+
+    w.pages[0].mediabox = RectangleObject([0, 0, 800, 600])
     w.add_annotation(0, Link(rect=(50, 50, 200, 80), url="https://example.com/report"))
     out = io.BytesIO()
     w.write(out)
@@ -254,6 +260,34 @@ def _pdf_drawn() -> bytes:
     out = io.BytesIO()
     w.write(out)
     return out.getvalue()
+
+
+def _locate_every_link(data: bytes) -> list:
+    """The location of every link in a PDF, as if each were a finding."""
+    import tempfile
+
+    from app.models.accessibility import NodeLocation, Violation
+    from app.parsers import parse_to_tree
+    from app.services.finding_location import build_locations
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "links.pdf"
+        path.write_bytes(data)
+        tree = parse_to_tree(str(path)).tree
+
+        def walk(n):
+            yield n
+            for c in getattr(n, "children", None) or []:
+                yield from walk(c)
+
+        links = [n for n in walk(tree.root) if type(n).__name__ == "LinkNode"]
+        viols = [
+            Violation(violation_id=f"v{i}", rule_id="LINK_TEXT_NON_DESCRIPTIVE", severity="warning",
+                      description="x", location=NodeLocation(node_id=n.id))
+            for i, n in enumerate(links)
+        ]
+        locs = build_locations(tree, viols, "pdf", path, thumbnails=False)
+    return [locs[v.violation_id] for v in viols]
 
 
 def _pdf_lines() -> bytes:
@@ -609,7 +643,7 @@ def main() -> int:
     img = [v for v in vs if v["evidence"].get("node_type") == "image"]
     check(
         "pdf: the image finding names page 1 + the page size, with a thumbnail",
-        bool(img) and img[0]["location"]["page"] == 1 and img[0]["location"]["pageSize"] == [400.0, 300.0]
+        bool(img) and img[0]["location"]["page"] == 1 and img[0]["location"]["pageSize"] == [800.0, 600.0]
         and thumb_ok(img[0]["location"]["thumbnail"]),
         [i["location"] | {"thumbnail": bool(i["location"]["thumbnail"])} for i in img],
     )
@@ -618,7 +652,7 @@ def main() -> int:
         "pdf: the link annotation is a pdf-region with its own /Rect",
         bool(links) and links[0]["location"]["kind"] == "pdf-region"
         and links[0]["location"]["bbox"] == [50.0, 50.0, 200.0, 80.0]
-        and links[0]["location"]["pageSize"] == [400.0, 300.0],
+        and links[0]["location"]["pageSize"] == [800.0, 600.0],
         [l["location"] for l in links][:1],
     )
 
@@ -675,10 +709,11 @@ def main() -> int:
     )
 
     vs = contract("pdf-lines", analyze("lines.pdf", _pdf_lines(), "application/pdf"), "pdf")
+    # The parser now reads each link's words off the page, so "annual report"
+    # and "CC" are no longer flagged; locate EVERY link directly to keep
+    # measuring where the words under each /Rect are.
     shown = sorted(
-        (v["location"]["snippet"], v["location"]["highlight"])
-        for v in vs
-        if v["evidence"].get("node_type") == "link" and v["location"]["kind"] == "pdf-region"
+        (loc["snippet"], loc["highlight"]) for loc in _locate_every_link(_pdf_lines()) if loc["kind"] == "pdf-region"
     )
     check(
         "pdf: a link that is its own text run is shown in its line; text across a column gutter is not stitched on",
