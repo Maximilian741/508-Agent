@@ -73,7 +73,11 @@ def _tounicode_cmap(chars: Iterable[str], *, broken: bool = False) -> bytes:
 
 
 def type0_font(w: PdfWriter, chars: Iterable[str], *, to_unicode: bool = True, broken: bool = False,
-               base: str = "/ArialMT", embedded: bool = False):
+               base: str = "/ArialMT", embedded: bool = False, dw: int = 556,
+               widths: Optional[Dict[str, float]] = None):
+    """``widths`` (char -> 1/1000 em) becomes the CID font's /W array; every
+    other glyph is ``dw`` wide. Word lists every glyph in /W; Chrome/Skia
+    leave out the glyphs whose width equals /DW."""
     cid_font = DictionaryObject({
         NameObject("/Type"): NameObject("/Font"),
         NameObject("/Subtype"): NameObject("/CIDFontType2"),
@@ -83,8 +87,14 @@ def type0_font(w: PdfWriter, chars: Iterable[str], *, to_unicode: bool = True, b
             NameObject("/Ordering"): TextStringObject("Identity"),
             NameObject("/Supplement"): NumberObject(0),
         }),
-        NameObject("/DW"): NumberObject(556),
+        NameObject("/DW"): NumberObject(dw),
     })
+    if widths:
+        warr = ArrayObject()
+        for ch in sorted(widths, key=cid_for):
+            warr.append(NumberObject(cid_for(ch)))
+            warr.append(ArrayObject([FloatObject(widths[ch])]))
+        cid_font[NameObject("/W")] = warr
     desc = DictionaryObject({
         NameObject("/Type"): NameObject("/FontDescriptor"),
         NameObject("/FontName"): NameObject(base),

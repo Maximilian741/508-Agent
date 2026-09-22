@@ -179,53 +179,168 @@ def _layout_fonts(page: Any) -> Dict[str, Any]:
                     merged = dict(font.width_map or {})
                     merged.update(table)
                     font.width_map = merged
+            if "/DescendantFonts" in ft:
+                _fill_cid_default_width(font, ft)
             fonts[str(name)] = font
         except Exception:
             logger.debug("layout font %s unavailable", name, exc_info=True)
     return fonts
 
 
-def _split_words(tj: Any) -> List[Word]:
-    """Word boxes inside one text-show op, advancing by the font's widths."""
-    words: List[Word] = []
-    txt = tj.txt or ""
-    if not txt.strip():
-        return words
+def _fill_cid_default_width(font: Any, ft: DictionaryObject) -> None:
+    """Give a CID font's glyphs that /W leaves out their /DW width.
+
+    pypdf 4.2 reads /W but ignores /DW, so every glyph whose width equals the
+    default (Chrome/Skia omit those: "s" and "y" in Arial) fell back to a
+    guess, and the glyph after it looked like it started a new word.
+    """
     try:
-        a = float(tj.transform[0])
-        if abs(a) < 1e-9:
-            return words
-        font = tj.font
-        scale_tz = float(tj.Tz) / 100.0
-        x = float(tj.tx)
-        start_x = None
-        buf: List[str] = []
-        for ch in txt:
-            w = font.width_map.get(ch, font.space_width * 2)
-            adv = (float(tj.font_size) * (float(w) / 1000.0) + float(tj.Tc)
-                   + (float(tj.Tw) if ch == " " else 0.0)) * scale_tz * a
-            if ch.isspace():
-                if buf:
-                    words.append(Word("".join(buf), start_x, x, float(tj.ty), float(tj.font_height)))
-                    buf = []
-                    start_x = None
-            else:
-                if start_x is None:
-                    start_x = x
-                buf.append(ch)
-            x += adv
-        if buf:
-            words.append(Word("".join(buf), start_x, x, float(tj.ty), float(tj.font_height)))
+        desc = _resolve(ft.get("/DescendantFonts"))
+        d0 = _resolve(desc[0]) if isinstance(desc, (list, ArrayObject)) and len(desc) else None
+        dw = 1000.0
+        if isinstance(d0, DictionaryObject) and d0.get("/DW") is not None:
+            dw = float(_resolve(d0.get("/DW")))
+        wm = dict(font.width_map or {})
+        for code, uni in (font.char_map or {}).items():
+            if (
+                isinstance(code, str) and len(code) == 1
+                and isinstance(uni, str) and len(uni) == 1
+                and uni not in wm
+            ):
+                wm[uni] = dw
+        font.width_map = wm
     except Exception:
-        return []
-    # A negative horizontal scale mirrors text; boxes would be inverted.
-    return [w for w in words if w.x1 >= w.x0]
+        logger.debug("CID default width unavailable", exc_info=True)
+
+
+# Words are built from glyph positions, not from pypdf's layout fragments: a
+# kerned TJ array ("[(Str)-3(ee)4(t)]", Word; one Tj per glyph, Chrome/Skia)
+# is one fragment per element, and a word per fragment turned "street" into
+# "Str ee t" in every link name and form label read off the page.
+#
+# Across fragments a word continues while the pen stays on the same baseline
+# and the next glyph starts where the last one ended. A kerning pair or a
+# tracking step moves a glyph by a few hundredths of an em; an inter-word
+# space is about a quarter em. A space glyph always ends a word.
+_WORD_GAP_EM = 0.15
+# pypdf knows no width for the previous glyph: its right edge is a guess, so
+# only a much larger gap is trusted as a word break (the producers seen doing
+# this print the space glyph, which ends the word regardless).
+_WORD_GAP_UNKNOWN_EM = 0.8
+# The pen moving back past this much is a new run (overprint, another column).
+_BACKTRACK_EM = 0.3
+
+
+def _char_advance(tj: Any, ch: str) -> Tuple[float, bool]:
+    """One glyph's advance in text space (before the text matrix), per the
+    spec: (w0 * Tfs + Tc + Tw if a single-byte space) * Th. Returns
+    (advance, width_known)."""
+    font = tj.font
+    wm = font.width_map or {}
+    known = ch in wm
+    w = wm.get(ch, font.space_width * 2)
+    tw = float(tj.Tw) if ch == " " and getattr(font, "subtype", "") != "/Type0" else 0.0
+    adv = (float(tj.font_size) * (float(w) / 1000.0) + float(tj.Tc) + tw) * (float(tj.Tz) / 100.0)
+    return adv, known
+
+
+def _glyph_boxes(tj: Any) -> Optional[Tuple[List[Tuple[str, float, float, bool]], float]]:
+    """Each glyph of one text-show op as (char, x0, x1, width_known), plus
+    the op's em in user space. None for mirrored, rotated or degenerate text."""
+    txt = tj.txt or ""
+    a, b = float(tj.transform[0]), float(tj.transform[1])
+    # A negative horizontal scale mirrors text; boxes would be inverted. A
+    # baseline that climbs (b != 0: a watermark at 35 degrees) has no
+    # horizontal box at all.
+    if a <= 1e-9 or abs(b) > 0.02 * a:
+        return None
+    em = abs(float(tj.font_size) * (float(tj.Tz) / 100.0) * a)
+    x = float(tj.tx)
+    out: List[Tuple[str, float, float, bool]] = []
+    for ch in txt:
+        adv, known = _char_advance(tj, ch)
+        out.append((ch, x, x + adv * a, known))
+        x += adv * a
+    return out, em
+
+
+def _show_ops(ops: Any, state: Any, fonts: Dict[str, Any]) -> List[Any]:
+    """Every text-show string of a content stream, with its text state.
+
+    pypdf's layout-mode walker (``recurs_to_target_op``) never advances the
+    pen past a shown string: a ``Tj`` followed by another ``Tj`` (a bold
+    word mid-sentence) or two adjacent strings in one ``TJ`` array both start
+    at the same x, so the second overprinted the first. This walker uses
+    pypdf's own text-state manager and decoding, and moves the pen by each
+    string's glyph advances and by the TJ adjustments, as a viewer does.
+    """
+    out: List[Any] = []
+    # q/Q save and restore the text state too (it is graphics state).
+    saved: List[Tuple[Any, ...]] = []
+    _TEXT_STATE = ("font", "font_size", "Tc", "Tw", "Tz", "TL", "Ts")
+
+    def show(value: Any) -> None:
+        p = state.text_state_params(value)  # raises without a Tf: no geometry
+        out.append(p)
+        dx = sum(_char_advance(p, ch)[0] for ch in (p.txt or ""))
+        state.add_trm([1.0, 0.0, 0.0, 1.0, dx, 0.0])
+
+    while True:
+        try:
+            operands, op = next(ops)
+        except StopIteration:
+            return out
+        if op == b"q":
+            state.add_q()
+            saved.append(tuple(getattr(state, k) for k in _TEXT_STATE))
+        elif op == b"Q":
+            if saved:
+                state.remove_q()
+                for k, v in zip(_TEXT_STATE, saved.pop()):
+                    setattr(state, k, v)
+        elif op == b"cm":
+            state.add_cm(*operands)
+        elif op in (b"BT", b"ET"):
+            state.reset_tm()
+        elif op == b"Tf":
+            # An unknown font raises: the page has no geometry rather than a
+            # wrong one.
+            state.set_font(fonts[str(operands[0])], operands[1])
+        elif op == b"Tj":
+            show(operands[0])
+        elif op == b"'":
+            state.reset_trm()
+            state.add_tm([0, -state.TL])
+            show(operands[0])
+        elif op == b'"':
+            state.reset_trm()
+            state.set_state_param(b"Tw", operands[0])
+            state.set_state_param(b"Tc", operands[1])
+            state.add_tm([0, -state.TL])
+            show(operands[2])
+        elif op == b"TJ":
+            for el in operands[0] if operands else []:
+                if isinstance(el, (bytes, str)):
+                    show(el)
+                else:
+                    dx = -(float(el) / 1000.0) * float(state.font_size) * (float(state.Tz) / 100.0)
+                    state.add_trm([1.0, 0.0, 0.0, 1.0, dx, 0.0])
+        elif op in (b"Td", b"Tm", b"TD", b"T*"):
+            state.reset_trm()
+            if op == b"Tm":
+                state.reset_tm()
+            elif op == b"TD":
+                state.set_state_param(b"TL", -operands[1])
+            elif op == b"T*":
+                operands = [0, -state.TL]
+            state.add_tm(operands)
+        else:  # Tc, Tw, Tz, TL, Ts
+            state.set_state_param(op, operands)
 
 
 def page_spans(page: Any, pdf: Any = None) -> Optional[List[Span]]:
     """Decoded, positioned text of one page in user space, or None."""
     try:
-        from pypdf._text_extraction._layout_mode._fixed_width_page import recurs_to_target_op
         from pypdf._text_extraction._layout_mode._text_state_manager import TextStateManager
 
         fonts = _layout_fonts(page)
@@ -234,37 +349,55 @@ def page_spans(page: Any, pdf: Any = None) -> Optional[List[Span]]:
             return []
         owner = pdf if pdf is not None else getattr(page, "pdf", None)
         ops = iter(ContentStream(contents, owner, "bytes").operations)
-        state = TextStateManager()
-        tjs: List[Any] = []
-        while True:
-            try:
-                operands, op = next(ops)
-            except StopIteration:
-                break
-            if op in (b"BT", b"q"):
-                _bts, got = recurs_to_target_op(
-                    ops, state, b"ET" if op == b"BT" else b"Q", fonts, True
-                )
-                tjs.extend(got)
-            elif op == b"cm":
-                state.add_cm(*operands)
-            else:
-                state.set_state_param(op, operands)
+        tjs = _show_ops(ops, TextStateManager(), fonts)
     except Exception:
         logger.debug("page_spans failed", exc_info=True)
         return None
     spans: List[Span] = []
+    cur: Optional[Word] = None  # the word being built, possibly across ops
+    last_x1 = 0.0
+    last_known = True
+    last_em = 0.0
     for tj in tjs:
         try:
             if getattr(tj, "rotated", False) or getattr(tj, "flip_vertical", False):
+                cur = None
                 continue
             txt = tj.txt or ""
             if not txt.strip():
+                cur = None  # a space glyph on its own (Word, Chrome) ends the word
                 continue
-            words = _split_words(tj)
-            x0, x1 = float(tj.tx), float(tj.displaced_tx)
-            spans.append(Span(txt, min(x0, x1), max(x0, x1), float(tj.ty), float(tj.font_height), words))
+            got = _glyph_boxes(tj)
+            if not got:
+                cur = None
+                continue
+            glyphs, em = got
+            y, size = float(tj.ty), float(tj.font_height)
+            x0, x1 = glyphs[0][1], glyphs[-1][2]
+            span = Span(txt, min(x0, x1), max(x0, x1), y, size, [])
+            spans.append(span)
+            if cur is not None and glyphs and not glyphs[0][0].isspace():
+                em_ref = max(em, last_em, 1e-6)
+                gap = glyphs[0][1] - last_x1
+                limit = (_WORD_GAP_EM if last_known else _WORD_GAP_UNKNOWN_EM) * em_ref
+                back = (_BACKTRACK_EM if last_known else 1.0) * em_ref
+                same_line = abs(y - cur.y) <= max(0.5, 0.12 * max(size, cur.size))
+                same_size = abs(size - cur.size) <= 0.2 * max(size, cur.size)
+                if not (same_line and same_size and -back <= gap <= limit):
+                    cur = None
+            for ch, gx0, gx1, known in glyphs:
+                if ch.isspace():
+                    cur = None
+                    continue
+                if cur is None:
+                    cur = Word(ch, gx0, gx1, y, size)
+                    span.words.append(cur)
+                else:
+                    cur.text += ch
+                    cur.x1 = max(cur.x1, gx1)
+                last_x1, last_known, last_em = gx1, known, em
         except Exception:
+            cur = None
             continue
     return spans
 
@@ -330,17 +463,45 @@ def text_in_rect(words: Sequence[Word], rect: Sequence[Any], *, max_chars: int =
     ordered = _reading_sorted(hits)
     lines = len({round(w.y) for w in ordered})
     text = re.sub(r"\s+", " ", " ".join(w.text for w in ordered)).strip()
+    # "... each November," — the comma after the linked words is sentence
+    # punctuation, not part of the name.
+    text = text.rstrip(",;:").strip()
     if not text or len(text) > max_chars or lines > 3:
         return None
-    if not is_readable_text(text):
+    if not is_readable_text(text) or looks_fragmented(text):
         return None
     return text
+
+
+# Short words that are real words, so "go to p. 2 of the map" is not noise.
+_COMMON_SHORT = frozenset(
+    "a i an am as at be by do go he if in is it me my no of on or so to up us we "
+    "id ok pm vs mr ms dr st".split()
+)
+
+
+def looks_fragmented(text: str) -> bool:
+    """Letter-by-letter text ("h e r e", "s t r ee t u se"): words that were
+    never rebuilt from their glyphs. Such a string is noise as a link name or
+    a field label, and "here" hidden in it escaped the non-descriptive check,
+    so callers treat it as no text at all."""
+    toks = [t.strip(".,;:!?()[]'\"") for t in (text or "").split()]
+    toks = [t for t in toks if t]
+    if len(toks) < 2:
+        return False
+    odd = [t for t in toks if t.isalpha() and len(t) <= 2 and t.lower() not in _COMMON_SHORT]
+    return len(odd) >= 2 and len(odd) * 3 >= len(toks)
 
 
 # --- form-field labels from the page ---------------------------------------
 
 _LABEL_TRAIL_RE = re.compile(r"[\s:*]+$")
 _FILLER_RE = re.compile(r"^[_.\-…·]+$")
+# A line ending on one of these runs on into the next line.
+_CONNECTORS = frozenset(
+    "a an and are as at be by for from her his in is of on or that the their to "
+    "which who will with your".split()
+)
 
 
 def _contiguous(words: List[Word], direction: int) -> List[Word]:
@@ -361,7 +522,7 @@ def _clean_label(text: str, *, allow_sentence: bool) -> Optional[str]:
     t = _LABEL_TRAIL_RE.sub("", re.sub(r"\s+", " ", text or "")).strip()
     if not t or not any(c.isalpha() for c in t):
         return None
-    if not is_readable_text(t):
+    if not is_readable_text(t) or looks_fragmented(t):
         return None
     limit = 120 if allow_sentence else 60
     if len(t) > limit or len(t) == 1:
@@ -418,13 +579,57 @@ def label_for_widget(
                 return True
         return False
 
-    def finish(ws: List[Word], allow_sentence: bool):
+    def finish(ws: List[Word], allow_sentence: bool, short_ok: bool = True):
         if not ws:
             return None
         label = _clean_label(" ".join(w.text for w in ws), allow_sentence=allow_sentence)
         if not label:
             return None
+        # "ft", "lbs", "oz", "in": a unit printed beside a box names nothing.
+        # A short label printed AS a label ("Age:") keeps its colon.
+        if not short_ok and sum(c.isalpha() for c in label) <= 3:
+            return None
         return label, tuple((round(w.x0, 1), round(w.y, 1)) for w in ws)
+
+    def ends_colon(ws: List[Word]) -> bool:
+        return bool(ws) and ws[-1].text.rstrip("* ").endswith(":")
+
+    def after_widget(ws: List[Word]) -> bool:
+        """The run starts right after another widget on its line: it is that
+        field's unit or suffix ("Height: [__] ft [__] in" — "ft" is not the
+        inches box's label)."""
+        s = ws[0]
+        for o in other_rects:
+            if o == r:
+                continue
+            if o[1] - 2 <= s.y <= o[3] + 2 and o[2] <= s.x0 + 1.0 and s.x0 - o[2] <= max(12.0, 1.5 * s.size):
+                return True
+        return False
+
+    def wrapped(ws: List[Word]) -> bool:
+        """The run is the last line of a label that wraps from the line above
+        ("Name of the person who will be responsible for / payment of the
+        permit fee: [____]"). Its tail alone is a wrong name: leave it."""
+        s = ws[0]
+        above_ws = [w for w in words if 0.8 * s.size <= w.y - s.y <= 2.2 * max(s.size, w.size)]
+        if not above_ws:
+            return False
+        ly = min(w.y for w in above_ws)
+        line = sorted((w for w in above_ws if abs(w.y - ly) <= 2.0), key=lambda w: w.x0)
+        # A field on the line above: that line is its own row of the form.
+        for o in other_rects:
+            if o != r and o[1] - 2 <= ly <= o[3] + 2:
+                return False
+        last = line[-1].text
+        lower_start = s.text[:1].islower()
+        if abs(line[0].x0 - s.x0) <= 3.0:
+            return (
+                lower_start
+                or last.endswith((",", "-"))
+                or last.lower().strip(".,;") in _CONNECTORS
+            )
+        # A hanging indent: a lower-case start under an unfinished line.
+        return lower_start and not last.endswith((".", ":", "!", "?"))
 
     if kind == "check":
         right = sorted((w for w in band if w.x0 >= x1 - 1.0), key=lambda w: w.x0)
@@ -465,7 +670,11 @@ def label_for_widget(
         if not blocked(first.x1, x0, first.y):
             same_line = [w for w in left if abs(w.y - first.y) <= 2.0]
             run = _contiguous(same_line, -1)
-            got = finish(run, allow_sentence=False)
+            if run and after_widget(run) and not ends_colon(run):
+                return None
+            if run and wrapped(run):
+                return None
+            got = finish(run, allow_sentence=False, short_ok=ends_colon(run))
             if got:
                 return got
     # Label printed directly above the field, aligned with its left edge.
@@ -497,7 +706,9 @@ def label_for_widget(
             continue
         if o[0] < rx1 - 1 and o[2] > rx0 + 1 and 0.0 <= o[1] - start.y <= 1.9 * start.size + 2.0:
             return None
-    return finish(run, allow_sentence=False)
+    if wrapped(run):
+        return None
+    return finish(run, allow_sentence=False, short_ok=ends_colon(run))
 
 
 def union_bbox(boxes: Iterable[Rect]) -> Optional[Rect]:
