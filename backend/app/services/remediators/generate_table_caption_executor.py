@@ -97,7 +97,7 @@ class GenerateTableCaptionExecutor(RemediationExecutor):
                     refusal_reason(result) or "We could not produce a caption for this table."
                 ),
             )
-        problem = vet_table_caption(suggestion, headers)
+        problem = vet_table_caption(suggestion, headers, _all_table_text(target))
         if problem:
             return _skip(
                 action_code,
@@ -143,6 +143,18 @@ def _table_context(table: TableNode) -> "tuple[List[str], str]":
             if joined:
                 data_rows.append(joined)
     return headers, "\n".join(data_rows)
+
+
+def _all_table_text(table: TableNode) -> str:
+    """Every cell's text: what a caption may state numbers from."""
+    parts: List[str] = []
+    for row in table.children:
+        if not isinstance(row, TableRowNode):
+            continue
+        for cell in row.children:
+            if isinstance(cell, TableCellNode) and cell.content and cell.content.text:
+                parts.append(cell.content.text)
+    return " ".join(parts)
 
 
 def _find_table_node(tree: AccessibilityTree, target_id: str) -> Optional[TableNode]:

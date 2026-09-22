@@ -383,6 +383,17 @@ def main() -> int:
     check("provider: table caption heuristic abstains (no 'Table: <headers>')", r.text == "", r.text)
     for text, headers, ok in TABLE_CAPTIONS:
         check(f"vet caption: {text!r} {'allowed' if ok else 'refused'}", (vet_table_caption(text, headers) is None) == ok)
+    # An AI caption may only state numbers the table itself contains.
+    grid = "Region Q1 Q2 North 120 140 South 90 110"
+    for text, ok in [
+        ("Quarterly sales by region", True),
+        ("Q1 and Q2 sales by region", True),
+        ("Sales by region, FY2025", False),
+        ("Revenue grew 12% in the North", False),
+    ]:
+        check(f"vet caption grounded in the table: {text!r} {'allowed' if ok else 'refused'}",
+              (vet_table_caption(text, ["Region", "Q1", "Q2"], grid) is None) == ok,
+              str(vet_table_caption(text, ["Region", "Q1", "Q2"], grid)))
 
     # ---- header rows -----------------------------------------------------
     from app.services.remediators.add_table_headers_executor import header_row_problem

@@ -709,9 +709,21 @@ def title_from_filename(filename: Optional[str]) -> Verdict:
 _PLACEHOLDER_CAPTIONS = {"table", "data table", "data", "table 1", "untitled table", "caption"}
 
 
-def vet_table_caption(text: Optional[str], headers: Iterable[str]) -> Optional[str]:
-    """Final gate for ANY provider's table caption. Returns a refusal reason or None."""
+def vet_table_caption(
+    text: Optional[str], headers: Iterable[str], table_text: Optional[str] = None
+) -> Optional[str]:
+    """Final gate for ANY provider's table caption. Returns a refusal reason or None.
+
+    ``table_text`` is every word of the table; when given, a caption that
+    states a number the table does not contain ("Revenue grew 12% in 2025"
+    over a table with neither) is refused as an invented fact.
+    """
     t = _collapse(text)
+    if table_text is not None:
+        have = set(re.findall(r"\d+(?:[.,]\d+)*", table_text))
+        invented = [n for n in re.findall(r"\d+(?:[.,]\d+)*", t) if n not in have]
+        if invented:
+            return f"the caption stated a number the table does not contain ({invented[0]})"
     if not t:
         return "no caption was produced"
     low = t.lower().strip(" .:")
