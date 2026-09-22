@@ -718,11 +718,16 @@ _RPR_ORDER = [
     "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath", "rPrChange",
 ]
 # What a heading style may change that a reader SEES. Pagination hints
-# (keepNext/keepLines) and the outline level are what we want from it.
-_PIN_PPR = ("pBdr", "shd", "spacing", "ind", "contextualSpacing", "jc")
-_PIN_RPR = ("rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "color", "spacing",
-            "w", "kern", "position", "sz", "szCs", "u")
-_TOGGLES = {"b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "contextualSpacing"}
+# (keepNext/keepLines) and the outline level are what we want from it. A
+# template's "page break before" on Heading 1 would push a promoted line onto
+# a new page, and a style-level bidi flips an Arabic/Hebrew paragraph's
+# direction — both are kept as they were.
+_PIN_PPR = ("pageBreakBefore", "pBdr", "shd", "bidi", "spacing", "ind", "contextualSpacing", "jc")
+_PIN_RPR = ("rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline",
+            "shadow", "emboss", "imprint", "vanish", "color", "spacing", "w", "kern", "position", "sz",
+            "szCs", "highlight", "u", "shd", "vertAlign", "em")
+_TOGGLES = {"b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline", "shadow",
+            "emboss", "imprint", "vanish", "contextualSpacing", "pageBreakBefore", "bidi"}
 _W_NS_URI = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
@@ -786,6 +791,16 @@ def _neutral_el(tag: str, new_el, run_level: bool):
             el.set(qn("w:val"), "0")
         elif tag == "w":
             el.set(qn("w:val"), "100")
+        elif tag == "highlight":
+            el.set(qn("w:val"), "none")
+        elif tag == "vertAlign":
+            el.set(qn("w:val"), "baseline")
+        elif tag == "em":
+            el.set(qn("w:val"), "none")
+        elif tag == "shd":
+            el.set(qn("w:val"), "clear")
+            el.set(qn("w:color"), "auto")
+            el.set(qn("w:fill"), "auto")
         else:
             return None  # rFonts: no neutral value to write
         return el

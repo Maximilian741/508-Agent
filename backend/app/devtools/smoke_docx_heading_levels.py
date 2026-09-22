@@ -299,6 +299,32 @@ def main() -> int:
     check("title: keeps Title's colour (text2), does not turn Heading-1 blue",
           col is not None and col.get(f"{W}themeColor") == "text2", etree.tostring(rpr).decode() if rpr is not None else "")
 
+    # ===== D2. A template's Heading 1 with "page break before" + ALL CAPS =====
+    # Many report templates start every Heading 1 on a new page and set it in
+    # capitals. Promoting a line to that style must not push it onto a new
+    # page or re-case it: both are pinned off on the paragraph.
+    d = Document()
+    d.core_properties.title = "Template look"
+    h1 = d.styles["Heading 1"]
+    h1.font.size = Pt(16)
+    h1.font.all_caps = True
+    h1.paragraph_format.page_break_before = True
+    _fake(d, "Annual Report", 24)
+    _body(d, 2)
+    src = tmp / "template_look.docx"
+    d.save(str(src))
+    res, execs, wr, after = _fix_fake_headings(src, tmp / "template_look_fixed.docx")
+    check("template look: promoted to Heading 1", dict(_outline(after.tree)).get("Annual Report") == 1,
+          str(_outline(after.tree)))
+    p_el = _para_xml(tmp / "template_look_fixed.docx", "Annual Report")
+    ppr = p_el.find(f"{W}pPr") if p_el is not None else None
+    pbb = ppr.find(f"{W}pageBreakBefore") if ppr is not None else None
+    caps = p_el.find(f"{W}r/{W}rPr/{W}caps") if p_el is not None else None
+    check("template look: no page break added before it (pageBreakBefore pinned off)",
+          pbb is not None and pbb.get(f"{W}val") in ("0", "false"), etree.tostring(ppr).decode() if ppr is not None else "")
+    check("template look: not re-cased to capitals (caps pinned off)",
+          caps is not None and caps.get(f"{W}val") in ("0", "false"), etree.tostring(p_el).decode()[:600] if p_el is not None else "")
+
     # ===== E. A numbered heading style must not add a number to the text ======
     d = Document()
     d.core_properties.title = "Numbered styles"
