@@ -1,4 +1,4 @@
-"""Smoke: a PDF picture's thumbnail can't be turned into a memory bomb.
+"""Smoke: a picture's thumbnail can't be turned into a memory bomb.
 
 The finding-location pass shows a thumbnail of every picture that lacks alt
 text. For a PDF it used to hand the image to pypdf (``page.images[...]``),
@@ -22,9 +22,14 @@ Python ``bytes`` from zlib, so a regression shows up as hundreds of MB):
   4. the decoder draws what the PDF means — pixel-exact against the source
      for Flate RGB/gray/CMYK, PNG predictors, 4- and 8-bit palettes, 1-bit
      gray, a stencil mask, a soft mask, /Decode [1 0], ASCII85; and
-  5. an encoding it can't bound (LZW) is simply no thumbnail, never an error.
+  5. an encoding it can't bound (LZW) is simply no thumbnail, never an error;
+  6. encoded pictures (DOCX / PPTX / HTML data: / a PDF's JPEG): a flat PNG
+     is a few KB at any pixel size and Pillow decodes it all at once, so the
+     DECODED raster is capped (MAX_THUMB_RASTER_BYTES) — a 6000x6600 RGBA
+     PNG in a DOCX gets no thumbnail (it peaked at 360 MB), a 4000x3000 one
+     and a 6000x4000 JPEG (decoded at draft scale) still do.
 
-Run: python -m app.devtools.smoke_pdf_thumbnail_bounds
+Run: python -m app.devtools.smoke_thumbnail_bounds
 """
 
 from __future__ import annotations
@@ -274,6 +279,42 @@ def main() -> int:
     # ---- 5: an encoding we can't bound: no thumbnail, no exception --------------------
     lzw = _pdf_with({"L": _image(b"\x80\x0b\x60\x50\x22\x0c\x0c\x85\x01", W, H, Filter=NameObject("/LZWDecode"), **rgb8)}, draw=False)
     check("an LZW picture (no bounded decoder) -> no thumbnail, no exception", fl._pdf_xobject_image(_xobject(lzw, "L")) is None)
+
+    # ---- 6: encoded pictures: the decoded raster is capped -------------------------------
+    def flat(mode: str, size: tuple, fmt: str = "PNG") -> bytes:
+        buf = io.BytesIO()
+        Image.new(mode, size, (10, 20, 30, 255)[: len(mode)] if mode not in ("1", "L", "P") else 0).save(buf, fmt)
+        return buf.getvalue()
+
+    huge = flat("RGBA", (6000, 6600))
+    check(
+        f"a {len(huge) // 1024} KB 6000x6600 RGBA PNG (158 MB decoded) -> no thumbnail",
+        fl.png_thumbnail_data_uri(huge) is None and 6000 * 6600 * 4 > fl.MAX_THUMB_RASTER_BYTES,
+    )
+    ok_png = fl.png_thumbnail_data_uri(flat("RGB", (4000, 3000)))
+    check("a 4000x3000 PNG (a big screenshot) still gets its thumbnail", bool(ok_png))
+    big_jpeg = fl.png_thumbnail_data_uri(flat("RGB", (6000, 4000), "JPEG"))
+    check("a 6000x4000 JPEG still gets its thumbnail (decoded at draft scale)", bool(big_jpeg))
+    palette = fl.png_thumbnail_data_uri(flat("P", (6000, 6600)))
+    check("a 40-megapixel palette PNG thumbnails without widening to RGBA first", bool(palette))
+
+    from docx import Document
+
+    d = Document()
+    d.add_paragraph("A flat picture of an enormous size follows.")
+    d.add_paragraph().add_run().add_picture(io.BytesIO(huge))
+    buf = io.BytesIO()
+    d.save(buf)
+    r = client.post(
+        "/pipeline/analyze",
+        files={"file": ("flat.docx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    imgs = [v["location"] for v in (r.json().get("violations", []) if r.status_code == 200 else []) if v["ruleId"] == "MISSING_ALT_TEXT"]
+    check(
+        "signed-out analyze of a DOCX holding that PNG -> 200, the picture is located, no thumbnail",
+        r.status_code == 200 and len(imgs) == 1 and imgs[0]["kind"] == "image" and imgs[0]["thumbnail"] is None,
+        (r.status_code, imgs),
+    )
 
     print(f"\nRESULT: {'all passed' if failures == 0 else str(failures) + ' FAILED'}")
     return 1 if failures else 0

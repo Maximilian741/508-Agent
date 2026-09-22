@@ -90,6 +90,10 @@ THUMB_BUDGET_SECONDS = 4.0
 # guard, well under Pillow's own warning threshold).
 MAX_THUMB_SOURCE_PIXELS = 40_000_000
 MAX_THUMB_SOURCE_BYTES = 12 * 1024 * 1024
+# Decoded raster (Pillow's own layout: 1 byte a pixel for 1/L/P, 4 otherwise)
+# one encoded picture may expand to. 64 MB is a 16-megapixel RGBA image — any
+# screenshot or photo; JPEGs decode at draft scale and rarely come near it.
+MAX_THUMB_RASTER_BYTES = 64 * 1024 * 1024
 MAX_THUMB_PNG_BYTES = 160 * 1024
 # Budget for reading PDF page geometry (content-stream walks) per response. A
 # page is read at most once; past the budget a finding keeps its page number,
@@ -1484,11 +1488,19 @@ def png_thumbnail_data_uri(data: Any) -> Optional[str]:
     """``data:image/png;base64,...`` no wider/taller than THUMB_MAX_PX, or None.
 
     ``data`` is encoded image bytes or a PIL image. Never raises.
+
+    Memory: a PNG of one flat colour is a few KB on disk at any pixel size,
+    and decoding is all-or-nothing (only JPEG can decode at a reduced scale),
+    so the pixels that will be DECODED are capped (MAX_THUMB_RASTER_BYTES)
+    after the JPEG draft, and the image is shrunk before any conversion that
+    would widen it — a 40-megapixel palette PNG used to become a full-size
+    RGBA copy (5 KB upload -> 360 MB).
     """
     try:
         from PIL import Image
 
-        if isinstance(data, (bytes, bytearray)):
+        owned = isinstance(data, (bytes, bytearray))
+        if owned:
             if not data or len(data) > MAX_THUMB_SOURCE_BYTES:
                 return None
             im = Image.open(io.BytesIO(bytes(data)))
@@ -1499,19 +1511,32 @@ def png_thumbnail_data_uri(data: Any) -> Optional[str]:
         w, h = im.size
         if w <= 0 or h <= 0 or w * h > MAX_THUMB_SOURCE_PIXELS:
             return None
-        try:
-            im.draft("RGB", (THUMB_MAX_PX * 2, THUMB_MAX_PX * 2))  # fast path for JPEG
-        except Exception:
-            pass
-        if getattr(im, "n_frames", 1) > 1:
+        if owned:
             try:
-                im.seek(0)
+                im.draft("RGB", (THUMB_MAX_PX * 2, THUMB_MAX_PX * 2))  # JPEG: decode at 1/2..1/8 scale
             except Exception:
                 pass
-        if im.mode not in ("RGB", "RGBA", "L", "LA"):
-            im = im.convert("RGBA" if ("A" in im.mode or im.mode == "P") else "RGB")
-        im = im.copy()
+            if getattr(im, "n_frames", 1) > 1:
+                try:
+                    im.seek(0)
+                except Exception:
+                    pass
+            dw, dh = im.size  # after the draft: what load() will really decode
+            per_pixel = 1 if im.mode in ("1", "L", "P") else 4
+            if dw * dh * per_pixel > MAX_THUMB_RASTER_BYTES:
+                return None
+        else:
+            im = im.copy()  # never shrink the caller's image in place
+        if im.mode == "CMYK":
+            im = im.convert("RGB")
+        elif im.mode == "1":
+            im = im.convert("L")  # same size, and it shrinks smoothly
+        elif im.mode == "P" and im.size[0] * im.size[1] * 4 <= MAX_THUMB_RASTER_BYTES:
+            # Widen first when it fits (a palette resizes nearest-neighbour).
+            im = im.convert("RGBA" if "transparency" in im.info else "RGB")
         im.thumbnail((THUMB_MAX_PX, THUMB_MAX_PX))
+        if im.mode not in ("RGB", "RGBA", "L", "LA"):
+            im = im.convert("RGBA" if ("A" in im.mode or "transparency" in im.info) else "RGB")
         buf = io.BytesIO()
         im.save(buf, format="PNG", optimize=True)
         png = buf.getvalue()
